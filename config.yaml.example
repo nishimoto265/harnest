@@ -1,0 +1,120 @@
+# auto-improve pipeline config — copy to config.yaml and edit.
+# All paths are resolved against the repository root (auto-detected via `git rev-parse --show-toplevel`)
+# unless they start with "/" (absolute) or "~".
+
+# ───────────────────────── Target repository ─────────────────────────
+repo:
+  github: "everytv/delish-web-global" # owner/name (used by `gh pr list`)
+  default_branch: "develop"
+  best_branch: "feature/nishimoto-best"
+
+# ───────────────────────── Worktree ─────────────────────────
+worktree:
+  # Parent directory where per-PR worktrees are created. Must be writable.
+  base: "/tmp/auto-improve-worktrees"
+  # Optional overrides (defaults shown):
+  # naming: "auto-improve-pr{pr}-{pass}-{agent}"   # {pr} {pass} {agent}
+  # cleanup_on_success: true
+
+# ───────────────────────── Pipeline ─────────────────────────
+# Optional (defaults: agents_per_pass=3, timeout_seconds=1800).
+# PR-level processing is strictly serial (queue) to avoid FIFO-stale baselines.
+# pipeline:
+#   agents_per_pass: 3
+#   timeout_seconds: 1800
+
+# ───────────────────────── Models ─────────────────────────
+# Optional (defaults: implementer=sonnet, judge=sonnet, cheap_judge=haiku).
+# models:
+#   implementer: "sonnet"
+#   judge: "sonnet"
+#   cheap_judge: "haiku"
+
+# ───────────────────────── External CLIs ─────────────────────────
+# Optional (defaults: implementer=claude, judge_primary=claude).
+# judge_secondary is optional; if set, enables panel judging (see preflight).
+agents:
+  judge_secondary: "codex"
+
+# ───────────────────────── Provider budget ─────────────────────────
+# Hints used by step 20/30 for concurrency + fallback. See plan §H4.
+providers:
+  claude:
+    max_concurrent: 5
+    tokens_per_minute: 100000
+    fallback: "single-judge"
+  codex:
+    max_concurrent: 3
+    fallback: "skip"
+
+# ───────────────────────── Paths ─────────────────────────
+paths:
+  rules_source: "docs/ai-rules/generated-rules.md"
+  rules_registry: "auto-improve/rules-registry.jsonl"
+  rubric: "auto-improve/rubrics/default.md"
+  checklist_generator: "scripts/generate-checklist.sh"
+  archives: "auto-improve/archives"
+  runs: "auto-improve/runs"
+  state_file: "auto-improve/processed.jsonl"
+  # Files copied into each worktree when assembling the harness surface:
+  harness_files:
+    - "CLAUDE.md"
+    - ".claude/"
+    - "docs/architecture-guide.md"
+    - "docs/ai-rules/"
+    - "docs/frontend-rules/"
+    - "docs/harness-eval/checklists/"
+    - "scripts/generate-checklist.sh"
+    - "eslint.config.mjs"
+
+# ───────────────────────── Prompts (markdown) ─────────────────────────
+prompts:
+  judge_score: "auto-improve/prompts/judge-score.md"
+  judge_pairwise: "auto-improve/prompts/judge-pairwise.md"
+  extract_rules: "auto-improve/prompts/extract-rules.md"
+
+# ───────────────────────── Judge composition ─────────────────────────
+judges:
+  score: "auto-improve/judges/panel.sh"
+  pairwise: "auto-improve/judges/pairwise.sh"
+  # Panel arbiter rotates across runs; see plan §H7.
+  arbiter_rotation: ["codex", "claude"]
+
+# ───────────────────────── Adoption thresholds ─────────────────────────
+# Optional (defaults: adopt_win_count=2, adopt_score_delta_min=0.3).
+# thresholds:
+#   adopt_win_count: 2          # B must win on ≥ N of agents_per_pass agents (pairwise)
+#   adopt_score_delta_min: 0.3  # avg(total_B) - avg(total_A) ≥ this
+
+# ───────────────────────── Sunset (cycle ③) ─────────────────────────
+# Optional — all fields have defaults; uncomment to override.
+# sunset:
+#   min_prs_since_last: 10
+#   min_days_since_last: 14
+#   time_fallback_days: 90
+#   contribution_negative_threshold: -0.3
+#   compliance_low_threshold: 0.3
+#   at_risk_consecutive_for_remove: 2
+
+# ───────────────────────── Detection window ─────────────────────────
+# Detection window resolution order:
+#   1. `detect.since` (absolute date, YYYY-MM-DD) — if set, always used
+#   2. max(`lookback_days` ago, oldest-non-terminal-PR.mergedAt from processed.jsonl),
+#      clamped to `max_lookback_days`
+#
+# On a fresh install, start_after_pr lets you fast-forward past the pre-automation history.
+# detect:
+#   since: "2026-03-01"       # optional absolute floor
+#   lookback_days: 30         # default
+#   max_lookback_days: 180    # default; caps state-aware widening
+#   limit: 50                 # default
+#   start_after_pr: 0         # default; ignore merged PRs with number ≤ this
+
+# ───────────────────────── Notifications (optional) ─────────────────────────
+notify:
+  cmux_surface: ""    # e.g. "my-surface"; leave empty to disable
+
+# ───────────────────────── Logging ─────────────────────────
+logging:
+  level: "info"       # trace|debug|info|warn|error|fatal
+  pretty: true        # use pino-pretty when stdout is a TTY

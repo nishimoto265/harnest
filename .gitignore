@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Runtime artifacts
+runs/
+processed.jsonl
+rules-registry.jsonl
+
+# Local config (must be user-supplied; .example is committed)
+config.yaml
+
+# Logs / tmp
+*.log
+.DS_Store
+
+# Archives (optional: may be re-enabled per-project)
+archives/removed/
+archives/rejected/
