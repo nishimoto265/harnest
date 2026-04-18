@@ -1,66 +1,29 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-import { z } from 'zod';
+import {
+  EVENT_VALUES,
+  type Event,
+  StateEntrySchema,
+  type StateEntry,
+  TERMINAL_EVENTS,
+} from '../contracts.ts';
+
+// Re-export for backward compatibility with existing consumers / tests.
+export { EVENT_VALUES, type Event, StateEntrySchema, type StateEntry, TERMINAL_EVENTS };
 
 /**
  * processed.jsonl — append-only event log.
  *
- * Schema aligned with the implementation plan §M2:
- *   event ∈ started / step_N_done / promoting / promoted / rollback / failed / timeout / skipped / completed
+ * Schema and terminal set are defined in `src/contracts.ts` (single source
+ * of truth). This module only hosts the read/write helpers.
  *
  * Idempotency model:
  *   - A PR is considered "terminal" once it has any of:
  *       promoted | rollback | skipped | failed | completed | timeout
- *     Terminal PRs are filtered out by `unprocessedPRs()` regardless of their prior "started".
- *     `timeout` is terminal per plan §"step 20 エージェント実装タイムアウト" — a timed-out
- *     PR is not retried automatically (operator must review and re-queue manually).
- *   - A PR may appear multiple times in the log (retries); the most recent terminal event wins.
+ *     Terminal PRs are filtered out by `unprocessedPRs()` regardless of prior "started".
+ *   - A PR may appear multiple times in the log (retries); latest terminal event wins.
  */
-
-export const EVENT_VALUES = [
-  'started',
-  'step_done',
-  'promoting',
-  'promoted',
-  'rollback',
-  'failed',
-  'timeout',
-  'skipped',
-  'completed',
-] as const;
-export type Event = (typeof EVENT_VALUES)[number];
-
-/** Events that signal a PR has reached a terminal state for idempotency. */
-export const TERMINAL_EVENTS: ReadonlySet<Event> = new Set<Event>([
-  'promoted',
-  'rollback',
-  'skipped',
-  'failed',
-  'completed',
-  'timeout',
-]);
-
-const BaseEntry = z.object({
-  pr: z.number().int().positive(),
-  event: z.enum(EVENT_VALUES),
-  /** ISO-8601 UTC timestamp */
-  at: z.string().datetime({ offset: true }),
-  /** correlation id; stable within a single cycle invocation */
-  run_id: z.string().min(1),
-  /** absolute path to the run directory (optional at `started`) */
-  run_dir: z.string().optional(),
-  /** step_done only: step number (10/20/30/40/50/60/70) */
-  step: z.number().int().positive().optional(),
-  /** promoted only: whether the candidate was adopted */
-  adopted: z.boolean().optional(),
-  /** failed/timeout: freeform short reason */
-  reason: z.string().optional(),
-  /** atomic-completion manifest path (Codex H5) — set after step 20/50 */
-  manifest: z.string().optional(),
-});
-export const StateEntrySchema = BaseEntry;
-export type StateEntry = z.infer<typeof StateEntrySchema>;
 
 export interface PRStateSummary {
   pr: number;
