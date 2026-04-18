@@ -58,6 +58,38 @@ export function readJsonl<T>(path: string, schema: ZodType<T>): T[] {
   return out;
 }
 
+/**
+ * Collapse entries by a key (e.g. PR number, provisional_id) with last-write-wins
+ * semantics. jsonl files are append-only; this helper turns them into
+ * "latest-state" views without each step re-implementing the reduce.
+ *
+ * If `tieBreak` is provided, it runs when two entries share the same key;
+ * the one for which `tieBreak` returns the larger value wins (useful for
+ * ISO timestamp fields). Default: array order (later entry wins).
+ */
+export function collapseByKey<T, K>(
+  entries: readonly T[],
+  keyFn: (e: T) => K,
+  tieBreak?: (e: T) => string | number,
+): Map<K, T> {
+  const out = new Map<K, T>();
+  for (const e of entries) {
+    const k = keyFn(e);
+    const prev = out.get(k);
+    if (!prev) {
+      out.set(k, e);
+      continue;
+    }
+    if (!tieBreak) {
+      // append-only order: later wins.
+      out.set(k, e);
+    } else {
+      out.set(k, tieBreak(e) >= tieBreak(prev) ? e : prev);
+    }
+  }
+  return out;
+}
+
 export class JsonlReadError extends Error {
   constructor(message: string) {
     super(message);

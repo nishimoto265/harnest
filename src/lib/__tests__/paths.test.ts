@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { expandWorktreeName, makeRunId, resolvePath, runDir } from '../paths.ts';
+import { expandWorktreeName, resolvePath } from '../paths.ts';
+
+// NOTE: runDir / makeRunId were moved to src/io/run-layout.ts (newRunId, runDir).
+// See src/io/__tests__/run-layout.test.ts for the new coverage.
 
 describe('paths.ts', () => {
   it('resolvePath: absolute paths pass through', () => {
@@ -15,16 +18,6 @@ describe('paths.ts', () => {
     const home = process.env.HOME ?? '/tmp';
     expect(resolvePath('~/stuff', '/repo')).toBe(`${home}/stuff`);
     expect(resolvePath('~stuff', '/repo')).toBe(`${home}/stuff`);
-  });
-
-  it('runDir: formats YYYY-MM-DD-PR<num>', () => {
-    const d = new Date('2026-04-17T15:00:00Z');
-    expect(runDir('/runs', 74, d)).toBe('/runs/2026-04-17-PR74');
-  });
-
-  it('makeRunId: stable format', () => {
-    const d = new Date('2026-04-17T15:00:00.123Z');
-    expect(makeRunId(74, d)).toBe('pr74-20260417T150000Z');
   });
 
   it('expandWorktreeName: substitutes template variables', () => {

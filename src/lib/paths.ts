@@ -2,6 +2,7 @@ import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
+// `join` is retained because `detectRepoRoot` uses it.
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -73,27 +74,13 @@ export function resolvePath(input: string, repoRoot: string): string {
 }
 
 /**
- * Build a run directory path for a given PR.
- * Format: <runsRoot>/<YYYY-MM-DD>-PR<num>/
- *
- * Accepts an optional `date` for deterministic tests.
+ * NOTE: `makeRunId` and `runDir(runsRoot, prNumber, date)` were previously
+ * defined here. They have been removed in favor of the single canonical
+ * layout in `src/io/run-layout.ts`:
+ *   - run id:  newRunId(pr, now?)  → "YYYY-MM-DD-PR<num>-<hex7>"
+ *   - run dir: runDir(ctx: RunContext)
+ * Importers should migrate to `src/io/run-layout.ts`.
  */
-export function runDir(runsRoot: string, prNumber: number, date: Date = new Date()): string {
-  const iso = date.toISOString().slice(0, 10); // YYYY-MM-DD (UTC; stable across machines)
-  return join(runsRoot, `${iso}-PR${prNumber}`);
-}
-
-/**
- * Build a stable run_id for log/state correlation. Collision-resistant for the
- * expected volume (<1 per PR per hour). Not cryptographic.
- */
-export function makeRunId(prNumber: number, date: Date = new Date()): string {
-  const ts = date
-    .toISOString()
-    .replace(/[-:]/g, '')
-    .replace(/\.\d{3}Z$/, 'Z');
-  return `pr${prNumber}-${ts}`;
-}
 
 /**
  * Expand worktree naming template. See config.worktree.naming.
