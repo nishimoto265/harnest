@@ -1,4 +1,0 @@
-# Marks auto-improve/ as a self-contained pnpm install root.
-# Without this file, pnpm would walk up to the parent pnpm-workspace.yaml
-# and install the delish-web-global root project instead.
-packages: []

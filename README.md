@@ -4,195 +4,31 @@ Self-improving harness pipeline for AI coding agents.
 Observes merged PRs, replays each under the current "best" rule set, scores the
 output, proposes new rules, verifies them in a second pass, and promotes wins.
 
-See design & implementation plan:
+> ⚠️ **Status (2026-04-20)**: Planning phase. TypeScript M1 skeleton is being
+> deleted; re-implementing in **Go** from scratch. No commands are runnable yet.
 
-- `docs/migration-plan/memos/2026-04-17_自動改善パイプライン全体設計.md`
-- `docs/migration-plan/memos/2026-04-17_自動改善パイプライン実装計画.md`
+## 📚 Canonical docs (read in this order)
 
-This package is **M1: the skeleton only** — config loader, state log, environment
-preflight, and merged-PR detection. Step 10–70 arrive in M2+.
+1. **`docs/design/Go実装計画.md`** — phase breakdown, ownership matrix, rollout plan (rev11+)
+2. **`docs/design/io-contracts.md`** — exact schemas, step70 staged transaction, recovery state machine, resume vocabulary, recover CLI (rev11+)
+3. **`docs/design/全体設計.md`** — background / 骨格思想 only (rev6 以降未同期、Phase 4 で rewrite)
 
----
+Old migration-plan memos (`docs/memos/`) are history/参考 only. The two files above are canonical.
 
-## Setup
+## Planned runtime (will land post-Phase 0)
 
-1. **Install dependencies** (first time only):
+- Go 1.22 binary: `auto-improve {preflight, detect-merged, run, sunset, recover}`
+- macOS launchd (hourly tick) or `workflow_dispatch` on GitHub Actions
+- External CLI dependencies: `git >= 2.35`, `gh >= 2.40`, `jq >= 1.6`, `yq >= 4.0`, `claude`, `codex`
+- Platform: darwin/arm64, darwin/amd64, linux/amd64
 
-   ```bash
-   cd auto-improve
-   pnpm install
-   ```
+### Recover after `needs_manual_recovery`
 
-2. **Copy the example config** and edit it for your environment:
+launchd は `StartInterval: 3600` で hourly tick のため、operator が sentinel を `recover` した後 **最大 1 時間** pipeline 停止することがある。即時復旧したい場合は以下いずれか:
+- `auto-improve run --pr <n>` で該当 PR を手動 trigger
+- `auto-improve run --detect-loop --with-preflight` で detect ループを手動起動
+- `launchctl start com.nishimoto265.auto-improve` で launchd の次 tick を前倒し
 
-   ```bash
-   cp config.yaml.example config.yaml
-   $EDITOR config.yaml
-   ```
+`auto-improve recover --inspect --run <id>` は read-only で state を confirm でき、副作用なしに診断可能。
 
-   At minimum, check:
-
-   - `repo.github` — `owner/name`
-   - `repo.best_branch` — the branch that holds your current best rules
-   - `worktree.base` — a writable parent directory for per-PR worktrees
-   - `paths.harness_files` — files/dirs copied into each worktree
-
-3. **Run preflight** to verify the environment is ready:
-
-   ```bash
-   pnpm auto-improve preflight        # ASCII table on TTY
-   pnpm auto-improve preflight --json # machine-readable (also default in non-TTY)
-   ```
-
-   This is a **hard gate**: non-zero exit if any required tool is missing, `gh`
-   is not authenticated, or `config.yaml` fails schema validation. Warnings
-   (e.g. harness files not yet present) do not block.
-
-4. **Detect unprocessed merged PRs**:
-
-   ```bash
-   pnpm auto-improve detect-merged
-   ```
-
-   Prints JSON to stdout. Empty `prs: []` means there's nothing new to do.
-
-   `detect-merged` runs its own critical-preflight check first and exits `2` if
-   anything essential is missing (node/git/gh-auth/jq/yq/config.yaml/…).
-   Pass `--skip-preflight` to bypass for local debugging.
-
-   Pipe-friendly usage:
-
-   ```bash
-   pnpm auto-improve detect-merged | jq '.prs[].number'
-   ```
-
----
-
-## Commands
-
-| Command                         | Purpose                                              | Exit codes               |
-| ------------------------------- | ---------------------------------------------------- | ------------------------ |
-| `pnpm auto-improve preflight`   | Check Node, pnpm, git, gh (+auth), jq, yq, claude,   | `0` OK, `1` NG, `2` arg  |
-|                                 | codex (optional), config schema, writable dirs.      |                          |
-| `pnpm auto-improve detect-merged` | List merged PRs not yet recorded terminal in state. | `0` OK, `1` runtime      |
-| `pnpm auto-improve help`        | Show usage.                                          | `0`                      |
-| `pnpm auto-improve version`     | Print version.                                       | `0`                      |
-
-### Environment overrides
-
-| Variable                   | Purpose                                                            |
-| -------------------------- | ------------------------------------------------------------------ |
-| `AUTO_IMPROVE_REPO_ROOT`   | Force repo root (skip `git rev-parse` autodetect). Used in tests.  |
-| `AUTO_IMPROVE_CONFIG`      | Path to `config.yaml` (default: `<repo>/auto-improve/config.yaml`) |
-| `LOG_LEVEL`                | `trace`/`debug`/`info`/`warn`/`error`/`fatal` (default `info`)     |
-
----
-
-## State model — `processed.jsonl`
-
-Append-only event log keyed by PR number. Each cycle step writes at least one
-line. Idempotency is derived by replaying the log.
-
-Event vocabulary (`lib/state.ts`):
-
-```
-started / step_done / promoting / promoted / rollback / failed / timeout / skipped / completed
-```
-
-Example:
-
-```jsonl
-{"pr":74,"event":"started","at":"2026-04-17T10:00:00.000Z","run_id":"pr74-20260417T100000Z"}
-{"pr":74,"event":"step_done","at":"2026-04-17T10:03:12.000Z","run_id":"pr74-…","step":10}
-{"pr":74,"event":"step_done","at":"…","run_id":"pr74-…","step":20,"manifest":"…/20-pass1/manifest.json"}
-{"pr":74,"event":"promoted","at":"…","run_id":"pr74-…","adopted":true,"run_dir":"auto-improve/runs/2026-04-17-PR74"}
-```
-
-A PR is "done" (and will be skipped by `detect-merged`) once any terminal event
-is recorded: `promoted | rollback | skipped | failed | completed | timeout`.
-
-Crash recovery: a PR with only `started` on it will appear in the next
-`detect-merged` output and can be retried. `timeout` is terminal on purpose —
-a timed-out PR is **not** auto-retried; the operator must investigate and
-manually re-queue (delete its terminal row, or re-run after the root cause is fixed).
-
-### Detection window
-
-`detect-merged` resolves the `gh pr list --search "merged:>=…"` floor in this order:
-
-1. `detect.since` (absolute `YYYY-MM-DD` in config) — always wins if set
-2. `max(N days ago, oldest-non-terminal-PR from state)` — widens automatically
-   when the pipeline has been down longer than `lookback_days`
-3. Clamped by `max_lookback_days` (default 180d) as a safety rail
-
-The output JSON includes `since_source` so you can tell which rule fired.
-
----
-
-## Directory layout
-
-```
-auto-improve/
-├── README.md                     # this file
-├── config.yaml.example           # committed; copy to config.yaml
-├── config.yaml                   # gitignored, user-supplied
-├── package.json
-├── tsconfig.json
-├── .gitignore
-├── src/
-│   ├── bin/auto-improve.ts       # CLI router
-│   ├── preflight.ts              # env + config hard gate
-│   ├── detect-merged.ts          # gh-based differential polling
-│   └── lib/
-│       ├── config.ts             # zod schema + loader
-│       ├── logger.ts             # pino
-│       ├── paths.ts              # repo-root / path resolution
-│       └── state.ts              # processed.jsonl reader/appender
-├── processed.jsonl               # (gitignored) append-only event log
-└── runs/                         # (gitignored) per-PR run artifacts (M2+)
-```
-
-`runs/`, `processed.jsonl`, `rules-registry.jsonl`, and `config.yaml` are
-intentionally gitignored. `pnpm-lock.yaml` and `config.yaml.example` are
-committed.
-
----
-
-## Development
-
-```bash
-pnpm typecheck     # tsc --noEmit
-pnpm test          # vitest (no tests yet in M1)
-```
-
-### Code conventions
-
-- ESM-only (`"type": "module"`).
-- Run directly with `tsx` — no build step.
-- All external I/O (config.yaml, processed.jsonl, gh JSON) passes through a
-  zod schema. On validation failure, produce a readable multi-line error.
-- `pino` for all logs; machine output (JSON results) goes to stdout, logs to
-  stderr.
-
----
-
-## What's in M1 (and what isn't)
-
-Scoped in:
-
-- `config.yaml.example` + zod schema + loader
-- repo-root auto-detect + path resolution
-- `processed.jsonl` schema + append/read/summarize (Codex M2 event set)
-- preflight hard gate (node/pnpm/git/gh-auth/jq/yq/claude; codex optional)
-- `detect-merged` via `gh pr list --search`
-
-Deferred to M2+:
-
-- `step 10` base restore + task-package.json
-- `step 20/50` agent-parallel implement with manifest.json
-- `step 30/60` scoring & pairwise (panel + codex arbiter rotation)
-- `step 40` candidate extraction (strict JSON)
-- `step 70` transactional promotion + rollback
-- `rules-registry.jsonl`
-- `run-cycle2.sh` / `run-cycle3.sh` orchestrators
-- archives/removed, archives/rejected lifecycle
+Setup, config, and run-book will be filled in at Phase 3-C (release) and Phase 4 (docs finalization).
