@@ -367,6 +367,29 @@ func TestManifestSuccess_Validate_RejectsPassAgentPrefixMismatch(t *testing.T) {
 	assert.ErrorIs(t, err, ErrManifestArtifactPathPrefixMismatch)
 }
 
+func TestManifestSuccess_Validate_RejectsArtifactPathEqualToPrefix(t *testing.T) {
+	var m ManifestSuccess
+	require.NoError(t, json.Unmarshal([]byte(fixtureManifestSuccess(t)), &m))
+	m.DiffPath = "20-pass1/a1"
+
+	err := m.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrManifestArtifactPathPrefixMismatch)
+}
+
+func TestManifest_Validate_RejectsFinishedBeforeStarted(t *testing.T) {
+	var m Manifest
+	require.NoError(t, json.Unmarshal([]byte(fixtureManifestSuccess(t)), &m))
+	v := m.Value.(ManifestSuccess)
+	v.StartedAt = time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	v.FinishedAt = time.Date(2026, 4, 20, 11, 59, 59, 0, time.UTC)
+	m.Value = v
+
+	err := m.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrManifestFinishedBeforeStarted)
+}
+
 func TestManifest_MarshalJSON_RejectsVariantMismatch(t *testing.T) {
 	now := time.Now()
 	m := Manifest{

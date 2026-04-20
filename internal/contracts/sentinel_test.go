@@ -48,3 +48,20 @@ func TestNeedsRecoverySentinel_RejectsBadCreatedAt(t *testing.T) {
 	var s NeedsRecoverySentinel
 	assert.Error(t, json.Unmarshal(data, &s))
 }
+
+func TestNeedsRecoverySentinel_Validate_RejectsReasonFailedStepMismatch(t *testing.T) {
+	s := validNeedsRecoverySentinel()
+	s.Reason = RollbackReasonWorktreeRescueLoop
+	s.FailedStep = FailedStep70
+
+	err := s.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrReasonFailedStepMismatch)
+}
+
+func TestNeedsRecoverySentinel_Validate_AcceptsWorktreeRescueLoopForStep20(t *testing.T) {
+	s := validNeedsRecoverySentinel()
+	s.Reason = RollbackReasonWorktreeRescueLoop
+	s.FailedStep = FailedStep20
+	assert.NoError(t, s.Validate())
+}

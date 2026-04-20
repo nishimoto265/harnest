@@ -54,4 +54,8 @@ var (
 	// numeric kind that is forbidden by the integer-only contract before
 	// encoding/json has a chance to erase the original type information.
 	ErrCanonicalForbiddenKind = errors.New("contracts: canonical marshal: forbidden Go numeric kind")
+
+	// ErrNilValidationValue is returned when runValidation receives a typed nil
+	// pointer/interface that would otherwise panic when calling Validate().
+	ErrNilValidationValue = errors.New("contracts: nil validation target")
 )

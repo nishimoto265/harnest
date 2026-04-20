@@ -12,6 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type nilValidatingValue struct{}
+
+func (*nilValidatingValue) Validate() error { return nil }
+
 // Phase 0-bootstrap-1 gate 3rd-round findings #1 and #2: EncodeStrict /
 // MarshalStrict run Validate() / validator.Struct before emitting JSON, so
 // producers that hand-craft a struct and call the writer cannot bypass
@@ -239,6 +243,23 @@ func TestCandidates_Validate_PropagatesCandidateError(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCandidateTargetRequired)
 	assert.True(t, strings.Contains(err.Error(), "candidates[0]"))
+}
+
+func TestCandidate_Validate_RejectsOverflowRefOutside40Prefix(t *testing.T) {
+	c := Candidate{
+		CandidateID: "c1",
+		Kind:        CandidateKindNew,
+		Title:       "x",
+		ProblemOverflowRef: &OverflowRef{
+			Path:   "30/reasons/problem.txt",
+			Sha256: "0000000000000000000000000000000000000000000000000000000000000001",
+		},
+		ProposedBodyPath:   "40/candidates/c1.md",
+		ProposedBodySha256: "0000000000000000000000000000000000000000000000000000000000000002",
+	}
+	err := c.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrOverflowRefPathPrefixMismatch)
 }
 
 func TestCandidate_Validate_RejectsAbsoluteBodyPath(t *testing.T) {
@@ -500,4 +521,122 @@ func TestDecodeStrict_RejectsEmptyPayloadsWithTypedError(t *testing.T) {
 			assert.ErrorIs(t, err, ErrEmptyJSON)
 		})
 	}
+}
+
+func TestCustomUnmarshalJSON_RejectsDuplicateDiscriminatorKeys(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      []byte
+		unmarshal func([]byte) error
+	}{
+		{
+			name: "manifest kind",
+			data: []byte(`{"kind":"success","kind":"error","schema_version":"1","run_id":"2026-04-20-PR42-abcdef0","pass":1,"agent":"a1","branch_name":"b","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","diff_path":"20-pass1/a1/diff.patch","session_path":"20-pass1/a1/session.jsonl","checklist_path":"20-pass1/a1/checklist-result.json","prompt_version":"v1","started_at":"2026-04-20T10:00:00Z","finished_at":"2026-04-20T10:01:00Z"}`),
+			unmarshal: func(data []byte) error {
+				var v Manifest
+				return v.UnmarshalJSON(data)
+			},
+		},
+		{
+			name: "decision action",
+			data: []byte(`{"action":"adopt","action":"reject","schema_version":"1","run_id":"2026-04-20-PR42-abcdef0","reason":"below_threshold","decided_at":"2026-04-20T12:00:00Z"}`),
+			unmarshal: func(data []byte) error {
+				var v Decision
+				return v.UnmarshalJSON(data)
+			},
+		},
+		{
+			name: "registry kind",
+			data: []byte(`{"kind":"added","kind":"updated","schema_version":"1","rule_id":"r-0001","rule_path":"rules/r-0001.md","sha256":"0000000000000000000000000000000000000000000000000000000000000001","prev_sha256":"0000000000000000000000000000000000000000000000000000000000000002","idempotency_key":"0000000000000000000000000000000000000000000000000000000000000003","version_seq":2,"prev_hash":"0000000000000000000000000000000000000000000000000000000000000004","by_run_id":"2026-04-20-PR42-abcdef0","at":"2026-04-20T12:00:00Z"}`),
+			unmarshal: func(data []byte) error {
+				var v RuleRegistryEntry
+				return v.UnmarshalJSON(data)
+			},
+		},
+		{
+			name: "state kind",
+			data: []byte(`{"kind":"started","kind":"step_done","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"10","at":"2026-04-20T10:00:00Z"}`),
+			unmarshal: func(data []byte) error {
+				var v StateEntry
+				return v.UnmarshalJSON(data)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.unmarshal(tt.data)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrDuplicateJSONKey)
+		})
+	}
+}
+
+func TestCustomUnmarshalJSON_RejectsEmptyAndTrailingPayloads(t *testing.T) {
+	tests := []struct {
+		name      string
+		unmarshal func([]byte) error
+		valid     []byte
+	}{
+		{
+			name: "manifest",
+			unmarshal: func(data []byte) error {
+				var v Manifest
+				return v.UnmarshalJSON(data)
+			},
+			valid: []byte(fixtureManifestSuccess(t)),
+		},
+		{
+			name: "decision",
+			unmarshal: func(data []byte) error {
+				var v Decision
+				return v.UnmarshalJSON(data)
+			},
+			valid: []byte(fixtureDecisionAdopt()),
+		},
+		{
+			name: "registry",
+			unmarshal: func(data []byte) error {
+				var v RuleRegistryEntry
+				return v.UnmarshalJSON(data)
+			},
+			valid: []byte(`{"kind":"added","schema_version":"1","rule_id":"r-0001","rule_path":"rules/r-0001.md","sha256":"0000000000000000000000000000000000000000000000000000000000000001","idempotency_key":"0000000000000000000000000000000000000000000000000000000000000002","version_seq":1,"by_run_id":"2026-04-20-PR42-abcdef0","at":"2026-04-20T12:00:00Z"}`),
+		},
+		{
+			name: "state",
+			unmarshal: func(data []byte) error {
+				var v StateEntry
+				return v.UnmarshalJSON(data)
+			},
+			valid: []byte(fixtureStateStarted()),
+		},
+		{
+			name: "classification",
+			unmarshal: func(data []byte) error {
+				var v ClassificationEntry
+				return v.UnmarshalJSON(data)
+			},
+			valid: []byte(`{"schema_version":"1","run_id":"2026-04-20-PR42-abcdef0","candidate_id":"c1","kind":"new","similarity_score":0,"classified_at":"2026-04-20T12:00:00Z"}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name+" empty", func(t *testing.T) {
+			err := tt.unmarshal(nil)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrEmptyJSON)
+		})
+		t.Run(tt.name+" trailing", func(t *testing.T) {
+			err := tt.unmarshal(append(append([]byte(nil), tt.valid...), []byte(`{"extra":true}`)...))
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrTrailingJSON)
+		})
+	}
+}
+
+func TestRunValidation_RejectsTypedNilPointer(t *testing.T) {
+	var value *nilValidatingValue
+	err := runValidation(value)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNilValidationValue)
 }

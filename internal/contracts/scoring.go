@@ -197,10 +197,21 @@ var (
 	ErrRawJudgeRefsForbidden = errors.New("contracts: raw scoring: primary/secondary rows must not carry arbiter refs")
 	ErrRawJudgePrimaryRole   = errors.New("contracts: raw scoring: primary_ref.role must be primary")
 	ErrRawJudgeSecondaryRole = errors.New("contracts: raw scoring: secondary_ref.role must be secondary")
+	ErrPairwiseAgentMismatch = errors.New("contracts: pairwise: agent_a and agent_b must refer to the same agent across pass1/pass2")
 )
+
+func (e ScoreEntry) Validate() error {
+	if err := validateStruct(e); err != nil {
+		return err
+	}
+	return validateOverflowRefUnderPrefix("reasons_overflow_ref", e.ReasonsOverflowRef, overflowPrefixForPass(e.Pass))
+}
 
 func (e RawScoreEntry) Validate() error {
 	if err := validateStruct(e); err != nil {
+		return err
+	}
+	if err := validateOverflowRefUnderPrefix("reasons_overflow_ref", e.ReasonsOverflowRef, overflowPrefixForPass(e.Pass)); err != nil {
 		return err
 	}
 	return validateRawJudgeRefs(e.JudgeRole, e.PrimaryRef, e.SecondaryRef)
@@ -210,7 +221,27 @@ func (e RawComplianceEntry) Validate() error {
 	if err := validateStruct(e); err != nil {
 		return err
 	}
+	if err := validateOverflowRefUnderPrefix("rationale_overflow_ref", e.RationaleOverflowRef, overflowPrefixForPass(e.Pass)); err != nil {
+		return err
+	}
 	return validateRawJudgeRefs(e.JudgeRole, e.PrimaryRef, e.SecondaryRef)
+}
+
+func (e ComplianceEntry) Validate() error {
+	if err := validateStruct(e); err != nil {
+		return err
+	}
+	return validateOverflowRefUnderPrefix("rationale_overflow_ref", e.RationaleOverflowRef, overflowPrefixForPass(e.Pass))
+}
+
+func (e PairwiseEntry) Validate() error {
+	if err := validateStruct(e); err != nil {
+		return err
+	}
+	if e.AgentA != e.AgentB {
+		return fmt.Errorf("%w: agent_a=%s agent_b=%s", ErrPairwiseAgentMismatch, e.AgentA, e.AgentB)
+	}
+	return validateOverflowRefUnderPrefix("justification_overflow_ref", e.JustificationOverflowRef, "60")
 }
 
 func validateRawJudgeRefs(role JudgeRole, primaryRef, secondaryRef *RawJudgeRef) error {
@@ -231,6 +262,13 @@ func validateRawJudgeRefs(role JudgeRole, primaryRef, secondaryRef *RawJudgeRef)
 		}
 	}
 	return nil
+}
+
+func overflowPrefixForPass(pass int) string {
+	if pass == 2 {
+		return "60"
+	}
+	return "30"
 }
 
 type Step30DoneMarker struct {

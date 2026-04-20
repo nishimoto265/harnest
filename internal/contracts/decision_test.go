@@ -147,6 +147,21 @@ func TestDecision_Reject_BadRollbackReason(t *testing.T) {
 	assert.Error(t, json.Unmarshal([]byte(data), &d))
 }
 
+func TestDecision_Rollback_RejectsReasonFailedStepMismatch(t *testing.T) {
+	data := `{
+  "action": "rollback",
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "rollback_reason": "worktree_rescue_loop",
+  "failed_step": "70",
+  "decided_at": "2026-04-20T12:00:00Z"
+}`
+	var d Decision
+	err := json.Unmarshal([]byte(data), &d)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrReasonFailedStepMismatch)
+}
+
 func TestDecision_Validate_RejectsOuterActionVariantTypeMismatch(t *testing.T) {
 	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
 	d := Decision{

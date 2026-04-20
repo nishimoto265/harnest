@@ -134,7 +134,7 @@ func validStep60Response() Step60Response {
 		RunID:           "2026-04-20-PR42-abcdef0",
 		ScoresCount:     10,
 		ComplianceCount: 2,
-		PairwiseCount:   1,
+		PairwiseCount:   2,
 		ResolvedAt:      time.Now(),
 	}
 }
@@ -325,8 +325,8 @@ func TestStepIO_JSONBoundaries_StrictRequestsAndResponses(t *testing.T) {
 				var v Step60Response
 				return v.UnmarshalJSON(data)
 			},
-			anchor:    `"pairwise_count":1`,
-			duplicate: `"pairwise_count":1,"pairwise_count":2`,
+			anchor:    `"pairwise_count":2`,
+			duplicate: `"pairwise_count":2,"pairwise_count":3`,
 			remove:    `"run_id":"2026-04-20-PR42-abcdef0",`,
 		},
 	}
@@ -549,6 +549,15 @@ func TestDecodeAndValidateStep10Response_RejectsCrossPRReplay(t *testing.T) {
 	assert.ErrorIs(t, err, ErrStep10RequestPRMismatch)
 }
 
+func TestDecodeAndValidateStep10Response_RejectsExpectedRunIDMismatch(t *testing.T) {
+	req := validStep10Request()
+	req.ExpectedRunID = "2026-04-21-PR42-abcdef0"
+
+	_, err := DecodeAndValidateStep10Response(mustMarshalJSON(t, validStep10Response()), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep10ExpectedRunIDMismatch)
+}
+
 func TestDecodeAndValidateStep30Response_RejectsCrossRunReplayEvenWhenDirectDecodeSucceeds(t *testing.T) {
 	data := mustMarshalJSON(t, validStep30Response())
 
@@ -560,6 +569,16 @@ func TestDecodeAndValidateStep30Response_RejectsCrossRunReplayEvenWhenDirectDeco
 	_, err := DecodeAndValidateStep30Response(data, req)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrResponseRunIDMismatch)
+}
+
+func TestDecodeAndValidateStep30Response_RejectsScoresCountMismatchForScorableAgents(t *testing.T) {
+	req := validStep30Request()
+	resp := validStep30Response()
+	resp.ScoresCount = expectedScoresCountForScorableAgents(req.ScorableAgents) - scoringDimensionCount
+
+	_, err := DecodeAndValidateStep30Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep30ScoresCountMismatch)
 }
 
 func TestDecodeAndValidateStep40Response_RejectsCrossRunReplayEvenWhenDirectDecodeSucceeds(t *testing.T) {
@@ -575,6 +594,27 @@ func TestDecodeAndValidateStep40Response_RejectsCrossRunReplayEvenWhenDirectDeco
 	assert.ErrorIs(t, err, ErrResponseRunIDMismatch)
 }
 
+func TestDecodeAndValidateStep40Response_RejectsCandidatesHashMismatch(t *testing.T) {
+	req := validStep40Request()
+	resp := validStep40Response()
+	resp.Candidates.CandidatesHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+	type candidatesAlias contracts.Candidates
+	raw := struct {
+		RunID           contracts.RunID `json:"run_id"`
+		Candidates      candidatesAlias `json:"candidates"`
+		CandidatesCount int             `json:"candidates_count"`
+	}{
+		RunID:           resp.RunID,
+		Candidates:      candidatesAlias(resp.Candidates),
+		CandidatesCount: resp.CandidatesCount,
+	}
+
+	_, err := DecodeAndValidateStep40Response(mustMarshalJSON(t, raw), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, contracts.ErrCandidatesHashMismatch)
+}
+
 func TestDecodeAndValidateStep60Response_RejectsCrossRunReplayEvenWhenDirectDecodeSucceeds(t *testing.T) {
 	data := mustMarshalJSON(t, validStep60Response())
 
@@ -586,4 +626,24 @@ func TestDecodeAndValidateStep60Response_RejectsCrossRunReplayEvenWhenDirectDeco
 	_, err := DecodeAndValidateStep60Response(data, req)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrResponseRunIDMismatch)
+}
+
+func TestDecodeAndValidateStep60Response_RejectsScoresCountMismatchForScorableAgents(t *testing.T) {
+	req := validStep60Request()
+	resp := validStep60Response()
+	resp.ScoresCount = expectedScoresCountForScorableAgents(req.ScorableAgents) - scoringDimensionCount
+
+	_, err := DecodeAndValidateStep60Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep60ScoresCountMismatch)
+}
+
+func TestDecodeAndValidateStep60Response_RejectsPairwiseCountMismatchForScorableAgents(t *testing.T) {
+	req := validStep60Request()
+	resp := validStep60Response()
+	resp.PairwiseCount = len(req.ScorableAgents) - 1
+
+	_, err := DecodeAndValidateStep60Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep60PairwiseCountMismatch)
 }

@@ -29,7 +29,10 @@ type Step30Response struct {
 	ResolvedAt      time.Time       `json:"resolved_at" validate:"required"`
 }
 
-var ErrStep30ScorableAgentPassMismatch = errors.New("stepio: step30: scorable_agents do not match TaskPackage.Worktrees[pass=1]")
+var (
+	ErrStep30ScorableAgentPassMismatch = errors.New("stepio: step30: scorable_agents do not match TaskPackage.Worktrees[pass=1]")
+	ErrStep30ScoresCountMismatch       = errors.New("stepio: step30: scores_count must match request.scorable_agents x rubric dimensions")
+)
 
 func (r *Step30Request) UnmarshalJSON(data []byte) error {
 	type alias Step30Request
@@ -75,6 +78,10 @@ func DecodeAndValidateStep30Response(data []byte, req Step30Request) (Step30Resp
 	}
 	if resp.RunID != req.TaskPackage.RunID {
 		return Step30Response{}, fmt.Errorf("%w: response.run_id=%s request.run_id=%s", ErrResponseRunIDMismatch, resp.RunID, req.TaskPackage.RunID)
+	}
+	expectedScores := expectedScoresCountForScorableAgents(req.ScorableAgents)
+	if resp.ScoresCount != expectedScores {
+		return Step30Response{}, fmt.Errorf("%w: scores_count=%d expected=%d scorable_agents=%d", ErrStep30ScoresCountMismatch, resp.ScoresCount, expectedScores, len(req.ScorableAgents))
 	}
 	return resp, nil
 }

@@ -24,6 +24,9 @@ func CanonicalMarshal(v any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectDuplicateKeys(raw); err != nil {
+		return nil, err
+	}
 
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -51,11 +54,17 @@ func rejectForbiddenCanonicalKinds(v reflect.Value, tree any, path string) error
 	if !v.IsValid() {
 		return nil
 	}
+	if isCanonicalCustomMarshaler(v) {
+		return rejectForbiddenCanonicalKindsInEncodedTree(tree, path)
+	}
 	for v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer {
 		if v.IsNil() {
 			return nil
 		}
 		v = v.Elem()
+		if isCanonicalCustomMarshaler(v) {
+			return rejectForbiddenCanonicalKindsInEncodedTree(tree, path)
+		}
 	}
 
 	switch v.Kind() {
@@ -113,6 +122,51 @@ func rejectForbiddenCanonicalKinds(v reflect.Value, tree any, path string) error
 	case reflect.Float32, reflect.Float64, reflect.Uint, reflect.Uint32, reflect.Uint64, reflect.Uintptr, reflect.Complex64, reflect.Complex128:
 		return fmt.Errorf("%w: kind=%s path=%s", ErrCanonicalForbiddenKind, v.Kind(), path)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint8, reflect.Uint16:
+		return nil
+	default:
+		return nil
+	}
+}
+
+func isCanonicalCustomMarshaler(v reflect.Value) bool {
+	if !v.IsValid() {
+		return false
+	}
+	if v.CanInterface() {
+		if _, ok := v.Interface().(json.Marshaler); ok {
+			return true
+		}
+	}
+	if v.CanAddr() && v.Addr().CanInterface() {
+		if _, ok := v.Addr().Interface().(json.Marshaler); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func rejectForbiddenCanonicalKindsInEncodedTree(tree any, path string) error {
+	switch vv := tree.(type) {
+	case nil, bool, string:
+		return nil
+	case json.Number:
+		if _, err := vv.Int64(); err == nil {
+			return nil
+		}
+		return fmt.Errorf("%w: %s", ErrCanonicalNonInteger, vv.String())
+	case []any:
+		for i := range vv {
+			if err := rejectForbiddenCanonicalKindsInEncodedTree(vv[i], fmt.Sprintf("%s[%d]", path, i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	case map[string]any:
+		for key, child := range vv {
+			if err := rejectForbiddenCanonicalKindsInEncodedTree(child, fmt.Sprintf("%s[%q]", path, key)); err != nil {
+				return err
+			}
+		}
 		return nil
 	default:
 		return nil

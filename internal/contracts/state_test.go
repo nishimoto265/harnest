@@ -99,6 +99,14 @@ func TestState_Warning_RejectsRescueRetryWrongStep(t *testing.T) {
 	assert.ErrorIs(t, err, ErrStateWarningRescueRetryStep)
 }
 
+func TestState_Warning_RejectsRescueRetryCount(t *testing.T) {
+	data := `{"kind":"rescue_retry","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"20","count":3,"at":"2026-04-20T12:00:00Z"}`
+	var e StateEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStateWarningRescueRetryCount)
+}
+
 func TestState_Warning_RejectsScopeMismatch(t *testing.T) {
 	data := `{"kind":"registry_size_critical","source":"step70","pr":42,"step":"70","count":2000,"at":"2026-04-20T12:00:00Z"}`
 	var e StateEntry
@@ -146,6 +154,14 @@ func TestState_Rollback_Parse(t *testing.T) {
 	var e StateEntry
 	require.NoError(t, json.Unmarshal([]byte(data), &e))
 	assert.True(t, e.Kind.IsTerminal())
+}
+
+func TestState_Rollback_RejectsReasonFailedStepMismatch(t *testing.T) {
+	data := `{"kind":"rollback","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","rollback_reason":"worktree_rescue_loop","failed_step":"70","at":"2026-04-20T12:00:00Z"}`
+	var e StateEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrReasonFailedStepMismatch)
 }
 
 func TestState_Reject_UnknownTopLevel(t *testing.T) {

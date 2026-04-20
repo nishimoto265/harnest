@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 
 	"github.com/nishimoto265/auto-improve/internal/validation"
 )
@@ -31,6 +32,13 @@ import (
 // This guarantees every decode path is covered — producers cannot bypass
 // Validate() by calling validator.Struct directly.
 func decodeStrict(data []byte, v any) error {
+	if err := decodeStrictJSONNoValidation(data, v); err != nil {
+		return err
+	}
+	return runValidation(v)
+}
+
+func decodeStrictJSONNoValidation(data []byte, v any) error {
 	if err := rejectDuplicateKeys(data); err != nil {
 		return err
 	}
@@ -43,7 +51,7 @@ func decodeStrict(data []byte, v any) error {
 	if err := dec.Decode(&rest); err != io.EOF {
 		return ErrTrailingJSON
 	}
-	return runValidation(v)
+	return nil
 }
 
 // DecodeStrictJSON exposes the strict single-value JSON decode used by the
@@ -51,6 +59,22 @@ func decodeStrict(data []byte, v any) error {
 // unknown-field / trailing-token checks at their own top-level boundaries.
 func DecodeStrictJSON(data []byte, v any) error {
 	return decodeStrict(data, v)
+}
+
+// DecodeStrictDiscriminatorField applies the same empty/duplicate/trailing
+// checks as DecodeStrictJSON, but only decodes one discriminator field out of a
+// full JSON object so tagged-union UnmarshalJSON implementations can peek kind
+// / action without losing strict boundary behavior.
+func DecodeStrictDiscriminatorField(data []byte, field string, v any) error {
+	raw, err := decodeStrictJSONObjectFields(data)
+	if err != nil {
+		return err
+	}
+	fieldRaw, ok := raw[field]
+	if !ok {
+		return nil
+	}
+	return decodeStrictJSONNoValidation(fieldRaw, v)
 }
 
 func decodeStrictWithRequiredFields(data []byte, v any, requiredFields map[string]error) error {
@@ -171,6 +195,16 @@ func scanJSONValue(dec *json.Decoder) error {
 // runValidation invokes Validate() if v (or the value it points to) implements
 // it, otherwise falls back to validateStruct.
 func runValidation(v any) error {
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return ErrNilValidationValue
+	}
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if rv.IsNil() {
+			return fmt.Errorf("%w: %T", ErrNilValidationValue, v)
+		}
+	}
 	if vv, ok := v.(interface{ Validate() error }); ok {
 		return vv.Validate()
 	}

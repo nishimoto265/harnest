@@ -76,6 +76,12 @@ func (c Candidate) Validate() error {
 	if err := EnsureCleanRelativePath(c.ProposedBodyPath); err != nil {
 		return fmt.Errorf("%w: %w", ErrCandidateBodyPathInvalid, err)
 	}
+	if err := validateOverflowRefUnderPrefix("problem_overflow_ref", c.ProblemOverflowRef, "40"); err != nil {
+		return err
+	}
+	if err := validateOverflowRefUnderPrefix("rationale_overflow_ref", c.RationaleOverflowRef, "40"); err != nil {
+		return err
+	}
 	switch c.Kind {
 	case CandidateKindUpdate, CandidateKindDuplicate:
 		if c.TargetRuleID == "" {
@@ -116,6 +122,18 @@ func (c *Candidates) UnmarshalJSON(data []byte) error {
 	}
 	*c = Candidates(a)
 	return c.Validate()
+}
+
+func (c Candidates) MarshalJSON() ([]byte, error) {
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	type alias Candidates
+	a := alias(c)
+	if a.Candidates == nil {
+		a.Candidates = []Candidate{}
+	}
+	return json.Marshal(a)
 }
 
 // Validate runs tag-based validation + per-Candidate kind invariants
@@ -210,17 +228,11 @@ var ErrClassificationEntryMissingSimilarityScore = errors.New("contracts: classi
 // and verify physical JSON field presence in UnmarshalJSON instead of using a
 // pointer.
 func (e *ClassificationEntry) UnmarshalJSON(data []byte) error {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	if _, ok := raw["similarity_score"]; !ok {
-		return ErrClassificationEntryMissingSimilarityScore
-	}
-
 	type alias ClassificationEntry
 	var a alias
-	if err := decodeStrict(data, &a); err != nil {
+	if err := decodeStrictWithRequiredFields(data, &a, map[string]error{
+		"similarity_score": ErrClassificationEntryMissingSimilarityScore,
+	}); err != nil {
 		return err
 	}
 	*e = ClassificationEntry(a)
@@ -228,5 +240,8 @@ func (e *ClassificationEntry) UnmarshalJSON(data []byte) error {
 }
 
 func (e ClassificationEntry) Validate() error {
-	return validateStruct(e)
+	if err := validateStruct(e); err != nil {
+		return err
+	}
+	return validateOverflowRefUnderPrefix("rationale_overflow_ref", e.RationaleOverflowRef, "40")
 }

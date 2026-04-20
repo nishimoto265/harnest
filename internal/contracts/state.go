@@ -185,6 +185,7 @@ var (
 	ErrStateWarningScopeMismatch         = errors.New("contracts: state warning: pr and run_id must either both be set or both be omitted")
 	ErrStateWarningRescueRetryScope      = errors.New("contracts: state warning: rescue_retry requires pr and run_id")
 	ErrStateWarningRescueRetryStep       = errors.New("contracts: state warning: rescue_retry step must be 20 or 50")
+	ErrStateWarningRescueRetryCount      = errors.New("contracts: state warning: rescue_retry must not set count")
 	ErrStateWarningRescueRetrySource     = errors.New("contracts: state warning: rescue_retry must not set source")
 	ErrStateWarningRegistryCount         = errors.New("contracts: state warning: registry size warnings require count")
 	ErrStateWarningRegistrySource        = errors.New("contracts: state warning: registry size warnings require source=step70|sunset_tick")
@@ -209,6 +210,9 @@ func (e StateEntryWarning) Validate() error {
 	case StateKindWarningRescueRetry:
 		if e.Source != nil {
 			return ErrStateWarningRescueRetrySource
+		}
+		if e.Count != nil {
+			return ErrStateWarningRescueRetryCount
 		}
 		if e.PR == nil || e.RunID == nil {
 			return ErrStateWarningRescueRetryScope
@@ -305,6 +309,13 @@ type StateEntryRollback struct {
 
 func (StateEntryRollback) stateVariant() {}
 
+func (e StateEntryRollback) Validate() error {
+	if err := validateStruct(e); err != nil {
+		return err
+	}
+	return validateReasonFailedStepPair(e.RollbackReason, e.FailedStep)
+}
+
 // StateEntrySkipped: terminal (detect 時点で既処理判定等).
 type StateEntrySkipped struct {
 	Kind              StateKind    `json:"kind" validate:"required,eq=skipped"`
@@ -345,15 +356,20 @@ type StateEntryNeedsManualRecovery struct {
 
 func (StateEntryNeedsManualRecovery) stateVariant() {}
 
-// UnmarshalJSON implements strict tagged-union decoding for StateEntry.
-func (e *StateEntry) UnmarshalJSON(data []byte) error {
-	var env struct {
-		Kind StateKind `json:"kind"`
-	}
-	if err := json.Unmarshal(data, &env); err != nil {
+func (e StateEntryNeedsManualRecovery) Validate() error {
+	if err := validateStruct(e); err != nil {
 		return err
 	}
-	switch env.Kind {
+	return validateReasonFailedStepPair(e.Reason, e.FailedStep)
+}
+
+// UnmarshalJSON implements strict tagged-union decoding for StateEntry.
+func (e *StateEntry) UnmarshalJSON(data []byte) error {
+	var kind StateKind
+	if err := DecodeStrictDiscriminatorField(data, "kind", &kind); err != nil {
+		return err
+	}
+	switch kind {
 	case StateKindStarted:
 		var v StateEntryStarted
 		if err := decodeStrict(data, &v); err != nil {
@@ -362,7 +378,7 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind, e.Value = env.Kind, v
+		e.Kind, e.Value = kind, v
 	case StateKindStepDone:
 		var v StateEntryStepDone
 		if err := decodeStrict(data, &v); err != nil {
@@ -371,7 +387,7 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind, e.Value = env.Kind, v
+		e.Kind, e.Value = kind, v
 	case StateKindInterrupted:
 		var v StateEntryInterrupted
 		if err := decodeStrict(data, &v); err != nil {
@@ -380,7 +396,7 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind, e.Value = env.Kind, v
+		e.Kind, e.Value = kind, v
 	case StateKindPromoting:
 		var v StateEntryPromoting
 		if err := decodeStrict(data, &v); err != nil {
@@ -389,7 +405,7 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind, e.Value = env.Kind, v
+		e.Kind, e.Value = kind, v
 	case StateKindWarningRegistrySizeHigh,
 		StateKindWarningRegistrySizeCritical,
 		StateKindWarningRescueRetry:
@@ -400,7 +416,7 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind, e.Value = env.Kind, v
+		e.Kind, e.Value = kind, v
 	case StateKindCompleted:
 		var v StateEntryCompleted
 		if err := decodeStrict(data, &v); err != nil {
@@ -409,7 +425,7 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind, e.Value = env.Kind, v
+		e.Kind, e.Value = kind, v
 	case StateKindFailed:
 		var v StateEntryFailed
 		if err := decodeStrict(data, &v); err != nil {
@@ -418,7 +434,7 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind, e.Value = env.Kind, v
+		e.Kind, e.Value = kind, v
 	case StateKindPromoted:
 		var v StateEntryPromoted
 		if err := decodeStrict(data, &v); err != nil {
@@ -427,7 +443,7 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind, e.Value = env.Kind, v
+		e.Kind, e.Value = kind, v
 	case StateKindRollback:
 		var v StateEntryRollback
 		if err := decodeStrict(data, &v); err != nil {
@@ -436,7 +452,7 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind, e.Value = env.Kind, v
+		e.Kind, e.Value = kind, v
 	case StateKindSkipped:
 		var v StateEntrySkipped
 		if err := decodeStrict(data, &v); err != nil {
@@ -445,7 +461,7 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind, e.Value = env.Kind, v
+		e.Kind, e.Value = kind, v
 	case StateKindTimeout:
 		var v StateEntryTimeout
 		if err := decodeStrict(data, &v); err != nil {
@@ -454,7 +470,7 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind, e.Value = env.Kind, v
+		e.Kind, e.Value = kind, v
 	case StateKindNeedsManualRecovery:
 		var v StateEntryNeedsManualRecovery
 		if err := decodeStrict(data, &v); err != nil {
@@ -463,7 +479,7 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind, e.Value = env.Kind, v
+		e.Kind, e.Value = kind, v
 	default:
 		return ErrUnknownStateKind
 	}

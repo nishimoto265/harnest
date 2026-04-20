@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -74,7 +75,7 @@ func EnsureRelativePathUnderPrefix(path, prefix string) error {
 		return fmt.Errorf("contracts: invalid required prefix %q: %w", prefix, err)
 	}
 	if path == prefix {
-		return nil
+		return fmt.Errorf("%w: path=%q required_prefix=%q", ErrPathRelativeBadPrefix, path, prefix)
 	}
 	required := prefix + string(filepath.Separator)
 	if !strings.HasPrefix(path, required) {
@@ -97,7 +98,10 @@ func EnsureCleanAbsolutePathWithBasename(path, basename string) error {
 
 // CanonicalizePathForUniqueness resolves absolute paths to a comparison key for
 // uniqueness checks. Existing paths are canonicalized through Abs+EvalSymlinks;
-// not-yet-created planning paths fall back to their clean absolute spelling.
+// not-yet-created planning paths resolve the longest existing ancestor through
+// EvalSymlinks and then append the missing tail. On darwin the comparison key is
+// lower-cased so default case-insensitive worktree volumes do not admit
+// duplicates that differ only by spelling.
 func CanonicalizePathForUniqueness(path string) (string, error) {
 	if err := EnsureCleanAbsolutePath(path); err != nil {
 		return "", err
@@ -106,12 +110,50 @@ func CanonicalizePathForUniqueness(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	canonical, err := canonicalizePathWithMissingTail(abs)
+	if err != nil {
+		return "", err
+	}
+	return normalizeUniquenessPathKey(canonical), nil
+}
+
+func canonicalizePathWithMissingTail(abs string) (string, error) {
 	canonical, err := filepath.EvalSymlinks(abs)
 	if err == nil {
 		return filepath.Clean(canonical), nil
 	}
-	if os.IsNotExist(err) {
-		return filepath.Clean(abs), nil
+	if !os.IsNotExist(err) {
+		return "", err
 	}
-	return "", err
+
+	current := abs
+	var tail []string
+	for {
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", err
+		}
+		tail = append(tail, filepath.Base(current))
+		current = parent
+
+		canonical, err = filepath.EvalSymlinks(current)
+		if err == nil {
+			base := filepath.Clean(canonical)
+			for i := len(tail) - 1; i >= 0; i-- {
+				base = filepath.Join(base, tail[i])
+			}
+			return filepath.Clean(base), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+}
+
+func normalizeUniquenessPathKey(path string) string {
+	clean := filepath.Clean(path)
+	if runtime.GOOS == "darwin" {
+		return strings.ToLower(clean)
+	}
+	return clean
 }

@@ -15,6 +15,9 @@ type Step10Request struct {
 	PR int `json:"pr" validate:"required,gt=0"`
 	// BestBranch: 現行 best 設定 branch (= remote に push してある promotion 結果).
 	BestBranch string `json:"best_branch" validate:"required"`
+	// ExpectedRunID: optional stale-replay guard. When present, the step10
+	// response must bind back to this orchestrator-issued run_id.
+	ExpectedRunID contracts.RunID `json:"expected_run_id,omitempty" validate:"omitempty,run_id_fmt"`
 	// HarnessFiles: best_branch 上の harness rule files を適用するかどうか。
 	// Phase 0 では常に true 想定。
 	HarnessFiles bool `json:"harness_files"`
@@ -33,6 +36,7 @@ type Step10Response struct {
 var (
 	ErrStep10ResponseRunIDMismatch   = errors.New("stepio: step10: response.run_id must equal task_package.run_id")
 	ErrStep10ResponseBaseSHAMismatch = errors.New("stepio: step10: response.base_sha must equal task_package.base_sha")
+	ErrStep10ExpectedRunIDMismatch   = errors.New("stepio: step10: response.run_id must equal request.expected_run_id")
 	ErrStep10RequestPRMismatch       = errors.New("stepio: step10: response.task_package.pr must equal request.pr")
 	ErrStep10RequestBestBranch       = errors.New("stepio: step10: response.task_package.best_branch must equal request.best_branch")
 )
@@ -94,6 +98,9 @@ func DecodeAndValidateStep10Response(data []byte, req Step10Request) (Step10Resp
 	}
 	if resp.TaskPackage.BestBranch != req.BestBranch {
 		return Step10Response{}, fmt.Errorf("%w: response.best_branch=%q request.best_branch=%q", ErrStep10RequestBestBranch, resp.TaskPackage.BestBranch, req.BestBranch)
+	}
+	if req.ExpectedRunID != "" && resp.RunID != req.ExpectedRunID {
+		return Step10Response{}, fmt.Errorf("%w: response.run_id=%s request.expected_run_id=%s", ErrStep10ExpectedRunIDMismatch, resp.RunID, req.ExpectedRunID)
 	}
 	return resp, nil
 }

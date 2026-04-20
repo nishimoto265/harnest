@@ -26,5 +26,5 @@ func (s NeedsRecoverySentinel) Validate() error {
 	if err := validateStruct(s); err != nil {
 		return err
 	}
-	return nil
+	return validateReasonFailedStepPair(s.Reason, s.FailedStep)
 }

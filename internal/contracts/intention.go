@@ -125,6 +125,9 @@ func (r IntentionRecord) Validate() error {
 		if string(r.FailedStep) == "" {
 			return ErrIntentionMissingFailedStep
 		}
+		if err := validateReasonFailedStepPair(r.RecoveryReason, r.FailedStep); err != nil {
+			return err
+		}
 	}
 	return nil
 }

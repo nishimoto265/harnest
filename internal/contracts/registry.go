@@ -144,7 +144,10 @@ func (e RuleRegistryRolledBack) Validate() error {
 	if err := validateStruct(e); err != nil {
 		return err
 	}
-	return validateRegistryChain(e.VersionSeq, e.PrevHash)
+	if err := validateRegistryChain(e.VersionSeq, e.PrevHash); err != nil {
+		return err
+	}
+	return validateReasonFailedStepPair(e.RollbackReason, e.FailedStep)
 }
 
 // --- sunset entries (archive/cycle③ emits) ---
@@ -280,13 +283,11 @@ func (e RuleRegistryRestored) Validate() error {
 
 // UnmarshalJSON implements strict tagged-union decoding for RuleRegistryEntry.
 func (e *RuleRegistryEntry) UnmarshalJSON(data []byte) error {
-	var env struct {
-		Kind RegistryKind `json:"kind"`
-	}
-	if err := json.Unmarshal(data, &env); err != nil {
+	var kind RegistryKind
+	if err := DecodeStrictDiscriminatorField(data, "kind", &kind); err != nil {
 		return err
 	}
-	switch env.Kind {
+	switch kind {
 	case RegistryKindAdded:
 		var v RuleRegistryAdded
 		if err := decodeStrict(data, &v); err != nil {
@@ -295,7 +296,7 @@ func (e *RuleRegistryEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind = env.Kind
+		e.Kind = kind
 		e.Value = v
 	case RegistryKindUpdated:
 		var v RuleRegistryUpdated
@@ -305,7 +306,7 @@ func (e *RuleRegistryEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind = env.Kind
+		e.Kind = kind
 		e.Value = v
 	case RegistryKindRolledBack:
 		var v RuleRegistryRolledBack
@@ -315,7 +316,7 @@ func (e *RuleRegistryEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind = env.Kind
+		e.Kind = kind
 		e.Value = v
 	case RegistryKindStatusChanged:
 		var v RuleRegistryStatusChanged
@@ -325,7 +326,7 @@ func (e *RuleRegistryEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind = env.Kind
+		e.Kind = kind
 		e.Value = v
 	case RegistryKindArchived:
 		var v RuleRegistryArchived
@@ -335,7 +336,7 @@ func (e *RuleRegistryEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind = env.Kind
+		e.Kind = kind
 		e.Value = v
 	case RegistryKindRestored:
 		var v RuleRegistryRestored
@@ -345,7 +346,7 @@ func (e *RuleRegistryEntry) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		e.Kind = env.Kind
+		e.Kind = kind
 		e.Value = v
 	default:
 		return ErrUnknownRegistryKind

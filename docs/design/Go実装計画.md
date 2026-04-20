@@ -8,7 +8,7 @@
 - 本計画書の契約は `docs/design/io-contracts.md` と同期済み(rev11 で改訂完了)
 - **Codex rev1〜rev11 指摘(延べ 95+ 件)精査・採用判断済み**
 - **rate limit / budget / context / signal 等途中停止からの resume 機構を明示(rev6 新規、rev7 以降精密化)**
-- **`docs/design/全体設計.md` は rev6 以降未同期**。Phase 4 で rev11 に合わせて rewrite 予定。それまで本ドキュメントと io-contracts.md を正本とする(全体設計.md 冒頭に注意書き追加)
+- **`docs/design/全体設計.md` は background / durable artifact 要約として同期維持する**。field-level contract と step 境界の single source of truth は引き続き本ドキュメントと `io-contracts.md`
 
 ---
 
@@ -226,11 +226,11 @@ step30/60 は必ず後者を使う。
 
 - `scores-*.jsonl`: reasons 1000字/次元 + 超過時 `30/reasons/<sha256>.txt` sidecar + `reasons_overflow_ref`
 - `scores-*-raw.jsonl`: reasons 1000字/次元 + 超過時 sidecar + `reasons_overflow_ref`
-- `compliance-*.jsonl`: rationale 500字 cap
+- `compliance-*.jsonl`: rationale 500字 cap + 超過時 `rationale_overflow_ref`
 - `compliance-*-raw.jsonl`: rationale 500字 cap + 超過時 `rationale_overflow_ref`
 - `classification.jsonl`: `{schema_version, run_id, candidate_id, kind, similarity_score, matched_rule_id?, rationale?, rationale_overflow_ref?, classified_at}`。`rationale` 500字 cap (`problem` field は存在しない)
 - `processed.jsonl`: `detail` 300字 cap + 超過時 sidecar + `detail_overflow_ref`
-- `pairwise.jsonl`: justification 500字 cap
+- `pairwise.jsonl`: justification 500字 cap + 超過時 `justification_overflow_ref`
 - `rules-registry.jsonl`: 本体は `<runs_base>/rules/<rule_id>.md` sidecar、registry entry は **tagged union**:
   - **promotion entries** (step70 から):
     - `added`: `{kind: 'added', schema_version, rule_id, rule_path, sha256, idempotency_key, version_seq, prev_hash, by_run_id, at}`
@@ -394,6 +394,7 @@ yaml KnownFields(true) + validator / slog JSON handler / config.yaml.example
 
 ### 1-A: step10 (restore-base)
 gh pr view / worktree 6個 / reconstructed_task_prompt / task-package.json / base.sha / `started` append
+- step10 response stale replay guard は **`expected_run_id`** を採用(`nonce` は follow-up 比較案として据え置き)。request に指定された場合のみ `response.run_id` 一致を必須化
 
 ### 1-B: step20 (pass1 implement)
 goroutine 3体 / claude CLI / atomic manifest / session.jsonl / diff.patch / checklist-result.json
@@ -683,7 +684,7 @@ Phase 4:               1 agent  半日    [実PR検証 + docs + tag]
 
 | # | 論点 | 決定 |
 |---|---|---|
-| 1 | step70 transactional | 5 stage intention + recovery state machine (**6 到達可能状態 + manual recovery、rev9 で更新、#62-74 参照**) |
+| 1 | step70 transactional | **8 persisted IntentionStage** + finalized pseudo-stage の recovery state machine |
 | 2 | idempotency_key | `sha256(run_id + target_sha + best_sha_before + candidates_hash)` (separator bytes なし)、planning で1回生成・永続化 |
 | 3 | registry recovery | registry_head_before 分岐追加、tail scan bound / index fallback / intention の append result 記録で O(1) path 優先 |
 | 4 | strict JSON | `json.Decoder + DisallowUnknownFields + 2回目 Decode で io.EOF 要求` (More() 非使用) + custom UnmarshalJSON |
@@ -723,7 +724,7 @@ Phase 4:               1 agent  半日    [実PR検証 + docs + tag]
 | 38 | recover CLI 実装 | cmd/auto-improve/recover.go + internal/recover/**、Phase 1-F owner |
 | 39 | Resume 機構 (rev6) | interrupted event, ResumeTarget, 各 step idempotent skip, signal/rate_limit/budget handling |
 | 40 | crash fixture | **rev11+ で #89 に統合、本行は削除済み** |
-| 41 | state vocabulary 拡張 | `interrupted / promoting / registry_size_high / registry_size_critical / rescue_retry / needs_manual_recovery` schema 追加、全 non-terminal event に step required |
+| 41 | state vocabulary 拡張 | `interrupted / promoting / registry_size_high / registry_size_critical / rescue_retry / needs_manual_recovery` schema 追加。基本は non-terminal event に step required、**ただし `source: 'sunset_tick'` の global telemetry warning は step forbidden** |
 | 42 | processed detail overflow | `detail` 300字 + sidecar `<run>/processed-details/<sha256>.txt` + `detail_overflow_ref`(rev7) |
 | 43 | panel review per-role resume | `(agent, judge_role, dimension)` 単位の raw jsonl + 最終 verdict の別 marker(rev7) |
 | 44 | agent worktree resume | `.resume-state.json { expected_base_sha, started_at, pid }` + resume 時 hard reset or rescue(rev7) |
@@ -733,7 +734,7 @@ Phase 4:               1 agent  半日    [実PR検証 + docs + tag]
 | 48 | recover lock-after-reread | `--adopt-anyway` は lock 取得後 remote HEAD + registry head + idempotency 再確認必須(rev7) |
 | 49 | idempotency-index rebuild | rebuildable cache、不整合時 tail scan fallback、registry が単一 source of truth(rev7) |
 | 50 | main.go stub に recover 追加 | Phase 0-A bootstrap 責務(rev7) |
-| 51 | 全体設計.md obsolete notice | rev6 以降未同期、io-contracts.md + Go実装計画.md 正本、Phase 4 で latest canonical (rev13+/rev11+) に sync 書き直し |
+| 51 | 全体設計.md role | background / durable artifact 要約を維持し、field-level contract の正本は io-contracts.md + Go実装計画.md |
 | 52 | step30/60 cardinality-based 完了 | `<run>/30/done.marker` `<run>/60/done.marker` を atomic write、`(agent, dimension)` 全揃い時のみ(rev8) |
 | 53 | recover safe matrix | `{remote HEAD, idempotency, registry head, intention stage}` ×4 軸で allowed cell を表形式で明記(io-contracts.md)(rev8) |
 | 54 | worktree rescue lease | **rev9 で #67 に統合、本行は削除済み** |

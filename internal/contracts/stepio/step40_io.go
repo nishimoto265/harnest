@@ -87,5 +87,8 @@ func DecodeAndValidateStep40Response(data []byte, req Step40Request) (Step40Resp
 	if resp.RunID != req.TaskPackage.RunID {
 		return Step40Response{}, fmt.Errorf("%w: response.run_id=%s request.run_id=%s", ErrResponseRunIDMismatch, resp.RunID, req.TaskPackage.RunID)
 	}
+	if err := resp.Candidates.VerifyCandidatesHash(); err != nil {
+		return Step40Response{}, err
+	}
 	return resp, nil
 }

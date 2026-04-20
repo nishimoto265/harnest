@@ -10,6 +10,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type duplicateEmitter struct{}
+
+func (duplicateEmitter) MarshalJSON() ([]byte, error) {
+	return []byte(`{"x":1,"x":2}`), nil
+}
+
+type floatEmitter struct{}
+
+func (floatEmitter) MarshalJSON() ([]byte, error) {
+	return []byte(`{"score":1.5}`), nil
+}
+
 func TestCanonicalMarshal_FieldOrderInvariant(t *testing.T) {
 	type orderedA struct {
 		Z string `json:"z"`
@@ -354,6 +366,38 @@ func TestCanonicalMarshal_AllowsDistinctSlicesSharingBackingArray(t *testing.T) 
 
 func TestCanonicalCandidatesHash_NormalizesNilAndEmptySlices(t *testing.T) {
 	assert.Equal(t, CanonicalCandidatesHash(nil), CanonicalCandidatesHash([]Candidate{}))
+}
+
+func TestCanonicalMarshal_RejectsDuplicateKeysFromRawMessage(t *testing.T) {
+	type payload struct {
+		Raw json.RawMessage `json:"raw"`
+	}
+
+	_, err := CanonicalMarshal(payload{
+		Raw: json.RawMessage(`{"x":1,"x":2}`),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicateJSONKey)
+}
+
+func TestCanonicalMarshal_RejectsDuplicateKeysFromCustomMarshalJSON(t *testing.T) {
+	type payload struct {
+		Value duplicateEmitter `json:"value"`
+	}
+
+	_, err := CanonicalMarshal(payload{Value: duplicateEmitter{}})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicateJSONKey)
+}
+
+func TestCanonicalMarshal_RejectsForbiddenKindsFromCustomMarshalJSON(t *testing.T) {
+	type payload struct {
+		Value floatEmitter `json:"value"`
+	}
+
+	_, err := CanonicalMarshal(payload{Value: floatEmitter{}})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCanonicalNonInteger)
 }
 
 func TestCanonicalMarshal_RejectsPointerCycles(t *testing.T) {

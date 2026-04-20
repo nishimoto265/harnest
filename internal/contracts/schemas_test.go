@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -159,6 +160,35 @@ func TestTaskPackage_Validate_RejectsCanonicalDuplicateSymlinkPath(t *testing.T)
 	assert.ErrorIs(t, err, ErrTaskPackageDuplicatePath)
 }
 
+func TestTaskPackage_Validate_RejectsCanonicalDuplicateSymlinkAncestorWithMissingLeaf(t *testing.T) {
+	tmp := t.TempDir()
+	realRoot := filepath.Join(tmp, "real")
+	aliasRoot := filepath.Join(tmp, "alias")
+	require.NoError(t, os.Mkdir(realRoot, 0o755))
+	require.NoError(t, os.Symlink(realRoot, aliasRoot))
+
+	pkg := validTaskPackage()
+	pkg.Worktrees[0].Path = filepath.Join(realRoot, "new-leaf")
+	pkg.Worktrees[3].Path = filepath.Join(aliasRoot, "new-leaf")
+
+	err := pkg.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTaskPackageDuplicatePath)
+}
+
+func TestCanonicalizePathForUniqueness_DarwinCaseInsensitiveKey(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only uniqueness key behavior")
+	}
+
+	tmp := t.TempDir()
+	upper, err := CanonicalizePathForUniqueness(filepath.Join(tmp, "Case", "Leaf"))
+	require.NoError(t, err)
+	lower, err := CanonicalizePathForUniqueness(filepath.Join(tmp, "case", "leaf"))
+	require.NoError(t, err)
+	assert.Equal(t, upper, lower)
+}
+
 func TestTaskPackage_Validate_Reject_PassCountMismatch(t *testing.T) {
 	// pass==1 が 4 (distinct agents)、pass==2 が 2 → len=6 は満たすが matrix invariant 違反。
 	pkg := validTaskPackage()
@@ -235,7 +265,7 @@ func TestChecklistResult_Valid(t *testing.T) {
 			{RuleID: "r-3", Verdict: ChecklistItemException, Rationale: "ok", ExceptionReason: "because"},
 		},
 	}
-	assert.NoError(t, validation.Instance().Struct(cr))
+	assert.NoError(t, cr.Validate())
 }
 
 func TestChecklistResult_Reject_BadVerdict(t *testing.T) {
@@ -246,7 +276,20 @@ func TestChecklistResult_Reject_BadVerdict(t *testing.T) {
 		Agent:         "a1",
 		Items:         []ChecklistItem{{RuleID: "r-1", Verdict: "wrong"}},
 	}
-	assert.Error(t, validation.Instance().Struct(cr))
+	assert.Error(t, cr.Validate())
+}
+
+func TestChecklistResult_Reject_ExceptionWithoutRationale(t *testing.T) {
+	cr := ChecklistResult{
+		SchemaVersion: "1",
+		RunID:         "2026-04-20-PR42-abcdef0",
+		Pass:          1,
+		Agent:         "a1",
+		Items:         []ChecklistItem{{RuleID: "r-1", Verdict: ChecklistItemException, Rationale: "   "}},
+	}
+	err := cr.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrChecklistExceptionRationaleRequired)
 }
 
 // ScoreEntry / ComplianceEntry / PairwiseEntry 最小 validator 動作確認.
@@ -303,6 +346,38 @@ func TestPairwiseEntry_Valid(t *testing.T) {
 		SchemaVersion: "1",
 		RunID:         "2026-04-20-PR42-abcdef0",
 		AgentA:        "a1",
+		AgentB:        "a1",
+		Winner:        PairwiseWinnerA,
+		Margin:        PairwiseMarginClear,
+		VerdictPath:   VerdictPathSingle,
+		RubricVersion: "v1",
+		PromptVersion: "p1",
+		ResolvedAt:    time.Now(),
+	}
+	assert.NoError(t, p.Validate())
+}
+
+func TestPairwiseEntry_Reject_BadWinner(t *testing.T) {
+	p := PairwiseEntry{
+		SchemaVersion: "1",
+		RunID:         "2026-04-20-PR42-abcdef0",
+		AgentA:        "a1",
+		AgentB:        "a1",
+		Winner:        "X",
+		Margin:        PairwiseMarginClear,
+		VerdictPath:   VerdictPathSingle,
+		RubricVersion: "v1",
+		PromptVersion: "p1",
+		ResolvedAt:    time.Now(),
+	}
+	assert.Error(t, p.Validate())
+}
+
+func TestPairwiseEntry_Reject_CrossAgentComparison(t *testing.T) {
+	p := PairwiseEntry{
+		SchemaVersion: "1",
+		RunID:         "2026-04-20-PR42-abcdef0",
+		AgentA:        "a1",
 		AgentB:        "a2",
 		Winner:        PairwiseWinnerA,
 		Margin:        PairwiseMarginClear,
@@ -311,23 +386,9 @@ func TestPairwiseEntry_Valid(t *testing.T) {
 		PromptVersion: "p1",
 		ResolvedAt:    time.Now(),
 	}
-	assert.NoError(t, validation.Instance().Struct(p))
-}
-
-func TestPairwiseEntry_Reject_BadWinner(t *testing.T) {
-	p := PairwiseEntry{
-		SchemaVersion: "1",
-		RunID:         "2026-04-20-PR42-abcdef0",
-		AgentA:        "a1",
-		AgentB:        "a2",
-		Winner:        "X",
-		Margin:        PairwiseMarginClear,
-		VerdictPath:   VerdictPathSingle,
-		RubricVersion: "v1",
-		PromptVersion: "p1",
-		ResolvedAt:    time.Now(),
-	}
-	assert.Error(t, validation.Instance().Struct(p))
+	err := p.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPairwiseAgentMismatch)
 }
 
 // Candidates schema roundtrip: JSON marshal → strict decode.
@@ -359,6 +420,19 @@ func TestCandidates_Roundtrip(t *testing.T) {
 	require.NoError(t, validation.Instance().Struct(c))
 	assert.Len(t, c.Candidates, 1)
 	assert.Equal(t, CandidateKindNew, c.Candidates[0].Kind)
+}
+
+func TestCandidates_MarshalJSON_NormalizesNilSliceToEmptyArray(t *testing.T) {
+	c := Candidates{
+		SchemaVersion:  "1",
+		RunID:          "2026-04-20-PR42-abcdef0",
+		Candidates:     nil,
+		CandidatesHash: CanonicalCandidatesHash(nil),
+		CreatedAt:      time.Now(),
+	}
+	data, err := json.Marshal(c)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"candidates":[]`)
 }
 
 func TestClassificationEntry_Valid(t *testing.T) {

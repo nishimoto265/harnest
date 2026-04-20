@@ -67,6 +67,7 @@ var (
 	ErrDecisionVariantTypeMismatch    = errors.New("contracts: decision: action does not match variant type")
 	ErrDecisionVariantActionMismatch  = errors.New("contracts: decision: action does not match inner action field")
 	ErrDecisionIdempotencyKeyMismatch = errors.New("contracts: decision: adopt idempotency_key does not match derived value")
+	ErrReasonFailedStepMismatch       = errors.New("contracts: rollback reason is not allowed for failed_step")
 )
 
 // DecisionAdopt: rule set が採用され best_branch に push された.
@@ -146,6 +147,13 @@ type DecisionRollback struct {
 
 func (DecisionRollback) decisionVariant() {}
 
+func (d DecisionRollback) Validate() error {
+	if err := validateStruct(d); err != nil {
+		return err
+	}
+	return validateReasonFailedStepPair(d.RollbackReason, d.FailedStep)
+}
+
 // RegistryAppendResult is the (offset, sha256) tuple recorded in intention /
 // decision after a successful append to rules-registry.jsonl.
 //
@@ -177,13 +185,11 @@ func (r *RegistryAppendResult) UnmarshalJSON(data []byte) error {
 
 // UnmarshalJSON implements strict tagged-union decoding for Decision.
 func (d *Decision) UnmarshalJSON(data []byte) error {
-	var env struct {
-		Action DecisionAction `json:"action"`
-	}
-	if err := json.Unmarshal(data, &env); err != nil {
+	var action DecisionAction
+	if err := DecodeStrictDiscriminatorField(data, "action", &action); err != nil {
 		return err
 	}
-	switch env.Action {
+	switch action {
 	case DecisionActionAdopt:
 		var v DecisionAdopt
 		if err := decodeStrict(data, &v); err != nil {
@@ -192,7 +198,7 @@ func (d *Decision) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		d.Action = env.Action
+		d.Action = action
 		d.Value = v
 	case DecisionActionReject:
 		var v DecisionReject
@@ -202,7 +208,7 @@ func (d *Decision) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		d.Action = env.Action
+		d.Action = action
 		d.Value = v
 	case DecisionActionNoop:
 		var v DecisionNoop
@@ -212,7 +218,7 @@ func (d *Decision) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		d.Action = env.Action
+		d.Action = action
 		d.Value = v
 	case DecisionActionRollback:
 		var v DecisionRollback
@@ -222,10 +228,28 @@ func (d *Decision) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		d.Action = env.Action
+		d.Action = action
 		d.Value = v
 	default:
 		return ErrUnknownDecisionAction
+	}
+	return nil
+}
+
+func validateReasonFailedStepPair(reason RollbackReason, failedStep FailedStep) error {
+	switch reason {
+	case RollbackReasonWorktreeRescueLoop:
+		if failedStep != FailedStep20 && failedStep != FailedStep50 {
+			return fmt.Errorf("%w: reason=%s failed_step=%s allowed=20|50", ErrReasonFailedStepMismatch, reason, failedStep)
+		}
+	case RollbackReasonLeaseFailure,
+		RollbackReasonRemoteDivergence,
+		RollbackReasonRegistryDivergence,
+		RollbackReasonManualAbortPendingCleanup,
+		RollbackReasonTransactionalFailure:
+		if failedStep != FailedStep70 {
+			return fmt.Errorf("%w: reason=%s failed_step=%s allowed=70", ErrReasonFailedStepMismatch, reason, failedStep)
+		}
 	}
 	return nil
 }

@@ -27,7 +27,11 @@ type Step60Response struct {
 	ResolvedAt      time.Time       `json:"resolved_at" validate:"required"`
 }
 
-var ErrStep60ScorableAgentPassMismatch = errors.New("stepio: step60: scorable_agents do not match TaskPackage.Worktrees[pass=2]")
+var (
+	ErrStep60ScorableAgentPassMismatch = errors.New("stepio: step60: scorable_agents do not match TaskPackage.Worktrees[pass=2]")
+	ErrStep60ScoresCountMismatch       = errors.New("stepio: step60: scores_count must match request.scorable_agents x rubric dimensions")
+	ErrStep60PairwiseCountMismatch     = errors.New("stepio: step60: pairwise_count must match request.scorable_agents")
+)
 
 func (r *Step60Request) UnmarshalJSON(data []byte) error {
 	type alias Step60Request
@@ -73,6 +77,13 @@ func DecodeAndValidateStep60Response(data []byte, req Step60Request) (Step60Resp
 	}
 	if resp.RunID != req.TaskPackage.RunID {
 		return Step60Response{}, fmt.Errorf("%w: response.run_id=%s request.run_id=%s", ErrResponseRunIDMismatch, resp.RunID, req.TaskPackage.RunID)
+	}
+	expectedScores := expectedScoresCountForScorableAgents(req.ScorableAgents)
+	if resp.ScoresCount != expectedScores {
+		return Step60Response{}, fmt.Errorf("%w: scores_count=%d expected=%d scorable_agents=%d", ErrStep60ScoresCountMismatch, resp.ScoresCount, expectedScores, len(req.ScorableAgents))
+	}
+	if resp.PairwiseCount != len(req.ScorableAgents) {
+		return Step60Response{}, fmt.Errorf("%w: pairwise_count=%d expected=%d", ErrStep60PairwiseCountMismatch, resp.PairwiseCount, len(req.ScorableAgents))
 	}
 	return resp, nil
 }

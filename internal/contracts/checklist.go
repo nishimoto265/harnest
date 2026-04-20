@@ -1,5 +1,11 @@
 package contracts
 
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
 // ChecklistItemVerdict is the 3-symbol outcome an agent records for each
 // harness checklist item (io-contracts.md §step20 / checklist-result.json).
 //
@@ -27,6 +33,8 @@ type ChecklistItem struct {
 	ExceptionReason string `json:"exception_reason,omitempty" validate:"omitempty,max=300"`
 }
 
+var ErrChecklistExceptionRationaleRequired = errors.New("contracts: checklist: verdict=exception requires non-empty rationale")
+
 // ChecklistResult is the top-level artifact at
 // `<run>/{20-pass1|50-pass2}/<agent>/checklist-result.json`.
 type ChecklistResult struct {
@@ -35,4 +43,36 @@ type ChecklistResult struct {
 	Pass          int             `json:"pass" validate:"required,oneof=1 2"`
 	Agent         AgentID         `json:"agent" validate:"required,agent_id_fmt"`
 	Items         []ChecklistItem `json:"items" validate:"required,dive"`
+}
+
+func (i ChecklistItem) Validate() error {
+	if err := validateStruct(i); err != nil {
+		return err
+	}
+	if i.Verdict == ChecklistItemException && strings.TrimSpace(i.Rationale) == "" {
+		return ErrChecklistExceptionRationaleRequired
+	}
+	return nil
+}
+
+func (r *ChecklistResult) UnmarshalJSON(data []byte) error {
+	type alias ChecklistResult
+	var a alias
+	if err := DecodeStrictJSON(data, &a); err != nil {
+		return err
+	}
+	*r = ChecklistResult(a)
+	return r.Validate()
+}
+
+func (r ChecklistResult) Validate() error {
+	if err := validateStruct(r); err != nil {
+		return err
+	}
+	for i, item := range r.Items {
+		if err := item.Validate(); err != nil {
+			return fmt.Errorf("items[%d]: %w", i, err)
+		}
+	}
+	return nil
 }

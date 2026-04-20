@@ -114,6 +114,51 @@ func TestRawComplianceEntry_RoundTrip(t *testing.T) {
 	assert.Equal(t, entry.JudgeRole, decoded.JudgeRole)
 }
 
+func TestScoreEntry_Validate_RejectsOverflowRefOutsidePassPrefix(t *testing.T) {
+	entry := ScoreEntry{
+		SchemaVersion: "1",
+		RunID:         "2026-04-20-PR42-abcdef0",
+		Pass:          1,
+		Agent:         "a1",
+		Dimension:     DimensionFidelity,
+		Score:         92,
+		ReasonsOverflowRef: &OverflowRef{
+			Path:   "60/reasons/overflow.txt",
+			Sha256: "0000000000000000000000000000000000000000000000000000000000000001",
+		},
+		VerdictPath:   VerdictPathAgreement,
+		RubricVersion: "v1",
+		PromptVersion: "p1",
+		ResolvedAt:    time.Now(),
+	}
+	err := entry.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrOverflowRefPathPrefixMismatch)
+}
+
+func TestRawComplianceEntry_Validate_RejectsOverflowRefOutsidePassPrefix(t *testing.T) {
+	entry := RawComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         "2026-04-20-PR42-abcdef0",
+		Pass:          2,
+		Agent:         "a2",
+		JudgeRole:     JudgeRolePrimary,
+		RuleID:        "r-1",
+		Verdict:       ComplianceVerdictViolated,
+		RationaleOverflowRef: &OverflowRef{
+			Path:   "30/reasons/overflow.txt",
+			Sha256: "0000000000000000000000000000000000000000000000000000000000000002",
+		},
+		OutputSha256:  "0000000000000000000000000000000000000000000000000000000000000003",
+		RubricVersion: "v1",
+		PromptVersion: "p1",
+		ResolvedAt:    time.Now(),
+	}
+	err := entry.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrOverflowRefPathPrefixMismatch)
+}
+
 func TestStep30DoneMarker_RoundTrip(t *testing.T) {
 	marker := Step30DoneMarker{
 		CompletedAgents: []AgentID{"a1", "a2", "a3"},

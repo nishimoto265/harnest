@@ -41,6 +41,7 @@ var (
 	ErrManifestVariantKindMismatch        = errors.New("contracts: manifest: kind does not match inner kind field")
 	ErrManifestArtifactPathPrefixMismatch = errors.New("contracts: manifest: artifact path prefix must match pass and agent")
 	ErrManifestErrorMissingExitCode       = errors.New("contracts: manifest: error.exit_code field is required")
+	ErrManifestFinishedBeforeStarted      = errors.New("contracts: manifest: finished_at must be >= started_at")
 )
 
 // ManifestSuccess: agent が実装 + commit + checklist 記入まで完走した状態.
@@ -92,7 +93,7 @@ func (m ManifestSuccess) Validate() error {
 			return fmt.Errorf("contracts: manifest: %s: %w", field, err)
 		}
 	}
-	return nil
+	return validateManifestFinishedAt(m.StartedAt, m.FinishedAt)
 }
 
 // ManifestError: agent wrapper が非 timeout で error exit した記録.
@@ -133,7 +134,10 @@ func (m *ManifestError) UnmarshalJSON(data []byte) error {
 }
 
 func (m ManifestError) Validate() error {
-	return validateStruct(m)
+	if err := validateStruct(m); err != nil {
+		return err
+	}
+	return validateManifestFinishedAt(m.StartedAt, m.FinishedAt)
 }
 
 // ManifestTimeout: agent が wall-clock timeout に到達した記録.
@@ -157,7 +161,10 @@ type ManifestTimeout struct {
 func (ManifestTimeout) manifestVariant() {}
 
 func (m ManifestTimeout) Validate() error {
-	return validateStruct(m)
+	if err := validateStruct(m); err != nil {
+		return err
+	}
+	return validateManifestFinishedAt(m.StartedAt, m.FinishedAt)
 }
 
 // UnmarshalJSON implements strict tagged-union decoding for Manifest.
@@ -167,13 +174,11 @@ func (m ManifestTimeout) Validate() error {
 //   - trailing token 禁止
 //   - validator.Struct(variant)
 func (m *Manifest) UnmarshalJSON(data []byte) error {
-	var env struct {
-		Kind ManifestKind `json:"kind"`
-	}
-	if err := json.Unmarshal(data, &env); err != nil {
+	var kind ManifestKind
+	if err := DecodeStrictDiscriminatorField(data, "kind", &kind); err != nil {
 		return err
 	}
-	switch env.Kind {
+	switch kind {
 	case ManifestKindSuccess:
 		var v ManifestSuccess
 		if err := decodeStrict(data, &v); err != nil {
@@ -182,7 +187,7 @@ func (m *Manifest) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		m.Kind = env.Kind
+		m.Kind = kind
 		m.Value = v
 	case ManifestKindError:
 		var v ManifestError
@@ -192,7 +197,7 @@ func (m *Manifest) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		m.Kind = env.Kind
+		m.Kind = kind
 		m.Value = v
 	case ManifestKindTimeout:
 		var v ManifestTimeout
@@ -202,10 +207,17 @@ func (m *Manifest) UnmarshalJSON(data []byte) error {
 		if err := validateStruct(v); err != nil {
 			return err
 		}
-		m.Kind = env.Kind
+		m.Kind = kind
 		m.Value = v
 	default:
 		return ErrUnknownManifestKind
+	}
+	return nil
+}
+
+func validateManifestFinishedAt(startedAt, finishedAt time.Time) error {
+	if finishedAt.Before(startedAt) {
+		return fmt.Errorf("%w: started_at=%s finished_at=%s", ErrManifestFinishedBeforeStarted, startedAt.Format(time.RFC3339Nano), finishedAt.Format(time.RFC3339Nano))
 	}
 	return nil
 }

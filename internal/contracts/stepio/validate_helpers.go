@@ -23,6 +23,8 @@ var (
 	ErrRegistryPathBasename              = errors.New("stepio: registry_path basename must be rules-registry.jsonl")
 )
 
+const scoringDimensionCount = 5
+
 func validateRegistryPath(path string) error {
 	if err := contracts.EnsureCleanAbsolutePathWithBasename(path, "rules-registry.jsonl"); err != nil {
 		switch {
@@ -176,6 +178,10 @@ func cloneManifest(m contracts.Manifest) contracts.Manifest {
 		cloned.Value = nil
 	}
 	return cloned
+}
+
+func expectedScoresCountForScorableAgents(agents []contracts.AgentID) int {
+	return len(agents) * scoringDimensionCount
 }
 
 func manifestMetadata(m contracts.Manifest) (pass int, agent contracts.AgentID, runID contracts.RunID, err error) {
