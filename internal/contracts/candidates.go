@@ -1,0 +1,78 @@
+package contracts
+
+import "time"
+
+// CandidateKind: new / update / duplicate (io-contracts.md §step40).
+// Phase 0 の candidate classification は flat 3-way enum (discriminator は持つが
+// variant 別 field 分岐は無し、下流 step70 で共通 schema を読むだけ).
+type CandidateKind string
+
+const (
+	CandidateKindNew       CandidateKind = "new"
+	CandidateKindUpdate    CandidateKind = "update"
+	CandidateKindDuplicate CandidateKind = "duplicate"
+)
+
+// Candidate is a LLM-generated rule proposal from step40.
+type Candidate struct {
+	// CandidateID: step40 が採番する一時 ID (最終 rule_id とは別).
+	CandidateID string        `json:"candidate_id" validate:"required"`
+	Kind        CandidateKind `json:"kind" validate:"required,oneof=new update duplicate"`
+
+	// TargetRuleID: kind=update / duplicate のとき参照される既存 rule_id.
+	// kind=new のときは空.
+	TargetRuleID string `json:"target_rule_id,omitempty" validate:"omitempty"`
+
+	// Title: 短い rule 見出し.
+	Title string `json:"title" validate:"required,max=200"`
+
+	// Problem: 500 字 cap (io-contracts.md §4KB overflow 棚卸し).
+	Problem            string       `json:"problem,omitempty" validate:"omitempty,max=500"`
+	ProblemOverflowRef *OverflowRef `json:"problem_overflow_ref,omitempty" validate:"omitempty"`
+
+	// Rationale: 500 字 cap.
+	Rationale            string       `json:"rationale,omitempty" validate:"omitempty,max=500"`
+	RationaleOverflowRef *OverflowRef `json:"rationale_overflow_ref,omitempty" validate:"omitempty"`
+
+	// ProposedBodyPath: `<run>/40/candidates/<candidate_id>.md` 等への相対 path.
+	// rule 本体 (長文) は sidecar に置き registry からも参照する (rev6).
+	ProposedBodyPath   string `json:"proposed_body_path" validate:"required"`
+	ProposedBodySha256 string `json:"proposed_body_sha256" validate:"required,sha256_hex"`
+}
+
+// Candidates is the `<run>/40/candidates.json` document.
+// 完了マーカー: candidates.json 存在 (io-contracts.md §completion marker).
+type Candidates struct {
+	SchemaVersion string `json:"schema_version" validate:"required,oneof=1"`
+	RunID         RunID  `json:"run_id" validate:"required,run_id_fmt"`
+
+	// Candidates: 0 件 (step40 無収穫) も許容.
+	Candidates []Candidate `json:"candidates" validate:"dive"`
+
+	// CandidatesHash: sha256 over canonical-JSON of `candidates[]`
+	// (step70 idempotency_key に組み込まれる).
+	CandidatesHash string `json:"candidates_hash" validate:"required,sha256_hex"`
+
+	CreatedAt time.Time `json:"created_at" validate:"required"`
+}
+
+// ClassificationEntry is one row appended to `<run>/40/classification.jsonl`.
+// 1 候補 1 行 (io-contracts.md §step40).
+type ClassificationEntry struct {
+	SchemaVersion string        `json:"schema_version" validate:"required,oneof=1"`
+	RunID         RunID         `json:"run_id" validate:"required,run_id_fmt"`
+	CandidateID   string        `json:"candidate_id" validate:"required"`
+	Kind          CandidateKind `json:"kind" validate:"required,oneof=new update duplicate"`
+
+	// SimilarityScore: 類似度 (0..100 integer, float 禁止).
+	SimilarityScore int `json:"similarity_score" validate:"gte=0,lte=100"`
+
+	// MatchedRuleID: kind=update / duplicate のとき参照される既存 rule_id.
+	MatchedRuleID string `json:"matched_rule_id,omitempty" validate:"omitempty"`
+
+	// Rationale: 500 字 cap.
+	Rationale            string       `json:"rationale,omitempty" validate:"omitempty,max=500"`
+	RationaleOverflowRef *OverflowRef `json:"rationale_overflow_ref,omitempty" validate:"omitempty"`
+
+	ClassifiedAt time.Time `json:"classified_at" validate:"required"`
+}

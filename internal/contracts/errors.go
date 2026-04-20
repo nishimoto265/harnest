@@ -1,0 +1,36 @@
+package contracts
+
+import "errors"
+
+// Sentinel errors shared across all contract schemas / step I/O boundaries.
+//
+// ErrTrailingJSON / ErrUnknownManifestKind 等は strict JSON reader および
+// tagged union の custom UnmarshalJSON から返される。ステップ間 typed failure
+// (ErrAgentTimeout / ErrAllAgentsFailed 等) は `internal/contracts/stepio`
+// からも re-export 経由で参照される (see stepio/errors.go)。
+var (
+	// ErrTrailingJSON is returned when a strict JSON reader observes additional
+	// tokens (or bytes) after the single expected top-level value.
+	ErrTrailingJSON = errors.New("contracts: trailing data after JSON value")
+
+	// ErrUnknownManifestKind is returned when a Manifest envelope has a `kind`
+	// outside the {success, error, timeout} set.
+	ErrUnknownManifestKind = errors.New("contracts: unknown manifest kind")
+
+	// ErrUnknownDecisionAction is returned when a Decision envelope has an
+	// `action` outside the {adopt, reject, noop, rollback} set.
+	ErrUnknownDecisionAction = errors.New("contracts: unknown decision action")
+
+	// ErrUnknownRegistryKind is returned when a rules-registry.jsonl entry has
+	// a `kind` outside the {added, updated, status_changed, archived, restored,
+	// rolled_back} set.
+	ErrUnknownRegistryKind = errors.New("contracts: unknown rules-registry kind")
+
+	// ErrUnknownStateKind is returned when a processed.jsonl entry has a `kind`
+	// outside the accepted state event enum.
+	ErrUnknownStateKind = errors.New("contracts: unknown state event kind")
+
+	// ErrUnknownCandidateKind is returned when a candidate kind is outside
+	// {new, update, duplicate}.
+	ErrUnknownCandidateKind = errors.New("contracts: unknown candidate kind")
+)
