@@ -32,3 +32,7 @@ launchd は `StartInterval: 3600` で hourly tick のため、operator が senti
 `auto-improve recover --inspect --run <id>` は read-only で state を confirm でき、副作用なしに診断可能。
 
 Setup, config, and run-book will be filled in at Phase 3-C (release) and Phase 4 (docs finalization).
+
+## Git Hooks
+
+Enable the repository hooks with `git config core.hooksPath .githooks`.
