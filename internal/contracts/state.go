@@ -93,6 +93,13 @@ const (
 	WarningKindRescueRetry          = StateKindWarningRescueRetry
 )
 
+type WarningSource string
+
+const (
+	WarningSourceStep70     WarningSource = "step70"
+	WarningSourceSunsetTick WarningSource = "sunset_tick"
+)
+
 // StateEntry is one row appended to `<runs_base>/processed.jsonl`.
 // Tagged union over `kind`. All variants carry `step` (required for every
 // non-terminal + terminal event, io-contracts.md §resume vocabulary).
@@ -161,23 +168,32 @@ func (StateEntryPromoting) stateVariant() {}
 // rescue_retry). outer envelope `kind:"warning"` は無く、sub-kind が直接
 // discriminator を兼ねる (io-contracts.md §6.1 warning schema).
 type StateEntryWarning struct {
-	Kind              StateKind    `json:"kind" validate:"required,oneof=registry_size_high registry_size_critical rescue_retry"`
-	PR                *int         `json:"pr,omitempty" validate:"omitempty,gt=0"`
-	RunID             *RunID       `json:"run_id,omitempty" validate:"omitempty,run_id_fmt"`
-	Step              FailedStep   `json:"step" validate:"required,oneof=10 20 30 40 50 60 70"`
-	Count             *int64       `json:"count,omitempty" validate:"omitempty,gte=0"`
-	Detail            string       `json:"detail,omitempty" validate:"omitempty,max=300"`
-	DetailOverflowRef *OverflowRef `json:"detail_overflow_ref,omitempty" validate:"omitempty"`
-	At                time.Time    `json:"at" validate:"required"`
+	Kind              StateKind      `json:"kind" validate:"required,oneof=registry_size_high registry_size_critical rescue_retry"`
+	PR                *int           `json:"pr,omitempty" validate:"omitempty,gt=0"`
+	RunID             *RunID         `json:"run_id,omitempty" validate:"omitempty,run_id_fmt"`
+	Source            *WarningSource `json:"source,omitempty" validate:"omitempty,oneof=step70 sunset_tick"`
+	Step              *FailedStep    `json:"step,omitempty" validate:"omitempty,oneof=10 20 30 40 50 60 70"`
+	Count             *int64         `json:"count,omitempty" validate:"omitempty,gte=0"`
+	Detail            string         `json:"detail,omitempty" validate:"omitempty,max=300"`
+	DetailOverflowRef *OverflowRef   `json:"detail_overflow_ref,omitempty" validate:"omitempty"`
+	At                time.Time      `json:"at" validate:"required"`
 }
 
 func (StateEntryWarning) stateVariant() {}
 
 var (
-	ErrStateWarningScopeMismatch    = errors.New("contracts: state warning: pr and run_id must either both be set or both be omitted")
-	ErrStateWarningRescueRetryScope = errors.New("contracts: state warning: rescue_retry requires pr and run_id")
-	ErrStateWarningRescueRetryStep  = errors.New("contracts: state warning: rescue_retry step must be 20 or 50")
-	ErrStateWarningRegistryCount    = errors.New("contracts: state warning: registry size warnings require count")
+	ErrStateWarningScopeMismatch         = errors.New("contracts: state warning: pr and run_id must either both be set or both be omitted")
+	ErrStateWarningRescueRetryScope      = errors.New("contracts: state warning: rescue_retry requires pr and run_id")
+	ErrStateWarningRescueRetryStep       = errors.New("contracts: state warning: rescue_retry step must be 20 or 50")
+	ErrStateWarningRescueRetrySource     = errors.New("contracts: state warning: rescue_retry must not set source")
+	ErrStateWarningRegistryCount         = errors.New("contracts: state warning: registry size warnings require count")
+	ErrStateWarningRegistrySource        = errors.New("contracts: state warning: registry size warnings require source=step70|sunset_tick")
+	ErrStateWarningRegistryStep          = errors.New("contracts: state warning: registry size warnings from step70 require step=70")
+	ErrStateWarningRegistryStepForbidden = errors.New("contracts: state warning: registry size warnings from sunset_tick must omit step")
+	ErrStateWarningRegistryStep70Scope   = errors.New("contracts: state warning: registry size warnings from step70 require pr and run_id")
+	ErrStateWarningRegistrySunsetScope   = errors.New("contracts: state warning: registry size warnings from sunset_tick must be global telemetry")
+	ErrStateVariantTypeMismatch          = errors.New("contracts: state: kind does not match variant type")
+	ErrStateVariantKindMismatch          = errors.New("contracts: state: kind does not match inner kind field")
 )
 
 func (e StateEntryWarning) Validate() error {
@@ -189,15 +205,39 @@ func (e StateEntryWarning) Validate() error {
 	}
 	switch e.Kind {
 	case StateKindWarningRescueRetry:
+		if e.Source != nil {
+			return ErrStateWarningRescueRetrySource
+		}
 		if e.PR == nil || e.RunID == nil {
 			return ErrStateWarningRescueRetryScope
 		}
-		if e.Step != FailedStep20 && e.Step != FailedStep50 {
-			return fmt.Errorf("%w: step=%s", ErrStateWarningRescueRetryStep, e.Step)
+		if e.Step == nil || (*e.Step != FailedStep20 && *e.Step != FailedStep50) {
+			return fmt.Errorf("%w: step=%v", ErrStateWarningRescueRetryStep, e.Step)
 		}
 	case StateKindWarningRegistrySizeHigh, StateKindWarningRegistrySizeCritical:
 		if e.Count == nil {
 			return ErrStateWarningRegistryCount
+		}
+		if e.Source == nil {
+			return ErrStateWarningRegistrySource
+		}
+		switch *e.Source {
+		case WarningSourceStep70:
+			if e.PR == nil || e.RunID == nil {
+				return ErrStateWarningRegistryStep70Scope
+			}
+			if e.Step == nil || *e.Step != FailedStep70 {
+				return fmt.Errorf("%w: step=%v", ErrStateWarningRegistryStep, e.Step)
+			}
+		case WarningSourceSunsetTick:
+			if e.PR != nil || e.RunID != nil {
+				return ErrStateWarningRegistrySunsetScope
+			}
+			if e.Step != nil {
+				return fmt.Errorf("%w: step=%s", ErrStateWarningRegistryStepForbidden, *e.Step)
+			}
+		default:
+			return ErrStateWarningRegistrySource
 		}
 	default:
 		return ErrUnknownStateKind
@@ -438,5 +478,43 @@ func (e StateEntry) Validate() error {
 	if e.Value == nil {
 		return ErrUnknownStateKind
 	}
+	expected, inner, err := stateVariantMetadata(e.Value)
+	if err != nil {
+		return err
+	}
+	if err := validateTaggedUnionDiscriminator(e.Kind, expected, inner, ErrStateVariantTypeMismatch, ErrStateVariantKindMismatch); err != nil {
+		return err
+	}
 	return runValidation(e.Value)
+}
+
+func stateVariantMetadata(v StateVariant) (expected StateKind, inner StateKind, err error) {
+	switch vv := v.(type) {
+	case StateEntryStarted:
+		return StateKindStarted, vv.Kind, nil
+	case StateEntryStepDone:
+		return StateKindStepDone, vv.Kind, nil
+	case StateEntryInterrupted:
+		return StateKindInterrupted, vv.Kind, nil
+	case StateEntryPromoting:
+		return StateKindPromoting, vv.Kind, nil
+	case StateEntryWarning:
+		return vv.Kind, vv.Kind, nil
+	case StateEntryCompleted:
+		return StateKindCompleted, vv.Kind, nil
+	case StateEntryFailed:
+		return StateKindFailed, vv.Kind, nil
+	case StateEntryPromoted:
+		return StateKindPromoted, vv.Kind, nil
+	case StateEntryRollback:
+		return StateKindRollback, vv.Kind, nil
+	case StateEntrySkipped:
+		return StateKindSkipped, vv.Kind, nil
+	case StateEntryTimeout:
+		return StateKindTimeout, vv.Kind, nil
+	case StateEntryNeedsManualRecovery:
+		return StateKindNeedsManualRecovery, vv.Kind, nil
+	default:
+		return "", "", ErrUnknownStateKind
+	}
 }

@@ -125,6 +125,8 @@ var (
 	ErrRegistryPrevHashSequenceMismatch      = errors.New("contracts: registry: prev_hash must be empty iff version_seq == 1")
 	ErrRegistryRolledBackMissingTargetOffset = errors.New("contracts: registry: rolled_back: target_offset field is required")
 	ErrRuleIdempotencyIndexMissingOffset     = errors.New("contracts: registry: idempotency-index: registry_offset field is required")
+	ErrRegistryVariantTypeMismatch           = errors.New("contracts: registry: kind does not match variant type")
+	ErrRegistryVariantKindMismatch           = errors.New("contracts: registry: kind does not match inner kind field")
 )
 
 func (e *RuleRegistryRolledBack) UnmarshalJSON(data []byte) error {
@@ -377,7 +379,33 @@ func (e RuleRegistryEntry) Validate() error {
 	if e.Value == nil {
 		return ErrUnknownRegistryKind
 	}
+	expected, inner, err := ruleRegistryVariantMetadata(e.Value)
+	if err != nil {
+		return err
+	}
+	if err := validateTaggedUnionDiscriminator(e.Kind, expected, inner, ErrRegistryVariantTypeMismatch, ErrRegistryVariantKindMismatch); err != nil {
+		return err
+	}
 	return runValidation(e.Value)
+}
+
+func ruleRegistryVariantMetadata(v RuleRegistryVariant) (expected RegistryKind, inner RegistryKind, err error) {
+	switch vv := v.(type) {
+	case RuleRegistryAdded:
+		return RegistryKindAdded, vv.Kind, nil
+	case RuleRegistryUpdated:
+		return RegistryKindUpdated, vv.Kind, nil
+	case RuleRegistryRolledBack:
+		return RegistryKindRolledBack, vv.Kind, nil
+	case RuleRegistryStatusChanged:
+		return RegistryKindStatusChanged, vv.Kind, nil
+	case RuleRegistryArchived:
+		return RegistryKindArchived, vv.Kind, nil
+	case RuleRegistryRestored:
+		return RegistryKindRestored, vv.Kind, nil
+	default:
+		return "", "", ErrUnknownRegistryKind
+	}
 }
 
 func validateRegistryChain(versionSeq int64, prevHash string) error {

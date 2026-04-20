@@ -3,7 +3,6 @@ package contracts
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -104,6 +103,16 @@ type Candidates struct {
 	CreatedAt time.Time `json:"created_at" validate:"required"`
 }
 
+func (c *Candidates) UnmarshalJSON(data []byte) error {
+	type alias Candidates
+	var a alias
+	if err := decodeStrict(data, &a); err != nil {
+		return err
+	}
+	*c = Candidates(a)
+	return c.Validate()
+}
+
 // Validate runs tag-based validation + per-Candidate kind invariants
 // (finding #6). Candidates_hash content verification (i.e. hash == sha256 of
 // canonical-JSON(candidates[])) requires the canonical-JSON implementation
@@ -133,7 +142,16 @@ func (c Candidates) Validate() error {
 // order (no map[string]any). This is the shared producer/verifier algorithm
 // for `<run>/40/candidates.json`.
 func CanonicalCandidatesHash(items []Candidate) string {
-	sum := sha256.Sum256(mustJSONMarshal(items))
+	data, err := CanonicalMarshal(items)
+	if err != nil {
+		panic(fmt.Sprintf("contracts: unexpected CanonicalMarshal failure: %v", err))
+	}
+	sum := sha256Sum(data)
+	return sum
+}
+
+func sha256Sum(data []byte) string {
+	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
 
@@ -154,14 +172,6 @@ func (c Candidates) VerifyCandidatesHash() error {
 		return fmt.Errorf("%w: got=%s want=%s", ErrCandidatesHashMismatch, c.CandidatesHash, want)
 	}
 	return nil
-}
-
-func mustJSONMarshal(v any) []byte {
-	data, err := json.Marshal(v)
-	if err != nil {
-		panic(fmt.Sprintf("contracts: unexpected json.Marshal failure: %v", err))
-	}
-	return data
 }
 
 // ClassificationEntry is one row appended to `<run>/40/classification.jsonl`.

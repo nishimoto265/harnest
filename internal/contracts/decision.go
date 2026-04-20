@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -246,13 +245,10 @@ func (d Decision) Validate() error {
 	if err != nil {
 		return err
 	}
-	if d.Action != expected {
-		return fmt.Errorf("%w: outer=%s variant=%s", ErrDecisionVariantTypeMismatch, d.Action, expected)
+	if err := validateTaggedUnionDiscriminator(d.Action, expected, inner, ErrDecisionVariantTypeMismatch, ErrDecisionVariantActionMismatch); err != nil {
+		return err
 	}
-	if d.Action != inner {
-		return fmt.Errorf("%w: outer=%s inner=%s", ErrDecisionVariantActionMismatch, d.Action, inner)
-	}
-	return validateStruct(d.Value)
+	return runValidation(d.Value)
 }
 
 func decisionVariantMetadata(v DecisionVariant) (expected DecisionAction, inner DecisionAction, runID RunID, err error) {

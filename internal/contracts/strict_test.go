@@ -272,6 +272,71 @@ func TestCandidates_VerifyCandidatesHash_RoundTripAndTamper(t *testing.T) {
 	assert.ErrorIs(t, err, ErrCandidatesHashMismatch)
 }
 
+func TestCandidates_UnmarshalJSON_RejectsDuplicateTopLevelKey(t *testing.T) {
+	data := []byte(`{
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "run_id": "2026-04-21-PR42-abcdef0",
+  "candidates": [],
+  "candidates_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5edc3d5f9d9f54a2e4f3b68d5c4d6f6f8",
+  "created_at": "2026-04-20T12:00:00Z"
+}`)
+	var cs Candidates
+	err := json.Unmarshal(data, &cs)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicateJSONKey)
+}
+
+func TestCandidates_UnmarshalJSON_RejectsDuplicateItemKey(t *testing.T) {
+	data := []byte(`{
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "candidates": [
+    {
+      "candidate_id": "c1",
+      "candidate_id": "c1-dup",
+      "kind": "new",
+      "title": "title",
+      "proposed_body_path": "40/candidates/c1.md",
+      "proposed_body_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  ],
+  "candidates_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "created_at": "2026-04-20T12:00:00Z"
+}`)
+	var cs Candidates
+	err := json.Unmarshal(data, &cs)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicateJSONKey)
+}
+
+func TestCandidates_UnmarshalJSON_RejectsDuplicateNestedStructKey(t *testing.T) {
+	data := []byte(`{
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "candidates": [
+    {
+      "candidate_id": "c1",
+      "kind": "new",
+      "title": "title",
+      "problem_overflow_ref": {
+        "path": "40/problems/c1.txt",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000002",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000003"
+      },
+      "proposed_body_path": "40/candidates/c1.md",
+      "proposed_body_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  ],
+  "candidates_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "created_at": "2026-04-20T12:00:00Z"
+}`)
+	var cs Candidates
+	err := json.Unmarshal(data, &cs)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicateJSONKey)
+}
+
 // #4: TaskPackage.Validate rejects duplicate worktree paths.
 func TestTaskPackage_Validate_RejectsDuplicatePath(t *testing.T) {
 	pkg := validTaskPackage()

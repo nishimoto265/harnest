@@ -1,6 +1,7 @@
 package stepio
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -13,16 +14,22 @@ import (
 // enforces Promoted ↔ Decision.Action consistency.
 
 func validAdoptDecision() contracts.Decision {
+	candidatesHash := contracts.CanonicalCandidatesHash(validCandidates().Candidates)
 	return contracts.Decision{
 		Action: contracts.DecisionActionAdopt,
 		Value: contracts.DecisionAdopt{
-			Action:         contracts.DecisionActionAdopt,
-			SchemaVersion:  "1",
-			RunID:          "2026-04-20-PR42-abcdef0",
-			IdempotencyKey: "0000000000000000000000000000000000000000000000000000000000000001",
+			Action:        contracts.DecisionActionAdopt,
+			SchemaVersion: "1",
+			RunID:         "2026-04-20-PR42-abcdef0",
+			IdempotencyKey: contracts.ComputeAdoptIdempotencyKey(
+				"2026-04-20-PR42-abcdef0",
+				"2222222222222222222222222222222222222222",
+				"1111111111111111111111111111111111111111",
+				candidatesHash,
+			),
 			BestShaBefore:  "1111111111111111111111111111111111111111",
 			TargetSha:      "2222222222222222222222222222222222222222",
-			CandidatesHash: "0000000000000000000000000000000000000000000000000000000000000002",
+			CandidatesHash: candidatesHash,
 			RegistryAppendResult: contracts.RegistryAppendResult{
 				Offset: 0,
 				Sha256: "0000000000000000000000000000000000000000000000000000000000000003",
@@ -241,18 +248,24 @@ func TestStep70Response_Validate_RejectsDecisionVariantTypeMismatch(t *testing.T
 }
 
 func TestStep70Response_Validate_RejectsDecisionInnerActionMismatch(t *testing.T) {
+	candidatesHash := contracts.CanonicalCandidatesHash(validCandidates().Candidates)
 	r := Step70Response{
 		RunID: "2026-04-20-PR42-abcdef0",
 		Decision: contracts.Decision{
 			Action: contracts.DecisionActionAdopt,
 			Value: contracts.DecisionAdopt{
-				Action:         contracts.DecisionActionReject,
-				SchemaVersion:  "1",
-				RunID:          "2026-04-20-PR42-abcdef0",
-				IdempotencyKey: "0000000000000000000000000000000000000000000000000000000000000001",
+				Action:        contracts.DecisionActionReject,
+				SchemaVersion: "1",
+				RunID:         "2026-04-20-PR42-abcdef0",
+				IdempotencyKey: contracts.ComputeAdoptIdempotencyKey(
+					"2026-04-20-PR42-abcdef0",
+					"2222222222222222222222222222222222222222",
+					"1111111111111111111111111111111111111111",
+					candidatesHash,
+				),
 				BestShaBefore:  "1111111111111111111111111111111111111111",
 				TargetSha:      "2222222222222222222222222222222222222222",
-				CandidatesHash: "0000000000000000000000000000000000000000000000000000000000000002",
+				CandidatesHash: candidatesHash,
 				RegistryAppendResult: contracts.RegistryAppendResult{
 					Offset: 0,
 					Sha256: "0000000000000000000000000000000000000000000000000000000000000003",
@@ -276,4 +289,107 @@ func TestStep70Response_Validate_RejectsResponseRunIDMismatch(t *testing.T) {
 	err := r.Validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70ResponseRunIDMismatch)
+}
+
+func TestStep70Response_Validate_RejectsForgedAdoptIdempotencyKey(t *testing.T) {
+	r := Step70Response{
+		RunID:    "2026-04-20-PR42-abcdef0",
+		Decision: validAdoptDecision(),
+		Promoted: true,
+	}
+	adopt := r.Decision.Value.(contracts.DecisionAdopt)
+	adopt.IdempotencyKey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	r.Decision.Value = adopt
+
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep70AdoptIdempotencyKeyMismatch)
+}
+
+func TestStep70Response_ValidateAgainstRequest_RejectsCandidatesHashMismatch(t *testing.T) {
+	req := validStep70Request()
+	resp := Step70Response{
+		RunID:    req.TaskPackage.RunID,
+		Decision: validAdoptDecision(),
+		Promoted: true,
+	}
+	adopt := resp.Decision.Value.(contracts.DecisionAdopt)
+	adopt.CandidatesHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	adopt.IdempotencyKey = contracts.ComputeAdoptIdempotencyKey(string(adopt.RunID), adopt.TargetSha, adopt.BestShaBefore, adopt.CandidatesHash)
+	resp.Decision.Value = adopt
+
+	err := resp.ValidateAgainstRequest(req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep70AdoptCandidatesHashMismatch)
+}
+
+func TestStep70Request_UnmarshalJSON_RejectsDuplicateTopLevelKey(t *testing.T) {
+	data := []byte(`{
+  "task_package": {
+    "schema_version": "1",
+    "run_id": "2026-04-20-PR42-abcdef0",
+    "pr": 42,
+    "title": "fix",
+    "base_sha": "1111111111111111111111111111111111111111",
+    "best_branch": "auto-improve/best",
+    "reconstructed_task_prompt": "hello",
+    "worktrees": [
+      {"agent":"a1","pass":1,"path":"/tmp/wt/pass1-a1","branch":"b-pass1-a1","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"},
+      {"agent":"a2","pass":1,"path":"/tmp/wt/pass1-a2","branch":"b-pass1-a2","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"},
+      {"agent":"a3","pass":1,"path":"/tmp/wt/pass1-a3","branch":"b-pass1-a3","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"},
+      {"agent":"a1","pass":2,"path":"/tmp/wt/pass2-a1","branch":"b-pass2-a1","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"},
+      {"agent":"a2","pass":2,"path":"/tmp/wt/pass2-a2","branch":"b-pass2-a2","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"},
+      {"agent":"a3","pass":2,"path":"/tmp/wt/pass2-a3","branch":"b-pass2-a3","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"}
+    ],
+    "created_at": "2026-04-20T12:00:00Z"
+  },
+  "candidates": {
+    "schema_version": "1",
+    "run_id": "2026-04-20-PR42-abcdef0",
+    "candidates": [],
+    "candidates_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5edc3d5f9d9f54a2e4f3b68d5c4d6f6f8",
+    "created_at": "2026-04-20T12:00:00Z"
+  },
+  "registry_path": "/tmp/runs/rules-registry.jsonl",
+  "registry_path": "/tmp/runs/rules-registry-2.jsonl"
+}`)
+	var req Step70Request
+	err := json.Unmarshal(data, &req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, contracts.ErrDuplicateJSONKey)
+}
+
+func TestStep70Request_UnmarshalJSON_RejectsDuplicateNestedStructKey(t *testing.T) {
+	data := []byte(`{
+  "task_package": {
+    "schema_version": "1",
+    "run_id": "2026-04-20-PR42-abcdef0",
+    "pr": 42,
+    "title": "fix",
+    "base_sha": "1111111111111111111111111111111111111111",
+    "best_branch": "auto-improve/best",
+    "reconstructed_task_prompt": "hello",
+    "worktrees": [
+      {"agent":"a1","pass":1,"path":"/tmp/wt/pass1-a1","path":"/tmp/wt/pass1-a1-dup","branch":"b-pass1-a1","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"},
+      {"agent":"a2","pass":1,"path":"/tmp/wt/pass1-a2","branch":"b-pass1-a2","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"},
+      {"agent":"a3","pass":1,"path":"/tmp/wt/pass1-a3","branch":"b-pass1-a3","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"},
+      {"agent":"a1","pass":2,"path":"/tmp/wt/pass2-a1","branch":"b-pass2-a1","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"},
+      {"agent":"a2","pass":2,"path":"/tmp/wt/pass2-a2","branch":"b-pass2-a2","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"},
+      {"agent":"a3","pass":2,"path":"/tmp/wt/pass2-a3","branch":"b-pass2-a3","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"}
+    ],
+    "created_at": "2026-04-20T12:00:00Z"
+  },
+  "candidates": {
+    "schema_version": "1",
+    "run_id": "2026-04-20-PR42-abcdef0",
+    "candidates": [],
+    "candidates_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5edc3d5f9d9f54a2e4f3b68d5c4d6f6f8",
+    "created_at": "2026-04-20T12:00:00Z"
+  },
+  "registry_path": "/tmp/runs/rules-registry.jsonl"
+}`)
+	var req Step70Request
+	err := json.Unmarshal(data, &req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, contracts.ErrDuplicateJSONKey)
 }

@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -25,7 +26,7 @@ const (
 // 採点時は success のみを読み込むため、`internal/io.LoadScorableManifest` が
 // success 以外を `ErrNotScorable` で reject する契約 (io-contracts.md §2).
 type Manifest struct {
-	Kind  ManifestKind   `json:"kind"`
+	Kind  ManifestKind    `json:"kind"`
 	Value ManifestVariant `json:"-"`
 }
 
@@ -33,6 +34,11 @@ type Manifest struct {
 type ManifestVariant interface {
 	manifestVariant()
 }
+
+var (
+	ErrManifestVariantTypeMismatch = errors.New("contracts: manifest: kind does not match variant type")
+	ErrManifestVariantKindMismatch = errors.New("contracts: manifest: kind does not match inner kind field")
+)
 
 // ManifestSuccess: agent が実装 + commit + checklist 記入まで完走した状態.
 type ManifestSuccess struct {
@@ -173,5 +179,25 @@ func (m Manifest) Validate() error {
 	if m.Value == nil {
 		return ErrUnknownManifestKind
 	}
-	return validateStruct(m.Value)
+	expected, inner, err := manifestVariantMetadata(m.Value)
+	if err != nil {
+		return err
+	}
+	if err := validateTaggedUnionDiscriminator(m.Kind, expected, inner, ErrManifestVariantTypeMismatch, ErrManifestVariantKindMismatch); err != nil {
+		return err
+	}
+	return runValidation(m.Value)
+}
+
+func manifestVariantMetadata(v ManifestVariant) (expected ManifestKind, inner ManifestKind, err error) {
+	switch vv := v.(type) {
+	case ManifestSuccess:
+		return ManifestKindSuccess, vv.Kind, nil
+	case ManifestError:
+		return ManifestKindError, vv.Kind, nil
+	case ManifestTimeout:
+		return ManifestKindTimeout, vv.Kind, nil
+	default:
+		return "", "", ErrUnknownManifestKind
+	}
 }

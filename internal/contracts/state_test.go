@@ -37,26 +37,29 @@ func TestState_Interrupted_Parse(t *testing.T) {
 func TestState_Warning_GlobalTelemetry(t *testing.T) {
 	// pr / run_id を欠いた global telemetry warning (io-contracts.md rev22)
 	// warning sub-kind は `kind` 直接 (outer envelope の `warning` wrap は無い)。
-	data := `{"kind":"registry_size_critical","step":"70","count":2001,"at":"2026-04-20T12:00:00Z"}`
+	data := `{"kind":"registry_size_critical","source":"sunset_tick","count":2001,"at":"2026-04-20T12:00:00Z"}`
 	var e StateEntry
 	require.NoError(t, json.Unmarshal([]byte(data), &e))
 	assert.True(t, e.Kind.IsWarning())
 	w := e.Value.(StateEntryWarning)
 	assert.Nil(t, w.PR)
 	assert.Nil(t, w.RunID)
+	assert.NotNil(t, w.Source)
+	assert.Equal(t, WarningSourceSunsetTick, *w.Source)
+	assert.Nil(t, w.Step)
 	require.NotNil(t, w.Count)
 	assert.EqualValues(t, 2001, *w.Count)
 }
 
 func TestState_Warning_PRScoped(t *testing.T) {
-	data := `{"kind":"registry_size_high","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","count":1501,"at":"2026-04-20T12:00:00Z"}`
+	data := `{"kind":"registry_size_high","pr":42,"run_id":"2026-04-20-PR42-abcdef0","source":"step70","step":"70","count":1501,"at":"2026-04-20T12:00:00Z"}`
 	var e StateEntry
 	require.NoError(t, json.Unmarshal([]byte(data), &e))
 	assert.True(t, e.Kind.IsWarning())
 }
 
 func TestState_Warning_RejectsRegistryWarningWithoutCount(t *testing.T) {
-	data := `{"kind":"registry_size_high","step":"70","at":"2026-04-20T12:00:00Z"}`
+	data := `{"kind":"registry_size_high","source":"step70","step":"70","pr":42,"run_id":"2026-04-20-PR42-abcdef0","at":"2026-04-20T12:00:00Z"}`
 	var e StateEntry
 	err := json.Unmarshal([]byte(data), &e)
 	require.Error(t, err)
@@ -80,11 +83,31 @@ func TestState_Warning_RejectsRescueRetryWrongStep(t *testing.T) {
 }
 
 func TestState_Warning_RejectsScopeMismatch(t *testing.T) {
-	data := `{"kind":"registry_size_critical","pr":42,"step":"70","count":2000,"at":"2026-04-20T12:00:00Z"}`
+	data := `{"kind":"registry_size_critical","source":"step70","pr":42,"step":"70","count":2000,"at":"2026-04-20T12:00:00Z"}`
 	var e StateEntry
 	err := json.Unmarshal([]byte(data), &e)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStateWarningScopeMismatch)
+}
+
+func TestState_Warning_RejectsRegistryWarningWrongStep(t *testing.T) {
+	data := `{"kind":"registry_size_high","source":"step70","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"30","count":1501,"at":"2026-04-20T12:00:00Z"}`
+	var e StateEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStateWarningRegistryStep)
+}
+
+func TestState_Warning_AcceptsRegistryWarningStep70(t *testing.T) {
+	data := `{"kind":"registry_size_high","source":"step70","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","count":1501,"at":"2026-04-20T12:00:00Z"}`
+	var e StateEntry
+	require.NoError(t, json.Unmarshal([]byte(data), &e))
+}
+
+func TestState_Warning_AcceptsRegistryWarningSunsetTick(t *testing.T) {
+	data := `{"kind":"registry_size_high","source":"sunset_tick","count":1501,"at":"2026-04-20T12:00:00Z"}`
+	var e StateEntry
+	require.NoError(t, json.Unmarshal([]byte(data), &e))
 }
 
 func TestState_NeedsManualRecovery_Parse(t *testing.T) {
@@ -163,5 +186,75 @@ func TestState_IsTerminal_Coverage(t *testing.T) {
 	}
 	for _, k := range term {
 		assert.True(t, k.IsTerminal(), string(k))
+	}
+}
+
+func TestState_Validate_RejectsTaggedUnionMismatches(t *testing.T) {
+	fixtures := map[StateKind]string{
+		StateKindStarted:                 fixtureStateStarted(),
+		StateKindStepDone:                `{"kind":"step_done","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"20","at":"2026-04-20T10:30:00Z"}`,
+		StateKindInterrupted:             `{"kind":"interrupted","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"30","reason":"rate_limit","at":"2026-04-20T11:00:00Z"}`,
+		StateKindPromoting:               `{"kind":"promoting","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","at":"2026-04-20T12:00:00Z"}`,
+		StateKindWarningRegistrySizeHigh: `{"kind":"registry_size_high","source":"step70","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","count":1501,"at":"2026-04-20T12:00:00Z"}`,
+		StateKindCompleted:               `{"kind":"completed","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","at":"2026-04-20T12:00:00Z"}`,
+		StateKindFailed:                  `{"kind":"failed","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"30","reason":"judge_failed","at":"2026-04-20T12:00:00Z"}`,
+		StateKindPromoted:                `{"kind":"promoted","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","at":"2026-04-20T12:00:00Z"}`,
+		StateKindRollback:                `{"kind":"rollback","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","rollback_reason":"transactional_failure","failed_step":"70","at":"2026-04-20T12:00:00Z"}`,
+		StateKindSkipped:                 `{"kind":"skipped","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"10","at":"2026-04-20T12:00:00Z"}`,
+		StateKindTimeout:                 `{"kind":"timeout","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"20","at":"2026-04-20T12:00:00Z"}`,
+		StateKindNeedsManualRecovery:     `{"kind":"needs_manual_recovery","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","reason":"remote_divergence","failed_step":"70","at":"2026-04-20T12:00:00Z"}`,
+	}
+	parse := func(kind StateKind) StateEntry {
+		var e StateEntry
+		require.NoError(t, json.Unmarshal([]byte(fixtures[kind]), &e))
+		return e
+	}
+	tests := []struct {
+		name     string
+		entry    StateEntry
+		mutate   func(*StateEntry)
+		expected error
+	}{
+		{"started outer mismatch", parse(StateKindStarted), func(e *StateEntry) { e.Kind = StateKindStepDone }, ErrStateVariantTypeMismatch},
+		{"started inner mismatch", parse(StateKindStarted), func(e *StateEntry) { v := e.Value.(StateEntryStarted); v.Kind = StateKindStepDone; e.Value = v }, ErrStateVariantKindMismatch},
+		{"step_done outer mismatch", parse(StateKindStepDone), func(e *StateEntry) { e.Kind = StateKindStarted }, ErrStateVariantTypeMismatch},
+		{"step_done inner mismatch", parse(StateKindStepDone), func(e *StateEntry) { v := e.Value.(StateEntryStepDone); v.Kind = StateKindStarted; e.Value = v }, ErrStateVariantKindMismatch},
+		{"interrupted outer mismatch", parse(StateKindInterrupted), func(e *StateEntry) { e.Kind = StateKindPromoting }, ErrStateVariantTypeMismatch},
+		{"interrupted inner mismatch", parse(StateKindInterrupted), func(e *StateEntry) { v := e.Value.(StateEntryInterrupted); v.Kind = StateKindPromoting; e.Value = v }, ErrStateVariantKindMismatch},
+		{"promoting outer mismatch", parse(StateKindPromoting), func(e *StateEntry) { e.Kind = StateKindInterrupted }, ErrStateVariantTypeMismatch},
+		{"promoting inner mismatch", parse(StateKindPromoting), func(e *StateEntry) { v := e.Value.(StateEntryPromoting); v.Kind = StateKindInterrupted; e.Value = v }, ErrStateVariantKindMismatch},
+		{"warning inner mismatch", parse(StateKindWarningRegistrySizeHigh), func(e *StateEntry) {
+			v := e.Value.(StateEntryWarning)
+			v.Kind = StateKindWarningRegistrySizeCritical
+			e.Value = v
+		}, ErrStateVariantTypeMismatch},
+		{"completed outer mismatch", parse(StateKindCompleted), func(e *StateEntry) { e.Kind = StateKindFailed }, ErrStateVariantTypeMismatch},
+		{"completed inner mismatch", parse(StateKindCompleted), func(e *StateEntry) { v := e.Value.(StateEntryCompleted); v.Kind = StateKindFailed; e.Value = v }, ErrStateVariantKindMismatch},
+		{"failed outer mismatch", parse(StateKindFailed), func(e *StateEntry) { e.Kind = StateKindCompleted }, ErrStateVariantTypeMismatch},
+		{"failed inner mismatch", parse(StateKindFailed), func(e *StateEntry) { v := e.Value.(StateEntryFailed); v.Kind = StateKindCompleted; e.Value = v }, ErrStateVariantKindMismatch},
+		{"promoted outer mismatch", parse(StateKindPromoted), func(e *StateEntry) { e.Kind = StateKindRollback }, ErrStateVariantTypeMismatch},
+		{"promoted inner mismatch", parse(StateKindPromoted), func(e *StateEntry) { v := e.Value.(StateEntryPromoted); v.Kind = StateKindRollback; e.Value = v }, ErrStateVariantKindMismatch},
+		{"rollback outer mismatch", parse(StateKindRollback), func(e *StateEntry) { e.Kind = StateKindPromoted }, ErrStateVariantTypeMismatch},
+		{"rollback inner mismatch", parse(StateKindRollback), func(e *StateEntry) { v := e.Value.(StateEntryRollback); v.Kind = StateKindPromoted; e.Value = v }, ErrStateVariantKindMismatch},
+		{"skipped outer mismatch", parse(StateKindSkipped), func(e *StateEntry) { e.Kind = StateKindTimeout }, ErrStateVariantTypeMismatch},
+		{"skipped inner mismatch", parse(StateKindSkipped), func(e *StateEntry) { v := e.Value.(StateEntrySkipped); v.Kind = StateKindTimeout; e.Value = v }, ErrStateVariantKindMismatch},
+		{"timeout outer mismatch", parse(StateKindTimeout), func(e *StateEntry) { e.Kind = StateKindSkipped }, ErrStateVariantTypeMismatch},
+		{"timeout inner mismatch", parse(StateKindTimeout), func(e *StateEntry) { v := e.Value.(StateEntryTimeout); v.Kind = StateKindSkipped; e.Value = v }, ErrStateVariantKindMismatch},
+		{"needs_manual_recovery outer mismatch", parse(StateKindNeedsManualRecovery), func(e *StateEntry) { e.Kind = StateKindCompleted }, ErrStateVariantTypeMismatch},
+		{"needs_manual_recovery inner mismatch", parse(StateKindNeedsManualRecovery), func(e *StateEntry) {
+			v := e.Value.(StateEntryNeedsManualRecovery)
+			v.Kind = StateKindCompleted
+			e.Value = v
+		}, ErrStateVariantKindMismatch},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := tt.entry
+			tt.mutate(&entry)
+			err := entry.Validate()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tt.expected)
+		})
 	}
 }

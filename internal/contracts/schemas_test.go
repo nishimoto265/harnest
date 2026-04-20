@@ -266,7 +266,14 @@ func TestPairwiseEntry_Reject_BadWinner(t *testing.T) {
 
 // Candidates schema roundtrip: JSON marshal → strict decode.
 func TestCandidates_Roundtrip(t *testing.T) {
-	data := `{
+	items := []Candidate{{
+		CandidateID:        "c1",
+		Kind:               CandidateKindNew,
+		Title:              "Prefer clarity",
+		ProposedBodyPath:   "40/candidates/c1.md",
+		ProposedBodySha256: "0000000000000000000000000000000000000000000000000000000000000001",
+	}}
+	data := []byte(fmt.Sprintf(`{
   "schema_version": "1",
   "run_id": "2026-04-20-PR42-abcdef0",
   "candidates": [
@@ -278,11 +285,11 @@ func TestCandidates_Roundtrip(t *testing.T) {
       "proposed_body_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
     }
   ],
-  "candidates_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+  "candidates_hash": %q,
   "created_at": "2026-04-20T13:00:00Z"
-}`
+}`, CanonicalCandidatesHash(items)))
 	var c Candidates
-	require.NoError(t, json.Unmarshal([]byte(data), &c))
+	require.NoError(t, json.Unmarshal(data, &c))
 	require.NoError(t, validation.Instance().Struct(c))
 	assert.Len(t, c.Candidates, 1)
 	assert.Equal(t, CandidateKindNew, c.Candidates[0].Kind)

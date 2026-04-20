@@ -48,15 +48,28 @@ type Step70Response struct {
 // mislead the orchestrator into double-appending `promoted` / contradicting
 // the persisted decision.json.
 var (
-	ErrStep70PromotedRequiresAdopt  = errors.New("stepio: step70: promoted=true requires Decision.Action=adopt")
-	ErrStep70AdoptRequiresPromoted  = errors.New("stepio: step70: Decision.Action=adopt requires promoted=true")
-	ErrStep70RollbackMustNotPromote = errors.New("stepio: step70: Decision.Action=rollback must have promoted=false")
-	ErrStep70RejectMustNotPromote   = errors.New("stepio: step70: Decision.Action=reject must have promoted=false")
-	ErrStep70NoopMustNotPromote     = errors.New("stepio: step70: Decision.Action=noop must have promoted=false")
-	ErrStep70DecisionMissing        = errors.New("stepio: step70: Decision.Value must be populated")
-	ErrStep70RequestRunIDMismatch   = errors.New("stepio: step70: task_package.run_id must equal candidates.run_id")
-	ErrStep70ResponseRunIDMismatch  = errors.New("stepio: step70: response.run_id must equal decision.run_id")
+	ErrStep70PromotedRequiresAdopt        = errors.New("stepio: step70: promoted=true requires Decision.Action=adopt")
+	ErrStep70AdoptRequiresPromoted        = errors.New("stepio: step70: Decision.Action=adopt requires promoted=true")
+	ErrStep70RollbackMustNotPromote       = errors.New("stepio: step70: Decision.Action=rollback must have promoted=false")
+	ErrStep70RejectMustNotPromote         = errors.New("stepio: step70: Decision.Action=reject must have promoted=false")
+	ErrStep70NoopMustNotPromote           = errors.New("stepio: step70: Decision.Action=noop must have promoted=false")
+	ErrStep70DecisionMissing              = errors.New("stepio: step70: Decision.Value must be populated")
+	ErrStep70RequestRunIDMismatch         = errors.New("stepio: step70: task_package.run_id must equal candidates.run_id")
+	ErrStep70ResponseRunIDMismatch        = errors.New("stepio: step70: response.run_id must equal decision.run_id")
+	ErrStep70AdoptIdempotencyKeyMismatch  = errors.New("stepio: step70: adopt idempotency_key does not match derived value")
+	ErrStep70AdoptCandidatesHashMismatch  = errors.New("stepio: step70: adopt candidates_hash must match request.candidates_hash")
+	ErrStep70RequestResponseRunIDMismatch = errors.New("stepio: step70: response.run_id must equal request.run_id")
 )
+
+func (r *Step70Request) UnmarshalJSON(data []byte) error {
+	type alias Step70Request
+	var a alias
+	if err := contracts.DecodeStrictJSON(data, &a); err != nil {
+		return err
+	}
+	*r = Step70Request(a)
+	return r.Validate()
+}
 
 func (r Step70Request) Validate() error {
 	if err := validation.Instance().Struct(r); err != nil {
@@ -98,6 +111,11 @@ func (r Step70Response) Validate() error {
 	}
 	switch r.Decision.Action {
 	case contracts.DecisionActionAdopt:
+		adopt := r.Decision.Value.(contracts.DecisionAdopt)
+		expected := contracts.ComputeAdoptIdempotencyKey(string(adopt.RunID), adopt.TargetSha, adopt.BestShaBefore, adopt.CandidatesHash)
+		if adopt.IdempotencyKey != expected {
+			return fmt.Errorf("%w: got=%s want=%s", ErrStep70AdoptIdempotencyKeyMismatch, adopt.IdempotencyKey, expected)
+		}
 		if !r.Promoted {
 			return fmt.Errorf("%w: action=%s promoted=%t", ErrStep70AdoptRequiresPromoted, r.Decision.Action, r.Promoted)
 		}
@@ -121,6 +139,26 @@ func (r Step70Response) Validate() error {
 	// direction-reversed assertion for review clarity).
 	if r.Promoted && r.Decision.Action != contracts.DecisionActionAdopt {
 		return fmt.Errorf("%w: action=%s promoted=true", ErrStep70PromotedRequiresAdopt, r.Decision.Action)
+	}
+	return nil
+}
+
+func (r Step70Response) ValidateAgainstRequest(req Step70Request) error {
+	if err := req.Validate(); err != nil {
+		return err
+	}
+	if err := r.Validate(); err != nil {
+		return err
+	}
+	if r.RunID != req.TaskPackage.RunID {
+		return fmt.Errorf("%w: response.run_id=%s request.run_id=%s", ErrStep70RequestResponseRunIDMismatch, r.RunID, req.TaskPackage.RunID)
+	}
+	if r.Decision.Action != contracts.DecisionActionAdopt {
+		return nil
+	}
+	adopt := r.Decision.Value.(contracts.DecisionAdopt)
+	if adopt.CandidatesHash != req.Candidates.CandidatesHash {
+		return fmt.Errorf("%w: decision=%s request=%s", ErrStep70AdoptCandidatesHashMismatch, adopt.CandidatesHash, req.Candidates.CandidatesHash)
 	}
 	return nil
 }

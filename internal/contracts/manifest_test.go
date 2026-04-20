@@ -136,3 +136,108 @@ func TestManifest_decodeStrict_TrailingJSON(t *testing.T) {
 	err := decodeStrict(data, &v)
 	assert.True(t, errors.Is(err, ErrTrailingJSON))
 }
+
+func TestManifest_Validate_RejectsTaggedUnionMismatches(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(*Manifest)
+		expected error
+	}{
+		{
+			name: "success outer kind mismatch",
+			mutate: func(m *Manifest) {
+				m.Kind = ManifestKindError
+			},
+			expected: ErrManifestVariantTypeMismatch,
+		},
+		{
+			name: "success inner kind mismatch",
+			mutate: func(m *Manifest) {
+				v := m.Value.(ManifestSuccess)
+				v.Kind = ManifestKindError
+				m.Value = v
+			},
+			expected: ErrManifestVariantKindMismatch,
+		},
+		{
+			name: "error outer kind mismatch",
+			mutate: func(m *Manifest) {
+				m.Kind = ManifestKindTimeout
+			},
+			expected: ErrManifestVariantTypeMismatch,
+		},
+		{
+			name: "error inner kind mismatch",
+			mutate: func(m *Manifest) {
+				v := m.Value.(ManifestError)
+				v.Kind = ManifestKindTimeout
+				m.Value = v
+			},
+			expected: ErrManifestVariantKindMismatch,
+		},
+		{
+			name: "timeout outer kind mismatch",
+			mutate: func(m *Manifest) {
+				m.Kind = ManifestKindSuccess
+			},
+			expected: ErrManifestVariantTypeMismatch,
+		},
+		{
+			name: "timeout inner kind mismatch",
+			mutate: func(m *Manifest) {
+				v := m.Value.(ManifestTimeout)
+				v.Kind = ManifestKindSuccess
+				m.Value = v
+			},
+			expected: ErrManifestVariantKindMismatch,
+		},
+	}
+
+	valid := func(data string) Manifest {
+		var m Manifest
+		require.NoError(t, json.Unmarshal([]byte(data), &m))
+		return m
+	}
+	manifests := map[string]Manifest{
+		"success": valid(fixtureManifestSuccess(t)),
+		"error": valid(`{
+  "kind": "error",
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "pass": 1,
+  "agent": "a2",
+  "exit_code": 1,
+  "reason": "rate_limit",
+  "started_at": "2026-04-20T10:00:00Z",
+  "finished_at": "2026-04-20T10:01:00Z"
+}`),
+		"timeout": valid(`{
+  "kind": "timeout",
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "pass": 2,
+  "agent": "a3",
+  "timeout_seconds": 3600,
+  "started_at": "2026-04-20T10:00:00Z",
+  "finished_at": "2026-04-20T11:00:00Z"
+}`),
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var m Manifest
+			switch {
+			case strings.Contains(tt.name, "success"):
+				m = manifests["success"]
+			case strings.Contains(tt.name, "error"):
+				m = manifests["error"]
+			default:
+				m = manifests["timeout"]
+			}
+			tt.mutate(&m)
+			err := m.Validate()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tt.expected)
+		})
+	}
+}

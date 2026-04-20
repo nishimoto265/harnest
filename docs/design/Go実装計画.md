@@ -351,8 +351,8 @@ yaml KnownFields(true) + validator / slog JSON handler / config.yaml.example
 - **Resume ロジック**(rev6、rev11 で vocabulary 拡張、io-contracts.md §6.1 準拠):
   - 起動時に `processed.jsonl` を読み、各 PR の最後 event を取得
   - terminal (`completed/failed/promoted/rollback/skipped/timeout/needs_manual_recovery`) → skip
-  - non-terminal (`started/step_done/interrupted/promoting/warning`) → **同じ run_id で cycle resume**
-  - **`warning` の特殊扱い** (rev28、Codex rev27 #2 対応): `warning` は PR-scoped (pr + run_id 両方 present) の場合のみ resume target。**pr 不在の global telemetry warning**(例: sunset_tick の registry_size_critical)は **resume queue に乗らない、telemetry 専用**。起動時 scan は `pr` field 存在でフィルタ
+  - non-terminal (`started/step_done/interrupted/promoting/registry_size_high/registry_size_critical/rescue_retry`) → **同じ run_id で cycle resume**
+  - **warning 系 event の特殊扱い** (rev28、Codex rev27 #2 対応): PR-scoped (`pr` + `run_id` 両方 present) の場合のみ resume target。**pr 不在の global telemetry event**(例: `source: 'sunset_tick'` の `registry_size_critical`)は **resume queue に乗らない、telemetry 専用**。起動時 scan は `pr` field 存在でフィルタ
   - `<runs_base>/needs-recovery/*.json` と `<runs_base>/needs-recovery/*.aborted.json` 両方 sentinel scan: 1件でもあれば 全新規 step70 を block
 - **Signal handling**: SIGTERM/SIGINT → 現 step graceful stop → state.lock 取得 → `processed interrupted { step, reason: 'signal' }` append → state.lock release → **保持中の lock を全て defer unlock**(step70 実行中なら promotion.lock も保持、外なら state.lock のみ短期間保持) → exit 0
 - **Rate limit 検出**: `internal/interruption.Classify()` 経由で判定 → `interrupted { step, reason: 'rate_limit' }` append → defer unlock → exit 0
@@ -431,7 +431,7 @@ PanelReview / 5次元 / reasons cap + sidecar / compliance / `LoadScorableManife
 - **done.marker** (rev14 追加、rev15 hash 具体化):
   - step30 (`30/done.marker`): `{completed_agents, dimensions, expected_counts: {scores, compliance}, content_hashes: {scores_final, compliance_final}, raw_hashes: {scores_raw, compliance_raw}, resolved_at}`(step30 に pairwise は無い)
   - step60 (`60/done.marker`): `{completed_agents, dimensions, expected_counts: {scores, compliance, pairwise}, content_hashes: {scores_final, compliance_final, pairwise_final}, raw_hashes: {scores_raw, compliance_raw}, resolved_at}`(pairwise 含む)
-  - Hash algo: io-contracts.md §cardinality 参照。canonical JSON は `internal/io/canonicaljson.go#Marshal()`(map+sort.Strings 経由で field 順を確定、`encoding/json` の struct 定義順依存を排除)を使う
+  - Hash algo: io-contracts.md §cardinality 参照。canonical JSON は `internal/contracts/canonical.go#CanonicalMarshal()`(map+sort.Strings 経由で field 順を確定、`encoding/json` の struct 定義順依存を排除)を使う
   - `(agent, dimension)` 全組合せ final verdict 揃った時 atomic write
   - resume 時 marker 存在 + counts/hashes 現 file 一致なら skip、不一致なら marker 削除 → raw から再 reduce → 不足 role launch → 揃ったら marker 再生成
 - arbiter resume: `primary_ref / secondary_ref` の sha256 が最新 primary/secondary raw と一致するもののみ valid(CollapseByKey reducer の arbiter 用拡張 rule)。追加 marker 不要、provenance-only
@@ -454,7 +454,12 @@ PanelReview / 5次元 / reasons cap + sidecar / compliance / `LoadScorableManife
   - b. `current_registry_head == registry_head_before` → CAS append + 1回 retry
   - c. `!=` かつ a 不一致 → rollback path
 - **registry size check を append 時に実施**(rev6、24h gate と独立):
-  - **閾値(io-contracts と統一、rev28 sync)**: 1500 超 → slog warning + `warning { step: 70, kind: 'registry_size_high', count }` processed append + `rules-idempotency-index.jsonl` 自動生成有効化 / 1800 超 → 上記 + index lookup mandatory / 2000 超 → 上記 + `warning { step: 70, kind: 'registry_size_critical', count }` + stderr 強制
+  - **閾値(io-contracts と統一、rev28 sync)**: 1500 超 → slog warning + `registry_size_high` processed append
+    - step70 emit: `{ kind: 'registry_size_high', source: 'step70', pr, run_id, step: '70', count }`
+    - sunset_tick emit: `{ kind: 'registry_size_high', source: 'sunset_tick', count }`
+    - 以降 `rules-idempotency-index.jsonl` 自動生成有効化
+    - 1800 超 → 上記 + index lookup mandatory
+    - 2000 超 → 上記 + `registry_size_critical` を同 shape で append + stderr 強制
 - **Rollback path**: remote HEAD 確認 → safe revert 可なら terminal rollback(decision.json + processed rollback、rollback は per-PR terminal で scheduler は次 PR 進行) / 不可なら **needs_manual_recovery** (intention 保持 + **durable sentinel `<runs_base>/needs-recovery/<run_id>.json` atomic write** + processed terminal event + flock release)
 - **needs_manual_recovery 状態は `auto-improve recover --run <id>` コマンドで operator が解除**(sentinel 削除 + intention 処理)
 - flock は live 排他のみ、durable block は sentinel が担う

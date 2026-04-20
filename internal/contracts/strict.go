@@ -46,6 +46,20 @@ func decodeStrict(data []byte, v any) error {
 	return runValidation(v)
 }
 
+// DecodeStrictJSON exposes the strict single-value JSON decode used by the
+// contracts package so step I/O envelopes can apply the same duplicate-key /
+// unknown-field / trailing-token checks at their own top-level boundaries.
+func DecodeStrictJSON(data []byte, v any) error {
+	return decodeStrict(data, v)
+}
+
+// RejectDuplicateJSONKeys exposes the duplicate-key scanner used by strict
+// readers. Step I/O boundaries use it before decoding alias structs in custom
+// UnmarshalJSON implementations.
+func RejectDuplicateJSONKeys(data []byte) error {
+	return rejectDuplicateKeys(data)
+}
+
 func rejectDuplicateKeys(data []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := scanJSONValue(dec); err != nil {
