@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -64,8 +65,9 @@ type DecisionVariant interface {
 }
 
 var (
-	ErrDecisionVariantTypeMismatch   = errors.New("contracts: decision: action does not match variant type")
-	ErrDecisionVariantActionMismatch = errors.New("contracts: decision: action does not match inner action field")
+	ErrDecisionVariantTypeMismatch    = errors.New("contracts: decision: action does not match variant type")
+	ErrDecisionVariantActionMismatch  = errors.New("contracts: decision: action does not match inner action field")
+	ErrDecisionIdempotencyKeyMismatch = errors.New("contracts: decision: adopt idempotency_key does not match derived value")
 )
 
 // DecisionAdopt: rule set が採用され best_branch に push された.
@@ -85,6 +87,17 @@ type DecisionAdopt struct {
 }
 
 func (DecisionAdopt) decisionVariant() {}
+
+func (d DecisionAdopt) Validate() error {
+	if err := validateStruct(d); err != nil {
+		return err
+	}
+	expected := ComputeAdoptIdempotencyKey(string(d.RunID), d.TargetSha, d.BestShaBefore, d.CandidatesHash)
+	if d.IdempotencyKey != expected {
+		return fmt.Errorf("%w: got=%s want=%s", ErrDecisionIdempotencyKeyMismatch, d.IdempotencyKey, expected)
+	}
+	return nil
+}
 
 // DecisionReject: candidates は生成されたが閾値未満で reject.
 type DecisionReject struct {

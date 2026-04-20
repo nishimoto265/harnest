@@ -27,6 +27,12 @@ type Step70Request struct {
 
 // Step70Response is the output envelope for step 70.
 // Decision は `<run>/70/decision.json` に atomic write 済みで渡す前提。
+//
+// Intentional boundary choice (H1 option A): this type does not expose
+// UnmarshalJSON or a public Validate method because its full invariant set is
+// request-bound (`run_id` / `candidates_hash` / adopt idempotency cross-checks).
+// The only sanctioned public decode entrypoint is
+// DecodeAndValidateStep70Response(data, req).
 type Step70Response struct {
 	RunID    contracts.RunID    `json:"run_id" validate:"required,run_id_fmt"`
 	Decision contracts.Decision `json:"decision"`
@@ -90,15 +96,6 @@ func (r Step70Request) Validate() error {
 	return nil
 }
 
-func (r *Step70Response) UnmarshalJSON(data []byte) error {
-	decoded, err := decodeStep70Response(data)
-	if err != nil {
-		return err
-	}
-	*r = decoded
-	return nil
-}
-
 // DecodeAndValidateStep70Response is the sanctioned read boundary for a step70
 // response when the originating request is available. It enforces strict JSON
 // decode, response-local invariants, and request-bound cross-checks in one
@@ -121,15 +118,13 @@ func decodeStep70Response(data []byte) (Step70Response, error) {
 		return Step70Response{}, err
 	}
 	resp := Step70Response(a)
-	if err := resp.Validate(); err != nil {
+	if err := resp.validate(); err != nil {
 		return Step70Response{}, err
 	}
 	return resp, nil
 }
 
-// Validate enforces tag-based validation + Decision internal validation +
-// Promoted/Action consistency (finding #5).
-func (r Step70Response) Validate() error {
+func (r Step70Response) validate() error {
 	if err := validation.Instance().Var(r.RunID, "required,run_id_fmt"); err != nil {
 		return err
 	}
@@ -148,7 +143,10 @@ func (r Step70Response) Validate() error {
 	}
 	switch r.Decision.Action {
 	case contracts.DecisionActionAdopt:
-		adopt := r.Decision.Value.(contracts.DecisionAdopt)
+		adopt, err := contractsDecisionAdopt(r.Decision)
+		if err != nil {
+			return err
+		}
 		expected := contracts.ComputeAdoptIdempotencyKey(string(adopt.RunID), adopt.TargetSha, adopt.BestShaBefore, adopt.CandidatesHash)
 		if adopt.IdempotencyKey != expected {
 			return fmt.Errorf("%w: got=%s want=%s", ErrStep70AdoptIdempotencyKeyMismatch, adopt.IdempotencyKey, expected)
@@ -184,7 +182,7 @@ func (r Step70Response) validateAgainstRequest(req Step70Request) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}
-	if err := r.Validate(); err != nil {
+	if err := r.validate(); err != nil {
 		return err
 	}
 	if r.RunID != req.TaskPackage.RunID {
@@ -193,7 +191,10 @@ func (r Step70Response) validateAgainstRequest(req Step70Request) error {
 	if r.Decision.Action != contracts.DecisionActionAdopt {
 		return nil
 	}
-	adopt := r.Decision.Value.(contracts.DecisionAdopt)
+	adopt, err := contractsDecisionAdopt(r.Decision)
+	if err != nil {
+		return err
+	}
 	if adopt.CandidatesHash != req.Candidates.CandidatesHash {
 		return fmt.Errorf("%w: decision=%s request=%s", ErrStep70AdoptCandidatesHashMismatch, adopt.CandidatesHash, req.Candidates.CandidatesHash)
 	}
@@ -207,13 +208,47 @@ func contractsDecisionMetadata(d contracts.Decision) (contracts.DecisionAction, 
 	switch v := d.Value.(type) {
 	case contracts.DecisionAdopt:
 		return contracts.DecisionActionAdopt, v.Action, v.RunID, nil
+	case *contracts.DecisionAdopt:
+		if v == nil {
+			return "", "", "", ErrStep70DecisionMissing
+		}
+		return contracts.DecisionActionAdopt, v.Action, v.RunID, nil
 	case contracts.DecisionReject:
+		return contracts.DecisionActionReject, v.Action, v.RunID, nil
+	case *contracts.DecisionReject:
+		if v == nil {
+			return "", "", "", ErrStep70DecisionMissing
+		}
 		return contracts.DecisionActionReject, v.Action, v.RunID, nil
 	case contracts.DecisionNoop:
 		return contracts.DecisionActionNoop, v.Action, v.RunID, nil
+	case *contracts.DecisionNoop:
+		if v == nil {
+			return "", "", "", ErrStep70DecisionMissing
+		}
+		return contracts.DecisionActionNoop, v.Action, v.RunID, nil
 	case contracts.DecisionRollback:
+		return contracts.DecisionActionRollback, v.Action, v.RunID, nil
+	case *contracts.DecisionRollback:
+		if v == nil {
+			return "", "", "", ErrStep70DecisionMissing
+		}
 		return contracts.DecisionActionRollback, v.Action, v.RunID, nil
 	default:
 		return "", "", "", contracts.ErrUnknownDecisionAction
+	}
+}
+
+func contractsDecisionAdopt(d contracts.Decision) (contracts.DecisionAdopt, error) {
+	switch v := d.Value.(type) {
+	case contracts.DecisionAdopt:
+		return v, nil
+	case *contracts.DecisionAdopt:
+		if v == nil {
+			return contracts.DecisionAdopt{}, ErrStep70DecisionMissing
+		}
+		return *v, nil
+	default:
+		return contracts.DecisionAdopt{}, contracts.ErrDecisionVariantTypeMismatch
 	}
 }

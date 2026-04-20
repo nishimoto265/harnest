@@ -227,7 +227,7 @@ step30/60 は必ず後者を使う。
 - `scores-*.jsonl`: reasons 1000字/次元 + 超過時 `30/reasons/<sha256>.txt` sidecar + `reasons_overflow_ref`
 - `compliance-*.jsonl`: rationale 500字 cap
 - `classification.jsonl`: `{schema_version, run_id, candidate_id, kind, similarity_score, matched_rule_id?, rationale?, rationale_overflow_ref?, classified_at}`。`rationale` 500字 cap (`problem` field は存在しない)
-- `processed.jsonl`: reason 300字 cap + 超過時 sidecar
+- `processed.jsonl`: `detail` 300字 cap + 超過時 sidecar + `detail_overflow_ref`
 - `pairwise.jsonl`: justification 500字 cap
 - `rules-registry.jsonl`: 本体は `<runs_base>/rules/<rule_id>.md` sidecar、registry entry は **tagged union**:
   - **promotion entries** (step70 から):
@@ -251,7 +251,7 @@ step30/60 は必ず後者を使う。
 ```go
 type IntentionRecord struct {
     Stage                string    // planning | branch_pushed | registry_appended | decision_written | rolling_back_branch_reverted | rolling_back_registry_appended | rolling_back_decision_written | needs_manual_recovery
-    IdempotencyKey       string    // sha256(run_id || target_sha || best_sha_before || candidates_hash)
+    IdempotencyKey       string    // sha256(run_id + target_sha + best_sha_before + candidates_hash) // no separator bytes
     RunID                string
     BestShaBefore        string
     TargetSha            string
@@ -675,8 +675,8 @@ Phase 4:               1 agent  半日    [実PR検証 + docs + tag]
 | # | 論点 | 決定 |
 |---|---|---|
 | 1 | step70 transactional | 5 stage intention + recovery state machine (**6 到達可能状態 + manual recovery、rev9 で更新、#62-74 参照**) |
-| 2 | idempotency_key | `sha256(run_id || target_sha || best_sha_before || candidates_hash)`、planning で1回生成・永続化 |
-| 3 | registry recovery | registry_head_before 分岐追加、tail scan 2000件 bound、intention に append result 記録で O(1) path 優先 |
+| 2 | idempotency_key | `sha256(run_id + target_sha + best_sha_before + candidates_hash)` (separator bytes なし)、planning で1回生成・永続化 |
+| 3 | registry recovery | registry_head_before 分岐追加、tail scan bound / index fallback / intention の append result 記録で O(1) path 優先 |
 | 4 | strict JSON | `json.Decoder + DisallowUnknownFields + 2回目 Decode で io.EOF 要求` (More() 非使用) + custom UnmarshalJSON |
 | 5 | Decision variant | adopt/reject/noop/rollback のみ、error 廃止 |
 | 6 | sunset | business logic `internal/archive` 一本化、2 entry point は wiring のみ。idempotent transaction (marker + flock + idempotency_key) |
@@ -695,7 +695,7 @@ Phase 4:               1 agent  半日    [実PR検証 + docs + tag]
 | 19 | step70 排他 | `<runs_base>/promotion.lock` (global) flock で全 flow 排他 + recovery も lock 取得後 state 再読込 |
 | 20 | Stage 4 判定順序 | idempotency tail scan 先行 → registry_head 比較 → CAS |
 | 21 | rollback 非終端化 | divergence / lease failure 時は `needs_manual_recovery`(intention 保持、`auto-improve recover` で解除) |
-| 22 | registry scan bound | 2000件 + 運用 metric 警告(1500超)、閾値到達時は index 併設検討 |
+| 22 | registry scan bound | tail scan bound と index fallback の併用。具体閾値は `io-contracts.md` の single source of truth に追従 |
 | 23 | sunset recovery 順序 | lock → stale marker reconcile → gate check → run |
 | 24 | installer | 同一 FS staging + writability check + swap rollback + INSTALL_DIR env(sudo 回避) |
 | 25 | validator singleton | `internal/validation/validator.go` に sync.Once + Instance() 一本化 |
@@ -710,11 +710,11 @@ Phase 4:               1 agent  半日    [実PR検証 + docs + tag]
 | 34 | rollback terminal 明確化 | per-PR terminal(再試行せず)、scheduler は次 PR 進行、手動再試行は `run --pr <n> --from-scratch` |
 | 35 | installer plist transactional | plist も backup/restore、INSTALL_DIR 変更時は絶対 path 再生成 |
 | 36 | sunset per-op idempotency | `op_id = sha256(sunset_run_id || rule_id || transition)`、reconcile は per-op |
-| 37 | registry size check | step70 append 時(24h gate と独立)、1500/1800/2000 の閾値で warning/index/alert |
+| 37 | registry size check | step70 append 時(24h gate と独立)、registry size telemetry / index activation / critical alert の閾値は常に `io-contracts.md` と同期 |
 | 38 | recover CLI 実装 | cmd/auto-improve/recover.go + internal/recover/**、Phase 1-F owner |
 | 39 | Resume 機構 (rev6) | interrupted event, ResumeTarget, 各 step idempotent skip, signal/rate_limit/budget handling |
 | 40 | crash fixture | **rev11+ で #89 に統合、本行は削除済み** |
-| 41 | state vocabulary 拡張 | interrupted / warning / needs_manual_recovery schema 追加、全 non-terminal event に step required |
+| 41 | state vocabulary 拡張 | `interrupted / promoting / registry_size_high / registry_size_critical / rescue_retry / needs_manual_recovery` schema 追加、全 non-terminal event に step required |
 | 42 | processed detail overflow | `detail` 300字 + sidecar `<run>/processed-details/<sha256>.txt` + `detail_overflow_ref`(rev7) |
 | 43 | panel review per-role resume | `(agent, judge_role, dimension)` 単位の raw jsonl + 最終 verdict の別 marker(rev7) |
 | 44 | agent worktree resume | `.resume-state.json { expected_base_sha, started_at, pid }` + resume 時 hard reset or rescue(rev7) |
@@ -731,7 +731,7 @@ Phase 4:               1 agent  半日    [実PR検証 + docs + tag]
 | 55 | arbiter provenance | raw entry に `primary_ref.sha256 / secondary_ref.sha256`、upstream 変更時再実行(rev8) |
 | 56 | expected_base_sha source | `task-package.json.worktrees[agent].base_sha` 固定、live HEAD 再計算禁止(rev8) |
 | 57 | resume precedence | queue.go で non-terminal PR を先行 resume、fresh detect は resume 完了後(rev8) |
-| 58 | promoting/warning vocabulary | non-terminal として schema 追加、resume class 明記(rev8) |
+| 58 | promoting/registry telemetry vocabulary | `promoting / registry_size_high / registry_size_critical / rescue_retry` を non-terminal schema に追加、resume class を明記(rev8) |
 | 59 | interruption owner | Phase 0-F、`internal/interruption/**` + `testdata/interruption/**`、unknown は alert 必須(rev8) |
 | 60 | legacy log 非互換 | v0.1 fresh start 前提、rev8 以前 log は reader が警告 + skip、`--from-scratch` でリセット(rev8) |
 | 61 | promotion.lock 残存削除 | 全箇所 global `<runs_base>/promotion.lock` に統一、per-run 記述削除(rev8) |
@@ -744,7 +744,7 @@ Phase 4:               1 agent  半日    [実PR検証 + docs + tag]
 | 68 | processed-index.jsonl | **rev10 で #75 に統合、本行は削除済み** |
 | 69 | io-contracts completion marker 表 | done.marker に同期(rev9) |
 | 70 | Phase 0 前提 closed | module path / Go / agent type / launch strategy 確定(rev9) |
-| 71 | non-terminal vocabulary 統一 | io-contracts + Phase 0-C + queue で `promoting / warning` 含む 5種(rev9) |
+| 71 | non-terminal vocabulary 統一 | io-contracts + Phase 0-C + queue で `started / step_done / interrupted / promoting / registry_size_high / registry_size_critical / rescue_retry` を統一(rev9) |
 | 72 | step20 single-writer 維持 | rescue exhausted は typed result 返却、processed.jsonl 直接 append 禁止(rev9) |
 | 73 | --mark-manual-abort non-terminal sentinel | `.aborted.json` rename で block 継続、`--finalize-cleanup --remote-head <sha> --registry-head <sha>` 両SHA必須で operator 明示宣言後に解除(rev10/rev11) |
 | 74 | planning+HEAD==best_sha_before recovery | terminal rollback → non-terminal `interrupted { reason: 'pre_push_crash' }` に変更(rev10) |

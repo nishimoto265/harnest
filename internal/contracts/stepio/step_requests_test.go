@@ -123,18 +123,20 @@ func TestStep50Request_Validate_Valid(t *testing.T) {
 
 func TestStep50Request_Validate_Reject_DuplicateAgents(t *testing.T) {
 	r := Step50Request{
-		TaskPackage:    buildTaskPackage(),
-		Agents:         []contracts.AgentID{"a1", "a1"},
-		TimeoutSeconds: 600,
+		TaskPackage:      buildTaskPackage(),
+		Agents:           []contracts.AgentID{"a1", "a1"},
+		TimeoutSeconds:   600,
+		CandidateRuleIDs: []string{"r-1"},
 	}
 	assert.Error(t, r.Validate())
 }
 
 func TestStep50Request_Validate_Reject_ZeroTimeout(t *testing.T) {
 	r := Step50Request{
-		TaskPackage:    buildTaskPackage(),
-		Agents:         []contracts.AgentID{"a1", "a2", "a3"},
-		TimeoutSeconds: 0,
+		TaskPackage:      buildTaskPackage(),
+		Agents:           []contracts.AgentID{"a1", "a2", "a3"},
+		TimeoutSeconds:   0,
+		CandidateRuleIDs: []string{"r-1"},
 	}
 	assert.Error(t, r.Validate())
 }
@@ -142,9 +144,10 @@ func TestStep50Request_Validate_Reject_ZeroTimeout(t *testing.T) {
 func TestStep50Request_Validate_Reject_PassMismatch(t *testing.T) {
 	// pass=2 の agent set は {a1,a2,a3}. a4 は居ない → mismatch
 	r := Step50Request{
-		TaskPackage:    buildTaskPackage(),
-		Agents:         []contracts.AgentID{"a1", "a2", "a4"},
-		TimeoutSeconds: 600,
+		TaskPackage:      buildTaskPackage(),
+		Agents:           []contracts.AgentID{"a1", "a2", "a4"},
+		TimeoutSeconds:   600,
+		CandidateRuleIDs: []string{"r-1"},
 	}
 	err := r.Validate()
 	require.Error(t, err)
@@ -166,9 +169,10 @@ func TestStep20Request_Validate_Reject_SubsetOnly(t *testing.T) {
 
 func TestStep50Request_Validate_Reject_SubsetOnly(t *testing.T) {
 	r := Step50Request{
-		TaskPackage:    buildTaskPackage(),
-		Agents:         []contracts.AgentID{"a1", "a2"},
-		TimeoutSeconds: 600,
+		TaskPackage:      buildTaskPackage(),
+		Agents:           []contracts.AgentID{"a1", "a2"},
+		TimeoutSeconds:   600,
+		CandidateRuleIDs: []string{"r-1"},
 	}
 	err := r.Validate()
 	require.Error(t, err)

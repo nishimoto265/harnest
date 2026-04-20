@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,17 +12,18 @@ import (
 )
 
 func fixtureDecisionAdopt() string {
-	return `{
+	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
+	return fmt.Sprintf(`{
   "action": "adopt",
   "schema_version": "1",
   "run_id": "2026-04-20-PR42-abcdef0",
-  "idempotency_key": "0000000000000000000000000000000000000000000000000000000000000001",
+  "idempotency_key": "%s",
   "best_sha_before": "1111111111111111111111111111111111111111",
   "target_sha": "2222222222222222222222222222222222222222",
-  "candidates_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+  "candidates_hash": "%s",
   "registry_append_result": {"offset": 0, "sha256": "0000000000000000000000000000000000000000000000000000000000000003"},
   "decided_at": "2026-04-20T12:00:00Z"
-}`
+}`, ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash), candidatesHash)
 }
 
 func TestDecision_Adopt_Parse(t *testing.T) {
@@ -108,14 +110,15 @@ func TestRegistryAppendResult_Accept_ZeroOffset(t *testing.T) {
 
 func TestDecision_Adopt_Reject_MissingOffsetInAppendResult(t *testing.T) {
 	// DecisionAdopt の registry_append_result 内 offset 欠落は全体の decode エラー.
+	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
 	data := `{
   "action": "adopt",
   "schema_version": "1",
   "run_id": "2026-04-20-PR42-abcdef0",
-  "idempotency_key": "0000000000000000000000000000000000000000000000000000000000000001",
+  "idempotency_key": "` + ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash) + `",
   "best_sha_before": "1111111111111111111111111111111111111111",
   "target_sha": "2222222222222222222222222222222222222222",
-  "candidates_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+  "candidates_hash": "` + candidatesHash + `",
   "registry_append_result": {"sha256": "0000000000000000000000000000000000000000000000000000000000000003"},
   "decided_at": "2026-04-20T12:00:00Z"
 }`
@@ -137,16 +140,17 @@ func TestDecision_Reject_BadRollbackReason(t *testing.T) {
 }
 
 func TestDecision_Validate_RejectsOuterActionVariantTypeMismatch(t *testing.T) {
+	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
 	d := Decision{
 		Action: DecisionActionReject,
 		Value: DecisionAdopt{
 			Action:         DecisionActionAdopt,
 			SchemaVersion:  "1",
 			RunID:          "2026-04-20-PR42-abcdef0",
-			IdempotencyKey: "0000000000000000000000000000000000000000000000000000000000000001",
+			IdempotencyKey: ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash),
 			BestShaBefore:  "1111111111111111111111111111111111111111",
 			TargetSha:      "2222222222222222222222222222222222222222",
-			CandidatesHash: "0000000000000000000000000000000000000000000000000000000000000002",
+			CandidatesHash: candidatesHash,
 			RegistryAppendResult: RegistryAppendResult{
 				Offset: 0,
 				Sha256: "0000000000000000000000000000000000000000000000000000000000000003",
@@ -160,16 +164,17 @@ func TestDecision_Validate_RejectsOuterActionVariantTypeMismatch(t *testing.T) {
 }
 
 func TestDecision_Validate_RejectsOuterActionInnerActionMismatch(t *testing.T) {
+	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
 	d := Decision{
 		Action: DecisionActionAdopt,
 		Value: DecisionAdopt{
 			Action:         DecisionActionReject,
 			SchemaVersion:  "1",
 			RunID:          "2026-04-20-PR42-abcdef0",
-			IdempotencyKey: "0000000000000000000000000000000000000000000000000000000000000001",
+			IdempotencyKey: ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash),
 			BestShaBefore:  "1111111111111111111111111111111111111111",
 			TargetSha:      "2222222222222222222222222222222222222222",
-			CandidatesHash: "0000000000000000000000000000000000000000000000000000000000000002",
+			CandidatesHash: candidatesHash,
 			RegistryAppendResult: RegistryAppendResult{
 				Offset: 0,
 				Sha256: "0000000000000000000000000000000000000000000000000000000000000003",
@@ -223,4 +228,29 @@ func TestDecision_Validate_AcceptsValueAndPointerVariants(t *testing.T) {
 			assert.NoError(t, tt.d.Validate())
 		})
 	}
+}
+
+func TestDecision_Validate_RejectsForgedAdoptIdempotencyKey(t *testing.T) {
+	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
+	d := Decision{
+		Action: DecisionActionAdopt,
+		Value: DecisionAdopt{
+			Action:         DecisionActionAdopt,
+			SchemaVersion:  "1",
+			RunID:          "2026-04-20-PR42-abcdef0",
+			IdempotencyKey: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			BestShaBefore:  "1111111111111111111111111111111111111111",
+			TargetSha:      "2222222222222222222222222222222222222222",
+			CandidatesHash: candidatesHash,
+			RegistryAppendResult: RegistryAppendResult{
+				Offset: 0,
+				Sha256: "0000000000000000000000000000000000000000000000000000000000000003",
+			},
+			DecidedAt: time.Now(),
+		},
+	}
+
+	err := d.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDecisionIdempotencyKeyMismatch)
 }

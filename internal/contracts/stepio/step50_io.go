@@ -14,7 +14,7 @@ type Step50Request struct {
 	Agents         []contracts.AgentID   `json:"agents" validate:"required,unique,dive,agent_id_fmt"`
 	TimeoutSeconds int                   `json:"timeout_seconds" validate:"required,gt=0"`
 	// CandidateRuleIDs: best 設定に加えて pass2 で適用する候補 rule_id 群。
-	CandidateRuleIDs []string `json:"candidate_rule_ids"`
+	CandidateRuleIDs []string `json:"candidate_rule_ids" validate:"required,min=1,dive,required"`
 }
 
 // ErrStep50AgentPassMismatch mirrors ErrStep20AgentPassMismatch for pass=2.
@@ -41,10 +41,37 @@ func (r Step50Request) Validate() error {
 	return nil
 }
 
+func (r *Step50Request) UnmarshalJSON(data []byte) error {
+	type alias Step50Request
+	var a alias
+	if err := contracts.DecodeStrictJSON(data, &a); err != nil {
+		return err
+	}
+	*r = Step50Request(a)
+	return r.Validate()
+}
+
 // Step50Response is the output envelope for step 50 (mirrors Step20Response).
 type Step50Response struct {
-	RunID           contracts.RunID     `json:"run_id"`
-	Pass            int                 `json:"pass"` // 固定 2
+	RunID           contracts.RunID     `json:"run_id" validate:"required,run_id_fmt"`
+	Pass            int                 `json:"pass" validate:"required,eq=2"` // 固定 2
 	Results         []Step20AgentResult `json:"results"`
 	RescueExhausted []RescueExhausted   `json:"rescue_exhausted,omitempty"`
+}
+
+func (r *Step50Response) UnmarshalJSON(data []byte) error {
+	type alias Step50Response
+	var a alias
+	if err := contracts.DecodeStrictJSON(data, &a); err != nil {
+		return err
+	}
+	*r = Step50Response(a)
+	return r.Validate()
+}
+
+func (r Step50Response) Validate() error {
+	if err := validation.Instance().Struct(r); err != nil {
+		return err
+	}
+	return validateImplementationResponse(r.RunID, r.Pass, r.Results, r.RescueExhausted)
 }

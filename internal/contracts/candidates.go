@@ -3,6 +3,7 @@ package contracts
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -193,4 +194,32 @@ type ClassificationEntry struct {
 	RationaleOverflowRef *OverflowRef `json:"rationale_overflow_ref,omitempty" validate:"omitempty"`
 
 	ClassifiedAt time.Time `json:"classified_at" validate:"required"`
+}
+
+var ErrClassificationEntryMissingSimilarityScore = errors.New("contracts: classification: similarity_score field is required")
+
+// similarity_score accepts 0 as a valid value, so we follow the existing
+// required-zero-valid pattern used by offset fields: keep the concrete int type
+// and verify physical JSON field presence in UnmarshalJSON instead of using a
+// pointer.
+func (e *ClassificationEntry) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["similarity_score"]; !ok {
+		return ErrClassificationEntryMissingSimilarityScore
+	}
+
+	type alias ClassificationEntry
+	var a alias
+	if err := decodeStrict(data, &a); err != nil {
+		return err
+	}
+	*e = ClassificationEntry(a)
+	return e.Validate()
+}
+
+func (e ClassificationEntry) Validate() error {
+	return validateStruct(e)
 }

@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -68,6 +69,7 @@ var (
 	ErrIntentionMissingRegistryAppendResult = errors.New("contracts: intention: registry_append_result is required for this stage")
 	ErrIntentionMissingRecoveryReason       = errors.New("contracts: intention: recovery_reason is required for this stage")
 	ErrIntentionMissingFailedStep           = errors.New("contracts: intention: failed_step is required for this stage")
+	ErrIntentionIdempotencyKeyMismatch      = errors.New("contracts: intention: idempotency_key does not match derived value")
 )
 
 // Validate enforces stage-conditional required fields on top of tag-based
@@ -76,6 +78,10 @@ var (
 func (r IntentionRecord) Validate() error {
 	if err := validateStruct(r); err != nil {
 		return err
+	}
+	expected := ComputeAdoptIdempotencyKey(string(r.RunID), r.TargetSha, r.BestShaBefore, r.CandidatesHash)
+	if r.IdempotencyKey != expected {
+		return fmt.Errorf("%w: got=%s want=%s", ErrIntentionIdempotencyKeyMismatch, r.IdempotencyKey, expected)
 	}
 	switch r.Stage {
 	case IntentionStageRegistryAppended,

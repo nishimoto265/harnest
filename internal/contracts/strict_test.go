@@ -377,14 +377,15 @@ func TestTaskPackage_Validate_RejectsCrossPassDuplicateBranch(t *testing.T) {
 // decodeStrict (or readers that wrap it) instead of plain json.Unmarshal.
 func TestDecodeStrict_IntentionRecord_EnforcesStageInvariant(t *testing.T) {
 	// stage=registry_appended but missing registry_append_result.
+	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
 	data := []byte(`{
   "schema_version": "1",
   "stage": "registry_appended",
-  "idempotency_key": "0000000000000000000000000000000000000000000000000000000000000001",
+  "idempotency_key": "` + ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash) + `",
   "run_id": "2026-04-20-PR42-abcdef0",
   "best_sha_before": "1111111111111111111111111111111111111111",
   "target_sha": "2222222222222222222222222222222222222222",
-  "candidates_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+  "candidates_hash": "` + candidatesHash + `",
   "started_at": "2026-04-20T10:00:00Z"
 }`)
 	var r IntentionRecord

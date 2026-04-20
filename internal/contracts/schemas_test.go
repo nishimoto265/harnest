@@ -308,16 +308,70 @@ func TestClassificationEntry_Valid(t *testing.T) {
 	assert.NoError(t, validation.Instance().Struct(e))
 }
 
+func TestClassificationEntry_UnmarshalJSON_RejectsMissingSimilarityScore(t *testing.T) {
+	data := []byte(`{
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "candidate_id": "c1",
+  "kind": "update",
+  "classified_at": "2026-04-20T12:00:00Z"
+}`)
+	var e ClassificationEntry
+	err := json.Unmarshal(data, &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrClassificationEntryMissingSimilarityScore)
+}
+
+func TestClassificationEntry_UnmarshalJSON_AcceptsZeroSimilarityScore(t *testing.T) {
+	data := []byte(`{
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "candidate_id": "c1",
+  "kind": "update",
+  "similarity_score": 0,
+  "classified_at": "2026-04-20T12:00:00Z"
+}`)
+	var e ClassificationEntry
+	require.NoError(t, json.Unmarshal(data, &e))
+	assert.Equal(t, 0, e.SimilarityScore)
+}
+
+func TestClassificationEntry_UnmarshalJSON_RejectsOutOfRangeSimilarityScore(t *testing.T) {
+	tests := []struct {
+		name  string
+		score int
+	}{
+		{name: "too high", score: 101},
+		{name: "negative", score: -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := []byte(fmt.Sprintf(`{
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "candidate_id": "c1",
+  "kind": "update",
+  "similarity_score": %d,
+  "classified_at": "2026-04-20T12:00:00Z"
+}`, tt.score))
+			var e ClassificationEntry
+			assert.Error(t, json.Unmarshal(data, &e))
+		})
+	}
+}
+
 // IntentionRecord
 func TestIntentionRecord_Valid_Planning(t *testing.T) {
+	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
 	i := IntentionRecord{
 		SchemaVersion:      "1",
 		Stage:              IntentionStagePlanning,
-		IdempotencyKey:     "0000000000000000000000000000000000000000000000000000000000000001",
+		IdempotencyKey:     ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash),
 		RunID:              "2026-04-20-PR42-abcdef0",
 		BestShaBefore:      "1111111111111111111111111111111111111111",
 		TargetSha:          "2222222222222222222222222222222222222222",
-		CandidatesHash:     "0000000000000000000000000000000000000000000000000000000000000002",
+		CandidatesHash:     candidatesHash,
 		RegistryHeadBefore: "",
 		StartedAt:          time.Now(),
 	}
@@ -340,13 +394,14 @@ func TestIntentionRecord_Reject_BadStage(t *testing.T) {
 
 // finding #1: stage に応じた required field を enforce する Validate() の動作確認。
 func validIntentionBase() IntentionRecord {
+	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
 	return IntentionRecord{
 		SchemaVersion:  "1",
-		IdempotencyKey: "0000000000000000000000000000000000000000000000000000000000000001",
+		IdempotencyKey: ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash),
 		RunID:          "2026-04-20-PR42-abcdef0",
 		BestShaBefore:  "1111111111111111111111111111111111111111",
 		TargetSha:      "2222222222222222222222222222222222222222",
-		CandidatesHash: "0000000000000000000000000000000000000000000000000000000000000002",
+		CandidatesHash: candidatesHash,
 		StartedAt:      time.Now(),
 	}
 }
@@ -449,17 +504,61 @@ func TestIntentionRecord_AllStagesEnumerated(t *testing.T) {
 		IntentionStageNeedsManualRecovery,
 	}
 	for _, s := range all {
+		candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
 		i := IntentionRecord{
 			SchemaVersion:  "1",
 			Stage:          s,
-			IdempotencyKey: "0000000000000000000000000000000000000000000000000000000000000001",
+			IdempotencyKey: ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash),
 			RunID:          "2026-04-20-PR42-abcdef0",
 			BestShaBefore:  "1111111111111111111111111111111111111111",
 			TargetSha:      "2222222222222222222222222222222222222222",
-			CandidatesHash: "0000000000000000000000000000000000000000000000000000000000000002",
+			CandidatesHash: candidatesHash,
 			StartedAt:      time.Now(),
 		}
 		assert.NoError(t, validation.Instance().Struct(i), string(s))
 	}
 	assert.Len(t, all, 8)
+}
+
+func TestIntentionRecord_Validate_RejectsForgedIdempotencyKeyAcrossStages(t *testing.T) {
+	stages := []IntentionStage{
+		IntentionStagePlanning,
+		IntentionStageBranchPushed,
+		IntentionStageRegistryAppended,
+		IntentionStageDecisionWritten,
+		IntentionStageRollingBackBranchReverted,
+		IntentionStageRollingBackRegistryAppended,
+		IntentionStageRollingBackDecisionWritten,
+		IntentionStageNeedsManualRecovery,
+	}
+
+	for _, stage := range stages {
+		t.Run(string(stage), func(t *testing.T) {
+			r := validIntentionBase()
+			r.Stage = stage
+			r.IdempotencyKey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+			switch stage {
+			case IntentionStageRegistryAppended,
+				IntentionStageDecisionWritten,
+				IntentionStageRollingBackRegistryAppended,
+				IntentionStageRollingBackDecisionWritten:
+				r.RegistryAppendResult = &RegistryAppendResult{
+					Offset: 0,
+					Sha256: "0000000000000000000000000000000000000000000000000000000000000003",
+				}
+			}
+			switch stage {
+			case IntentionStageRollingBackBranchReverted,
+				IntentionStageRollingBackRegistryAppended,
+				IntentionStageRollingBackDecisionWritten,
+				IntentionStageNeedsManualRecovery:
+				r.RecoveryReason = RollbackReasonLeaseFailure
+				r.FailedStep = FailedStep70
+			}
+
+			err := r.Validate()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrIntentionIdempotencyKeyMismatch)
+		})
+	}
 }

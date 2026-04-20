@@ -37,6 +37,16 @@ func (r Step20Request) Validate() error {
 	return validateAgentsAgainstPass(r.Agents, r.TaskPackage, 1)
 }
 
+func (r *Step20Request) UnmarshalJSON(data []byte) error {
+	type alias Step20Request
+	var a alias
+	if err := contracts.DecodeStrictJSON(data, &a); err != nil {
+		return err
+	}
+	*r = Step20Request(a)
+	return r.Validate()
+}
+
 // validateAgentsAgainstPass enforces: Agents set == set of worktrees[pass==p].Agent.
 func validateAgentsAgainstPass(agents []contracts.AgentID, pkg contracts.TaskPackage, pass int) error {
 	want := map[contracts.AgentID]struct{}{}
@@ -62,14 +72,14 @@ func validateAgentsAgainstPass(agents []contracts.AgentID, pkg contracts.TaskPac
 
 // Step20AgentResult: 各 agent ごとの実行結果。manifest は Manifest tagged union。
 type Step20AgentResult struct {
-	Agent    contracts.AgentID  `json:"agent"`
+	Agent    contracts.AgentID  `json:"agent" validate:"required,agent_id_fmt"`
 	Manifest contracts.Manifest `json:"manifest"`
 }
 
 // Step20Response is the output envelope for step 20.
 type Step20Response struct {
-	RunID   contracts.RunID     `json:"run_id"`
-	Pass    int                 `json:"pass"` // 固定 1 だが共通 field として持つ
+	RunID   contracts.RunID     `json:"run_id" validate:"required,run_id_fmt"`
+	Pass    int                 `json:"pass" validate:"required,eq=1"` // 固定 1 だが共通 field として持つ
 	Results []Step20AgentResult `json:"results"`
 	// RescueExhausted: worktree rescue が retry 上限 (3) に達した agent 一覧。
 	// orchestrator が processed.jsonl に needs_manual_recovery を append する契約
@@ -79,6 +89,23 @@ type Step20Response struct {
 
 // RescueExhausted: step20/50 agent の rescue 上限到達通知。
 type RescueExhausted struct {
-	Agent      contracts.AgentID `json:"agent"`
-	RetryCount int               `json:"retry_count"`
+	Agent      contracts.AgentID `json:"agent" validate:"required,agent_id_fmt"`
+	RetryCount int               `json:"retry_count" validate:"gte=3"`
+}
+
+func (r *Step20Response) UnmarshalJSON(data []byte) error {
+	type alias Step20Response
+	var a alias
+	if err := contracts.DecodeStrictJSON(data, &a); err != nil {
+		return err
+	}
+	*r = Step20Response(a)
+	return r.Validate()
+}
+
+func (r Step20Response) Validate() error {
+	if err := validation.Instance().Struct(r); err != nil {
+		return err
+	}
+	return validateImplementationResponse(r.RunID, r.Pass, r.Results, r.RescueExhausted)
 }

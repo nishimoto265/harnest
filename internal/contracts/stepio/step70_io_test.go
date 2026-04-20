@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Phase 0-bootstrap-1 gate 3rd-round finding #5: Step70Response.Validate()
+// Phase 0-bootstrap-1 gate 3rd-round finding #5: Step70Response.validate()
 // enforces Promoted ↔ Decision.Action consistency.
 
 func validAdoptDecision() contracts.Decision {
@@ -122,6 +122,20 @@ func mustMarshalJSON(t *testing.T, v any) []byte {
 	return data
 }
 
+func mustDecisionAdopt(t *testing.T, d contracts.Decision) contracts.DecisionAdopt {
+	t.Helper()
+	switch v := d.Value.(type) {
+	case contracts.DecisionAdopt:
+		return v
+	case *contracts.DecisionAdopt:
+		require.NotNil(t, v)
+		return *v
+	default:
+		t.Fatalf("expected adopt decision, got %T", d.Value)
+		return contracts.DecisionAdopt{}
+	}
+}
+
 func TestStep70Request_Validate_Valid(t *testing.T) {
 	assert.NoError(t, validStep70Request().Validate())
 }
@@ -154,7 +168,7 @@ func TestStep70Response_Validate_Adopt_Promoted_True(t *testing.T) {
 		Decision: validAdoptDecision(),
 		Promoted: true,
 	}
-	assert.NoError(t, r.Validate())
+	assert.NoError(t, r.validate())
 }
 
 func TestStep70Response_Validate_Adopt_Promoted_False_Rejected(t *testing.T) {
@@ -164,7 +178,7 @@ func TestStep70Response_Validate_Adopt_Promoted_False_Rejected(t *testing.T) {
 		Decision: validAdoptDecision(),
 		Promoted: false,
 	}
-	err := r.Validate()
+	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70AdoptRequiresPromoted)
 }
@@ -175,7 +189,7 @@ func TestStep70Response_Validate_Reject_Promoted_True_Rejected(t *testing.T) {
 		Decision: validRejectDecision(),
 		Promoted: true,
 	}
-	err := r.Validate()
+	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70RejectMustNotPromote)
 }
@@ -186,7 +200,7 @@ func TestStep70Response_Validate_Reject_Promoted_False(t *testing.T) {
 		Decision: validRejectDecision(),
 		Promoted: false,
 	}
-	assert.NoError(t, r.Validate())
+	assert.NoError(t, r.validate())
 }
 
 func TestStep70Response_Validate_Noop_Promoted_True_Rejected(t *testing.T) {
@@ -195,7 +209,7 @@ func TestStep70Response_Validate_Noop_Promoted_True_Rejected(t *testing.T) {
 		Decision: validNoopDecision(),
 		Promoted: true,
 	}
-	err := r.Validate()
+	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70NoopMustNotPromote)
 }
@@ -206,7 +220,7 @@ func TestStep70Response_Validate_Noop_Promoted_False(t *testing.T) {
 		Decision: validNoopDecision(),
 		Promoted: false,
 	}
-	assert.NoError(t, r.Validate())
+	assert.NoError(t, r.validate())
 }
 
 func TestStep70Response_Validate_Rollback_Promoted_True_Rejected(t *testing.T) {
@@ -215,7 +229,7 @@ func TestStep70Response_Validate_Rollback_Promoted_True_Rejected(t *testing.T) {
 		Decision: validRollbackDecision(),
 		Promoted: true,
 	}
-	err := r.Validate()
+	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70RollbackMustNotPromote)
 }
@@ -226,7 +240,7 @@ func TestStep70Response_Validate_Rollback_Promoted_False(t *testing.T) {
 		Decision: validRollbackDecision(),
 		Promoted: false,
 	}
-	assert.NoError(t, r.Validate())
+	assert.NoError(t, r.validate())
 }
 
 func TestStep70Response_Validate_MissingDecisionValue(t *testing.T) {
@@ -235,7 +249,7 @@ func TestStep70Response_Validate_MissingDecisionValue(t *testing.T) {
 		Decision: contracts.Decision{Action: contracts.DecisionActionAdopt, Value: nil},
 		Promoted: true,
 	}
-	err := r.Validate()
+	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70DecisionMissing)
 }
@@ -246,7 +260,7 @@ func TestStep70Response_Validate_BadRunID(t *testing.T) {
 		Decision: validAdoptDecision(),
 		Promoted: true,
 	}
-	assert.Error(t, r.Validate())
+	assert.Error(t, r.validate())
 }
 
 func TestStep70Response_Validate_RejectsDecisionVariantTypeMismatch(t *testing.T) {
@@ -258,7 +272,7 @@ func TestStep70Response_Validate_RejectsDecisionVariantTypeMismatch(t *testing.T
 		},
 		Promoted: false,
 	}
-	err := r.Validate()
+	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, contracts.ErrDecisionVariantTypeMismatch)
 }
@@ -291,7 +305,7 @@ func TestStep70Response_Validate_RejectsDecisionInnerActionMismatch(t *testing.T
 		},
 		Promoted: true,
 	}
-	err := r.Validate()
+	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, contracts.ErrDecisionVariantActionMismatch)
 }
@@ -302,7 +316,7 @@ func TestStep70Response_Validate_RejectsResponseRunIDMismatch(t *testing.T) {
 		Decision: validAdoptDecision(),
 		Promoted: true,
 	}
-	err := r.Validate()
+	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70ResponseRunIDMismatch)
 }
@@ -313,13 +327,21 @@ func TestStep70Response_Validate_RejectsForgedAdoptIdempotencyKey(t *testing.T) 
 		Decision: validAdoptDecision(),
 		Promoted: true,
 	}
-	adopt := r.Decision.Value.(contracts.DecisionAdopt)
+	adopt := mustDecisionAdopt(t, r.Decision)
 	adopt.IdempotencyKey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	r.Decision.Value = adopt
 
-	err := r.Validate()
+	err := r.validate()
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrStep70AdoptIdempotencyKeyMismatch)
+	assert.ErrorIs(t, err, contracts.ErrDecisionIdempotencyKeyMismatch)
+}
+
+func TestStep70Response_validate_AcceptsPointerDecisionAdopt(t *testing.T) {
+	r := validStep70Response()
+	adopt := mustDecisionAdopt(t, r.Decision)
+	r.Decision.Value = &adopt
+
+	assert.NoError(t, r.validate())
 }
 
 func TestDecodeAndValidateStep70Response_RejectsDuplicateTopLevelKey(t *testing.T) {
@@ -385,7 +407,7 @@ func TestDecodeAndValidateStep70Response_RejectsRequestRunIDMismatch(t *testing.
 func TestDecodeAndValidateStep70Response_RejectsCandidatesHashMismatch(t *testing.T) {
 	req := validStep70Request()
 	resp := validStep70Response()
-	adopt := resp.Decision.Value.(contracts.DecisionAdopt)
+	adopt := mustDecisionAdopt(t, resp.Decision)
 	adopt.CandidatesHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	adopt.IdempotencyKey = contracts.ComputeAdoptIdempotencyKey(string(adopt.RunID), adopt.TargetSha, adopt.BestShaBefore, adopt.CandidatesHash)
 	resp.Decision.Value = adopt
@@ -398,13 +420,24 @@ func TestDecodeAndValidateStep70Response_RejectsCandidatesHashMismatch(t *testin
 func TestDecodeAndValidateStep70Response_RejectsForgedIdempotencyKey(t *testing.T) {
 	req := validStep70Request()
 	resp := validStep70Response()
-	adopt := resp.Decision.Value.(contracts.DecisionAdopt)
+	adopt := mustDecisionAdopt(t, resp.Decision)
 	adopt.IdempotencyKey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	resp.Decision.Value = adopt
 
 	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrStep70AdoptIdempotencyKeyMismatch)
+	assert.ErrorIs(t, err, contracts.ErrDecisionIdempotencyKeyMismatch)
+}
+
+func TestDecodeAndValidateStep70Response_AcceptsPointerDecisionAdopt(t *testing.T) {
+	req := validStep70Request()
+	resp := validStep70Response()
+	adopt := mustDecisionAdopt(t, resp.Decision)
+	resp.Decision.Value = &adopt
+
+	got, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
+	require.NoError(t, err)
+	assert.Equal(t, req.TaskPackage.RunID, got.RunID)
 }
 
 func TestStep70Request_UnmarshalJSON_RejectsDuplicateTopLevelKey(t *testing.T) {
