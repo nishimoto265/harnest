@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"path/filepath"
 	"strings"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -13,68 +13,125 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const defaultConfigFile = "config.yaml"
+
 const (
 	DefaultRegistryHighThreshold     = 1501
 	DefaultRegistryCriticalThreshold = 2001
 )
 
-var (
-	ErrTrailingYAML = errors.New("config: YAML must contain exactly one document")
-
-	requiredStepTimeoutKeys = []string{
-		"step10",
-		"step20",
-		"step30",
-		"step40",
-		"step50",
-		"step60",
-		"step70",
-	}
-)
+var requiredStepTimeoutKeys = []string{
+	"step10",
+	"step20",
+	"step30",
+	"step40",
+	"step50",
+	"step60",
+	"step70",
+}
 
 type Config struct {
-	RunsBase                  string         `yaml:"runs_base" validate:"required"`
-	WorktreeBase              string         `yaml:"worktree_base" validate:"required"`
-	ClaudeCLIPath             string         `yaml:"claude_cli_path" validate:"required"`
-	CodexCLIPath              string         `yaml:"codex_cli_path" validate:"required"`
-	PreflightTimeoutSec       int            `yaml:"preflight_timeout_sec" validate:"required,gt=0"`
-	RescueMaxRetries          int            `yaml:"rescue_max_retries" validate:"required,gt=0"`
-	RegistryHighThreshold     int            `yaml:"registry_high_threshold" validate:"gt=0"`
-	RegistryCriticalThreshold int            `yaml:"registry_critical_threshold" validate:"gt=0"`
-	StepTimeouts              map[string]int `yaml:"step_timeouts" validate:"required,min=1,dive,keys,oneof=step10 step20 step30 step40 step50 step60 step70,endkeys,gt=0"`
+	Repo     RepoConfig     `yaml:"repo"`
+	Worktree WorktreeConfig `yaml:"worktree"`
+	Agents   AgentsConfig   `yaml:"agents"`
+	Paths    PathsConfig    `yaml:"paths"`
+
+	RunsBasePath              string         `yaml:"runs_base"`
+	WorktreeBasePath          string         `yaml:"worktree_base"`
+	ClaudeCLIPath             string         `yaml:"claude_cli_path"`
+	CodexCLIPath              string         `yaml:"codex_cli_path"`
+	PreflightTimeoutSec       int            `yaml:"preflight_timeout_sec"`
+	RescueMaxRetries          int            `yaml:"rescue_max_retries"`
+	RegistryHighThreshold     int            `yaml:"registry_high_threshold"`
+	RegistryCriticalThreshold int            `yaml:"registry_critical_threshold"`
+	StepTimeouts              map[string]int `yaml:"step_timeouts"`
+
+	configPath string
+	repoRoot   string
+}
+
+type RepoConfig struct {
+	GitHub        string `yaml:"github"`
+	Root          string `yaml:"root"`
+	DefaultBranch string `yaml:"default_branch"`
+	BestBranch    string `yaml:"best_branch"`
+}
+
+type WorktreeConfig struct {
+	Base string `yaml:"base"`
+}
+
+type AgentsConfig struct {
+	Implementer    string `yaml:"implementer"`
+	JudgePrimary   string `yaml:"judge_primary"`
+	JudgeSecondary string `yaml:"judge_secondary"`
+}
+
+type PathsConfig struct {
+	Runs          string `yaml:"runs"`
+	StateFile     string `yaml:"state_file"`
+	RulesRegistry string `yaml:"rules_registry"`
+}
+
+func LoadDefault() (Config, error) {
+	return Load(defaultConfigFile)
 }
 
 func LoadConfig(path string) (*Config, error) {
-	f, err := os.Open(path)
+	cfg, err := Load(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: open %s: %w", path, err)
-	}
-	defer f.Close()
-
-	dec := yaml.NewDecoder(f)
-	dec.KnownFields(true)
-
-	var cfg Config
-	if err := dec.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("config: decode %s: %w", path, err)
-	}
-
-	var trailing any
-	if err := dec.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return nil, fmt.Errorf("config: decode %s: %w", path, ErrTrailingYAML)
-		}
-		return nil, fmt.Errorf("config: decode %s: %w", path, err)
-	}
-
-	cfg.applyDefaults()
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("config: validate %s: %w", path, err)
+		return nil, err
 	}
 	return &cfg, nil
 }
 
+func Load(path string) (Config, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return Config{}, err
+	}
+	absPath = filepath.Clean(absPath)
+	if err := contracts.EnsureCleanAbsolutePath(absPath); err != nil {
+		return Config{}, err
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return Config{}, err
+	}
+
+	var cfg Config
+	dec := yaml.NewDecoder(strings.NewReader(string(data)))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		return Config{}, err
+	}
+	var rest any
+	if err := dec.Decode(&rest); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return Config{}, errors.New("config: YAML must contain exactly one document")
+		}
+		return Config{}, err
+	}
+
+	cfg.applyDefaults()
+	cfg.configPath = absPath
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
 func (c *Config) applyDefaults() {
+	if c.Agents.Implementer == "" {
+		c.Agents.Implementer = "claude"
+	}
+	if c.Agents.JudgePrimary == "" {
+		c.Agents.JudgePrimary = "claude"
+	}
+	if c.Agents.JudgeSecondary == "" {
+		c.Agents.JudgeSecondary = "codex"
+	}
 	if c.RegistryHighThreshold == 0 {
 		c.RegistryHighThreshold = DefaultRegistryHighThreshold
 	}
@@ -83,15 +140,91 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+func (c Config) RepoRoot() (string, error) {
+	if c.repoRoot != "" {
+		return c.repoRoot, nil
+	}
+	return c.resolveRepoRoot()
+}
+
+func (c Config) RunsBase() (string, error) {
+	value := c.Paths.Runs
+	if value == "" {
+		value = c.RunsBasePath
+	}
+	if value == "" {
+		return "", errors.New("config: RunsBase is required")
+	}
+	return c.resolvePath(value)
+}
+
+func (c Config) WorktreeBase() (string, error) {
+	value := c.Worktree.Base
+	if value == "" {
+		value = c.WorktreeBasePath
+	}
+	if value == "" {
+		return "", errors.New("config: WorktreeBase is required")
+	}
+	return c.resolvePath(value)
+}
+
+func (c Config) ProcessedPath() (string, error) {
+	if c.Paths.StateFile != "" {
+		return c.resolvePath(c.Paths.StateFile)
+	}
+	runsBase, err := c.RunsBase()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(runsBase, "processed.jsonl")
+	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (c Config) PromotionLockPath() (string, error) {
+	runsBase, err := c.RunsBase()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(runsBase, "promotion.lock")
+	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (c Config) ClaudeBinary() string {
+	if c.ClaudeCLIPath != "" {
+		return c.ClaudeCLIPath
+	}
+	if c.Agents.Implementer != "" {
+		return c.Agents.Implementer
+	}
+	if c.Agents.JudgePrimary != "" {
+		return c.Agents.JudgePrimary
+	}
+	return "claude"
+}
+
+func (c Config) CodexBinary() string {
+	if c.CodexCLIPath != "" {
+		return c.CodexCLIPath
+	}
+	if c.Agents.JudgeSecondary != "" {
+		return c.Agents.JudgeSecondary
+	}
+	return "codex"
+}
+
 func (c Config) Validate() error {
-	if err := validation.Instance().Struct(c); err != nil {
-		return err
+	if c.Paths.Runs == "" && c.RunsBasePath == "" {
+		return errors.New("config: RunsBase is required")
 	}
-	if err := contracts.EnsureCleanAbsolutePath(c.RunsBase); err != nil {
-		return err
-	}
-	if err := contracts.EnsureCleanAbsolutePath(c.WorktreeBase); err != nil {
-		return err
+	if c.Worktree.Base == "" && c.WorktreeBasePath == "" {
+		return errors.New("config: WorktreeBase is required")
 	}
 	if c.RegistryCriticalThreshold <= c.RegistryHighThreshold {
 		return fmt.Errorf(
@@ -100,21 +233,107 @@ func (c Config) Validate() error {
 			c.RegistryHighThreshold,
 		)
 	}
-
-	missing := missingStepTimeoutKeys(c.StepTimeouts)
-	if len(missing) > 0 {
-		return fmt.Errorf("config: step_timeouts missing required keys: %s", strings.Join(missing, ", "))
-	}
-	return nil
-}
-
-func missingStepTimeoutKeys(stepTimeouts map[string]int) []string {
-	missing := make([]string, 0, len(requiredStepTimeoutKeys))
-	for _, key := range requiredStepTimeoutKeys {
-		if _, ok := stepTimeouts[key]; !ok {
-			missing = append(missing, key)
+	if len(c.StepTimeouts) > 0 {
+		for _, key := range requiredStepTimeoutKeys {
+			if _, ok := c.StepTimeouts[key]; !ok {
+				return fmt.Errorf("config: step_timeouts missing required key: %s", key)
+			}
 		}
 	}
-	sort.Strings(missing)
-	return missing
+
+	if c.RunsBasePath != "" {
+		if err := contracts.EnsureCleanAbsolutePath(filepath.Clean(c.RunsBasePath)); err != nil {
+			return err
+		}
+	}
+	if c.WorktreeBasePath != "" {
+		if err := contracts.EnsureCleanAbsolutePath(filepath.Clean(c.WorktreeBasePath)); err != nil {
+			return err
+		}
+	}
+
+	type validationView struct {
+		RegistryHighThreshold     int `validate:"gt=0"`
+		RegistryCriticalThreshold int `validate:"gt=0"`
+		PreflightTimeoutSec       int `validate:"omitempty,gt=0"`
+		RescueMaxRetries          int `validate:"omitempty,gt=0"`
+	}
+	return validation.Instance().Struct(validationView{
+		RegistryHighThreshold:     c.RegistryHighThreshold,
+		RegistryCriticalThreshold: c.RegistryCriticalThreshold,
+		PreflightTimeoutSec:       c.PreflightTimeoutSec,
+		RescueMaxRetries:          c.RescueMaxRetries,
+	})
+}
+
+func (c Config) resolveRepoRoot() (string, error) {
+	if c.Repo.Root != "" {
+		return c.resolvePath(c.Repo.Root)
+	}
+	start := "."
+	if c.configPath != "" {
+		start = filepath.Dir(c.configPath)
+	}
+	return findRepoRoot(start)
+}
+
+func (c Config) resolvePath(value string) (string, error) {
+	if value == "" {
+		return "", errors.New("config: path is empty")
+	}
+	if strings.HasPrefix(value, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		value = filepath.Join(home, value[2:])
+	}
+	if filepath.IsAbs(value) {
+		value = filepath.Clean(value)
+		if err := contracts.EnsureCleanAbsolutePath(value); err != nil {
+			return "", err
+		}
+		return value, nil
+	}
+
+	root := c.repoRoot
+	if root == "" {
+		var err error
+		root, err = c.resolveRepoRoot()
+		if err != nil {
+			if c.configPath == "" {
+				return "", err
+			}
+			root = filepath.Dir(c.configPath)
+		}
+	}
+	resolved := filepath.Clean(filepath.Join(root, value))
+	if err := contracts.EnsureCleanAbsolutePath(resolved); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+func findRepoRoot(start string) (string, error) {
+	current, err := filepath.Abs(start)
+	if err != nil {
+		return "", err
+	}
+	current = filepath.Clean(current)
+	for {
+		gitPath := filepath.Join(current, ".git")
+		if _, err := os.Stat(gitPath); err == nil {
+			if err := contracts.EnsureCleanAbsolutePath(current); err != nil {
+				return "", err
+			}
+			return current, nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("config: could not find repository root from %q", start)
+		}
+		current = parent
+	}
 }

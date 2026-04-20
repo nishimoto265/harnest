@@ -178,6 +178,28 @@ func TestAppend_WritesDetailOverflowSidecar(t *testing.T) {
 	assert.Equal(t, detail, content)
 }
 
+func TestLastProcessedPRPath_UsesLatestTerminalEntries(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	ctx101 := testRunContext(t, "2026-04-21-PR101-abcdef0", runsBase, worktreeBase)
+	ctx102 := testRunContext(t, "2026-04-21-PR102-bcdef01", runsBase, worktreeBase)
+	ctx103 := testRunContext(t, "2026-04-21-PR103-cdef012", runsBase, worktreeBase)
+
+	require.NoError(t, Append(ctx101, completedEntry(101, ctx101.RunID, contracts.FailedStep70, time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC))))
+	require.NoError(t, Append(ctx102, startedEntry(102, ctx102.RunID, time.Date(2026, 4, 21, 11, 5, 0, 0, time.UTC))))
+	require.NoError(t, Append(ctx103, completedEntry(103, ctx103.RunID, contracts.FailedStep70, time.Date(2026, 4, 21, 11, 10, 0, 0, time.UTC))))
+
+	last, err := LastProcessedPRPath(ctx101.ProcessedPath())
+	require.NoError(t, err)
+	assert.Equal(t, 103, last)
+
+	processed, err := TerminalPRSetPath(ctx101.ProcessedPath())
+	require.NoError(t, err)
+	assert.Contains(t, processed, 101)
+	assert.Contains(t, processed, 103)
+	assert.NotContains(t, processed, 102)
+}
+
 func testRunContext(t *testing.T, runID string, runsBase string, worktreeBase string) internalio.RunContext {
 	t.Helper()
 	ctx, err := internalio.NewRunContext(contracts.RunID(runID), runsBase, worktreeBase)

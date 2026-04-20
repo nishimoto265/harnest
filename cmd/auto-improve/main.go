@@ -39,21 +39,6 @@ func newRootCmd() *cobra.Command {
 	return cmd
 }
 
-func newPreflightCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "preflight",
-		Short: "Run local toolchain and filesystem sanity checks",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			_, err := cmd.OutOrStdout().Write([]byte("OK\n"))
-			return err
-		},
-	}
-}
-
-func newDetectMergedCmd() *cobra.Command {
-	return notImplementedCommand("detect-merged", "Detect newly merged pull requests")
-}
-
 func newRunCmd() *cobra.Command {
 	cmd := notImplementedCommand("run", "Run the pipeline for one PR or the detect loop")
 	cmd.Use = "run"

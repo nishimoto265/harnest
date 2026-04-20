@@ -79,6 +79,48 @@ func ReadLatestForPR(ctx internalio.RunContext, pr int) (*contracts.StateEntry, 
 	return LastEventForPR(ctx, pr)
 }
 
+func TerminalPRSet(ctx internalio.RunContext) (map[int]struct{}, error) {
+	return TerminalPRSetPath(ctx.ProcessedPath())
+}
+
+func TerminalPRSetPath(path string) (map[int]struct{}, error) {
+	latest, err := latestEntriesByPRPath(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(latest) == 0 {
+		return nil, nil
+	}
+	processed := make(map[int]struct{}, len(latest))
+	for pr, entry := range latest {
+		if entry.Kind.IsTerminal() {
+			processed[pr] = struct{}{}
+		}
+	}
+	if len(processed) == 0 {
+		return nil, nil
+	}
+	return processed, nil
+}
+
+func LastProcessedPR(ctx internalio.RunContext) (int, error) {
+	return LastProcessedPRPath(ctx.ProcessedPath())
+}
+
+func LastProcessedPRPath(path string) (int, error) {
+	processed, err := TerminalPRSetPath(path)
+	if err != nil {
+		return 0, err
+	}
+	last := 0
+	for pr := range processed {
+		if pr > last {
+			last = pr
+		}
+	}
+	return last, nil
+}
+
 func Append(ctx internalio.RunContext, entry contracts.StateEntry) error {
 	return NewWriter(ctx).Append(entry)
 }
@@ -244,6 +286,32 @@ type processedLine struct {
 	Number int
 	Offset int64
 	Data   []byte
+}
+
+func latestEntriesByPRPath(path string) (map[int]contracts.StateEntry, error) {
+	lines, err := readProcessedLines(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	latest := make(map[int]contracts.StateEntry, len(lines))
+	for _, line := range lines {
+		entry, err := decodeStateLine(line)
+		if err != nil {
+			return nil, err
+		}
+		pr, ok := stateEntryPR(entry)
+		if !ok {
+			continue
+		}
+		latest[pr] = entry
+	}
+	if len(latest) == 0 {
+		return nil, nil
+	}
+	return latest, nil
 }
 
 func readProcessedLines(path string) ([]processedLine, error) {
