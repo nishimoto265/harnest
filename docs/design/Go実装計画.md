@@ -238,6 +238,7 @@ step30/60 は必ず後者を使う。
     - `status_changed`: `{kind: 'status_changed', schema_version, rule_id, prev_status, new_status, transition, op_id, version_seq, prev_hash, by_sunset_run_id, at}`
     - `archived`: `{kind: 'archived', schema_version, rule_id, prev_status, new_status, op_id, version_seq, prev_hash, by_sunset_run_id, at}`
     - `restored`: `{kind: 'restored', schema_version, rule_id, prev_status, new_status, op_id, version_seq, prev_hash, by_sunset_run_id, at}`
+  - registry chain rule (全 variant 共通): `version_seq == 1` の row は `prev_hash == ""` のみ許可、`version_seq > 1` の row は `prev_hash` 必須かつ直前 row の hash と一致
   - 全 kind とも 4KB cap、長文は sidecar 参照
 
 ### Intention の atomic overwrite と tmp cleanup (rev5 新規)

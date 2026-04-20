@@ -71,7 +71,11 @@ func validStep70RequestExternal() stepio.Step70Request {
 func validStep70ResponseJSONExternal(t *testing.T) []byte {
 	t.Helper()
 	candidates := validCandidatesForStep70External()
-	resp := stepio.Step70Response{
+	resp := struct {
+		RunID    contracts.RunID    `json:"run_id"`
+		Decision contracts.Decision `json:"decision"`
+		Promoted bool               `json:"promoted"`
+	}{
 		RunID: "2026-04-20-PR42-abcdef0",
 		Decision: contracts.Decision{
 			Action: contracts.DecisionActionAdopt,
@@ -137,8 +141,8 @@ func TestStep70Response_DirectJSONUnmarshal_SucceedsButRemainsUnbound(t *testing
 	var resp stepio.Step70Response
 	err := json.Unmarshal(data, &resp)
 	require.NoError(t, err)
-	assert.False(t, resp.DecodedAndBound())
-	assert.NoError(t, resp.Validate())
+	assert.False(t, resp.RequestBound())
+	assert.ErrorIs(t, resp.Validate(), stepio.ErrStep70ResponseNotBound)
 }
 
 func TestDecodeAndValidateStep70Response_BindsRequest(t *testing.T) {
@@ -147,8 +151,9 @@ func TestDecodeAndValidateStep70Response_BindsRequest(t *testing.T) {
 
 	got, err := stepio.DecodeAndValidateStep70Response(data, req)
 	require.NoError(t, err)
-	assert.Equal(t, req.TaskPackage.RunID, got.RunID)
-	assert.True(t, got.DecodedAndBound())
+	assert.Equal(t, req.TaskPackage.RunID, got.RunID())
+	assert.True(t, got.RequestBound())
+	assert.NoError(t, got.Validate())
 }
 
 func TestDecodeAndValidateStep70Response_RejectsRequestMismatchEvenWhenDirectDecodeSucceeds(t *testing.T) {
@@ -156,7 +161,7 @@ func TestDecodeAndValidateStep70Response_RejectsRequestMismatchEvenWhenDirectDec
 
 	var direct stepio.Step70Response
 	require.NoError(t, json.Unmarshal(data, &direct))
-	assert.False(t, direct.DecodedAndBound())
+	assert.False(t, direct.RequestBound())
 
 	req := validStep70RequestExternal()
 	req.Candidates.Candidates[0].Title = "different candidate set"
@@ -165,4 +170,23 @@ func TestDecodeAndValidateStep70Response_RejectsRequestMismatchEvenWhenDirectDec
 	_, err := stepio.DecodeAndValidateStep70Response(data, req)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, stepio.ErrStep70AdoptCandidatesHashMismatch)
+}
+
+func TestDecodeAndValidateStep70Response_PublicGetterReturnsCopy(t *testing.T) {
+	data := validStep70ResponseJSONExternal(t)
+	req := validStep70RequestExternal()
+
+	got, err := stepio.DecodeAndValidateStep70Response(data, req)
+	require.NoError(t, err)
+
+	decision := got.Decision()
+	adopt, ok := decision.Value.(contracts.DecisionAdopt)
+	require.True(t, ok)
+	adopt.Action = contracts.DecisionActionReject
+	decision.Action = contracts.DecisionActionReject
+	decision.Value = adopt
+
+	assert.Equal(t, contracts.DecisionActionAdopt, got.Decision().Action)
+	assert.Equal(t, contracts.DecisionActionAdopt, got.Decision().Value.(contracts.DecisionAdopt).Action)
+	assert.True(t, got.Promoted())
 }

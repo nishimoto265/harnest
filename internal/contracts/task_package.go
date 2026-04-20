@@ -3,6 +3,7 @@ package contracts
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"time"
 )
 
@@ -63,6 +64,7 @@ type TaskPackage struct {
 //   - pass==1 の entry が 3 件、pass==2 の entry が 3 件
 //   - 各 pass 内で AgentID が一意
 //   - 2 pass の AgentID 集合が完全一致 (例: pass1={a1,a2,a3} ⇒ pass2 も同じ)
+//
 // を満たす。step20/50 の `validateAgentsAgainstPass` はこの invariant を前提に
 // subset 一致ではなく set equality を担保する。
 var (
@@ -80,6 +82,7 @@ var (
 	// waiting for runtime IO corruption.
 	ErrTaskPackageDuplicatePath   = errors.New("contracts: task_package: duplicate worktree path across allocations")
 	ErrTaskPackageDuplicateBranch = errors.New("contracts: task_package: duplicate worktree branch across allocations")
+	ErrWorktreePathNotAbsolute    = errors.New("contracts: task_package: worktree path must be an absolute path")
 )
 
 // Validate enforces tag-based validation + the 3×2 matrix invariants described
@@ -90,10 +93,25 @@ func (p TaskPackage) Validate() error {
 	if err := validateStruct(p); err != nil {
 		return err
 	}
+	for i, w := range p.Worktrees {
+		if err := w.Validate(); err != nil {
+			return fmt.Errorf("worktrees[%d]: %w", i, err)
+		}
+	}
 	if err := p.validateWorktreeMatrix(); err != nil {
 		return err
 	}
 	return p.validateWorktreePathBranchUniqueness()
+}
+
+func (w WorktreeAllocation) Validate() error {
+	if err := validateStruct(w); err != nil {
+		return err
+	}
+	if !filepath.IsAbs(w.Path) {
+		return fmt.Errorf("%w: path=%q", ErrWorktreePathNotAbsolute, w.Path)
+	}
+	return nil
 }
 
 // validateWorktreePathBranchUniqueness enforces that every WorktreeAllocation

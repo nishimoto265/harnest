@@ -2,6 +2,7 @@ package stepio
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/validation"
@@ -89,6 +90,9 @@ func DecodeAndValidateStep50Response(data []byte, req Step50Request) (Step50Resp
 	}
 	if err := validateImplementationPartition(resp.Results, resp.RescueExhausted, req.Agents); err != nil {
 		return Step50Response{}, err
+	}
+	if resp.RunID != req.TaskPackage.RunID {
+		return Step50Response{}, fmt.Errorf("%w: response.run_id=%s request.run_id=%s", ErrResponseRunIDMismatch, resp.RunID, req.TaskPackage.RunID)
 	}
 	return resp, nil
 }

@@ -1,8 +1,10 @@
 package stepio
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/validation"
@@ -25,23 +27,26 @@ type Step70Request struct {
 	RegistryPath string `json:"registry_path" validate:"required"`
 }
 
-// Step70Response is the output envelope for step 70.
-// Decision は `<run>/70/decision.json` に atomic write 済みで渡す前提。
-//
-// Direct stdlib decode must still fail closed on malformed payloads because
-// this is an exported struct with exported fields. UnmarshalJSON therefore
-// enforces strict JSON + response-local invariants and leaves the value marked
-// as "not yet request-bound". Callers that need to consume the response as a
-// real step70 boundary must use DecodeAndValidateStep70Response(data, req),
-// which performs the second-stage request binding and flips DecodedAndBound().
-type Step70Response struct {
+type step70ResponsePayload struct {
 	RunID    contracts.RunID    `json:"run_id" validate:"required,run_id_fmt"`
 	Decision contracts.Decision `json:"decision"`
 	// Promoted: Decision.Action == adopt かつ best_branch push + registry append
 	// まで完走した場合のみ true。orchestrator は true のときに promoted event を
 	// state に append 可 (step70 自身が既に append 済みなので重複 append しない)。
 	Promoted bool `json:"promoted"`
+}
 
+// Step70Response is the opaque output envelope for step 70.
+// Decision は `<run>/70/decision.json` に atomic write 済みで渡す前提。
+//
+// Direct stdlib decode still enforces strict JSON + response-local invariants,
+// but the resulting value remains request-unbound. Public callers must treat
+// only DecodeAndValidateStep70Response output as a real boundary value:
+// Validate succeeds only after the request-aware binding step has run, and all
+// public access happens through copy-returning getters so a caller cannot keep
+// mutating a sticky "already validated" struct.
+type Step70Response struct {
+	payload             step70ResponsePayload
 	requestBoundChecked bool
 }
 
@@ -57,6 +62,7 @@ type Step70Response struct {
 // mislead the orchestrator into double-appending `promoted` / contradicting
 // the persisted decision.json.
 var (
+	ErrStep70ResponseNotBound             = errors.New("stepio: step70: response is not bound to a request; use DecodeAndValidateStep70Response")
 	ErrStep70PromotedRequiresAdopt        = errors.New("stepio: step70: promoted=true requires Decision.Action=adopt")
 	ErrStep70AdoptRequiresPromoted        = errors.New("stepio: step70: Decision.Action=adopt requires promoted=true")
 	ErrStep70RollbackMustNotPromote       = errors.New("stepio: step70: Decision.Action=rollback must have promoted=false")
@@ -93,6 +99,9 @@ func (r Step70Request) Validate() error {
 	if err := r.Candidates.VerifyCandidatesHash(); err != nil {
 		return err
 	}
+	if !filepath.IsAbs(r.RegistryPath) {
+		return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotAbsolute, r.RegistryPath)
+	}
 	if r.TaskPackage.RunID != r.Candidates.RunID {
 		return fmt.Errorf("%w: task_package.run_id=%s candidates.run_id=%s", ErrStep70RequestRunIDMismatch, r.TaskPackage.RunID, r.Candidates.RunID)
 	}
@@ -116,49 +125,121 @@ func DecodeAndValidateStep70Response(data []byte, req Step70Request) (Step70Resp
 }
 
 func (r *Step70Response) UnmarshalJSON(data []byte) error {
-	type alias Step70Response
-	var a alias
-	if err := contracts.DecodeStrictJSON(data, &a); err != nil {
+	var payload step70ResponsePayload
+	if err := contracts.DecodeStrictJSON(data, &payload); err != nil {
 		return err
 	}
-	*r = Step70Response(a)
-	r.requestBoundChecked = false
-	if err := r.Validate(); err != nil {
-		return err
-	}
+	*r = newStep70Response(payload, false)
 	return nil
 }
 
-func (r Step70Response) Validate() error {
-	return r.validate()
+func (r Step70Response) MarshalJSON() ([]byte, error) {
+	return json.Marshal(r.payload)
 }
 
-// DecodedAndBound reports whether DecodeAndValidateStep70Response completed the
-// request-bound second-stage validation for this value.
-func (r Step70Response) DecodedAndBound() bool {
+func (r Step70Response) RunID() contracts.RunID {
+	return r.payload.RunID
+}
+
+func (r Step70Response) Decision() contracts.Decision {
+	return cloneDecision(r.payload.Decision)
+}
+
+func (r Step70Response) Promoted() bool {
+	return r.payload.Promoted
+}
+
+func (r Step70Response) RequestBound() bool {
 	return r.requestBoundChecked
 }
 
+func (r Step70Response) DecodedAndBound() bool {
+	return r.RequestBound()
+}
+
+func (p step70ResponsePayload) Validate() error {
+	return p.validate()
+}
+
+func (r Step70Response) Validate() error {
+	if !r.requestBoundChecked {
+		return ErrStep70ResponseNotBound
+	}
+	return r.validate()
+}
+
 func (r Step70Response) validate() error {
-	if err := validation.Instance().Var(r.RunID, "required,run_id_fmt"); err != nil {
+	return r.payload.validate()
+}
+
+func (r Step70Response) validateAgainstRequest(req Step70Request) error {
+	return r.payload.validateAgainstRequest(req)
+}
+
+func newStep70Response(payload step70ResponsePayload, requestBound bool) Step70Response {
+	return Step70Response{
+		payload: step70ResponsePayload{
+			RunID:    payload.RunID,
+			Decision: cloneDecision(payload.Decision),
+			Promoted: payload.Promoted,
+		},
+		requestBoundChecked: requestBound,
+	}
+}
+
+func cloneDecision(d contracts.Decision) contracts.Decision {
+	cloned := contracts.Decision{Action: d.Action}
+	switch v := d.Value.(type) {
+	case contracts.DecisionAdopt:
+		cloned.Value = v
+	case *contracts.DecisionAdopt:
+		if v != nil {
+			cloned.Value = *v
+		}
+	case contracts.DecisionReject:
+		cloned.Value = v
+	case *contracts.DecisionReject:
+		if v != nil {
+			cloned.Value = *v
+		}
+	case contracts.DecisionNoop:
+		cloned.Value = v
+	case *contracts.DecisionNoop:
+		if v != nil {
+			cloned.Value = *v
+		}
+	case contracts.DecisionRollback:
+		cloned.Value = v
+	case *contracts.DecisionRollback:
+		if v != nil {
+			cloned.Value = *v
+		}
+	default:
+		cloned.Value = nil
+	}
+	return cloned
+}
+
+func (p step70ResponsePayload) validate() error {
+	if err := validation.Instance().Var(p.RunID, "required,run_id_fmt"); err != nil {
 		return err
 	}
-	if r.Decision.Value == nil {
+	if p.Decision.Value == nil {
 		return ErrStep70DecisionMissing
 	}
-	if err := r.Decision.Validate(); err != nil {
+	if err := p.Decision.Validate(); err != nil {
 		return err
 	}
-	_, _, decisionRunID, err := contractsDecisionMetadata(r.Decision)
+	_, _, decisionRunID, err := contractsDecisionMetadata(p.Decision)
 	if err != nil {
 		return err
 	}
-	if r.RunID != decisionRunID {
-		return fmt.Errorf("%w: response.run_id=%s decision.run_id=%s", ErrStep70ResponseRunIDMismatch, r.RunID, decisionRunID)
+	if p.RunID != decisionRunID {
+		return fmt.Errorf("%w: response.run_id=%s decision.run_id=%s", ErrStep70ResponseRunIDMismatch, p.RunID, decisionRunID)
 	}
-	switch r.Decision.Action {
+	switch p.Decision.Action {
 	case contracts.DecisionActionAdopt:
-		adopt, err := contractsDecisionAdopt(r.Decision)
+		adopt, err := contractsDecisionAdopt(p.Decision)
 		if err != nil {
 			return err
 		}
@@ -166,47 +247,47 @@ func (r Step70Response) validate() error {
 		if adopt.IdempotencyKey != expected {
 			return fmt.Errorf("%w: got=%s want=%s", ErrStep70AdoptIdempotencyKeyMismatch, adopt.IdempotencyKey, expected)
 		}
-		if !r.Promoted {
-			return fmt.Errorf("%w: action=%s promoted=%t", ErrStep70AdoptRequiresPromoted, r.Decision.Action, r.Promoted)
+		if !p.Promoted {
+			return fmt.Errorf("%w: action=%s promoted=%t", ErrStep70AdoptRequiresPromoted, p.Decision.Action, p.Promoted)
 		}
 	case contracts.DecisionActionReject:
-		if r.Promoted {
-			return fmt.Errorf("%w: action=%s promoted=%t", ErrStep70RejectMustNotPromote, r.Decision.Action, r.Promoted)
+		if p.Promoted {
+			return fmt.Errorf("%w: action=%s promoted=%t", ErrStep70RejectMustNotPromote, p.Decision.Action, p.Promoted)
 		}
 	case contracts.DecisionActionNoop:
-		if r.Promoted {
-			return fmt.Errorf("%w: action=%s promoted=%t", ErrStep70NoopMustNotPromote, r.Decision.Action, r.Promoted)
+		if p.Promoted {
+			return fmt.Errorf("%w: action=%s promoted=%t", ErrStep70NoopMustNotPromote, p.Decision.Action, p.Promoted)
 		}
 	case contracts.DecisionActionRollback:
-		if r.Promoted {
-			return fmt.Errorf("%w: action=%s promoted=%t", ErrStep70RollbackMustNotPromote, r.Decision.Action, r.Promoted)
+		if p.Promoted {
+			return fmt.Errorf("%w: action=%s promoted=%t", ErrStep70RollbackMustNotPromote, p.Decision.Action, p.Promoted)
 		}
 	default:
-		return fmt.Errorf("%w: action=%q", contracts.ErrUnknownDecisionAction, r.Decision.Action)
+		return fmt.Errorf("%w: action=%q", contracts.ErrUnknownDecisionAction, p.Decision.Action)
 	}
 	// Secondary sanity check: if Promoted==true but action is not adopt, fail
 	// (this is equivalent to the per-action branches above but kept as a single
 	// direction-reversed assertion for review clarity).
-	if r.Promoted && r.Decision.Action != contracts.DecisionActionAdopt {
-		return fmt.Errorf("%w: action=%s promoted=true", ErrStep70PromotedRequiresAdopt, r.Decision.Action)
+	if p.Promoted && p.Decision.Action != contracts.DecisionActionAdopt {
+		return fmt.Errorf("%w: action=%s promoted=true", ErrStep70PromotedRequiresAdopt, p.Decision.Action)
 	}
 	return nil
 }
 
-func (r Step70Response) validateAgainstRequest(req Step70Request) error {
+func (p step70ResponsePayload) validateAgainstRequest(req Step70Request) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}
-	if err := r.validate(); err != nil {
+	if err := p.validate(); err != nil {
 		return err
 	}
-	if r.RunID != req.TaskPackage.RunID {
-		return fmt.Errorf("%w: response.run_id=%s request.run_id=%s", ErrStep70RequestResponseRunIDMismatch, r.RunID, req.TaskPackage.RunID)
+	if p.RunID != req.TaskPackage.RunID {
+		return fmt.Errorf("%w: response.run_id=%s request.run_id=%s", ErrStep70RequestResponseRunIDMismatch, p.RunID, req.TaskPackage.RunID)
 	}
-	if r.Decision.Action != contracts.DecisionActionAdopt {
+	if p.Decision.Action != contracts.DecisionActionAdopt {
 		return nil
 	}
-	adopt, err := contractsDecisionAdopt(r.Decision)
+	adopt, err := contractsDecisionAdopt(p.Decision)
 	if err != nil {
 		return err
 	}

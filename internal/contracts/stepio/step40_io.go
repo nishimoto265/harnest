@@ -3,6 +3,7 @@ package stepio
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/validation"
@@ -28,6 +29,7 @@ type Step40Response struct {
 var (
 	ErrStep40ResponseRunIDMismatch   = errors.New("stepio: step40: response.run_id must equal candidates.run_id")
 	ErrStep40CandidatesCountMismatch = errors.New("stepio: step40: candidates_count must equal len(candidates.candidates)")
+	ErrRegistryPathNotAbsolute       = errors.New("stepio: registry_path must be an absolute path")
 )
 
 func (r *Step40Request) UnmarshalJSON(data []byte) error {
@@ -43,6 +45,9 @@ func (r *Step40Request) UnmarshalJSON(data []byte) error {
 func (r Step40Request) Validate() error {
 	if err := validation.Instance().Struct(r); err != nil {
 		return err
+	}
+	if !filepath.IsAbs(r.RegistryPath) {
+		return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotAbsolute, r.RegistryPath)
 	}
 	return r.TaskPackage.Validate()
 }

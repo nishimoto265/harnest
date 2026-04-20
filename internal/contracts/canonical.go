@@ -16,7 +16,7 @@ import (
 // level, preserves arrays in-order, disables HTML escaping, and normalizes
 // numbers to the minimal JSON representation produced by Go's encoder.
 func CanonicalMarshal(v any) ([]byte, error) {
-	if err := rejectForbiddenCanonicalKinds(reflect.ValueOf(v), "$"); err != nil {
+	if err := rejectForbiddenCanonicalKinds(reflect.ValueOf(v), "$", make(map[uintptr]struct{})); err != nil {
 		return nil, err
 	}
 
@@ -44,35 +44,61 @@ func CanonicalMarshal(v any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func rejectForbiddenCanonicalKinds(v reflect.Value, path string) error {
+func rejectForbiddenCanonicalKinds(v reflect.Value, path string, seen map[uintptr]struct{}) error {
 	if !v.IsValid() {
 		return nil
 	}
 
+	if shouldTrackCanonicalVisit(v) {
+		ptr := v.Pointer()
+		if ptr != 0 {
+			if _, ok := seen[ptr]; ok {
+				return &json.UnsupportedValueError{
+					Value: v,
+					Str:   fmt.Sprintf("encountered a cycle via %s", path),
+				}
+			}
+			seen[ptr] = struct{}{}
+			defer delete(seen, ptr)
+		}
+	}
+
 	switch v.Kind() {
-	case reflect.Interface, reflect.Pointer:
+	case reflect.Interface:
 		if v.IsNil() {
 			return nil
 		}
-		return rejectForbiddenCanonicalKinds(v.Elem(), path)
+		return rejectForbiddenCanonicalKinds(v.Elem(), path, seen)
+	case reflect.Pointer:
+		if v.IsNil() {
+			return nil
+		}
+		return rejectForbiddenCanonicalKinds(v.Elem(), path, seen)
 	case reflect.Struct:
 		t := v.Type()
 		for i := 0; i < v.NumField(); i++ {
 			field := t.Field(i)
-			if field.PkgPath != "" {
-				continue
-			}
 			if field.Tag.Get("json") == "-" {
 				continue
 			}
-			if err := rejectForbiddenCanonicalKinds(v.Field(i), path+"."+field.Name); err != nil {
+			fieldKind := fieldKindAfterPointerDeref(field.Type)
+			switch {
+			case field.Anonymous && fieldKind == reflect.Struct:
+				// Match encoding/json field promotion semantics: embedded structs
+				// are walked even when the field itself is unexported.
+			case field.Anonymous && field.PkgPath != "":
+				continue
+			case !field.Anonymous && field.PkgPath != "":
+				continue
+			}
+			if err := rejectForbiddenCanonicalKinds(v.Field(i), path+"."+field.Name, seen); err != nil {
 				return err
 			}
 		}
 		return nil
 	case reflect.Slice, reflect.Array:
 		for i := 0; i < v.Len(); i++ {
-			if err := rejectForbiddenCanonicalKinds(v.Index(i), fmt.Sprintf("%s[%d]", path, i)); err != nil {
+			if err := rejectForbiddenCanonicalKinds(v.Index(i), fmt.Sprintf("%s[%d]", path, i), seen); err != nil {
 				return err
 			}
 		}
@@ -80,7 +106,7 @@ func rejectForbiddenCanonicalKinds(v reflect.Value, path string) error {
 	case reflect.Map:
 		iter := v.MapRange()
 		for iter.Next() {
-			if err := rejectForbiddenCanonicalKinds(iter.Value(), fmt.Sprintf("%s[%v]", path, iter.Key())); err != nil {
+			if err := rejectForbiddenCanonicalKinds(iter.Value(), fmt.Sprintf("%s[%v]", path, iter.Key()), seen); err != nil {
 				return err
 			}
 		}
@@ -92,6 +118,22 @@ func rejectForbiddenCanonicalKinds(v reflect.Value, path string) error {
 	default:
 		return nil
 	}
+}
+
+func shouldTrackCanonicalVisit(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice:
+		return !v.IsNil()
+	default:
+		return false
+	}
+}
+
+func fieldKindAfterPointerDeref(t reflect.Type) reflect.Kind {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.Kind()
 }
 
 func writeCanonicalJSON(buf *bytes.Buffer, v any) error {

@@ -178,3 +178,82 @@ func TestCanonicalMarshal_NormalizesNegativeZero(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "0", string(data))
 }
+
+func TestCanonicalMarshal_RejectsForbiddenKindsInAnonymousEmbeddedStructs(t *testing.T) {
+	type embeddedUnexported struct {
+		Score float64 `json:"score"`
+	}
+	type EmbeddedExported struct {
+		Score float64 `json:"score"`
+	}
+	type withEmbeddedUnexported struct {
+		embeddedUnexported
+	}
+	type withEmbeddedExported struct {
+		EmbeddedExported
+	}
+
+	_, err := CanonicalMarshal(withEmbeddedUnexported{
+		embeddedUnexported: embeddedUnexported{Score: 1.0},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCanonicalForbiddenKind)
+
+	_, err = CanonicalMarshal(withEmbeddedExported{
+		EmbeddedExported: EmbeddedExported{Score: 1.0},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCanonicalForbiddenKind)
+}
+
+func TestCanonicalMarshal_SkipsUnexportedNonEmbeddedStructFields(t *testing.T) {
+	type hiddenFloat struct {
+		Score float64 `json:"score"`
+	}
+	type payload struct {
+		hidden hiddenFloat
+	}
+
+	data, err := CanonicalMarshal(payload{
+		hidden: hiddenFloat{Score: 1.0},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, `{}`, string(data))
+}
+
+func TestCanonicalMarshal_RejectsPointerCycles(t *testing.T) {
+	type node struct {
+		Next *node `json:"next"`
+	}
+
+	n := &node{}
+	n.Next = n
+
+	_, err := CanonicalMarshal(n)
+	require.Error(t, err)
+
+	var unsupported *json.UnsupportedValueError
+	require.ErrorAs(t, err, &unsupported)
+}
+
+func TestCanonicalMarshal_RejectsMapCycles(t *testing.T) {
+	m := map[string]any{}
+	m["self"] = m
+
+	_, err := CanonicalMarshal(m)
+	require.Error(t, err)
+
+	var unsupported *json.UnsupportedValueError
+	require.ErrorAs(t, err, &unsupported)
+}
+
+func TestCanonicalMarshal_RejectsSliceCycles(t *testing.T) {
+	s := make([]any, 1)
+	s[0] = &s
+
+	_, err := CanonicalMarshal(s)
+	require.Error(t, err)
+
+	var unsupported *json.UnsupportedValueError
+	require.ErrorAs(t, err, &unsupported)
+}

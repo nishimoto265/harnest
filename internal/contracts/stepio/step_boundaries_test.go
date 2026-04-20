@@ -353,6 +353,15 @@ func TestStep40Response_Validate_RejectsCandidatesCountMismatch(t *testing.T) {
 	assert.ErrorIs(t, err, ErrStep40CandidatesCountMismatch)
 }
 
+func TestStep40Request_Validate_RejectsRelativeRegistryPath(t *testing.T) {
+	req := validStep40Request()
+	req.RegistryPath = "tmp/runs/rules-registry.jsonl"
+
+	err := req.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryPathNotAbsolute)
+}
+
 func TestStep50Response_Validate_RejectsManifestPassMismatch(t *testing.T) {
 	resp := validStep50Response()
 	resp.Results[0].Manifest = validManifestSuccess(1, "a1")
@@ -428,6 +437,26 @@ func TestDecodeAndValidateStep20Response_AcceptsExactPartition(t *testing.T) {
 	assert.Equal(t, resp.RunID, got.RunID)
 }
 
+func TestDecodeAndValidateStep20Response_RejectsCrossRunReplay(t *testing.T) {
+	req := validStep20Request()
+	req.TaskPackage.RunID = "2026-04-21-PR42-abcdef0"
+	resp := Step20Response{
+		RunID: "2026-04-20-PR42-abcdef0",
+		Pass:  1,
+		Results: []Step20AgentResult{
+			{Agent: "a1", Manifest: validManifestSuccess(1, "a1")},
+			{Agent: "a2", Manifest: validManifestSuccess(1, "a2")},
+		},
+		RescueExhausted: []RescueExhausted{
+			{Agent: "a3", RetryCount: 3},
+		},
+	}
+
+	_, err := DecodeAndValidateStep20Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrResponseRunIDMismatch)
+}
+
 func TestDecodeAndValidateStep50Response_RejectsCoverageMismatchOnInjectedAgent(t *testing.T) {
 	req := validStep50Request()
 	resp := Step50Response{
@@ -464,4 +493,24 @@ func TestDecodeAndValidateStep50Response_AcceptsExactPartition(t *testing.T) {
 	got, err := DecodeAndValidateStep50Response(mustMarshalJSON(t, resp), req)
 	require.NoError(t, err)
 	assert.Equal(t, resp.RunID, got.RunID)
+}
+
+func TestDecodeAndValidateStep50Response_RejectsCrossRunReplay(t *testing.T) {
+	req := validStep50Request()
+	req.TaskPackage.RunID = "2026-04-21-PR42-abcdef0"
+	resp := Step50Response{
+		RunID: "2026-04-20-PR42-abcdef0",
+		Pass:  2,
+		Results: []Step20AgentResult{
+			{Agent: "a1", Manifest: validManifestSuccess(2, "a1")},
+			{Agent: "a3", Manifest: validManifestSuccess(2, "a3")},
+		},
+		RescueExhausted: []RescueExhausted{
+			{Agent: "a2", RetryCount: 3},
+		},
+	}
+
+	_, err := DecodeAndValidateStep50Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrResponseRunIDMismatch)
 }

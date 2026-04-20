@@ -93,6 +93,21 @@ func TestTaskPackage_Validate_Valid(t *testing.T) {
 	assert.NoError(t, validTaskPackage().Validate())
 }
 
+func TestTaskPackage_Validate_RejectsRelativeWorktreePath(t *testing.T) {
+	pkg := validTaskPackage()
+	pkg.Worktrees[0].Path = "tmp/wt/pass1-a1"
+
+	err := pkg.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWorktreePathNotAbsolute)
+}
+
+func TestWorktreeAllocation_Validate_AcceptsAbsolutePath(t *testing.T) {
+	w := validTaskPackage().Worktrees[0]
+
+	assert.NoError(t, w.Validate())
+}
+
 func TestTaskPackage_Validate_Reject_PassCountMismatch(t *testing.T) {
 	// pass==1 が 4 (distinct agents)、pass==2 が 2 → len=6 は満たすが matrix invariant 違反。
 	pkg := validTaskPackage()

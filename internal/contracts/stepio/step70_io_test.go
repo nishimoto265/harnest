@@ -108,10 +108,17 @@ func validStep70Request() Step70Request {
 }
 
 func validStep70Response() Step70Response {
+	return newTestStep70Response("2026-04-20-PR42-abcdef0", validAdoptDecision(), true)
+}
+
+func newTestStep70Response(runID contracts.RunID, decision contracts.Decision, promoted bool) Step70Response {
 	return Step70Response{
-		RunID:    "2026-04-20-PR42-abcdef0",
-		Decision: validAdoptDecision(),
-		Promoted: true,
+		payload: step70ResponsePayload{
+			RunID:    runID,
+			Decision: decision,
+			Promoted: promoted,
+		},
+		requestBoundChecked: true,
 	}
 }
 
@@ -146,6 +153,15 @@ func TestStep70Request_Validate_RejectsMissingRegistryPath(t *testing.T) {
 	assert.Error(t, r.Validate())
 }
 
+func TestStep70Request_Validate_RejectsRelativeRegistryPath(t *testing.T) {
+	r := validStep70Request()
+	r.RegistryPath = "tmp/runs/rules-registry.jsonl"
+
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryPathNotAbsolute)
+}
+
 func TestStep70Request_Validate_RejectsRunIDMismatch(t *testing.T) {
 	r := validStep70Request()
 	r.Candidates.RunID = "2026-04-21-PR42-abcdef0"
@@ -163,115 +179,71 @@ func TestStep70Request_Validate_RejectsTamperedCandidatesHash(t *testing.T) {
 }
 
 func TestStep70Response_Validate_Adopt_Promoted_True(t *testing.T) {
-	r := Step70Response{
-		RunID:    "2026-04-20-PR42-abcdef0",
-		Decision: validAdoptDecision(),
-		Promoted: true,
-	}
+	r := newTestStep70Response("2026-04-20-PR42-abcdef0", validAdoptDecision(), true)
 	assert.NoError(t, r.validate())
 }
 
 func TestStep70Response_Validate_Adopt_Promoted_False_Rejected(t *testing.T) {
 	// adopt + promoted=false → inconsistent (adopt means we successfully promoted).
-	r := Step70Response{
-		RunID:    "2026-04-20-PR42-abcdef0",
-		Decision: validAdoptDecision(),
-		Promoted: false,
-	}
+	r := newTestStep70Response("2026-04-20-PR42-abcdef0", validAdoptDecision(), false)
 	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70AdoptRequiresPromoted)
 }
 
 func TestStep70Response_Validate_Reject_Promoted_True_Rejected(t *testing.T) {
-	r := Step70Response{
-		RunID:    "2026-04-20-PR42-abcdef0",
-		Decision: validRejectDecision(),
-		Promoted: true,
-	}
+	r := newTestStep70Response("2026-04-20-PR42-abcdef0", validRejectDecision(), true)
 	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70RejectMustNotPromote)
 }
 
 func TestStep70Response_Validate_Reject_Promoted_False(t *testing.T) {
-	r := Step70Response{
-		RunID:    "2026-04-20-PR42-abcdef0",
-		Decision: validRejectDecision(),
-		Promoted: false,
-	}
+	r := newTestStep70Response("2026-04-20-PR42-abcdef0", validRejectDecision(), false)
 	assert.NoError(t, r.validate())
 }
 
 func TestStep70Response_Validate_Noop_Promoted_True_Rejected(t *testing.T) {
-	r := Step70Response{
-		RunID:    "2026-04-20-PR42-abcdef0",
-		Decision: validNoopDecision(),
-		Promoted: true,
-	}
+	r := newTestStep70Response("2026-04-20-PR42-abcdef0", validNoopDecision(), true)
 	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70NoopMustNotPromote)
 }
 
 func TestStep70Response_Validate_Noop_Promoted_False(t *testing.T) {
-	r := Step70Response{
-		RunID:    "2026-04-20-PR42-abcdef0",
-		Decision: validNoopDecision(),
-		Promoted: false,
-	}
+	r := newTestStep70Response("2026-04-20-PR42-abcdef0", validNoopDecision(), false)
 	assert.NoError(t, r.validate())
 }
 
 func TestStep70Response_Validate_Rollback_Promoted_True_Rejected(t *testing.T) {
-	r := Step70Response{
-		RunID:    "2026-04-20-PR42-abcdef0",
-		Decision: validRollbackDecision(),
-		Promoted: true,
-	}
+	r := newTestStep70Response("2026-04-20-PR42-abcdef0", validRollbackDecision(), true)
 	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70RollbackMustNotPromote)
 }
 
 func TestStep70Response_Validate_Rollback_Promoted_False(t *testing.T) {
-	r := Step70Response{
-		RunID:    "2026-04-20-PR42-abcdef0",
-		Decision: validRollbackDecision(),
-		Promoted: false,
-	}
+	r := newTestStep70Response("2026-04-20-PR42-abcdef0", validRollbackDecision(), false)
 	assert.NoError(t, r.validate())
 }
 
 func TestStep70Response_Validate_MissingDecisionValue(t *testing.T) {
-	r := Step70Response{
-		RunID:    "2026-04-20-PR42-abcdef0",
-		Decision: contracts.Decision{Action: contracts.DecisionActionAdopt, Value: nil},
-		Promoted: true,
-	}
+	r := newTestStep70Response("2026-04-20-PR42-abcdef0", contracts.Decision{Action: contracts.DecisionActionAdopt, Value: nil}, true)
 	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70DecisionMissing)
 }
 
 func TestStep70Response_Validate_BadRunID(t *testing.T) {
-	r := Step70Response{
-		RunID:    "not-a-run-id",
-		Decision: validAdoptDecision(),
-		Promoted: true,
-	}
+	r := newTestStep70Response("not-a-run-id", validAdoptDecision(), true)
 	assert.Error(t, r.validate())
 }
 
 func TestStep70Response_Validate_RejectsDecisionVariantTypeMismatch(t *testing.T) {
-	r := Step70Response{
-		RunID: "2026-04-20-PR42-abcdef0",
-		Decision: contracts.Decision{
-			Action: contracts.DecisionActionReject,
-			Value:  validAdoptDecision().Value,
-		},
-		Promoted: false,
-	}
+	r := newTestStep70Response("2026-04-20-PR42-abcdef0", contracts.Decision{
+		Action: contracts.DecisionActionReject,
+		Value:  validAdoptDecision().Value,
+	}, false)
 	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, contracts.ErrDecisionVariantTypeMismatch)
@@ -279,57 +251,45 @@ func TestStep70Response_Validate_RejectsDecisionVariantTypeMismatch(t *testing.T
 
 func TestStep70Response_Validate_RejectsDecisionInnerActionMismatch(t *testing.T) {
 	candidatesHash := contracts.CanonicalCandidatesHash(validCandidates().Candidates)
-	r := Step70Response{
-		RunID: "2026-04-20-PR42-abcdef0",
-		Decision: contracts.Decision{
-			Action: contracts.DecisionActionAdopt,
-			Value: contracts.DecisionAdopt{
-				Action:        contracts.DecisionActionReject,
-				SchemaVersion: "1",
-				RunID:         "2026-04-20-PR42-abcdef0",
-				IdempotencyKey: contracts.ComputeAdoptIdempotencyKey(
-					"2026-04-20-PR42-abcdef0",
-					"2222222222222222222222222222222222222222",
-					"1111111111111111111111111111111111111111",
-					candidatesHash,
-				),
-				BestShaBefore:  "1111111111111111111111111111111111111111",
-				TargetSha:      "2222222222222222222222222222222222222222",
-				CandidatesHash: candidatesHash,
-				RegistryAppendResult: contracts.RegistryAppendResult{
-					Offset: 0,
-					Sha256: "0000000000000000000000000000000000000000000000000000000000000003",
-				},
-				DecidedAt: time.Now(),
+	r := newTestStep70Response("2026-04-20-PR42-abcdef0", contracts.Decision{
+		Action: contracts.DecisionActionAdopt,
+		Value: contracts.DecisionAdopt{
+			Action:        contracts.DecisionActionReject,
+			SchemaVersion: "1",
+			RunID:         "2026-04-20-PR42-abcdef0",
+			IdempotencyKey: contracts.ComputeAdoptIdempotencyKey(
+				"2026-04-20-PR42-abcdef0",
+				"2222222222222222222222222222222222222222",
+				"1111111111111111111111111111111111111111",
+				candidatesHash,
+			),
+			BestShaBefore:  "1111111111111111111111111111111111111111",
+			TargetSha:      "2222222222222222222222222222222222222222",
+			CandidatesHash: candidatesHash,
+			RegistryAppendResult: contracts.RegistryAppendResult{
+				Offset: 0,
+				Sha256: "0000000000000000000000000000000000000000000000000000000000000003",
 			},
+			DecidedAt: time.Now(),
 		},
-		Promoted: true,
-	}
+	}, true)
 	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, contracts.ErrDecisionVariantActionMismatch)
 }
 
 func TestStep70Response_Validate_RejectsResponseRunIDMismatch(t *testing.T) {
-	r := Step70Response{
-		RunID:    "2026-04-21-PR42-abcdef0",
-		Decision: validAdoptDecision(),
-		Promoted: true,
-	}
+	r := newTestStep70Response("2026-04-21-PR42-abcdef0", validAdoptDecision(), true)
 	err := r.validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70ResponseRunIDMismatch)
 }
 
 func TestStep70Response_Validate_RejectsForgedAdoptIdempotencyKey(t *testing.T) {
-	r := Step70Response{
-		RunID:    "2026-04-20-PR42-abcdef0",
-		Decision: validAdoptDecision(),
-		Promoted: true,
-	}
-	adopt := mustDecisionAdopt(t, r.Decision)
+	r := newTestStep70Response("2026-04-20-PR42-abcdef0", validAdoptDecision(), true)
+	adopt := mustDecisionAdopt(t, r.payload.Decision)
 	adopt.IdempotencyKey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-	r.Decision.Value = adopt
+	r.payload.Decision.Value = adopt
 
 	err := r.validate()
 	require.Error(t, err)
@@ -338,8 +298,8 @@ func TestStep70Response_Validate_RejectsForgedAdoptIdempotencyKey(t *testing.T) 
 
 func TestStep70Response_validate_AcceptsPointerDecisionAdopt(t *testing.T) {
 	r := validStep70Response()
-	adopt := mustDecisionAdopt(t, r.Decision)
-	r.Decision.Value = &adopt
+	adopt := mustDecisionAdopt(t, r.payload.Decision)
+	r.payload.Decision.Value = &adopt
 
 	assert.NoError(t, r.validate())
 }
@@ -375,7 +335,7 @@ func TestDecodeAndValidateStep70Response_RejectsTrailingTokens(t *testing.T) {
 func TestDecodeAndValidateStep70Response_RejectsPromotedActionMismatch(t *testing.T) {
 	req := validStep70Request()
 	resp := validStep70Response()
-	resp.Promoted = false
+	resp.payload.Promoted = false
 
 	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
 	require.Error(t, err)
@@ -385,7 +345,7 @@ func TestDecodeAndValidateStep70Response_RejectsPromotedActionMismatch(t *testin
 func TestDecodeAndValidateStep70Response_RejectsDecisionRunIDMismatch(t *testing.T) {
 	req := validStep70Request()
 	resp := validStep70Response()
-	resp.RunID = "2026-04-21-PR42-abcdef0"
+	resp.payload.RunID = "2026-04-21-PR42-abcdef0"
 
 	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
 	require.Error(t, err)
@@ -407,10 +367,10 @@ func TestDecodeAndValidateStep70Response_RejectsRequestRunIDMismatch(t *testing.
 func TestDecodeAndValidateStep70Response_RejectsCandidatesHashMismatch(t *testing.T) {
 	req := validStep70Request()
 	resp := validStep70Response()
-	adopt := mustDecisionAdopt(t, resp.Decision)
+	adopt := mustDecisionAdopt(t, resp.payload.Decision)
 	adopt.CandidatesHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	adopt.IdempotencyKey = contracts.ComputeAdoptIdempotencyKey(string(adopt.RunID), adopt.TargetSha, adopt.BestShaBefore, adopt.CandidatesHash)
-	resp.Decision.Value = adopt
+	resp.payload.Decision.Value = adopt
 
 	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
 	require.Error(t, err)
@@ -420,9 +380,9 @@ func TestDecodeAndValidateStep70Response_RejectsCandidatesHashMismatch(t *testin
 func TestDecodeAndValidateStep70Response_RejectsForgedIdempotencyKey(t *testing.T) {
 	req := validStep70Request()
 	resp := validStep70Response()
-	adopt := mustDecisionAdopt(t, resp.Decision)
+	adopt := mustDecisionAdopt(t, resp.payload.Decision)
 	adopt.IdempotencyKey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-	resp.Decision.Value = adopt
+	resp.payload.Decision.Value = adopt
 
 	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
 	require.Error(t, err)
@@ -432,13 +392,14 @@ func TestDecodeAndValidateStep70Response_RejectsForgedIdempotencyKey(t *testing.
 func TestDecodeAndValidateStep70Response_AcceptsPointerDecisionAdopt(t *testing.T) {
 	req := validStep70Request()
 	resp := validStep70Response()
-	adopt := mustDecisionAdopt(t, resp.Decision)
-	resp.Decision.Value = &adopt
+	adopt := mustDecisionAdopt(t, resp.payload.Decision)
+	resp.payload.Decision.Value = &adopt
 
 	got, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
 	require.NoError(t, err)
-	assert.Equal(t, req.TaskPackage.RunID, got.RunID)
-	assert.True(t, got.DecodedAndBound())
+	assert.Equal(t, req.TaskPackage.RunID, got.RunID())
+	assert.True(t, got.RequestBound())
+	assert.NoError(t, got.Validate())
 }
 
 func TestStep70Request_UnmarshalJSON_RejectsDuplicateTopLevelKey(t *testing.T) {

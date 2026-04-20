@@ -124,5 +124,8 @@ func DecodeAndValidateStep20Response(data []byte, req Step20Request) (Step20Resp
 	if err := validateImplementationPartition(resp.Results, resp.RescueExhausted, req.Agents); err != nil {
 		return Step20Response{}, err
 	}
+	if resp.RunID != req.TaskPackage.RunID {
+		return Step20Response{}, fmt.Errorf("%w: response.run_id=%s request.run_id=%s", ErrResponseRunIDMismatch, resp.RunID, req.TaskPackage.RunID)
+	}
 	return resp, nil
 }

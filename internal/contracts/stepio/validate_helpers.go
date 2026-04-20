@@ -15,6 +15,7 @@ var (
 	ErrStepResponseManifestRunIDMismatch = errors.New("stepio: response.run_id must equal manifest.run_id")
 	ErrStepResponseManifestPassMismatch  = errors.New("stepio: response.pass must equal manifest.pass")
 	ErrStepResponseManifestAgentMismatch = errors.New("stepio: result.agent must equal manifest.agent")
+	ErrResponseRunIDMismatch             = errors.New("stepio: response.run_id must equal request.task_package.run_id")
 	ErrAgentResultOverlap                = errors.New("stepio: response agent must not appear in both results and rescue_exhausted")
 	ErrAgentCoverageMismatch             = errors.New("stepio: response agents must partition request.agents exactly")
 )
