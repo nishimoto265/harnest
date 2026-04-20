@@ -206,6 +206,105 @@ func TestCanonicalMarshal_RejectsForbiddenKindsInAnonymousEmbeddedStructs(t *tes
 	assert.ErrorIs(t, err, ErrCanonicalForbiddenKind)
 }
 
+func TestCanonicalMarshal_IgnoresConflictingEmbeddedTaggedFieldsThatJSONDrops(t *testing.T) {
+	type EmbeddedA struct {
+		Score float64 `json:"score"`
+	}
+	type EmbeddedB struct {
+		Value int `json:"score"`
+	}
+	type payload struct {
+		EmbeddedA
+		EmbeddedB
+	}
+
+	v := payload{
+		EmbeddedA: EmbeddedA{Score: 1.5},
+		EmbeddedB: EmbeddedB{Value: 2},
+	}
+
+	raw, err := json.Marshal(v)
+	require.NoError(t, err)
+	assert.Equal(t, `{}`, string(raw))
+
+	canonical, err := CanonicalMarshal(v)
+	require.NoError(t, err)
+	assert.Equal(t, `{}`, string(canonical))
+}
+
+func TestCanonicalMarshal_UsesTaggedFieldOverConflictingUntaggedEmbeddedField(t *testing.T) {
+	type Tagged struct {
+		Score int `json:"Score"`
+	}
+	type Untagged struct {
+		Score float64
+	}
+	type payload struct {
+		Tagged
+		Untagged
+	}
+
+	v := payload{
+		Tagged:   Tagged{Score: 2},
+		Untagged: Untagged{Score: 1.5},
+	}
+
+	raw, err := json.Marshal(v)
+	require.NoError(t, err)
+	assert.Equal(t, `{"Score":2}`, string(raw))
+
+	canonical, err := CanonicalMarshal(v)
+	require.NoError(t, err)
+	assert.Equal(t, `{"Score":2}`, string(canonical))
+}
+
+func TestCanonicalMarshal_UsesTaggedOverrideInsteadOfHiddenPromotedEmbeddedField(t *testing.T) {
+	type Embedded struct {
+		Score float64 `json:"score"`
+	}
+	type payload struct {
+		Embedded
+		Score int `json:"score"`
+	}
+
+	v := payload{
+		Embedded: Embedded{Score: 1.5},
+		Score:    2,
+	}
+
+	raw, err := json.Marshal(v)
+	require.NoError(t, err)
+	assert.Equal(t, `{"score":2}`, string(raw))
+
+	canonical, err := CanonicalMarshal(v)
+	require.NoError(t, err)
+	assert.Equal(t, `{"score":2}`, string(canonical))
+}
+
+func TestCanonicalMarshal_RejectsActiveDeeplyNestedPromotedEmbeddedField(t *testing.T) {
+	type Level1 struct {
+		Score float64 `json:"score"`
+	}
+	type Level2 struct {
+		Level1
+	}
+	type payload struct {
+		Level2
+	}
+
+	v := payload{
+		Level2: Level2{Level1: Level1{Score: 1.5}},
+	}
+
+	raw, err := json.Marshal(v)
+	require.NoError(t, err)
+	assert.Equal(t, `{"score":1.5}`, string(raw))
+
+	_, err = CanonicalMarshal(v)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCanonicalForbiddenKind)
+}
+
 func TestCanonicalMarshal_SkipsUnexportedNonEmbeddedStructFields(t *testing.T) {
 	type hiddenFloat struct {
 		Score float64 `json:"score"`

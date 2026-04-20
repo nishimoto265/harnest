@@ -3,7 +3,6 @@ package contracts
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"time"
 )
 
@@ -83,6 +82,7 @@ var (
 	ErrTaskPackageDuplicatePath   = errors.New("contracts: task_package: duplicate worktree path across allocations")
 	ErrTaskPackageDuplicateBranch = errors.New("contracts: task_package: duplicate worktree branch across allocations")
 	ErrWorktreePathNotAbsolute    = errors.New("contracts: task_package: worktree path must be an absolute path")
+	ErrWorktreePathNotClean       = errors.New("contracts: task_package: worktree path must be a clean absolute path without . or .. elements")
 )
 
 // Validate enforces tag-based validation + the 3×2 matrix invariants described
@@ -108,8 +108,15 @@ func (w WorktreeAllocation) Validate() error {
 	if err := validateStruct(w); err != nil {
 		return err
 	}
-	if !filepath.IsAbs(w.Path) {
-		return fmt.Errorf("%w: path=%q", ErrWorktreePathNotAbsolute, w.Path)
+	if err := EnsureCleanAbsolutePath(w.Path); err != nil {
+		switch {
+		case errors.Is(err, ErrPathNotAbsolute):
+			return fmt.Errorf("%w: path=%q", ErrWorktreePathNotAbsolute, w.Path)
+		case errors.Is(err, ErrPathNotClean):
+			return fmt.Errorf("%w: path=%q", ErrWorktreePathNotClean, w.Path)
+		default:
+			return err
+		}
 	}
 	return nil
 }

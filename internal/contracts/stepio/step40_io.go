@@ -3,7 +3,6 @@ package stepio
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/validation"
@@ -30,6 +29,7 @@ var (
 	ErrStep40ResponseRunIDMismatch   = errors.New("stepio: step40: response.run_id must equal candidates.run_id")
 	ErrStep40CandidatesCountMismatch = errors.New("stepio: step40: candidates_count must equal len(candidates.candidates)")
 	ErrRegistryPathNotAbsolute       = errors.New("stepio: registry_path must be an absolute path")
+	ErrRegistryPathNotClean          = errors.New("stepio: registry_path must be a clean absolute path without . or .. elements")
 )
 
 func (r *Step40Request) UnmarshalJSON(data []byte) error {
@@ -46,8 +46,15 @@ func (r Step40Request) Validate() error {
 	if err := validation.Instance().Struct(r); err != nil {
 		return err
 	}
-	if !filepath.IsAbs(r.RegistryPath) {
-		return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotAbsolute, r.RegistryPath)
+	if err := contracts.EnsureCleanAbsolutePath(r.RegistryPath); err != nil {
+		switch {
+		case errors.Is(err, contracts.ErrPathNotAbsolute):
+			return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotAbsolute, r.RegistryPath)
+		case errors.Is(err, contracts.ErrPathNotClean):
+			return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotClean, r.RegistryPath)
+		default:
+			return err
+		}
 	}
 	return r.TaskPackage.Validate()
 }

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/validation"
@@ -99,8 +98,15 @@ func (r Step70Request) Validate() error {
 	if err := r.Candidates.VerifyCandidatesHash(); err != nil {
 		return err
 	}
-	if !filepath.IsAbs(r.RegistryPath) {
-		return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotAbsolute, r.RegistryPath)
+	if err := contracts.EnsureCleanAbsolutePath(r.RegistryPath); err != nil {
+		switch {
+		case errors.Is(err, contracts.ErrPathNotAbsolute):
+			return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotAbsolute, r.RegistryPath)
+		case errors.Is(err, contracts.ErrPathNotClean):
+			return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotClean, r.RegistryPath)
+		default:
+			return err
+		}
 	}
 	if r.TaskPackage.RunID != r.Candidates.RunID {
 		return fmt.Errorf("%w: task_package.run_id=%s candidates.run_id=%s", ErrStep70RequestRunIDMismatch, r.TaskPackage.RunID, r.Candidates.RunID)
@@ -124,9 +130,27 @@ func DecodeAndValidateStep70Response(data []byte, req Step70Request) (Step70Resp
 	return resp, nil
 }
 
+// NewStep70Response constructs a request-bound step70 response that is ready
+// for MarshalJSON. Producers should prefer this over manual struct assembly so
+// the write path enforces both response-local and request-bound invariants.
+func NewStep70Response(runID string, decision contracts.Decision, promoted bool, req Step70Request) (Step70Response, error) {
+	payload := step70ResponsePayload{
+		RunID:    contracts.RunID(runID),
+		Decision: cloneDecision(decision),
+		Promoted: promoted,
+	}
+	if err := payload.validateAgainstRequest(req); err != nil {
+		return Step70Response{}, err
+	}
+	return newStep70Response(payload, true), nil
+}
+
 func (r *Step70Response) UnmarshalJSON(data []byte) error {
 	var payload step70ResponsePayload
 	if err := contracts.DecodeStrictJSON(data, &payload); err != nil {
+		return err
+	}
+	if err := payload.validate(); err != nil {
 		return err
 	}
 	*r = newStep70Response(payload, false)
@@ -134,19 +158,31 @@ func (r *Step70Response) UnmarshalJSON(data []byte) error {
 }
 
 func (r Step70Response) MarshalJSON() ([]byte, error) {
+	if err := r.requireBound(); err != nil {
+		return nil, err
+	}
 	return json.Marshal(r.payload)
 }
 
-func (r Step70Response) RunID() contracts.RunID {
-	return r.payload.RunID
+func (r Step70Response) RunID() (contracts.RunID, error) {
+	if err := r.requireBound(); err != nil {
+		return "", err
+	}
+	return r.payload.RunID, nil
 }
 
-func (r Step70Response) Decision() contracts.Decision {
-	return cloneDecision(r.payload.Decision)
+func (r Step70Response) Decision() (contracts.Decision, error) {
+	if err := r.requireBound(); err != nil {
+		return contracts.Decision{}, err
+	}
+	return cloneDecision(r.payload.Decision), nil
 }
 
-func (r Step70Response) Promoted() bool {
-	return r.payload.Promoted
+func (r Step70Response) Promoted() (bool, error) {
+	if err := r.requireBound(); err != nil {
+		return false, err
+	}
+	return r.payload.Promoted, nil
 }
 
 func (r Step70Response) RequestBound() bool {
@@ -166,6 +202,10 @@ func (r Step70Response) Validate() error {
 		return ErrStep70ResponseNotBound
 	}
 	return r.validate()
+}
+
+func (r Step70Response) requireBound() error {
+	return r.Validate()
 }
 
 func (r Step70Response) validate() error {

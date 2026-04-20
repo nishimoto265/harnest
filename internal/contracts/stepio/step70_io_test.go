@@ -129,6 +129,13 @@ func mustMarshalJSON(t *testing.T, v any) []byte {
 	return data
 }
 
+func mustMarshalStep70PayloadJSON(t *testing.T, resp Step70Response) []byte {
+	t.Helper()
+	data, err := json.Marshal(resp.payload)
+	require.NoError(t, err)
+	return data
+}
+
 func mustDecisionAdopt(t *testing.T, d contracts.Decision) contracts.DecisionAdopt {
 	t.Helper()
 	switch v := d.Value.(type) {
@@ -337,7 +344,7 @@ func TestDecodeAndValidateStep70Response_RejectsPromotedActionMismatch(t *testin
 	resp := validStep70Response()
 	resp.payload.Promoted = false
 
-	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
+	_, err := DecodeAndValidateStep70Response(mustMarshalStep70PayloadJSON(t, resp), req)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70AdoptRequiresPromoted)
 }
@@ -347,7 +354,7 @@ func TestDecodeAndValidateStep70Response_RejectsDecisionRunIDMismatch(t *testing
 	resp := validStep70Response()
 	resp.payload.RunID = "2026-04-21-PR42-abcdef0"
 
-	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
+	_, err := DecodeAndValidateStep70Response(mustMarshalStep70PayloadJSON(t, resp), req)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70ResponseRunIDMismatch)
 }
@@ -384,7 +391,7 @@ func TestDecodeAndValidateStep70Response_RejectsForgedIdempotencyKey(t *testing.
 	adopt.IdempotencyKey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	resp.payload.Decision.Value = adopt
 
-	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
+	_, err := DecodeAndValidateStep70Response(mustMarshalStep70PayloadJSON(t, resp), req)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, contracts.ErrDecisionIdempotencyKeyMismatch)
 }
@@ -397,9 +404,130 @@ func TestDecodeAndValidateStep70Response_AcceptsPointerDecisionAdopt(t *testing.
 
 	got, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
 	require.NoError(t, err)
-	assert.Equal(t, req.TaskPackage.RunID, got.RunID())
+	runID, err := got.RunID()
+	require.NoError(t, err)
+	assert.Equal(t, req.TaskPackage.RunID, runID)
 	assert.True(t, got.RequestBound())
 	assert.NoError(t, got.Validate())
+}
+
+func TestNewStep70Response_ValidBoundRoundTrip(t *testing.T) {
+	req := validStep70Request()
+
+	resp, err := NewStep70Response(string(req.TaskPackage.RunID), validAdoptDecision(), true, req)
+	require.NoError(t, err)
+	assert.True(t, resp.RequestBound())
+	assert.NoError(t, resp.Validate())
+
+	data, err := resp.MarshalJSON()
+	require.NoError(t, err)
+
+	decoded, err := DecodeAndValidateStep70Response(data, req)
+	require.NoError(t, err)
+	assert.True(t, decoded.RequestBound())
+
+	runID, err := decoded.RunID()
+	require.NoError(t, err)
+	assert.Equal(t, req.TaskPackage.RunID, runID)
+}
+
+func TestNewStep70Response_RejectsInvalidInputsWithTypedErrors(t *testing.T) {
+	req := validStep70Request()
+
+	tests := []struct {
+		name     string
+		runID    string
+		decision contracts.Decision
+		promoted bool
+		wantErr  error
+	}{
+		{
+			name:     "run_id mismatch",
+			runID:    "2026-04-21-PR42-abcdef0",
+			decision: validAdoptDecision(),
+			promoted: true,
+			wantErr:  ErrStep70ResponseRunIDMismatch,
+		},
+		{
+			name:     "adopt requires promoted",
+			runID:    "2026-04-20-PR42-abcdef0",
+			decision: validAdoptDecision(),
+			promoted: false,
+			wantErr:  ErrStep70AdoptRequiresPromoted,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewStep70Response(tt.runID, tt.decision, tt.promoted, req)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestStep40Request_Validate_RegistryPathHardening(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		wantErr    error
+		wantAnyErr bool
+	}{
+		{name: "clean absolute", path: "/a/b"},
+		{name: "parent escape", path: "/a/../b", wantErr: ErrRegistryPathNotClean},
+		{name: "dot segment", path: "/a/./b", wantErr: ErrRegistryPathNotClean},
+		{name: "relative", path: "a/b", wantErr: ErrRegistryPathNotAbsolute},
+		{name: "empty", path: "", wantAnyErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := validStep40Request()
+			req.RegistryPath = tt.path
+
+			err := req.Validate()
+			if tt.wantErr == nil && !tt.wantAnyErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestStep70Request_Validate_RegistryPathHardening(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		wantErr    error
+		wantAnyErr bool
+	}{
+		{name: "clean absolute", path: "/a/b"},
+		{name: "parent escape", path: "/a/../b", wantErr: ErrRegistryPathNotClean},
+		{name: "dot segment", path: "/a/./b", wantErr: ErrRegistryPathNotClean},
+		{name: "relative", path: "a/b", wantErr: ErrRegistryPathNotAbsolute},
+		{name: "empty", path: "", wantAnyErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := validStep70Request()
+			req.RegistryPath = tt.path
+
+			err := req.Validate()
+			if tt.wantErr == nil && !tt.wantAnyErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+			}
+		})
+	}
 }
 
 func TestStep70Request_UnmarshalJSON_RejectsDuplicateTopLevelKey(t *testing.T) {

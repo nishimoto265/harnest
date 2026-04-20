@@ -8,6 +8,9 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
+	"unicode"
 )
 
 // CanonicalMarshal returns a deterministic JSON encoding for v.
@@ -76,22 +79,12 @@ func rejectForbiddenCanonicalKinds(v reflect.Value, path string, seen map[uintpt
 		return rejectForbiddenCanonicalKinds(v.Elem(), path, seen)
 	case reflect.Struct:
 		t := v.Type()
-		for i := 0; i < v.NumField(); i++ {
-			field := t.Field(i)
-			if field.Tag.Get("json") == "-" {
+		for _, field := range cachedCanonicalActiveFields(t) {
+			fieldValue := canonicalValueByIndex(v, field.index)
+			if !fieldValue.IsValid() {
 				continue
 			}
-			fieldKind := fieldKindAfterPointerDeref(field.Type)
-			switch {
-			case field.Anonymous && fieldKind == reflect.Struct:
-				// Match encoding/json field promotion semantics: embedded structs
-				// are walked even when the field itself is unexported.
-			case field.Anonymous && field.PkgPath != "":
-				continue
-			case !field.Anonymous && field.PkgPath != "":
-				continue
-			}
-			if err := rejectForbiddenCanonicalKinds(v.Field(i), path+"."+field.Name, seen); err != nil {
+			if err := rejectForbiddenCanonicalKinds(fieldValue, path+"."+canonicalFieldPath(t, field.index), seen); err != nil {
 				return err
 			}
 		}
@@ -129,11 +122,213 @@ func shouldTrackCanonicalVisit(v reflect.Value) bool {
 	}
 }
 
-func fieldKindAfterPointerDeref(t reflect.Type) reflect.Kind {
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
+type canonicalActiveField struct {
+	name  string
+	index []int
+	typ   reflect.Type
+	tag   bool
+}
+
+var canonicalFieldCache sync.Map
+
+func cachedCanonicalActiveFields(t reflect.Type) []canonicalActiveField {
+	if fields, ok := canonicalFieldCache.Load(t); ok {
+		return fields.([]canonicalActiveField)
 	}
-	return t.Kind()
+	fields, _ := canonicalFieldCache.LoadOrStore(t, canonicalActiveFields(t))
+	return fields.([]canonicalActiveField)
+}
+
+func canonicalActiveFields(t reflect.Type) []canonicalActiveField {
+	current := []canonicalActiveField{}
+	next := []canonicalActiveField{{typ: t}}
+
+	var count, nextCount map[reflect.Type]int
+	visited := map[reflect.Type]bool{}
+	var fields []canonicalActiveField
+
+	for len(next) > 0 {
+		current, next = next, current[:0]
+		count, nextCount = nextCount, map[reflect.Type]int{}
+
+		for _, field := range current {
+			if visited[field.typ] {
+				continue
+			}
+			visited[field.typ] = true
+
+			for i := 0; i < field.typ.NumField(); i++ {
+				sf := field.typ.Field(i)
+				if sf.Anonymous {
+					embeddedType := sf.Type
+					if embeddedType.Kind() == reflect.Pointer {
+						embeddedType = embeddedType.Elem()
+					}
+					if !sf.IsExported() && embeddedType.Kind() != reflect.Struct {
+						continue
+					}
+				} else if !sf.IsExported() {
+					continue
+				}
+
+				tag := sf.Tag.Get("json")
+				if tag == "-" {
+					continue
+				}
+				name, _ := parseCanonicalJSONTag(tag)
+				if !isValidCanonicalJSONTag(name) {
+					name = ""
+				}
+
+				index := make([]int, len(field.index)+1)
+				copy(index, field.index)
+				index[len(field.index)] = i
+
+				fieldType := sf.Type
+				if fieldType.Name() == "" && fieldType.Kind() == reflect.Pointer {
+					fieldType = fieldType.Elem()
+				}
+
+				if name != "" || !sf.Anonymous || fieldType.Kind() != reflect.Struct {
+					tagged := name != ""
+					if name == "" {
+						name = sf.Name
+					}
+					activeField := canonicalActiveField{
+						name:  name,
+						index: index,
+						typ:   fieldType,
+						tag:   tagged,
+					}
+					fields = append(fields, activeField)
+					if count[field.typ] > 1 {
+						fields = append(fields, activeField)
+					}
+					continue
+				}
+
+				nextCount[fieldType]++
+				if nextCount[fieldType] == 1 {
+					next = append(next, canonicalActiveField{
+						name:  fieldType.Name(),
+						index: index,
+						typ:   fieldType,
+					})
+				}
+			}
+		}
+	}
+
+	sort.Slice(fields, func(i, j int) bool {
+		left, right := fields[i], fields[j]
+		if left.name != right.name {
+			return left.name < right.name
+		}
+		if len(left.index) != len(right.index) {
+			return len(left.index) < len(right.index)
+		}
+		if left.tag != right.tag {
+			return left.tag
+		}
+		return compareCanonicalIndex(left.index, right.index) < 0
+	})
+
+	out := fields[:0]
+	for advance, i := 0, 0; i < len(fields); i += advance {
+		fi := fields[i]
+		name := fi.name
+		for advance = 1; i+advance < len(fields); advance++ {
+			if fields[i+advance].name != name {
+				break
+			}
+		}
+		if advance == 1 {
+			out = append(out, fi)
+			continue
+		}
+		dominant, ok := dominantCanonicalField(fields[i : i+advance])
+		if ok {
+			out = append(out, dominant)
+		}
+	}
+
+	fields = out
+	sort.Slice(fields, func(i, j int) bool {
+		return compareCanonicalIndex(fields[i].index, fields[j].index) < 0
+	})
+
+	return fields
+}
+
+func dominantCanonicalField(fields []canonicalActiveField) (canonicalActiveField, bool) {
+	if len(fields) > 1 && len(fields[0].index) == len(fields[1].index) && fields[0].tag == fields[1].tag {
+		return canonicalActiveField{}, false
+	}
+	return fields[0], true
+}
+
+func compareCanonicalIndex(left, right []int) int {
+	for i := 0; i < len(left) && i < len(right); i++ {
+		if left[i] < right[i] {
+			return -1
+		}
+		if left[i] > right[i] {
+			return 1
+		}
+	}
+	switch {
+	case len(left) < len(right):
+		return -1
+	case len(left) > len(right):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func canonicalValueByIndex(v reflect.Value, index []int) reflect.Value {
+	for _, i := range index {
+		if v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return reflect.Value{}
+			}
+			v = v.Elem()
+		}
+		v = v.Field(i)
+	}
+	return v
+}
+
+func canonicalFieldPath(t reflect.Type, index []int) string {
+	parts := make([]string, 0, len(index))
+	for _, i := range index {
+		if t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		field := t.Field(i)
+		parts = append(parts, field.Name)
+		t = field.Type
+	}
+	return strings.Join(parts, ".")
+}
+
+func parseCanonicalJSONTag(tag string) (string, string) {
+	name, options, _ := strings.Cut(tag, ",")
+	return name, options
+}
+
+func isValidCanonicalJSONTag(tag string) bool {
+	if tag == "" {
+		return false
+	}
+	for _, r := range tag {
+		switch {
+		case strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", r):
+		case !unicode.IsLetter(r) && !unicode.IsDigit(r):
+			return false
+		}
+	}
+	return true
 }
 
 func writeCanonicalJSON(buf *bytes.Buffer, v any) error {

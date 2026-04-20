@@ -108,6 +108,38 @@ func TestWorktreeAllocation_Validate_AcceptsAbsolutePath(t *testing.T) {
 	assert.NoError(t, w.Validate())
 }
 
+func TestWorktreeAllocation_Validate_PathHardening(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		wantErr    error
+		wantAnyErr bool
+	}{
+		{name: "clean absolute", path: "/a/b"},
+		{name: "parent escape", path: "/a/../b", wantErr: ErrWorktreePathNotClean},
+		{name: "dot segment", path: "/a/./b", wantErr: ErrWorktreePathNotClean},
+		{name: "relative", path: "a/b", wantErr: ErrWorktreePathNotAbsolute},
+		{name: "empty", path: "", wantAnyErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := validTaskPackage().Worktrees[0]
+			w.Path = tt.path
+
+			err := w.Validate()
+			if tt.wantErr == nil && !tt.wantAnyErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestTaskPackage_Validate_Reject_PassCountMismatch(t *testing.T) {
 	// pass==1 が 4 (distinct agents)、pass==2 が 2 → len=6 は満たすが matrix invariant 違反。
 	pkg := validTaskPackage()

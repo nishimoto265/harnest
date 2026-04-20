@@ -124,6 +124,10 @@ func TestStep70Response_DirectJSONUnmarshal_RejectsMalformedPayloads(t *testing.
 			name: "response-local invariant",
 			data: []byte(strings.Replace(string(data), `"promoted":true`, `"promoted":false`, 1)),
 		},
+		{
+			name: "response-local run_id mismatch",
+			data: []byte(strings.Replace(string(data), `"run_id":"2026-04-20-PR42-abcdef0"`, `"run_id":"2026-04-21-PR42-abcdef0"`, 1)),
+		},
 	}
 
 	for _, tt := range tests {
@@ -145,13 +149,39 @@ func TestStep70Response_DirectJSONUnmarshal_SucceedsButRemainsUnbound(t *testing
 	assert.ErrorIs(t, resp.Validate(), stepio.ErrStep70ResponseNotBound)
 }
 
+func TestStep70Response_DirectJSONUnmarshal_UnboundAccessorsAndMarshalFail(t *testing.T) {
+	data := validStep70ResponseJSONExternal(t)
+
+	var resp stepio.Step70Response
+	require.NoError(t, json.Unmarshal(data, &resp))
+	assert.False(t, resp.RequestBound())
+
+	_, err := resp.RunID()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, stepio.ErrStep70ResponseNotBound)
+
+	_, err = resp.Decision()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, stepio.ErrStep70ResponseNotBound)
+
+	_, err = resp.Promoted()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, stepio.ErrStep70ResponseNotBound)
+
+	_, err = resp.MarshalJSON()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, stepio.ErrStep70ResponseNotBound)
+}
+
 func TestDecodeAndValidateStep70Response_BindsRequest(t *testing.T) {
 	data := validStep70ResponseJSONExternal(t)
 	req := validStep70RequestExternal()
 
 	got, err := stepio.DecodeAndValidateStep70Response(data, req)
 	require.NoError(t, err)
-	assert.Equal(t, req.TaskPackage.RunID, got.RunID())
+	runID, err := got.RunID()
+	require.NoError(t, err)
+	assert.Equal(t, req.TaskPackage.RunID, runID)
 	assert.True(t, got.RequestBound())
 	assert.NoError(t, got.Validate())
 }
@@ -179,14 +209,20 @@ func TestDecodeAndValidateStep70Response_PublicGetterReturnsCopy(t *testing.T) {
 	got, err := stepio.DecodeAndValidateStep70Response(data, req)
 	require.NoError(t, err)
 
-	decision := got.Decision()
+	decision, err := got.Decision()
+	require.NoError(t, err)
 	adopt, ok := decision.Value.(contracts.DecisionAdopt)
 	require.True(t, ok)
 	adopt.Action = contracts.DecisionActionReject
 	decision.Action = contracts.DecisionActionReject
 	decision.Value = adopt
 
-	assert.Equal(t, contracts.DecisionActionAdopt, got.Decision().Action)
-	assert.Equal(t, contracts.DecisionActionAdopt, got.Decision().Value.(contracts.DecisionAdopt).Action)
-	assert.True(t, got.Promoted())
+	gotDecision, err := got.Decision()
+	require.NoError(t, err)
+	assert.Equal(t, contracts.DecisionActionAdopt, gotDecision.Action)
+	assert.Equal(t, contracts.DecisionActionAdopt, gotDecision.Value.(contracts.DecisionAdopt).Action)
+
+	promoted, err := got.Promoted()
+	require.NoError(t, err)
+	assert.True(t, promoted)
 }
