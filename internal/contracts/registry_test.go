@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -194,6 +195,53 @@ func TestRegistry_Reject_TrailingBytes(t *testing.T) {
 	assert.Error(t, json.Unmarshal([]byte(data), &e))
 }
 
+func TestRegistry_Added_RejectsVersionSeqOneWithPrevHash(t *testing.T) {
+	data := strings.Replace(fixtureRegistryAdded(), `"prev_hash": ""`, `"prev_hash": "00000000000000000000000000000000000000000000000000000000000000aa"`, 1)
+	var e RuleRegistryEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryPrevHashSequenceMismatch)
+}
+
+func TestRegistry_Updated_RejectsMissingPrevHashAfterFirstVersion(t *testing.T) {
+	data := `{
+  "kind": "updated",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "rule_path": "rules/r-0001.md",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000010",
+  "prev_sha256": "0000000000000000000000000000000000000000000000000000000000000001",
+  "idempotency_key": "0000000000000000000000000000000000000000000000000000000000000003",
+  "version_seq": 2,
+  "prev_hash": "",
+  "by_run_id": "2026-04-21-PR43-abcdef1",
+  "at": "2026-04-21T12:00:00Z"
+}`
+	var e RuleRegistryEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryPrevHashSequenceMismatch)
+}
+
+func TestRegistry_RolledBack_RejectsMissingTargetOffset(t *testing.T) {
+	data := `{
+  "kind": "rolled_back",
+  "schema_version": "1",
+  "target_op_id": "0000000000000000000000000000000000000000000000000000000000000002",
+  "target_sha256": "0000000000000000000000000000000000000000000000000000000000000030",
+  "by_run_id": "2026-04-22-PR44-abcdef2",
+  "rollback_reason": "lease_failure",
+  "failed_step": "70",
+  "version_seq": 3,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000088",
+  "at": "2026-04-22T12:00:00Z"
+}`
+	var e RuleRegistryEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryRolledBackMissingTargetOffset)
+}
+
 // finding #6: status_changed は active↔deprecated 遷移のみ許容。active→archived
 // 等を status_changed で送ると reject。
 func TestRegistry_StatusChanged_Reject_ActiveToArchived(t *testing.T) {
@@ -294,6 +342,61 @@ func TestRegistry_Archived_Reject_NewStatusNotArchived(t *testing.T) {
 	err := json.Unmarshal([]byte(data), &e)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrRegistryArchivedInvalidTransition)
+}
+
+func TestRuleIdempotencyIndexEntry_RoundTrip(t *testing.T) {
+	entry := RuleIdempotencyIndexEntry{
+		IdempotencyKey: "0000000000000000000000000000000000000000000000000000000000000002",
+		RegistryOffset: 0,
+		RegistrySha256: "0000000000000000000000000000000000000000000000000000000000000030",
+		Kind:           RegistryKindAdded,
+		At:             time.Now(),
+	}
+	data, err := MarshalStrict(entry)
+	require.NoError(t, err)
+
+	var decoded RuleIdempotencyIndexEntry
+	require.NoError(t, decodeStrict(data, &decoded))
+	assert.Equal(t, entry.IdempotencyKey, decoded.IdempotencyKey)
+	assert.EqualValues(t, 0, decoded.RegistryOffset)
+	assert.Equal(t, entry.Kind, decoded.Kind)
+}
+
+func TestRuleIdempotencyIndexEntry_RejectsMissingRegistryOffset(t *testing.T) {
+	data := []byte(`{
+  "idempotency_key":"0000000000000000000000000000000000000000000000000000000000000002",
+  "registry_sha256":"0000000000000000000000000000000000000000000000000000000000000030",
+  "kind":"added",
+  "at":"2026-04-22T12:00:00Z"
+}`)
+	var entry RuleIdempotencyIndexEntry
+	err := decodeStrict(data, &entry)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRuleIdempotencyIndexMissingOffset)
+}
+
+func TestRuleIdempotencyIndexEntry_RejectsNegativeOffset(t *testing.T) {
+	data := []byte(`{
+  "idempotency_key":"0000000000000000000000000000000000000000000000000000000000000002",
+  "registry_offset":-1,
+  "registry_sha256":"0000000000000000000000000000000000000000000000000000000000000030",
+  "kind":"added",
+  "at":"2026-04-22T12:00:00Z"
+}`)
+	var entry RuleIdempotencyIndexEntry
+	assert.Error(t, decodeStrict(data, &entry))
+}
+
+func TestRuleIdempotencyIndexEntry_RejectsBadKind(t *testing.T) {
+	data := []byte(`{
+  "idempotency_key":"0000000000000000000000000000000000000000000000000000000000000002",
+  "registry_offset":0,
+  "registry_sha256":"0000000000000000000000000000000000000000000000000000000000000030",
+  "kind":"bogus",
+  "at":"2026-04-22T12:00:00Z"
+}`)
+	var entry RuleIdempotencyIndexEntry
+	assert.Error(t, decodeStrict(data, &entry))
 }
 
 // finding #6: restored は prev == archived AND new ∈ {active,deprecated} 限定。

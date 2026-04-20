@@ -1,6 +1,9 @@
 package contracts
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -111,6 +114,9 @@ type Candidates struct {
 // CandidatesHash verification through this method so the contract is
 // end-to-end enforced on every decode/encode.
 func (c Candidates) Validate() error {
+	if c.CandidatesHash == "" {
+		return ErrCandidatesHashMismatch
+	}
 	if err := validateStruct(c); err != nil {
 		return err
 	}
@@ -119,26 +125,43 @@ func (c Candidates) Validate() error {
 			return fmt.Errorf("candidates[%d]: %w", i, err)
 		}
 	}
+	return c.VerifyCandidatesHash()
+}
+
+// CanonicalCandidatesHash returns the step40/step70 canonical candidates hash:
+// sha256 over the JSON encoding of the Candidates slice using Go struct field
+// order (no map[string]any). This is the shared producer/verifier algorithm
+// for `<run>/40/candidates.json`.
+func CanonicalCandidatesHash(items []Candidate) string {
+	sum := sha256.Sum256(mustJSONMarshal(items))
+	return hex.EncodeToString(sum[:])
+}
+
+// VerifyCandidatesHash verifies that candidates_hash matches the canonical hash
+// of candidates[]. The canonical form is the JSON serialization of the
+// Candidates slice with deterministic struct field ordering (via
+// encoding/json on typed structs only, never map[string]any), followed by
+// sha256 hex encoding.
+//
+// This method fails closed: an empty candidates_hash or a mismatched digest
+// returns ErrCandidatesHashMismatch.
+func (c Candidates) VerifyCandidatesHash() error {
+	if c.CandidatesHash == "" {
+		return fmt.Errorf("%w: empty candidates_hash", ErrCandidatesHashMismatch)
+	}
+	want := CanonicalCandidatesHash(c.Candidates)
+	if c.CandidatesHash != want {
+		return fmt.Errorf("%w: got=%s want=%s", ErrCandidatesHashMismatch, c.CandidatesHash, want)
+	}
 	return nil
 }
 
-// VerifyCandidatesHash is the bootstrap-2 integration seam for verifying that
-// `candidates_hash` matches the sha256 of the canonical-JSON encoding of
-// `candidates[]`. It is intentionally a stub at bootstrap-1; the signature
-// is frozen so step40 / step70 can start calling it immediately once
-// bootstrap-2 supplies the canonical-JSON helper.
-//
-// Current behaviour (bootstrap-1): returns nil without comparison. The
-// caller contract is: after Candidates.Validate() succeeds, call this
-// method to additionally enforce hash-content integrity. When the
-// canonical-JSON helper is wired, this method will return an error when
-// the recomputed hash mismatches.
-func (c Candidates) VerifyCandidatesHash() error {
-	// TODO(bootstrap-2): call internal/canonicaljson.Marshal(c.Candidates)
-	// and sha256 the result; compare to c.CandidatesHash; return
-	// ErrCandidatesHashMismatch on mismatch. See docs/design/io-contracts.md
-	// §step40 candidates_hash derivation.
-	return nil
+func mustJSONMarshal(v any) []byte {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(fmt.Sprintf("contracts: unexpected json.Marshal failure: %v", err))
+	}
+	return data
 }
 
 // ClassificationEntry is one row appended to `<run>/40/classification.jsonl`.

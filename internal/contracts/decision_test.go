@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -133,4 +134,50 @@ func TestDecision_Reject_BadRollbackReason(t *testing.T) {
 }`
 	var d Decision
 	assert.Error(t, json.Unmarshal([]byte(data), &d))
+}
+
+func TestDecision_Validate_RejectsOuterActionVariantTypeMismatch(t *testing.T) {
+	d := Decision{
+		Action: DecisionActionReject,
+		Value: DecisionAdopt{
+			Action:         DecisionActionAdopt,
+			SchemaVersion:  "1",
+			RunID:          "2026-04-20-PR42-abcdef0",
+			IdempotencyKey: "0000000000000000000000000000000000000000000000000000000000000001",
+			BestShaBefore:  "1111111111111111111111111111111111111111",
+			TargetSha:      "2222222222222222222222222222222222222222",
+			CandidatesHash: "0000000000000000000000000000000000000000000000000000000000000002",
+			RegistryAppendResult: RegistryAppendResult{
+				Offset: 0,
+				Sha256: "0000000000000000000000000000000000000000000000000000000000000003",
+			},
+			DecidedAt: time.Now(),
+		},
+	}
+	err := d.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDecisionVariantTypeMismatch)
+}
+
+func TestDecision_Validate_RejectsOuterActionInnerActionMismatch(t *testing.T) {
+	d := Decision{
+		Action: DecisionActionAdopt,
+		Value: DecisionAdopt{
+			Action:         DecisionActionReject,
+			SchemaVersion:  "1",
+			RunID:          "2026-04-20-PR42-abcdef0",
+			IdempotencyKey: "0000000000000000000000000000000000000000000000000000000000000001",
+			BestShaBefore:  "1111111111111111111111111111111111111111",
+			TargetSha:      "2222222222222222222222222222222222222222",
+			CandidatesHash: "0000000000000000000000000000000000000000000000000000000000000002",
+			RegistryAppendResult: RegistryAppendResult{
+				Offset: 0,
+				Sha256: "0000000000000000000000000000000000000000000000000000000000000003",
+			},
+			DecidedAt: time.Now(),
+		},
+	}
+	err := d.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDecisionVariantActionMismatch)
 }

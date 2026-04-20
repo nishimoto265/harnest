@@ -3,6 +3,7 @@ package contracts
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 
 	"github.com/nishimoto265/auto-improve/internal/validation"
@@ -30,6 +31,9 @@ import (
 // This guarantees every decode path is covered — producers cannot bypass
 // Validate() by calling validator.Struct directly.
 func decodeStrict(data []byte, v any) error {
+	if err := rejectDuplicateKeys(data); err != nil {
+		return err
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
@@ -40,6 +44,76 @@ func decodeStrict(data []byte, v any) error {
 		return ErrTrailingJSON
 	}
 	return runValidation(v)
+}
+
+func rejectDuplicateKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if err := scanJSONValue(dec); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		if err == nil {
+			return ErrTrailingJSON
+		}
+		return err
+	}
+	return nil
+}
+
+func scanJSONValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := map[string]struct{}{}
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyTok.(string)
+			if !ok {
+				return fmt.Errorf("contracts: expected object key token, got %T", keyTok)
+			}
+			if _, exists := seen[key]; exists {
+				return fmt.Errorf("%w: %s", ErrDuplicateJSONKey, key)
+			}
+			seen[key] = struct{}{}
+			if err := scanJSONValue(dec); err != nil {
+				return err
+			}
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim('}') {
+			return fmt.Errorf("contracts: expected object close delimiter, got %v", end)
+		}
+		return nil
+	case '[':
+		for dec.More() {
+			if err := scanJSONValue(dec); err != nil {
+				return err
+			}
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim(']') {
+			return fmt.Errorf("contracts: expected array close delimiter, got %v", end)
+		}
+		return nil
+	default:
+		return fmt.Errorf("contracts: unexpected JSON delimiter %q", delim)
+	}
 }
 
 // runValidation invokes Validate() if v (or the value it points to) implements

@@ -22,7 +22,7 @@ type Step70Request struct {
 	// Candidates.CandidatesHash が intention.IdempotencyKey 計算の source of truth。
 	Candidates contracts.Candidates `json:"candidates"`
 	// RegistryPath: `<runs_base>/rules-registry.jsonl` の絶対 path。
-	RegistryPath string `json:"registry_path"`
+	RegistryPath string `json:"registry_path" validate:"required"`
 }
 
 // Step70Response is the output envelope for step 70.
@@ -43,36 +43,58 @@ type Step70Response struct {
 //   - Action == reject   → Promoted == false
 //   - Action == noop     → Promoted == false
 //   - Action == rollback → Promoted == false (adopt aborted / rolled back)
+//
 // Any other combination is a contract violation on the write path and would
 // mislead the orchestrator into double-appending `promoted` / contradicting
 // the persisted decision.json.
 var (
-	ErrStep70PromotedRequiresAdopt = errors.New("stepio: step70: promoted=true requires Decision.Action=adopt")
-	ErrStep70AdoptRequiresPromoted = errors.New("stepio: step70: Decision.Action=adopt requires promoted=true")
+	ErrStep70PromotedRequiresAdopt  = errors.New("stepio: step70: promoted=true requires Decision.Action=adopt")
+	ErrStep70AdoptRequiresPromoted  = errors.New("stepio: step70: Decision.Action=adopt requires promoted=true")
 	ErrStep70RollbackMustNotPromote = errors.New("stepio: step70: Decision.Action=rollback must have promoted=false")
 	ErrStep70RejectMustNotPromote   = errors.New("stepio: step70: Decision.Action=reject must have promoted=false")
 	ErrStep70NoopMustNotPromote     = errors.New("stepio: step70: Decision.Action=noop must have promoted=false")
 	ErrStep70DecisionMissing        = errors.New("stepio: step70: Decision.Value must be populated")
+	ErrStep70RequestRunIDMismatch   = errors.New("stepio: step70: task_package.run_id must equal candidates.run_id")
+	ErrStep70ResponseRunIDMismatch  = errors.New("stepio: step70: response.run_id must equal decision.run_id")
 )
+
+func (r Step70Request) Validate() error {
+	if err := validation.Instance().Struct(r); err != nil {
+		return err
+	}
+	if err := r.TaskPackage.Validate(); err != nil {
+		return err
+	}
+	if err := r.Candidates.Validate(); err != nil {
+		return err
+	}
+	if err := r.Candidates.VerifyCandidatesHash(); err != nil {
+		return err
+	}
+	if r.TaskPackage.RunID != r.Candidates.RunID {
+		return fmt.Errorf("%w: task_package.run_id=%s candidates.run_id=%s", ErrStep70RequestRunIDMismatch, r.TaskPackage.RunID, r.Candidates.RunID)
+	}
+	return nil
+}
 
 // Validate enforces tag-based validation + Decision internal validation +
 // Promoted/Action consistency (finding #5).
 func (r Step70Response) Validate() error {
-	if err := validation.Instance().Struct(r); err != nil {
+	if err := validation.Instance().Var(r.RunID, "required,run_id_fmt"); err != nil {
 		return err
 	}
 	if r.Decision.Value == nil {
 		return ErrStep70DecisionMissing
 	}
-	// Delegate to the inner Decision variant validator (registry_append_result
-	// presence, rollback_reason / failed_step, sha-format, etc.). Value-receiver
-	// Validate() is present on the variants that have extra invariants; for the
-	// rest (Adopt / Reject / Noop / Rollback) tag-based validation via
-	// validator.Struct is enough and was already executed when decodeStrict
-	// consumed the JSON. We re-run it here so that a producer that constructed
-	// Decision directly via Go literals (no decode path) is still checked.
-	if err := validation.Instance().Struct(r.Decision.Value); err != nil {
+	if err := r.Decision.Validate(); err != nil {
 		return err
+	}
+	_, _, decisionRunID, err := contractsDecisionMetadata(r.Decision)
+	if err != nil {
+		return err
+	}
+	if r.RunID != decisionRunID {
+		return fmt.Errorf("%w: response.run_id=%s decision.run_id=%s", ErrStep70ResponseRunIDMismatch, r.RunID, decisionRunID)
 	}
 	switch r.Decision.Action {
 	case contracts.DecisionActionAdopt:
@@ -101,4 +123,22 @@ func (r Step70Response) Validate() error {
 		return fmt.Errorf("%w: action=%s promoted=true", ErrStep70PromotedRequiresAdopt, r.Decision.Action)
 	}
 	return nil
+}
+
+func contractsDecisionMetadata(d contracts.Decision) (contracts.DecisionAction, contracts.DecisionAction, contracts.RunID, error) {
+	if d.Value == nil {
+		return "", "", "", ErrStep70DecisionMissing
+	}
+	switch v := d.Value.(type) {
+	case contracts.DecisionAdopt:
+		return contracts.DecisionActionAdopt, v.Action, v.RunID, nil
+	case contracts.DecisionReject:
+		return contracts.DecisionActionReject, v.Action, v.RunID, nil
+	case contracts.DecisionNoop:
+		return contracts.DecisionActionNoop, v.Action, v.RunID, nil
+	case contracts.DecisionRollback:
+		return contracts.DecisionActionRollback, v.Action, v.RunID, nil
+	default:
+		return "", "", "", contracts.ErrUnknownDecisionAction
+	}
 }

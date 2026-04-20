@@ -2,6 +2,8 @@ package contracts
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -9,9 +11,12 @@ import (
 // io-contracts.md §6.1 Resume (crash-resistant execution).
 //
 // Non-terminal (resume 対象):
-//   started / step_done / interrupted / promoting / warning (= 3 warning kinds)
+//
+//	started / step_done / interrupted / promoting / warning (= 3 warning kinds)
+//
 // Terminal (detect が再 queue しない):
-//   completed / failed / promoted / rollback / skipped / timeout / needs_manual_recovery
+//
+//	completed / failed / promoted / rollback / skipped / timeout / needs_manual_recovery
 //
 // Warning events carry the warning sub-kind directly in `kind` (io-contracts.md
 // §6.1 `warning { ..., kind, ... }`; rev33 closed enum). There is no outer
@@ -19,17 +24,17 @@ import (
 type StateKind string
 
 const (
-	StateKindStarted              StateKind = "started"
-	StateKindStepDone             StateKind = "step_done"
-	StateKindInterrupted          StateKind = "interrupted"
-	StateKindPromoting            StateKind = "promoting"
-	StateKindCompleted            StateKind = "completed"
-	StateKindFailed               StateKind = "failed"
-	StateKindPromoted             StateKind = "promoted"
-	StateKindRollback             StateKind = "rollback"
-	StateKindSkipped              StateKind = "skipped"
-	StateKindTimeout              StateKind = "timeout"
-	StateKindNeedsManualRecovery  StateKind = "needs_manual_recovery"
+	StateKindStarted             StateKind = "started"
+	StateKindStepDone            StateKind = "step_done"
+	StateKindInterrupted         StateKind = "interrupted"
+	StateKindPromoting           StateKind = "promoting"
+	StateKindCompleted           StateKind = "completed"
+	StateKindFailed              StateKind = "failed"
+	StateKindPromoted            StateKind = "promoted"
+	StateKindRollback            StateKind = "rollback"
+	StateKindSkipped             StateKind = "skipped"
+	StateKindTimeout             StateKind = "timeout"
+	StateKindNeedsManualRecovery StateKind = "needs_manual_recovery"
 
 	// Warning sub-kinds — serialized directly as `kind`.
 	StateKindWarningRegistrySizeHigh     StateKind = "registry_size_high"
@@ -69,12 +74,12 @@ func (k StateKind) IsTerminal() bool {
 type InterruptedReason string
 
 const (
-	InterruptedReasonRateLimit     InterruptedReason = "rate_limit"
-	InterruptedReasonBudget        InterruptedReason = "budget"
-	InterruptedReasonContext       InterruptedReason = "context"
-	InterruptedReasonSignal        InterruptedReason = "signal"
-	InterruptedReasonUnknown       InterruptedReason = "unknown"
-	InterruptedReasonPrePushCrash  InterruptedReason = "pre_push_crash"
+	InterruptedReasonRateLimit    InterruptedReason = "rate_limit"
+	InterruptedReasonBudget       InterruptedReason = "budget"
+	InterruptedReasonContext      InterruptedReason = "context"
+	InterruptedReasonSignal       InterruptedReason = "signal"
+	InterruptedReasonUnknown      InterruptedReason = "unknown"
+	InterruptedReasonPrePushCrash InterruptedReason = "pre_push_crash"
 )
 
 // WarningKind is an alias retained for code that wants to refer to the warning
@@ -92,8 +97,8 @@ const (
 // Tagged union over `kind`. All variants carry `step` (required for every
 // non-terminal + terminal event, io-contracts.md §resume vocabulary).
 type StateEntry struct {
-	Kind  StateKind     `json:"kind"`
-	Value StateVariant  `json:"-"`
+	Kind  StateKind    `json:"kind"`
+	Value StateVariant `json:"-"`
 }
 
 // StateVariant is implemented by every StateEntry variant struct.
@@ -167,6 +172,38 @@ type StateEntryWarning struct {
 }
 
 func (StateEntryWarning) stateVariant() {}
+
+var (
+	ErrStateWarningScopeMismatch    = errors.New("contracts: state warning: pr and run_id must either both be set or both be omitted")
+	ErrStateWarningRescueRetryScope = errors.New("contracts: state warning: rescue_retry requires pr and run_id")
+	ErrStateWarningRescueRetryStep  = errors.New("contracts: state warning: rescue_retry step must be 20 or 50")
+	ErrStateWarningRegistryCount    = errors.New("contracts: state warning: registry size warnings require count")
+)
+
+func (e StateEntryWarning) Validate() error {
+	if err := validateStruct(e); err != nil {
+		return err
+	}
+	if (e.PR == nil) != (e.RunID == nil) {
+		return ErrStateWarningScopeMismatch
+	}
+	switch e.Kind {
+	case StateKindWarningRescueRetry:
+		if e.PR == nil || e.RunID == nil {
+			return ErrStateWarningRescueRetryScope
+		}
+		if e.Step != FailedStep20 && e.Step != FailedStep50 {
+			return fmt.Errorf("%w: step=%s", ErrStateWarningRescueRetryStep, e.Step)
+		}
+	case StateKindWarningRegistrySizeHigh, StateKindWarningRegistrySizeCritical:
+		if e.Count == nil {
+			return ErrStateWarningRegistryCount
+		}
+	default:
+		return ErrUnknownStateKind
+	}
+	return nil
+}
 
 // StateEntryCompleted: terminal. detail に `sentinel_manually_cleared` などを
 // 格納するユースケースがある (recover --clear-sentinel / --finalize-cleanup).
@@ -401,5 +438,5 @@ func (e StateEntry) Validate() error {
 	if e.Value == nil {
 		return ErrUnknownStateKind
 	}
-	return validateStruct(e.Value)
+	return runValidation(e.Value)
 }

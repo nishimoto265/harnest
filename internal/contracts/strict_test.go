@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -240,11 +241,35 @@ func TestCandidates_Validate_PropagatesCandidateError(t *testing.T) {
 	assert.True(t, strings.Contains(err.Error(), "candidates[0]"))
 }
 
-// #6: VerifyCandidatesHash is a bootstrap-2 stub that must compile and be
-// callable now so step40 / step70 can wire the call site.
-func TestCandidates_VerifyCandidatesHash_StubReturnsNil(t *testing.T) {
-	cs := Candidates{}
-	assert.NoError(t, cs.VerifyCandidatesHash())
+func TestCandidates_VerifyCandidatesHash_RoundTripAndTamper(t *testing.T) {
+	cs := Candidates{
+		SchemaVersion: "1",
+		RunID:         "2026-04-20-PR42-abcdef0",
+		Candidates: []Candidate{
+			{
+				CandidateID:        "c1",
+				Kind:               CandidateKindNew,
+				Title:              "x",
+				ProposedBodyPath:   "40/candidates/c1.md",
+				ProposedBodySha256: "0000000000000000000000000000000000000000000000000000000000000001",
+			},
+		},
+		CreatedAt: time.Now(),
+	}
+	cs.CandidatesHash = CanonicalCandidatesHash(cs.Candidates)
+	require.NoError(t, cs.VerifyCandidatesHash())
+
+	mutated := cs
+	mutated.Candidates[0].Title = "changed"
+	err := mutated.VerifyCandidatesHash()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCandidatesHashMismatch)
+
+	tampered := cs
+	tampered.CandidatesHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	err = tampered.VerifyCandidatesHash()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCandidatesHashMismatch)
 }
 
 // #4: TaskPackage.Validate rejects duplicate worktree paths.
@@ -326,4 +351,52 @@ func TestMarshalStrict_vs_json_Marshal_StatusChanged(t *testing.T) {
 	_, err := MarshalStrict(e)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrRegistryStatusChangedInvalidTransition))
+}
+
+func TestDecodeStrict_RejectsDuplicateTopLevelKey(t *testing.T) {
+	data := []byte(`{"kind":"started","kind":"step_done","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"10","at":"2026-04-20T10:00:00Z"}`)
+	var e StateEntry
+	err := json.Unmarshal(data, &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicateJSONKey)
+}
+
+func TestDecodeStrict_RejectsDuplicateNestedRegistryAppendResultKey(t *testing.T) {
+	data := []byte(`{
+  "action":"adopt",
+  "schema_version":"1",
+  "run_id":"2026-04-20-PR42-abcdef0",
+  "idempotency_key":"0000000000000000000000000000000000000000000000000000000000000001",
+  "best_sha_before":"1111111111111111111111111111111111111111",
+  "target_sha":"2222222222222222222222222222222222222222",
+  "candidates_hash":"0000000000000000000000000000000000000000000000000000000000000002",
+  "registry_append_result":{"offset":0,"offset":1,"sha256":"0000000000000000000000000000000000000000000000000000000000000003"},
+  "decided_at":"2026-04-20T12:00:00Z"
+}`)
+	var d Decision
+	err := json.Unmarshal(data, &d)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicateJSONKey)
+}
+
+func TestDecodeStrict_RejectsDuplicateNestedOverflowRefKey(t *testing.T) {
+	data := []byte(`{
+  "schema_version":"1",
+  "run_id":"2026-04-20-PR42-abcdef0",
+  "pass":1,
+  "agent":"a1",
+  "judge_role":"primary",
+  "dimension":"fidelity",
+  "score":95,
+  "reasons":"ok",
+  "reasons_overflow_ref":{"path":"30/reasons/x.txt","sha256":"0000000000000000000000000000000000000000000000000000000000000004","sha256":"0000000000000000000000000000000000000000000000000000000000000005"},
+  "output_sha256":"0000000000000000000000000000000000000000000000000000000000000006",
+  "rubric_version":"v1",
+  "prompt_version":"p1",
+  "resolved_at":"2026-04-20T12:00:00Z"
+}`)
+	var row RawScoreEntry
+	err := decodeStrict(data, &row)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicateJSONKey)
 }

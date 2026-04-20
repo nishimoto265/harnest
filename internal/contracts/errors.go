@@ -13,6 +13,10 @@ var (
 	// tokens (or bytes) after the single expected top-level value.
 	ErrTrailingJSON = errors.New("contracts: trailing data after JSON value")
 
+	// ErrDuplicateJSONKey is returned when a strict JSON reader observes the
+	// same object key twice at the same nesting level.
+	ErrDuplicateJSONKey = errors.New("contracts: duplicate JSON object key")
+
 	// ErrUnknownManifestKind is returned when a Manifest envelope has a `kind`
 	// outside the {success, error, timeout} set.
 	ErrUnknownManifestKind = errors.New("contracts: unknown manifest kind")
@@ -33,4 +37,8 @@ var (
 	// ErrUnknownCandidateKind is returned when a candidate kind is outside
 	// {new, update, duplicate}.
 	ErrUnknownCandidateKind = errors.New("contracts: unknown candidate kind")
+
+	// ErrCandidatesHashMismatch is returned when candidates_hash is empty or
+	// does not match the canonical hash of candidates[].
+	ErrCandidatesHashMismatch = errors.New("contracts: candidates_hash mismatch")
 )

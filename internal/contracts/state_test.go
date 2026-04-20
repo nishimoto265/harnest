@@ -55,6 +55,38 @@ func TestState_Warning_PRScoped(t *testing.T) {
 	assert.True(t, e.Kind.IsWarning())
 }
 
+func TestState_Warning_RejectsRegistryWarningWithoutCount(t *testing.T) {
+	data := `{"kind":"registry_size_high","step":"70","at":"2026-04-20T12:00:00Z"}`
+	var e StateEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStateWarningRegistryCount)
+}
+
+func TestState_Warning_RejectsRescueRetryWithoutPRScope(t *testing.T) {
+	data := `{"kind":"rescue_retry","step":"20","at":"2026-04-20T12:00:00Z"}`
+	var e StateEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStateWarningRescueRetryScope)
+}
+
+func TestState_Warning_RejectsRescueRetryWrongStep(t *testing.T) {
+	data := `{"kind":"rescue_retry","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","at":"2026-04-20T12:00:00Z"}`
+	var e StateEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStateWarningRescueRetryStep)
+}
+
+func TestState_Warning_RejectsScopeMismatch(t *testing.T) {
+	data := `{"kind":"registry_size_critical","pr":42,"step":"70","count":2000,"at":"2026-04-20T12:00:00Z"}`
+	var e StateEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStateWarningScopeMismatch)
+}
+
 func TestState_NeedsManualRecovery_Parse(t *testing.T) {
 	data := `{"kind":"needs_manual_recovery","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","reason":"remote_divergence","failed_step":"70","at":"2026-04-20T12:00:00Z"}`
 	var e StateEntry

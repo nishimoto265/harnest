@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -63,6 +64,11 @@ type DecisionVariant interface {
 	decisionVariant()
 }
 
+var (
+	ErrDecisionVariantTypeMismatch   = errors.New("contracts: decision: action does not match variant type")
+	ErrDecisionVariantActionMismatch = errors.New("contracts: decision: action does not match inner action field")
+)
+
 // DecisionAdopt: rule set が採用され best_branch に push された.
 type DecisionAdopt struct {
 	Action         DecisionAction `json:"action" validate:"required,eq=adopt"`
@@ -108,7 +114,8 @@ type DecisionNoop struct {
 func (DecisionNoop) decisionVariant() {}
 
 // DecisionRollback: adopt 途中失敗で rollback.
-//   rollback_reason + failed_step は **必須** (io-contracts.md §Rollback path).
+//
+//	rollback_reason + failed_step は **必須** (io-contracts.md §Rollback path).
 type DecisionRollback struct {
 	Action         DecisionAction `json:"action" validate:"required,eq=rollback"`
 	SchemaVersion  string         `json:"schema_version" validate:"required,oneof=1"`
@@ -235,5 +242,30 @@ func (d Decision) Validate() error {
 	if d.Value == nil {
 		return ErrUnknownDecisionAction
 	}
+	expected, inner, _, err := decisionVariantMetadata(d.Value)
+	if err != nil {
+		return err
+	}
+	if d.Action != expected {
+		return fmt.Errorf("%w: outer=%s variant=%s", ErrDecisionVariantTypeMismatch, d.Action, expected)
+	}
+	if d.Action != inner {
+		return fmt.Errorf("%w: outer=%s inner=%s", ErrDecisionVariantActionMismatch, d.Action, inner)
+	}
 	return validateStruct(d.Value)
+}
+
+func decisionVariantMetadata(v DecisionVariant) (expected DecisionAction, inner DecisionAction, runID RunID, err error) {
+	switch vv := v.(type) {
+	case DecisionAdopt:
+		return DecisionActionAdopt, vv.Action, vv.RunID, nil
+	case DecisionReject:
+		return DecisionActionReject, vv.Action, vv.RunID, nil
+	case DecisionNoop:
+		return DecisionActionNoop, vv.Action, vv.RunID, nil
+	case DecisionRollback:
+		return DecisionActionRollback, vv.Action, vv.RunID, nil
+	default:
+		return "", "", "", ErrUnknownDecisionAction
+	}
 }

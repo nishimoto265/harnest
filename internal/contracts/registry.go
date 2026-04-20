@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,9 +21,9 @@ const (
 type SunsetTransition string
 
 const (
-	SunsetTransitionActivate     SunsetTransition = "activate"
-	SunsetTransitionDeprecate    SunsetTransition = "deprecate"
-	SunsetTransitionArchive      SunsetTransition = "archive"
+	SunsetTransitionActivate  SunsetTransition = "activate"
+	SunsetTransitionDeprecate SunsetTransition = "deprecate"
+	SunsetTransitionArchive   SunsetTransition = "archive"
 )
 
 // RegistryKind: rules-registry.jsonl tagged-union discriminator.
@@ -42,8 +43,8 @@ const (
 // Tagged union over `kind`. Numeric type 規約: version_seq / registry_offset は
 // int64 (uint64 禁止、rev23/rev24).
 type RuleRegistryEntry struct {
-	Kind  RegistryKind         `json:"kind"`
-	Value RuleRegistryVariant  `json:"-"`
+	Kind  RegistryKind        `json:"kind"`
+	Value RuleRegistryVariant `json:"-"`
 }
 
 // RuleRegistryVariant is implemented by the six registry variant structs.
@@ -69,6 +70,13 @@ type RuleRegistryAdded struct {
 
 func (RuleRegistryAdded) ruleRegistryVariant() {}
 
+func (e RuleRegistryAdded) Validate() error {
+	if err := validateStruct(e); err != nil {
+		return err
+	}
+	return validateRegistryChain(e.VersionSeq, e.PrevHash)
+}
+
 // RuleRegistryUpdated: 既存 rule 更新 (kind=updated).
 type RuleRegistryUpdated struct {
 	Kind           RegistryKind `json:"kind" validate:"required,eq=updated"`
@@ -79,12 +87,19 @@ type RuleRegistryUpdated struct {
 	PrevSha256     string       `json:"prev_sha256" validate:"required,sha256_hex"`
 	IdempotencyKey string       `json:"idempotency_key" validate:"required,sha256_hex"`
 	VersionSeq     int64        `json:"version_seq" validate:"required,gte=1"`
-	PrevHash       string       `json:"prev_hash" validate:"required,sha256_hex"`
+	PrevHash       string       `json:"prev_hash" validate:"omitempty,sha256_hex"`
 	ByRunID        RunID        `json:"by_run_id" validate:"required,run_id_fmt"`
 	At             time.Time    `json:"at" validate:"required"`
 }
 
 func (RuleRegistryUpdated) ruleRegistryVariant() {}
+
+func (e RuleRegistryUpdated) Validate() error {
+	if err := validateStruct(e); err != nil {
+		return err
+	}
+	return validateRegistryChain(e.VersionSeq, e.PrevHash)
+}
 
 // --- rollback entry (step70 emits, rev18) ---
 
@@ -100,28 +115,60 @@ type RuleRegistryRolledBack struct {
 	RollbackReason RollbackReason `json:"rollback_reason" validate:"required,oneof=lease_failure remote_divergence registry_divergence worktree_rescue_loop manual_abort_pending_cleanup transactional_failure"`
 	FailedStep     FailedStep     `json:"failed_step" validate:"required,oneof=10 20 30 40 50 60 70"`
 	VersionSeq     int64          `json:"version_seq" validate:"required,gte=1"`
-	PrevHash       string         `json:"prev_hash" validate:"required,sha256_hex"`
+	PrevHash       string         `json:"prev_hash" validate:"omitempty,sha256_hex"`
 	At             time.Time      `json:"at" validate:"required"`
 }
 
 func (RuleRegistryRolledBack) ruleRegistryVariant() {}
+
+var (
+	ErrRegistryPrevHashSequenceMismatch      = errors.New("contracts: registry: prev_hash must be empty iff version_seq == 1")
+	ErrRegistryRolledBackMissingTargetOffset = errors.New("contracts: registry: rolled_back: target_offset field is required")
+	ErrRuleIdempotencyIndexMissingOffset     = errors.New("contracts: registry: idempotency-index: registry_offset field is required")
+)
+
+func (e *RuleRegistryRolledBack) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["target_offset"]; !ok {
+		return ErrRegistryRolledBackMissingTargetOffset
+	}
+	type alias RuleRegistryRolledBack
+	var a alias
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&a); err != nil {
+		return err
+	}
+	*e = RuleRegistryRolledBack(a)
+	return nil
+}
+
+func (e RuleRegistryRolledBack) Validate() error {
+	if err := validateStruct(e); err != nil {
+		return err
+	}
+	return validateRegistryChain(e.VersionSeq, e.PrevHash)
+}
 
 // --- sunset entries (archive/cycle③ emits) ---
 
 // RuleRegistryStatusChanged: rule status 遷移 (kind=status_changed).
 // op_id = sha256(sunset_run_id || rule_id || transition).
 type RuleRegistryStatusChanged struct {
-	Kind            RegistryKind     `json:"kind" validate:"required,eq=status_changed"`
-	SchemaVersion   string           `json:"schema_version" validate:"required,oneof=1"`
-	RuleID          string           `json:"rule_id" validate:"required"`
-	PrevStatus      RuleStatus       `json:"prev_status" validate:"required,oneof=active deprecated archived"`
-	NewStatus       RuleStatus       `json:"new_status" validate:"required,oneof=active deprecated archived"`
-	Transition      SunsetTransition `json:"transition" validate:"required,oneof=activate deprecate archive"`
-	OpID            string           `json:"op_id" validate:"required,sha256_hex"`
-	VersionSeq      int64            `json:"version_seq" validate:"required,gte=1"`
-	PrevHash        string           `json:"prev_hash" validate:"required,sha256_hex"`
-	BySunsetRunID   string           `json:"by_sunset_run_id" validate:"required"`
-	At              time.Time        `json:"at" validate:"required"`
+	Kind          RegistryKind     `json:"kind" validate:"required,eq=status_changed"`
+	SchemaVersion string           `json:"schema_version" validate:"required,oneof=1"`
+	RuleID        string           `json:"rule_id" validate:"required"`
+	PrevStatus    RuleStatus       `json:"prev_status" validate:"required,oneof=active deprecated archived"`
+	NewStatus     RuleStatus       `json:"new_status" validate:"required,oneof=active deprecated archived"`
+	Transition    SunsetTransition `json:"transition" validate:"required,oneof=activate deprecate archive"`
+	OpID          string           `json:"op_id" validate:"required,sha256_hex"`
+	VersionSeq    int64            `json:"version_seq" validate:"required,gte=1"`
+	PrevHash      string           `json:"prev_hash" validate:"omitempty,sha256_hex"`
+	BySunsetRunID string           `json:"by_sunset_run_id" validate:"required"`
+	At            time.Time        `json:"at" validate:"required"`
 }
 
 func (RuleRegistryStatusChanged) ruleRegistryVariant() {}
@@ -137,7 +184,7 @@ type RuleRegistryArchived struct {
 	NewStatus     RuleStatus   `json:"new_status" validate:"required,oneof=active deprecated archived"`
 	OpID          string       `json:"op_id" validate:"required,sha256_hex"`
 	VersionSeq    int64        `json:"version_seq" validate:"required,gte=1"`
-	PrevHash      string       `json:"prev_hash" validate:"required,sha256_hex"`
+	PrevHash      string       `json:"prev_hash" validate:"omitempty,sha256_hex"`
 	BySunsetRunID string       `json:"by_sunset_run_id" validate:"required"`
 	At            time.Time    `json:"at" validate:"required"`
 }
@@ -153,7 +200,7 @@ type RuleRegistryRestored struct {
 	NewStatus     RuleStatus   `json:"new_status" validate:"required,oneof=active deprecated archived"`
 	OpID          string       `json:"op_id" validate:"required,sha256_hex"`
 	VersionSeq    int64        `json:"version_seq" validate:"required,gte=1"`
-	PrevHash      string       `json:"prev_hash" validate:"required,sha256_hex"`
+	PrevHash      string       `json:"prev_hash" validate:"omitempty,sha256_hex"`
 	BySunsetRunID string       `json:"by_sunset_run_id" validate:"required"`
 	At            time.Time    `json:"at" validate:"required"`
 }
@@ -167,7 +214,7 @@ func (RuleRegistryRestored) ruleRegistryVariant() {}
 //   - archived:       prev_status ∈ {active, deprecated} AND new_status == archived
 //   - restored:       prev_status == archived AND new_status ∈ {active, deprecated}
 var (
-	ErrRegistryStatusChangedInvalidTransition = errors.New("contracts: registry: status_changed allows only active↔deprecated transitions")
+	ErrRegistryStatusChangedInvalidTransition  = errors.New("contracts: registry: status_changed allows only active↔deprecated transitions")
 	ErrRegistryStatusChangedTransitionMismatch = errors.New("contracts: registry: status_changed transition field inconsistent with prev/new status")
 	ErrRegistryArchivedInvalidTransition       = errors.New("contracts: registry: archived requires prev_status in {active,deprecated} and new_status == archived")
 	ErrRegistryRestoredInvalidTransition       = errors.New("contracts: registry: restored requires prev_status == archived and new_status in {active,deprecated}")
@@ -176,6 +223,9 @@ var (
 // Validate enforces tag-based validation + status_changed transition semantics.
 func (e RuleRegistryStatusChanged) Validate() error {
 	if err := validateStruct(e); err != nil {
+		return err
+	}
+	if err := validateRegistryChain(e.VersionSeq, e.PrevHash); err != nil {
 		return err
 	}
 	// Allowed transitions: active↔deprecated (archive は archived variant 経由).
@@ -199,6 +249,9 @@ func (e RuleRegistryArchived) Validate() error {
 	if err := validateStruct(e); err != nil {
 		return err
 	}
+	if err := validateRegistryChain(e.VersionSeq, e.PrevHash); err != nil {
+		return err
+	}
 	if e.NewStatus != RuleStatusArchived {
 		return fmt.Errorf("%w: prev=%s new=%s", ErrRegistryArchivedInvalidTransition, e.PrevStatus, e.NewStatus)
 	}
@@ -214,6 +267,9 @@ func (e RuleRegistryArchived) Validate() error {
 // Validate enforces tag-based validation + restored transition semantics.
 func (e RuleRegistryRestored) Validate() error {
 	if err := validateStruct(e); err != nil {
+		return err
+	}
+	if err := validateRegistryChain(e.VersionSeq, e.PrevHash); err != nil {
 		return err
 	}
 	if e.PrevStatus != RuleStatusArchived {
@@ -322,4 +378,48 @@ func (e RuleRegistryEntry) Validate() error {
 		return ErrUnknownRegistryKind
 	}
 	return runValidation(e.Value)
+}
+
+func validateRegistryChain(versionSeq int64, prevHash string) error {
+	if versionSeq == 1 {
+		if prevHash != "" {
+			return fmt.Errorf("%w: version_seq=%d prev_hash=%q", ErrRegistryPrevHashSequenceMismatch, versionSeq, prevHash)
+		}
+		return nil
+	}
+	if prevHash == "" {
+		return fmt.Errorf("%w: version_seq=%d prev_hash=%q", ErrRegistryPrevHashSequenceMismatch, versionSeq, prevHash)
+	}
+	return nil
+}
+
+type RuleIdempotencyIndexEntry struct {
+	IdempotencyKey string       `json:"idempotency_key" validate:"required,sha256_hex"`
+	RegistryOffset int64        `json:"registry_offset" validate:"gte=0"`
+	RegistrySha256 string       `json:"registry_sha256" validate:"required,sha256_hex"`
+	Kind           RegistryKind `json:"kind" validate:"required,oneof=added updated rolled_back status_changed archived restored"`
+	At             time.Time    `json:"at" validate:"required"`
+}
+
+func (e *RuleIdempotencyIndexEntry) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["registry_offset"]; !ok {
+		return ErrRuleIdempotencyIndexMissingOffset
+	}
+	type alias RuleIdempotencyIndexEntry
+	var a alias
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&a); err != nil {
+		return err
+	}
+	*e = RuleIdempotencyIndexEntry(a)
+	return nil
+}
+
+func (e RuleIdempotencyIndexEntry) Validate() error {
+	return validateStruct(e)
 }
