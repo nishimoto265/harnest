@@ -193,3 +193,161 @@ func TestRegistry_Reject_TrailingBytes(t *testing.T) {
 	var e RuleRegistryEntry
 	assert.Error(t, json.Unmarshal([]byte(data), &e))
 }
+
+// finding #6: status_changed は active↔deprecated 遷移のみ許容。active→archived
+// 等を status_changed で送ると reject。
+func TestRegistry_StatusChanged_Reject_ActiveToArchived(t *testing.T) {
+	data := `{
+  "kind": "status_changed",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "active",
+  "new_status": "archived",
+  "transition": "archive",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000050",
+  "version_seq": 4,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000077",
+  "by_sunset_run_id": "sunset-2026-04-22",
+  "at": "2026-04-22T00:00:00Z"
+}`
+	var e RuleRegistryEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryStatusChangedInvalidTransition)
+}
+
+func TestRegistry_StatusChanged_Reject_SameStatus(t *testing.T) {
+	data := `{
+  "kind": "status_changed",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "active",
+  "new_status": "active",
+  "transition": "activate",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000050",
+  "version_seq": 4,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000077",
+  "by_sunset_run_id": "sunset-2026-04-22",
+  "at": "2026-04-22T00:00:00Z"
+}`
+	var e RuleRegistryEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryStatusChangedInvalidTransition)
+}
+
+func TestRegistry_StatusChanged_Reject_TransitionMismatch(t *testing.T) {
+	// active → deprecated は合法だが transition=activate は整合しない。
+	data := `{
+  "kind": "status_changed",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "active",
+  "new_status": "deprecated",
+  "transition": "activate",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000050",
+  "version_seq": 4,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000077",
+  "by_sunset_run_id": "sunset-2026-04-22",
+  "at": "2026-04-22T00:00:00Z"
+}`
+	var e RuleRegistryEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryStatusChangedTransitionMismatch)
+}
+
+// finding #6: archived は prev ∈ {active,deprecated} AND new == archived 限定。
+func TestRegistry_Archived_Reject_ArchivedToArchived(t *testing.T) {
+	data := `{
+  "kind": "archived",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "archived",
+  "new_status": "archived",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000050",
+  "version_seq": 5,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000077",
+  "by_sunset_run_id": "sunset-2026-04-22",
+  "at": "2026-04-22T00:00:00Z"
+}`
+	var e RuleRegistryEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryArchivedInvalidTransition)
+}
+
+func TestRegistry_Archived_Reject_NewStatusNotArchived(t *testing.T) {
+	data := `{
+  "kind": "archived",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "active",
+  "new_status": "deprecated",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000050",
+  "version_seq": 5,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000077",
+  "by_sunset_run_id": "sunset-2026-04-22",
+  "at": "2026-04-22T00:00:00Z"
+}`
+	var e RuleRegistryEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryArchivedInvalidTransition)
+}
+
+// finding #6: restored は prev == archived AND new ∈ {active,deprecated} 限定。
+func TestRegistry_Restored_Reject_PrevNotArchived(t *testing.T) {
+	data := `{
+  "kind": "restored",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "active",
+  "new_status": "deprecated",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000060",
+  "version_seq": 6,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000066",
+  "by_sunset_run_id": "sunset-2026-05-01",
+  "at": "2026-05-01T00:00:00Z"
+}`
+	var e RuleRegistryEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryRestoredInvalidTransition)
+}
+
+func TestRegistry_Restored_Reject_NewArchived(t *testing.T) {
+	data := `{
+  "kind": "restored",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "archived",
+  "new_status": "archived",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000060",
+  "version_seq": 6,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000066",
+  "by_sunset_run_id": "sunset-2026-05-01",
+  "at": "2026-05-01T00:00:00Z"
+}`
+	var e RuleRegistryEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryRestoredInvalidTransition)
+}
+
+func TestRegistry_Restored_Accept_ArchivedToDeprecated(t *testing.T) {
+	data := `{
+  "kind": "restored",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "archived",
+  "new_status": "deprecated",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000060",
+  "version_seq": 6,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000066",
+  "by_sunset_run_id": "sunset-2026-05-01",
+  "at": "2026-05-01T00:00:00Z"
+}`
+	var e RuleRegistryEntry
+	require.NoError(t, json.Unmarshal([]byte(data), &e))
+}

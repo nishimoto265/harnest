@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -53,6 +54,89 @@ func TestTaskPackage_Reject_BadRunID(t *testing.T) {
 		CreatedAt:     time.Now(),
 	}
 	assert.Error(t, validation.Instance().Struct(pkg))
+}
+
+// finding #5: TaskPackage.Validate() が 3×2 matrix invariant を強制する。
+func validTaskPackage() TaskPackage {
+	pkg := TaskPackage{
+		SchemaVersion:           "1",
+		RunID:                   "2026-04-20-PR42-abcdef0",
+		PR:                      42,
+		Title:                   "fix: example",
+		BaseSHA:                 "1111111111111111111111111111111111111111",
+		BestBranch:              "auto-improve/best",
+		ReconstructedTaskPrompt: "hello",
+		Worktrees:               make([]WorktreeAllocation, 6),
+		CreatedAt:               time.Now(),
+	}
+	agents := []AgentID{"a1", "a2", "a3", "a1", "a2", "a3"}
+	for i := range pkg.Worktrees {
+		pass := 1
+		if i >= 3 {
+			pass = 2
+		}
+		pkg.Worktrees[i] = WorktreeAllocation{
+			Agent:   agents[i],
+			Pass:    pass,
+			Path:    "/tmp/wt",
+			Branch:  "b",
+			BaseSHA: "1111111111111111111111111111111111111111",
+			HeadSHA: "1111111111111111111111111111111111111111",
+		}
+	}
+	return pkg
+}
+
+func TestTaskPackage_Validate_Valid(t *testing.T) {
+	assert.NoError(t, validTaskPackage().Validate())
+}
+
+func TestTaskPackage_Validate_Reject_PassCountMismatch(t *testing.T) {
+	// pass==1 が 4 (distinct agents)、pass==2 が 2 → len=6 は満たすが matrix invariant 違反。
+	pkg := validTaskPackage()
+	// worktrees[3] is the pass2/a1 row. Move it to pass=1 with a new agent a4
+	// (避: 重複判定が先に走らないよう distinct agent に置く).
+	pkg.Worktrees[3].Pass = 1
+	pkg.Worktrees[3].Agent = "a4"
+	err := pkg.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTaskPackagePassCountMismatch)
+}
+
+func TestTaskPackage_Validate_Reject_AllPass1(t *testing.T) {
+	pkg := validTaskPackage()
+	for i := range pkg.Worktrees {
+		pkg.Worktrees[i].Pass = 1
+	}
+	err := pkg.Validate()
+	require.Error(t, err)
+	// All-pass-1 causes tag validation (oneof=1 2) to pass but matrix enforces
+	// per-pass count == 3 → pass=1 has 6, pass=2 has 0.
+	// With current implementation: duplicate detection triggers first
+	// (3 agents × 2 copies within pass 1).
+	assert.Truef(t, errors.Is(err, ErrTaskPackageAgentDuplicate) || errors.Is(err, ErrTaskPackagePassCountMismatch), "err=%v", err)
+}
+
+func TestTaskPackage_Validate_Reject_DuplicateAgentWithinPass(t *testing.T) {
+	pkg := validTaskPackage()
+	// pass1 の worktrees[0..2] を全て a1 に → duplicate.
+	pkg.Worktrees[0].Agent = "a1"
+	pkg.Worktrees[1].Agent = "a1"
+	pkg.Worktrees[2].Agent = "a1"
+	err := pkg.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTaskPackageAgentDuplicate)
+}
+
+func TestTaskPackage_Validate_Reject_PassAgentSetDiffer(t *testing.T) {
+	pkg := validTaskPackage()
+	// pass2 の agent set を {a4,a5,a6} に置換 → pass1 = {a1,a2,a3} と不一致.
+	pkg.Worktrees[3].Agent = "a4"
+	pkg.Worktrees[4].Agent = "a5"
+	pkg.Worktrees[5].Agent = "a6"
+	err := pkg.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTaskPackagePassAgentMismatch)
 }
 
 func TestTaskPackage_Reject_WrongWorktreeCount(t *testing.T) {

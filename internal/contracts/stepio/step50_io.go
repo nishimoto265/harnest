@@ -20,9 +20,15 @@ type Step50Request struct {
 // ErrStep50AgentPassMismatch mirrors ErrStep20AgentPassMismatch for pass=2.
 var ErrStep50AgentPassMismatch = errors.New("stepio: step50: agents do not match TaskPackage.Worktrees[pass=2]")
 
-// Validate enforces tag-based validation + pass-2 agent subset invariant.
+// Validate enforces tag-based validation + pass-2 agent set-equality invariant.
+// Embedded TaskPackage is validated via its own Validate() so the 3×2 matrix
+// (finding #5) guarantees set-equality is not trivially satisfied by a subset
+// (finding #7).
 func (r Step50Request) Validate() error {
 	if err := validation.Instance().Struct(r); err != nil {
+		return err
+	}
+	if err := r.TaskPackage.Validate(); err != nil {
 		return err
 	}
 	if err := validateAgentsAgainstPass(r.Agents, r.TaskPackage, 2); err != nil {

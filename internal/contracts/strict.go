@@ -14,6 +14,21 @@ import (
 // Used by the tagged-union UnmarshalJSON implementations (Manifest / Decision /
 // RuleRegistryEntry / StateEntry). The public `ReadJSON` in `internal/io` uses
 // the same pattern for top-level reads.
+//
+// After a successful decode decodeStrict automatically chains the following
+// validations (Phase 0-bootstrap-1 gate 2nd-round finding #1-3):
+//
+//  1. If v (or the value it points to) implements `Validate() error`, that
+//     method is invoked. Any type that defines Validate() is expected to run
+//     tag-based struct validation itself (typically via the validateStruct
+//     helper); decodeStrict therefore does NOT additionally call
+//     validateStruct for such types.
+//  2. Otherwise, decodeStrict falls back to running the singleton validator on
+//     v (`validation.Instance().Struct`) so that decode paths without a
+//     Validate() method still enforce struct tags.
+//
+// This guarantees every decode path is covered — producers cannot bypass
+// Validate() by calling validator.Struct directly.
 func decodeStrict(data []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -24,11 +39,20 @@ func decodeStrict(data []byte, v any) error {
 	if err := dec.Decode(&rest); err != io.EOF {
 		return ErrTrailingJSON
 	}
-	return nil
+	return runValidation(v)
 }
 
-// validateStruct runs the singleton validator on v. Separated so variant
-// UnmarshalJSON can chain it cleanly.
+// runValidation invokes Validate() if v (or the value it points to) implements
+// it, otherwise falls back to validateStruct.
+func runValidation(v any) error {
+	if vv, ok := v.(interface{ Validate() error }); ok {
+		return vv.Validate()
+	}
+	return validateStruct(v)
+}
+
+// validateStruct runs the singleton validator on v. Separated so call sites
+// (Validate() implementations, direct decode paths) can chain it cleanly.
 func validateStruct(v any) error {
 	return validation.Instance().Struct(v)
 }

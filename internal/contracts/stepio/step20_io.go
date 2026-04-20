@@ -24,9 +24,14 @@ var ErrStep20AgentPassMismatch = errors.New("stepio: step20: agents do not match
 
 // Validate enforces tag-based validation + structural invariant:
 // every Agent must appear in TaskPackage.Worktrees[pass==1] and together cover
-// all pass-1 agent IDs.
+// all pass-1 agent IDs. Embedded TaskPackage is validated via its own
+// Validate() to enforce the 3×2 matrix invariant (finding #5), so subset-only
+// Agents cannot pass by riding on a malformed TaskPackage (finding #7).
 func (r Step20Request) Validate() error {
 	if err := validation.Instance().Struct(r); err != nil {
+		return err
+	}
+	if err := r.TaskPackage.Validate(); err != nil {
 		return err
 	}
 	return validateAgentsAgainstPass(r.Agents, r.TaskPackage, 1)

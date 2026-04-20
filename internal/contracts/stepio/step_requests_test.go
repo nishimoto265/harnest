@@ -149,3 +149,45 @@ func TestStep50Request_Validate_Reject_PassMismatch(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep50AgentPassMismatch)
 }
+
+// finding #7: Agents が subset (例: {a1,a2}) の場合も reject。
+// TaskPackage.Worktrees[pass=1] の set は {a1,a2,a3}、{a1,a2} は完全一致でないため fail。
+func TestStep20Request_Validate_Reject_SubsetOnly(t *testing.T) {
+	r := Step20Request{
+		TaskPackage:    buildTaskPackage(),
+		Agents:         []contracts.AgentID{"a1", "a2"},
+		TimeoutSeconds: 600,
+	}
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep20AgentPassMismatch)
+}
+
+func TestStep50Request_Validate_Reject_SubsetOnly(t *testing.T) {
+	r := Step50Request{
+		TaskPackage:    buildTaskPackage(),
+		Agents:         []contracts.AgentID{"a1", "a2"},
+		TimeoutSeconds: 600,
+	}
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep50AgentPassMismatch)
+}
+
+// finding #5 / #7: malformed TaskPackage (matrix invariant 違反) は
+// Step20/50Request.Validate() からも伝播する。
+func TestStep20Request_Validate_Propagates_TaskPackageMatrixError(t *testing.T) {
+	pkg := buildTaskPackage()
+	// pass2 の agent set を {a4,a5,a6} に差し替え → matrix mismatch.
+	pkg.Worktrees[3].Agent = "a4"
+	pkg.Worktrees[4].Agent = "a5"
+	pkg.Worktrees[5].Agent = "a6"
+	r := Step20Request{
+		TaskPackage:    pkg,
+		Agents:         []contracts.AgentID{"a1", "a2", "a3"},
+		TimeoutSeconds: 600,
+	}
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, contracts.ErrTaskPackagePassAgentMismatch)
+}

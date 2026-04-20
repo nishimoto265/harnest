@@ -2,6 +2,8 @@ package contracts
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -157,6 +159,74 @@ type RuleRegistryRestored struct {
 }
 
 func (RuleRegistryRestored) ruleRegistryVariant() {}
+
+// Registry lifecycle transition errors (Phase 0-bootstrap-1 gate 2nd-round
+// finding #6). status_changed / archived / restored の 3 variant は
+// prev_status / new_status の組合せを enforce する:
+//   - status_changed: (active → deprecated) または (deprecated → active) のみ
+//   - archived:       prev_status ∈ {active, deprecated} AND new_status == archived
+//   - restored:       prev_status == archived AND new_status ∈ {active, deprecated}
+var (
+	ErrRegistryStatusChangedInvalidTransition = errors.New("contracts: registry: status_changed allows only active↔deprecated transitions")
+	ErrRegistryStatusChangedTransitionMismatch = errors.New("contracts: registry: status_changed transition field inconsistent with prev/new status")
+	ErrRegistryArchivedInvalidTransition       = errors.New("contracts: registry: archived requires prev_status in {active,deprecated} and new_status == archived")
+	ErrRegistryRestoredInvalidTransition       = errors.New("contracts: registry: restored requires prev_status == archived and new_status in {active,deprecated}")
+)
+
+// Validate enforces tag-based validation + status_changed transition semantics.
+func (e RuleRegistryStatusChanged) Validate() error {
+	if err := validateStruct(e); err != nil {
+		return err
+	}
+	// Allowed transitions: active↔deprecated (archive は archived variant 経由).
+	switch {
+	case e.PrevStatus == RuleStatusActive && e.NewStatus == RuleStatusDeprecated:
+		if e.Transition != SunsetTransitionDeprecate {
+			return fmt.Errorf("%w: prev=%s new=%s transition=%s", ErrRegistryStatusChangedTransitionMismatch, e.PrevStatus, e.NewStatus, e.Transition)
+		}
+	case e.PrevStatus == RuleStatusDeprecated && e.NewStatus == RuleStatusActive:
+		if e.Transition != SunsetTransitionActivate {
+			return fmt.Errorf("%w: prev=%s new=%s transition=%s", ErrRegistryStatusChangedTransitionMismatch, e.PrevStatus, e.NewStatus, e.Transition)
+		}
+	default:
+		return fmt.Errorf("%w: prev=%s new=%s", ErrRegistryStatusChangedInvalidTransition, e.PrevStatus, e.NewStatus)
+	}
+	return nil
+}
+
+// Validate enforces tag-based validation + archived transition semantics.
+func (e RuleRegistryArchived) Validate() error {
+	if err := validateStruct(e); err != nil {
+		return err
+	}
+	if e.NewStatus != RuleStatusArchived {
+		return fmt.Errorf("%w: prev=%s new=%s", ErrRegistryArchivedInvalidTransition, e.PrevStatus, e.NewStatus)
+	}
+	switch e.PrevStatus {
+	case RuleStatusActive, RuleStatusDeprecated:
+		// ok
+	default:
+		return fmt.Errorf("%w: prev=%s new=%s", ErrRegistryArchivedInvalidTransition, e.PrevStatus, e.NewStatus)
+	}
+	return nil
+}
+
+// Validate enforces tag-based validation + restored transition semantics.
+func (e RuleRegistryRestored) Validate() error {
+	if err := validateStruct(e); err != nil {
+		return err
+	}
+	if e.PrevStatus != RuleStatusArchived {
+		return fmt.Errorf("%w: prev=%s new=%s", ErrRegistryRestoredInvalidTransition, e.PrevStatus, e.NewStatus)
+	}
+	switch e.NewStatus {
+	case RuleStatusActive, RuleStatusDeprecated:
+		// ok
+	default:
+		return fmt.Errorf("%w: prev=%s new=%s", ErrRegistryRestoredInvalidTransition, e.PrevStatus, e.NewStatus)
+	}
+	return nil
+}
 
 // UnmarshalJSON implements strict tagged-union decoding for RuleRegistryEntry.
 func (e *RuleRegistryEntry) UnmarshalJSON(data []byte) error {

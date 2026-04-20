@@ -1,6 +1,10 @@
 package contracts
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 // WorktreeAllocation describes one of the 6 worktrees (pass1 × 3 + pass2 × 3)
 // that step10 carves out of the base repository. `task-package.json.worktrees[]`
@@ -52,4 +56,62 @@ type TaskPackage struct {
 
 	// CreatedAt: step10 が task-package を書いた時刻.
 	CreatedAt time.Time `json:"created_at" validate:"required"`
+}
+
+// TaskPackage 3×2 agent matrix invariants (Phase 0-bootstrap-1 gate 2nd-round
+// finding #5): step10 が書き出す task-package.json の Worktrees[] は必ず
+//   - pass==1 の entry が 3 件、pass==2 の entry が 3 件
+//   - 各 pass 内で AgentID が一意
+//   - 2 pass の AgentID 集合が完全一致 (例: pass1={a1,a2,a3} ⇒ pass2 も同じ)
+// を満たす。step20/50 の `validateAgentsAgainstPass` はこの invariant を前提に
+// subset 一致ではなく set equality を担保する。
+var (
+	ErrTaskPackagePassCountMismatch = errors.New("contracts: task_package: worktrees must contain exactly 3 entries per pass")
+	ErrTaskPackageAgentDuplicate    = errors.New("contracts: task_package: duplicate agent within a pass")
+	ErrTaskPackagePassAgentMismatch = errors.New("contracts: task_package: agent set differs between pass 1 and pass 2")
+)
+
+// Validate enforces tag-based validation + the 3×2 matrix invariants described
+// above. The tag-based `len=6` on Worktrees is a necessary but insufficient
+// condition; this method completes the check. decodeStrict auto-chains this
+// method whenever TaskPackage flows through a strict decode path.
+func (p TaskPackage) Validate() error {
+	if err := validateStruct(p); err != nil {
+		return err
+	}
+	return p.validateWorktreeMatrix()
+}
+
+func (p TaskPackage) validateWorktreeMatrix() error {
+	pass1 := map[AgentID]struct{}{}
+	pass2 := map[AgentID]struct{}{}
+	for _, w := range p.Worktrees {
+		switch w.Pass {
+		case 1:
+			if _, dup := pass1[w.Agent]; dup {
+				return fmt.Errorf("%w: pass=1 agent=%s", ErrTaskPackageAgentDuplicate, w.Agent)
+			}
+			pass1[w.Agent] = struct{}{}
+		case 2:
+			if _, dup := pass2[w.Agent]; dup {
+				return fmt.Errorf("%w: pass=2 agent=%s", ErrTaskPackageAgentDuplicate, w.Agent)
+			}
+			pass2[w.Agent] = struct{}{}
+		default:
+			// Tag-level `oneof=1 2` should already have caught this; defensive.
+			return fmt.Errorf("%w: unknown pass=%d", ErrTaskPackagePassCountMismatch, w.Pass)
+		}
+	}
+	if len(pass1) != 3 || len(pass2) != 3 {
+		return fmt.Errorf("%w: pass1=%d pass2=%d", ErrTaskPackagePassCountMismatch, len(pass1), len(pass2))
+	}
+	if len(pass1) != len(pass2) {
+		return ErrTaskPackagePassAgentMismatch
+	}
+	for a := range pass1 {
+		if _, ok := pass2[a]; !ok {
+			return fmt.Errorf("%w: agent %s missing from pass 2", ErrTaskPackagePassAgentMismatch, a)
+		}
+	}
+	return nil
 }
