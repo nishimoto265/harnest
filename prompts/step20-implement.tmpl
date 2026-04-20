@@ -1,0 +1,21 @@
+{{/* Phase 0 skeleton for step20 implement. Phase 1 will replace this with the full prompt. */}}
+# Step 20 Implement
+
+Inputs
+- run_id: {{ .TaskPackage.RunID }}
+- pass: 1
+- agent: {{ .Agent }}
+- output_dir: 20-pass1/{{ .Agent }}
+
+Expected artifacts
+- manifest.json
+- session.jsonl
+- diff.patch
+- checklist-result.json
+
+Manifest shape
+- kind: success | error | timeout
+- schema_version
+- run_id
+- pass
+- agent
