@@ -163,3 +163,15 @@ func (m Manifest) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(m.Value)
 }
+
+// Validate runs tag-based validation on the embedded variant so that
+// EncodeStrict / MarshalStrict (Phase 0-bootstrap-1 gate 3rd-round finding
+// #1) enforce the same invariants on the write path that decodeStrict
+// enforces on the read path. Manifest itself has no tag rules — the variant
+// carries them.
+func (m Manifest) Validate() error {
+	if m.Value == nil {
+		return ErrUnknownManifestKind
+	}
+	return validateStruct(m.Value)
+}

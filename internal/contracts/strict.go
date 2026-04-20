@@ -56,3 +56,38 @@ func runValidation(v any) error {
 func validateStruct(v any) error {
 	return validation.Instance().Struct(v)
 }
+
+// EncodeStrict writes v as JSON to w after running the same Validate() /
+// validator.Struct chain that decodeStrict enforces (Phase 0-bootstrap-1 gate
+// 3rd-round finding #1). Producers writing top-level persisted JSON
+// (Manifest / TaskPackage / IntentionRecord / Decision / RuleRegistryEntry /
+// StateEntry / Candidates / ChecklistResult etc.) must go through this helper
+// so that transition checks / stage invariants / matrix invariants etc. are
+// enforced on the write path too — decode-time auto-chain alone is not
+// enough because a producer can hand-craft a struct and `json.Marshal` it
+// without ever touching a reader.
+//
+// EncodeStrict uses `json.Encoder` which appends a single trailing newline;
+// callers that need trailing-newline-free output should use MarshalStrict
+// and strip / reuse the bytes as needed.
+func EncodeStrict[T any](w io.Writer, v T) error {
+	if err := runValidation(v); err != nil {
+		return err
+	}
+	enc := json.NewEncoder(w)
+	return enc.Encode(v)
+}
+
+// MarshalStrict returns the JSON encoding of v after running the same
+// Validate() / validator.Struct chain as EncodeStrict / decodeStrict.
+//
+// Unlike json.Marshal, MarshalStrict rejects structs that fail their
+// Validate() method even when the producer constructed the struct directly
+// and skipped the decode path (Phase 0-bootstrap-1 gate 3rd-round finding #1
+// / #2). The returned bytes have no trailing newline.
+func MarshalStrict[T any](v T) ([]byte, error) {
+	if err := runValidation(v); err != nil {
+		return nil, err
+	}
+	return json.Marshal(v)
+}

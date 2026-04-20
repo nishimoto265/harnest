@@ -3,6 +3,7 @@ package contracts
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -30,11 +31,12 @@ func TestTaskPackage_Valid(t *testing.T) {
 		if i >= 3 {
 			pass = 2
 		}
+		agent := AgentID([]string{"a1", "a2", "a3", "a1", "a2", "a3"}[i])
 		pkg.Worktrees[i] = WorktreeAllocation{
-			Agent:   AgentID([]string{"a1", "a2", "a3", "a1", "a2", "a3"}[i]),
+			Agent:   agent,
 			Pass:    pass,
-			Path:    "/tmp/wt",
-			Branch:  "b",
+			Path:    fmt.Sprintf("/tmp/wt/pass%d-%s", pass, agent),
+			Branch:  fmt.Sprintf("b-pass%d-%s", pass, agent),
 			BaseSHA: "1111111111111111111111111111111111111111",
 			HeadSHA: "1111111111111111111111111111111111111111",
 		}
@@ -78,8 +80,8 @@ func validTaskPackage() TaskPackage {
 		pkg.Worktrees[i] = WorktreeAllocation{
 			Agent:   agents[i],
 			Pass:    pass,
-			Path:    "/tmp/wt",
-			Branch:  "b",
+			Path:    fmt.Sprintf("/tmp/wt/pass%d-%s", pass, agents[i]),
+			Branch:  fmt.Sprintf("b-pass%d-%s", pass, agents[i]),
 			BaseSHA: "1111111111111111111111111111111111111111",
 			HeadSHA: "1111111111111111111111111111111111111111",
 		}

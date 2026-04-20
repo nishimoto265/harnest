@@ -226,3 +226,14 @@ func (d Decision) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(d.Value)
 }
+
+// Validate runs tag-based validation on the inner variant (Phase 0-bootstrap-1
+// gate 3rd-round finding #1 / #2). Called automatically by EncodeStrict /
+// MarshalStrict so producers cannot bypass variant validation on the write
+// path.
+func (d Decision) Validate() error {
+	if d.Value == nil {
+		return ErrUnknownDecisionAction
+	}
+	return validateStruct(d.Value)
+}

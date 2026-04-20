@@ -69,6 +69,17 @@ var (
 	ErrTaskPackagePassCountMismatch = errors.New("contracts: task_package: worktrees must contain exactly 3 entries per pass")
 	ErrTaskPackageAgentDuplicate    = errors.New("contracts: task_package: duplicate agent within a pass")
 	ErrTaskPackagePassAgentMismatch = errors.New("contracts: task_package: agent set differs between pass 1 and pass 2")
+
+	// ErrTaskPackageDuplicatePath / ErrTaskPackageDuplicateBranch (Phase 0-bootstrap-1
+	// gate 3rd-round finding #4): worktree path / branch must be globally unique
+	// across the 6-row matrix. step10 carves one worktree per (pass, agent) to
+	// its own <worktree_base>/<run>-pass{1,2}-a{N}/ and checks out a distinct
+	// per-row branch; if two rows share a path, both agents would clobber each
+	// other's working tree on disk, and shared branches would cross-wire pass1
+	// and pass2 commits. Catch this at contract-validation time instead of
+	// waiting for runtime IO corruption.
+	ErrTaskPackageDuplicatePath   = errors.New("contracts: task_package: duplicate worktree path across allocations")
+	ErrTaskPackageDuplicateBranch = errors.New("contracts: task_package: duplicate worktree branch across allocations")
 )
 
 // Validate enforces tag-based validation + the 3×2 matrix invariants described
@@ -79,7 +90,30 @@ func (p TaskPackage) Validate() error {
 	if err := validateStruct(p); err != nil {
 		return err
 	}
-	return p.validateWorktreeMatrix()
+	if err := p.validateWorktreeMatrix(); err != nil {
+		return err
+	}
+	return p.validateWorktreePathBranchUniqueness()
+}
+
+// validateWorktreePathBranchUniqueness enforces that every WorktreeAllocation
+// in Worktrees[] has a globally unique (path, branch) pair across the matrix.
+// Two rows sharing either would corrupt the filesystem or git state at
+// step20/50 run-time (finding #4).
+func (p TaskPackage) validateWorktreePathBranchUniqueness() error {
+	paths := make(map[string]int, len(p.Worktrees))
+	branches := make(map[string]int, len(p.Worktrees))
+	for i, w := range p.Worktrees {
+		if prev, dup := paths[w.Path]; dup {
+			return fmt.Errorf("%w: path=%q indices=%d,%d", ErrTaskPackageDuplicatePath, w.Path, prev, i)
+		}
+		paths[w.Path] = i
+		if prev, dup := branches[w.Branch]; dup {
+			return fmt.Errorf("%w: branch=%q indices=%d,%d", ErrTaskPackageDuplicateBranch, w.Branch, prev, i)
+		}
+		branches[w.Branch] = i
+	}
+	return nil
 }
 
 func (p TaskPackage) validateWorktreeMatrix() error {

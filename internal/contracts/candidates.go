@@ -1,6 +1,10 @@
 package contracts
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 // CandidateKind: new / update / duplicate (io-contracts.md §step40).
 // Phase 0 の candidate classification は flat 3-way enum (discriminator は持つが
@@ -40,6 +44,47 @@ type Candidate struct {
 	ProposedBodySha256 string `json:"proposed_body_sha256" validate:"required,sha256_hex"`
 }
 
+// Candidate.Validate enforces kind-specific target_rule_id invariants
+// (Phase 0-bootstrap-1 gate 3rd-round finding #6):
+//
+//   - kind == update    → target_rule_id is REQUIRED (the rule being updated)
+//   - kind == duplicate → target_rule_id is REQUIRED (the existing rule this
+//     candidate duplicates)
+//   - kind == new       → target_rule_id MUST be empty (a new rule has no
+//     pre-existing target; non-empty values here are a schema-level mixup
+//     between new and update that would confuse step70's promotion logic)
+//
+// For update / duplicate, the format follows the same sha256-or-short-ID
+// convention used elsewhere; we only validate non-emptiness here and leave
+// the exact character-set check to `validateStruct` tag rules at caller
+// level. If a future revision introduces a dedicated `rule_id_fmt` tag, wire
+// it through here too.
+var (
+	ErrCandidateTargetRequired  = errors.New("contracts: candidate: target_rule_id is required for kind=update/duplicate")
+	ErrCandidateTargetForbidden = errors.New("contracts: candidate: target_rule_id must be empty for kind=new")
+)
+
+// Validate runs tag-based struct validation + kind-specific invariants.
+func (c Candidate) Validate() error {
+	if err := validateStruct(c); err != nil {
+		return err
+	}
+	switch c.Kind {
+	case CandidateKindUpdate, CandidateKindDuplicate:
+		if c.TargetRuleID == "" {
+			return fmt.Errorf("%w: candidate_id=%s kind=%s", ErrCandidateTargetRequired, c.CandidateID, c.Kind)
+		}
+	case CandidateKindNew:
+		if c.TargetRuleID != "" {
+			return fmt.Errorf("%w: candidate_id=%s target_rule_id=%q", ErrCandidateTargetForbidden, c.CandidateID, c.TargetRuleID)
+		}
+	default:
+		// Tag-level oneof=new update duplicate should have caught this already.
+		return fmt.Errorf("%w: %s", ErrUnknownCandidateKind, c.Kind)
+	}
+	return nil
+}
+
 // Candidates is the `<run>/40/candidates.json` document.
 // 完了マーカー: candidates.json 存在 (io-contracts.md §completion marker).
 type Candidates struct {
@@ -54,6 +99,46 @@ type Candidates struct {
 	CandidatesHash string `json:"candidates_hash" validate:"required,sha256_hex"`
 
 	CreatedAt time.Time `json:"created_at" validate:"required"`
+}
+
+// Validate runs tag-based validation + per-Candidate kind invariants
+// (finding #6). Candidates_hash content verification (i.e. hash == sha256 of
+// canonical-JSON(candidates[])) requires the canonical-JSON implementation
+// that lands in bootstrap-2; the API surface is frozen here to make the
+// integration point unambiguous.
+//
+// TODO(bootstrap-2): once internal/canonicaljson lands, wire
+// CandidatesHash verification through this method so the contract is
+// end-to-end enforced on every decode/encode.
+func (c Candidates) Validate() error {
+	if err := validateStruct(c); err != nil {
+		return err
+	}
+	for i := range c.Candidates {
+		if err := c.Candidates[i].Validate(); err != nil {
+			return fmt.Errorf("candidates[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// VerifyCandidatesHash is the bootstrap-2 integration seam for verifying that
+// `candidates_hash` matches the sha256 of the canonical-JSON encoding of
+// `candidates[]`. It is intentionally a stub at bootstrap-1; the signature
+// is frozen so step40 / step70 can start calling it immediately once
+// bootstrap-2 supplies the canonical-JSON helper.
+//
+// Current behaviour (bootstrap-1): returns nil without comparison. The
+// caller contract is: after Candidates.Validate() succeeds, call this
+// method to additionally enforce hash-content integrity. When the
+// canonical-JSON helper is wired, this method will return an error when
+// the recomputed hash mismatches.
+func (c Candidates) VerifyCandidatesHash() error {
+	// TODO(bootstrap-2): call internal/canonicaljson.Marshal(c.Candidates)
+	// and sha256 the result; compare to c.CandidatesHash; return
+	// ErrCandidatesHashMismatch on mismatch. See docs/design/io-contracts.md
+	// §step40 candidates_hash derivation.
+	return nil
 }
 
 // ClassificationEntry is one row appended to `<run>/40/classification.jsonl`.

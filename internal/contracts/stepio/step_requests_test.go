@@ -1,6 +1,7 @@
 package stepio
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -32,8 +33,8 @@ func buildTaskPackage() contracts.TaskPackage {
 		pkg.Worktrees[i] = contracts.WorktreeAllocation{
 			Agent:   agents[i],
 			Pass:    pass,
-			Path:    "/tmp/wt",
-			Branch:  "b",
+			Path:    fmt.Sprintf("/tmp/wt/pass%d-%s", pass, agents[i]),
+			Branch:  fmt.Sprintf("b-pass%d-%s", pass, agents[i]),
 			BaseSHA: "1111111111111111111111111111111111111111",
 			HeadSHA: "1111111111111111111111111111111111111111",
 		}

@@ -310,3 +310,16 @@ func (e RuleRegistryEntry) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(e.Value)
 }
+
+// Validate dispatches to the inner variant's Validate() (if defined — that
+// covers status_changed / archived / restored transition rules) or falls
+// back to tag-based validateStruct for the rest (Phase 0-bootstrap-1 gate
+// 3rd-round finding #1 / #2). Called automatically by EncodeStrict /
+// MarshalStrict so registry entries cannot be written with invalid lifecycle
+// transitions.
+func (e RuleRegistryEntry) Validate() error {
+	if e.Value == nil {
+		return ErrUnknownRegistryKind
+	}
+	return runValidation(e.Value)
+}

@@ -392,3 +392,14 @@ func (e StateEntry) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(e.Value)
 }
+
+// Validate runs tag-based validation on the inner variant (Phase 0-bootstrap-1
+// gate 3rd-round finding #1 / #2). Called automatically by EncodeStrict /
+// MarshalStrict so state.jsonl entries cannot be written bypassing variant
+// validation.
+func (e StateEntry) Validate() error {
+	if e.Value == nil {
+		return ErrUnknownStateKind
+	}
+	return validateStruct(e.Value)
+}
