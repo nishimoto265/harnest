@@ -438,6 +438,7 @@ func TestDecodeAndValidateStep70Response_AcceptsPointerDecisionAdopt(t *testing.
 	got, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
 	require.NoError(t, err)
 	assert.Equal(t, req.TaskPackage.RunID, got.RunID)
+	assert.True(t, got.DecodedAndBound())
 }
 
 func TestStep70Request_UnmarshalJSON_RejectsDuplicateTopLevelKey(t *testing.T) {

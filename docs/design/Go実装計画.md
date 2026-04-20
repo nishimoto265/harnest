@@ -250,17 +250,18 @@ step30/60 は必ず後者を使う。
 
 ```go
 type IntentionRecord struct {
+    SchemaVersion        string    // "1"
     Stage                string    // planning | branch_pushed | registry_appended | decision_written | rolling_back_branch_reverted | rolling_back_registry_appended | rolling_back_decision_written | needs_manual_recovery
     IdempotencyKey       string    // sha256(run_id + target_sha + best_sha_before + candidates_hash) // no separator bytes
     RunID                string
     BestShaBefore        string
     TargetSha            string
     CandidatesHash       string
-    RegistryHeadBefore   string    // registry last-entry sha256 at planning time
+    RegistryHeadBefore   string    // registry last-entry sha256 at planning time (empty string allowed for empty registry)
     StartedAt            time.Time
-    RegistryAppendResult *RegistryAppendResult // {Offset int64, Sha256 string}, step4 で記録
-    RecoveryReason       string    // needs_manual_recovery 時のみ
-    FailedStep           string    // needs_manual_recovery 時のみ
+    RegistryAppendResult *RegistryAppendResult // {Offset int64, Sha256 string}; required for registry_appended | decision_written | rolling_back_registry_appended | rolling_back_decision_written
+    RecoveryReason       string    // required for needs_manual_recovery | rolling_back_branch_reverted | rolling_back_registry_appended | rolling_back_decision_written
+    FailedStep           string    // required for needs_manual_recovery | rolling_back_branch_reverted | rolling_back_registry_appended | rolling_back_decision_written
 }
 ```
 
@@ -303,18 +304,23 @@ yaml KnownFields(true) + validator / slog JSON handler / config.yaml.example
 - **Terminal events**: `completed / failed / promoted / rollback / skipped / timeout / needs_manual_recovery`
 - **Non-terminal events (resume 対象)**: `started / step_done / interrupted / promoting / registry_size_high / registry_size_critical / rescue_retry`
 - Schema(全 event に `step` required):
-  - `started { pr, run_id, step: 10 }`
-  - `step_done { pr, run_id, step }`
-  - `interrupted { pr, run_id, step, reason: 'rate_limit' | 'budget' | 'context' | 'signal' | 'unknown' | 'pre_push_crash', detail?, detail_overflow_ref? }`
-  - `promoting { pr, run_id, step: 70 }` (rev9 non-terminal)
+  - `started { pr, run_id, step: 10, at }`
+  - `step_done { pr, run_id, step, at }`
+  - `interrupted { pr, run_id, step, reason: 'rate_limit' | 'budget' | 'context' | 'signal' | 'unknown' | 'pre_push_crash', detail?, detail_overflow_ref?, at }`
+  - `promoting { pr, run_id, step: 70, at }` (rev9 non-terminal)
   - `registry_size_high` / `registry_size_critical`: `{ kind, pr?, run_id?, source, step?, count, detail?, detail_overflow_ref?, at }`
     - `source: 'step70'` のとき `pr` / `run_id` 必須、`step: '70'` 必須。PR-scoped resume 対象
     - `source: 'sunset_tick'` のとき `pr` / `run_id` / `step` はすべて禁止。global telemetry 専用で resume 対象外
   - `rescue_retry`: `{ kind, pr, run_id, step, detail?, detail_overflow_ref?, at }`
     - `step` は `'20' | '50'`
     - `source` field は禁止。PR-scoped resume 対象
-  - `needs_manual_recovery { pr, run_id, step, reason, failed_step, detail?, detail_overflow_ref? }`
-  - `promoted / rollback / failed / timeout / completed / skipped` は既存踏襲 + `step` required
+  - `needs_manual_recovery { pr, run_id, step, reason, failed_step, detail?, detail_overflow_ref?, at }`
+  - `promoted { pr, run_id, step: 70, at }`
+  - `rollback { pr, run_id, step: 70, rollback_reason, failed_step, at }`
+  - `failed { pr, run_id, step, reason, detail?, detail_overflow_ref?, at }`
+  - `timeout { pr, run_id, step, at }`
+  - `completed { pr, run_id, step, detail?, detail_overflow_ref?, at }`
+  - `skipped { pr, run_id, step, detail?, detail_overflow_ref?, at }`
 - `detail` 300字 cap、超過時 sidecar `<run>/processed-details/<sha256>.txt`、`detail_overflow_ref` に path + sha256
 - `ResumeTarget(entries) []ResumeRequest`: non-terminal PR の run_id と最後の step を列挙(`promoting / registry_size_high / registry_size_critical / rescue_retry` を含む、Codex rev8 R1/R3 対応)
 - **processed-index.jsonl は Phase 0 では実装しない**(rev10 決定、Codex rev9 R1/R2 対応): 個人運用 1 PR/日 × 10年 = 3650 entry 程度なら起動時 full scan で十分。index 実装は future work として記載、ただし validation/rebuild 契約が未詰めなため rev10 ではスコープ外

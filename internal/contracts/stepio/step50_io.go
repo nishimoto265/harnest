@@ -75,3 +75,20 @@ func (r Step50Response) Validate() error {
 	}
 	return validateImplementationResponse(r.RunID, r.Pass, r.Results, r.RescueExhausted)
 }
+
+// DecodeAndValidateStep50Response applies the response-local strict decode and
+// then enforces the request-aware partition contract:
+// results ∩ rescue_exhausted == ∅ and results ∪ rescue_exhausted == req.Agents.
+func DecodeAndValidateStep50Response(data []byte, req Step50Request) (Step50Response, error) {
+	var resp Step50Response
+	if err := resp.UnmarshalJSON(data); err != nil {
+		return Step50Response{}, err
+	}
+	if err := req.Validate(); err != nil {
+		return Step50Response{}, err
+	}
+	if err := validateImplementationPartition(resp.Results, resp.RescueExhausted, req.Agents); err != nil {
+		return Step50Response{}, err
+	}
+	return resp, nil
+}

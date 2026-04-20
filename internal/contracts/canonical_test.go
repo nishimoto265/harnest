@@ -116,6 +116,63 @@ func TestCanonicalMarshal_RejectsNaNAndInfinity(t *testing.T) {
 	}
 }
 
+func TestCanonicalMarshal_RejectsForbiddenNumericKindsBeforeJSONEncoding(t *testing.T) {
+	type nested struct {
+		Values []any `json:"values"`
+	}
+	type payload struct {
+		Name   string `json:"name"`
+		Amount any    `json:"amount"`
+		Nested nested `json:"nested"`
+	}
+	type onlyIntegers struct {
+		Int   int   `json:"int"`
+		Int64 int64 `json:"int64"`
+	}
+
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{
+			name: "float64 field",
+			value: struct {
+				Value float64 `json:"value"`
+			}{Value: 1.0},
+		},
+		{
+			name: "float32 field",
+			value: struct {
+				Value float32 `json:"value"`
+			}{Value: 0},
+		},
+		{
+			name: "nested float64 in interface tree",
+			value: payload{
+				Name:   "example",
+				Amount: 1,
+				Nested: nested{Values: []any{map[string]any{"score": 1.0}}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := CanonicalMarshal(tt.value)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrCanonicalForbiddenKind)
+		})
+	}
+
+	_, err := CanonicalMarshal(map[string]any{"score": json.Number("1.0")})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCanonicalNonInteger)
+
+	data, err := CanonicalMarshal(onlyIntegers{Int: 1, Int64: 2})
+	require.NoError(t, err)
+	assert.Equal(t, `{"int":1,"int64":2}`, string(data))
+}
+
 func TestCanonicalMarshal_NormalizesNegativeZero(t *testing.T) {
 	data, err := CanonicalMarshal(json.Number("-0"))
 	require.NoError(t, err)

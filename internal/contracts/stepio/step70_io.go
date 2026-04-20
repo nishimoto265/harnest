@@ -28,11 +28,12 @@ type Step70Request struct {
 // Step70Response is the output envelope for step 70.
 // Decision は `<run>/70/decision.json` に atomic write 済みで渡す前提。
 //
-// Intentional boundary choice (H1 option A): this type does not expose
-// UnmarshalJSON or a public Validate method because its full invariant set is
-// request-bound (`run_id` / `candidates_hash` / adopt idempotency cross-checks).
-// The only sanctioned public decode entrypoint is
-// DecodeAndValidateStep70Response(data, req).
+// Direct stdlib decode must still fail closed on malformed payloads because
+// this is an exported struct with exported fields. UnmarshalJSON therefore
+// enforces strict JSON + response-local invariants and leaves the value marked
+// as "not yet request-bound". Callers that need to consume the response as a
+// real step70 boundary must use DecodeAndValidateStep70Response(data, req),
+// which performs the second-stage request binding and flips DecodedAndBound().
 type Step70Response struct {
 	RunID    contracts.RunID    `json:"run_id" validate:"required,run_id_fmt"`
 	Decision contracts.Decision `json:"decision"`
@@ -40,6 +41,8 @@ type Step70Response struct {
 	// まで完走した場合のみ true。orchestrator は true のときに promoted event を
 	// state に append 可 (step70 自身が既に append 済みなので重複 append しない)。
 	Promoted bool `json:"promoted"`
+
+	requestBoundChecked bool
 }
 
 // Step70Response consistency errors (Phase 0-bootstrap-1 gate 3rd-round
@@ -101,27 +104,39 @@ func (r Step70Request) Validate() error {
 // decode, response-local invariants, and request-bound cross-checks in one
 // place so callers cannot accidentally skip the request-aware validation.
 func DecodeAndValidateStep70Response(data []byte, req Step70Request) (Step70Response, error) {
-	resp, err := decodeStep70Response(data)
-	if err != nil {
+	var resp Step70Response
+	if err := resp.UnmarshalJSON(data); err != nil {
 		return Step70Response{}, err
 	}
 	if err := resp.validateAgainstRequest(req); err != nil {
 		return Step70Response{}, err
 	}
+	resp.requestBoundChecked = true
 	return resp, nil
 }
 
-func decodeStep70Response(data []byte) (Step70Response, error) {
+func (r *Step70Response) UnmarshalJSON(data []byte) error {
 	type alias Step70Response
 	var a alias
 	if err := contracts.DecodeStrictJSON(data, &a); err != nil {
-		return Step70Response{}, err
+		return err
 	}
-	resp := Step70Response(a)
-	if err := resp.validate(); err != nil {
-		return Step70Response{}, err
+	*r = Step70Response(a)
+	r.requestBoundChecked = false
+	if err := r.Validate(); err != nil {
+		return err
 	}
-	return resp, nil
+	return nil
+}
+
+func (r Step70Response) Validate() error {
+	return r.validate()
+}
+
+// DecodedAndBound reports whether DecodeAndValidateStep70Response completed the
+// request-bound second-stage validation for this value.
+func (r Step70Response) DecodedAndBound() bool {
+	return r.requestBoundChecked
 }
 
 func (r Step70Response) validate() error {

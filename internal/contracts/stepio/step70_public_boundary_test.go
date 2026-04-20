@@ -3,7 +3,7 @@ package stepio_test
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,23 +97,72 @@ func validStep70ResponseJSONExternal(t *testing.T) []byte {
 	return data
 }
 
-func TestStep70Response_PublicBypassSurfaceRemoved(t *testing.T) {
+func TestStep70Response_DirectJSONUnmarshal_RejectsMalformedPayloads(t *testing.T) {
+	data := validStep70ResponseJSONExternal(t)
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "duplicate key",
+			data: []byte(strings.Replace(string(data), `"promoted":true`, `"promoted":true,"promoted":false`, 1)),
+		},
+		{
+			name: "unknown field",
+			data: []byte(strings.Replace(string(data), `"promoted":true`, `"unexpected":true,"promoted":true`, 1)),
+		},
+		{
+			name: "trailing token",
+			data: append(append([]byte(nil), data...), []byte(`{"extra":true}`)...),
+		},
+		{
+			name: "response-local invariant",
+			data: []byte(strings.Replace(string(data), `"promoted":true`, `"promoted":false`, 1)),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var resp stepio.Step70Response
+			err := json.Unmarshal(tt.data, &resp)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestStep70Response_DirectJSONUnmarshal_SucceedsButRemainsUnbound(t *testing.T) {
 	data := validStep70ResponseJSONExternal(t)
 
 	var resp stepio.Step70Response
-	require.NoError(t, json.Unmarshal(data, &resp))
-
-	_, hasValidate := reflect.TypeOf(stepio.Step70Response{}).MethodByName("Validate")
-	assert.False(t, hasValidate)
-	_, hasUnmarshalJSON := reflect.TypeOf((*stepio.Step70Response)(nil)).MethodByName("UnmarshalJSON")
-	assert.False(t, hasUnmarshalJSON)
+	err := json.Unmarshal(data, &resp)
+	require.NoError(t, err)
+	assert.False(t, resp.DecodedAndBound())
+	assert.NoError(t, resp.Validate())
 }
 
-func TestDecodeAndValidateStep70Response_RemainsPublicBoundary(t *testing.T) {
+func TestDecodeAndValidateStep70Response_BindsRequest(t *testing.T) {
 	data := validStep70ResponseJSONExternal(t)
 	req := validStep70RequestExternal()
 
 	got, err := stepio.DecodeAndValidateStep70Response(data, req)
 	require.NoError(t, err)
 	assert.Equal(t, req.TaskPackage.RunID, got.RunID)
+	assert.True(t, got.DecodedAndBound())
+}
+
+func TestDecodeAndValidateStep70Response_RejectsRequestMismatchEvenWhenDirectDecodeSucceeds(t *testing.T) {
+	data := validStep70ResponseJSONExternal(t)
+
+	var direct stepio.Step70Response
+	require.NoError(t, json.Unmarshal(data, &direct))
+	assert.False(t, direct.DecodedAndBound())
+
+	req := validStep70RequestExternal()
+	req.Candidates.Candidates[0].Title = "different candidate set"
+	req.Candidates.CandidatesHash = contracts.CanonicalCandidatesHash(req.Candidates.Candidates)
+
+	_, err := stepio.DecodeAndValidateStep70Response(data, req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, stepio.ErrStep70AdoptCandidatesHashMismatch)
 }

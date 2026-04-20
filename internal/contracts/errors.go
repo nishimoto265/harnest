@@ -45,4 +45,9 @@ var (
 	// ErrCanonicalNonInteger is returned when canonical JSON encounters a
 	// number that is not representable as an int64 integer.
 	ErrCanonicalNonInteger = errors.New("contracts: canonical marshal: number must be an int64 integer")
+
+	// ErrCanonicalForbiddenKind is returned when canonical JSON encounters a Go
+	// numeric kind that is forbidden by the integer-only contract before
+	// encoding/json has a chance to erase the original type information.
+	ErrCanonicalForbiddenKind = errors.New("contracts: canonical marshal: forbidden Go numeric kind")
 )

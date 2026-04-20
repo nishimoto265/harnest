@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
 	"strconv"
 )
@@ -15,6 +16,10 @@ import (
 // level, preserves arrays in-order, disables HTML escaping, and normalizes
 // numbers to the minimal JSON representation produced by Go's encoder.
 func CanonicalMarshal(v any) ([]byte, error) {
+	if err := rejectForbiddenCanonicalKinds(reflect.ValueOf(v), "$"); err != nil {
+		return nil, err
+	}
+
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
@@ -37,6 +42,56 @@ func CanonicalMarshal(v any) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func rejectForbiddenCanonicalKinds(v reflect.Value, path string) error {
+	if !v.IsValid() {
+		return nil
+	}
+
+	switch v.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		if v.IsNil() {
+			return nil
+		}
+		return rejectForbiddenCanonicalKinds(v.Elem(), path)
+	case reflect.Struct:
+		t := v.Type()
+		for i := 0; i < v.NumField(); i++ {
+			field := t.Field(i)
+			if field.PkgPath != "" {
+				continue
+			}
+			if field.Tag.Get("json") == "-" {
+				continue
+			}
+			if err := rejectForbiddenCanonicalKinds(v.Field(i), path+"."+field.Name); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			if err := rejectForbiddenCanonicalKinds(v.Index(i), fmt.Sprintf("%s[%d]", path, i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Map:
+		iter := v.MapRange()
+		for iter.Next() {
+			if err := rejectForbiddenCanonicalKinds(iter.Value(), fmt.Sprintf("%s[%v]", path, iter.Key())); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Float32, reflect.Float64, reflect.Uint, reflect.Uint32, reflect.Uint64, reflect.Uintptr, reflect.Complex64, reflect.Complex128:
+		return fmt.Errorf("%w: kind=%s path=%s", ErrCanonicalForbiddenKind, v.Kind(), path)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint8, reflect.Uint16:
+		return nil
+	default:
+		return nil
+	}
 }
 
 func writeCanonicalJSON(buf *bytes.Buffer, v any) error {

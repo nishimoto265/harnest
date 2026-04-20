@@ -109,3 +109,20 @@ func (r Step20Response) Validate() error {
 	}
 	return validateImplementationResponse(r.RunID, r.Pass, r.Results, r.RescueExhausted)
 }
+
+// DecodeAndValidateStep20Response applies the response-local strict decode and
+// then enforces the request-aware partition contract:
+// results ∩ rescue_exhausted == ∅ and results ∪ rescue_exhausted == req.Agents.
+func DecodeAndValidateStep20Response(data []byte, req Step20Request) (Step20Response, error) {
+	var resp Step20Response
+	if err := resp.UnmarshalJSON(data); err != nil {
+		return Step20Response{}, err
+	}
+	if err := req.Validate(); err != nil {
+		return Step20Response{}, err
+	}
+	if err := validateImplementationPartition(resp.Results, resp.RescueExhausted, req.Agents); err != nil {
+		return Step20Response{}, err
+	}
+	return resp, nil
+}

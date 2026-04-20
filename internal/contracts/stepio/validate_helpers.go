@@ -15,6 +15,8 @@ var (
 	ErrStepResponseManifestRunIDMismatch = errors.New("stepio: response.run_id must equal manifest.run_id")
 	ErrStepResponseManifestPassMismatch  = errors.New("stepio: response.pass must equal manifest.pass")
 	ErrStepResponseManifestAgentMismatch = errors.New("stepio: result.agent must equal manifest.agent")
+	ErrAgentResultOverlap                = errors.New("stepio: response agent must not appear in both results and rescue_exhausted")
+	ErrAgentCoverageMismatch             = errors.New("stepio: response agents must partition request.agents exactly")
 )
 
 func validateAgentsWithinPass(agents []contracts.AgentID, pkg contracts.TaskPackage, pass int, errWrap error) error {
@@ -69,6 +71,39 @@ func validateImplementationResponse(runID contracts.RunID, pass int, results []S
 			return fmt.Errorf("%w: agent=%s", ErrStepResponseDuplicateRescueAgent, rescue[i].Agent)
 		}
 		seenRescue[rescue[i].Agent] = struct{}{}
+	}
+	return nil
+}
+
+func validateImplementationPartition(results []Step20AgentResult, rescue []RescueExhausted, expectedAgents []contracts.AgentID) error {
+	expected := make(map[contracts.AgentID]struct{}, len(expectedAgents))
+	for _, agent := range expectedAgents {
+		expected[agent] = struct{}{}
+	}
+
+	covered := make(map[contracts.AgentID]struct{}, len(results)+len(rescue))
+	for _, result := range results {
+		covered[result.Agent] = struct{}{}
+	}
+	for _, exhausted := range rescue {
+		if _, overlap := covered[exhausted.Agent]; overlap {
+			return fmt.Errorf("%w: agent=%s", ErrAgentResultOverlap, exhausted.Agent)
+		}
+		covered[exhausted.Agent] = struct{}{}
+	}
+
+	if len(covered) != len(expected) {
+		return fmt.Errorf("%w: covered=%d expected=%d", ErrAgentCoverageMismatch, len(covered), len(expected))
+	}
+	for agent := range covered {
+		if _, ok := expected[agent]; !ok {
+			return fmt.Errorf("%w: unexpected agent=%s", ErrAgentCoverageMismatch, agent)
+		}
+	}
+	for agent := range expected {
+		if _, ok := covered[agent]; !ok {
+			return fmt.Errorf("%w: missing agent=%s", ErrAgentCoverageMismatch, agent)
+		}
 	}
 	return nil
 }

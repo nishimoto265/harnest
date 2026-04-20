@@ -370,3 +370,98 @@ func TestStep60Request_Validate_RejectsScorableAgentOutsidePass(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep60ScorableAgentPassMismatch)
 }
+
+func TestDecodeAndValidateStep20Response_RejectsAgentOverlap(t *testing.T) {
+	req := validStep20Request()
+	resp := Step20Response{
+		RunID: "2026-04-20-PR42-abcdef0",
+		Pass:  1,
+		Results: []Step20AgentResult{
+			{Agent: "a1", Manifest: validManifestSuccess(1, "a1")},
+			{Agent: "a2", Manifest: validManifestSuccess(1, "a2")},
+		},
+		RescueExhausted: []RescueExhausted{
+			{Agent: "a2", RetryCount: 3},
+			{Agent: "a3", RetryCount: 3},
+		},
+	}
+
+	_, err := DecodeAndValidateStep20Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrAgentResultOverlap)
+}
+
+func TestDecodeAndValidateStep20Response_RejectsCoverageMismatch(t *testing.T) {
+	req := validStep20Request()
+	resp := Step20Response{
+		RunID: "2026-04-20-PR42-abcdef0",
+		Pass:  1,
+		Results: []Step20AgentResult{
+			{Agent: "a1", Manifest: validManifestSuccess(1, "a1")},
+		},
+		RescueExhausted: []RescueExhausted{
+			{Agent: "a2", RetryCount: 3},
+		},
+	}
+
+	_, err := DecodeAndValidateStep20Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrAgentCoverageMismatch)
+}
+
+func TestDecodeAndValidateStep20Response_AcceptsExactPartition(t *testing.T) {
+	req := validStep20Request()
+	resp := Step20Response{
+		RunID: "2026-04-20-PR42-abcdef0",
+		Pass:  1,
+		Results: []Step20AgentResult{
+			{Agent: "a1", Manifest: validManifestSuccess(1, "a1")},
+			{Agent: "a2", Manifest: validManifestSuccess(1, "a2")},
+		},
+		RescueExhausted: []RescueExhausted{
+			{Agent: "a3", RetryCount: 3},
+		},
+	}
+
+	got, err := DecodeAndValidateStep20Response(mustMarshalJSON(t, resp), req)
+	require.NoError(t, err)
+	assert.Equal(t, resp.RunID, got.RunID)
+}
+
+func TestDecodeAndValidateStep50Response_RejectsCoverageMismatchOnInjectedAgent(t *testing.T) {
+	req := validStep50Request()
+	resp := Step50Response{
+		RunID: "2026-04-20-PR42-abcdef0",
+		Pass:  2,
+		Results: []Step20AgentResult{
+			{Agent: "a1", Manifest: validManifestSuccess(2, "a1")},
+			{Agent: "a2", Manifest: validManifestSuccess(2, "a2")},
+		},
+		RescueExhausted: []RescueExhausted{
+			{Agent: "a4", RetryCount: 3},
+		},
+	}
+
+	_, err := DecodeAndValidateStep50Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrAgentCoverageMismatch)
+}
+
+func TestDecodeAndValidateStep50Response_AcceptsExactPartition(t *testing.T) {
+	req := validStep50Request()
+	resp := Step50Response{
+		RunID: "2026-04-20-PR42-abcdef0",
+		Pass:  2,
+		Results: []Step20AgentResult{
+			{Agent: "a1", Manifest: validManifestSuccess(2, "a1")},
+			{Agent: "a3", Manifest: validManifestSuccess(2, "a3")},
+		},
+		RescueExhausted: []RescueExhausted{
+			{Agent: "a2", RetryCount: 3},
+		},
+	}
+
+	got, err := DecodeAndValidateStep50Response(mustMarshalJSON(t, resp), req)
+	require.NoError(t, err)
+	assert.Equal(t, resp.RunID, got.RunID)
+}
