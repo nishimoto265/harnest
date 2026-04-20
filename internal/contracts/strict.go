@@ -53,6 +53,19 @@ func DecodeStrictJSON(data []byte, v any) error {
 	return decodeStrict(data, v)
 }
 
+func decodeStrictWithRequiredFields(data []byte, v any, requiredFields map[string]error) error {
+	raw, err := decodeStrictJSONObjectFields(data)
+	if err != nil {
+		return err
+	}
+	for field, fieldErr := range requiredFields {
+		if _, ok := raw[field]; !ok {
+			return fieldErr
+		}
+	}
+	return decodeStrict(data, v)
+}
+
 // RejectDuplicateJSONKeys exposes the duplicate-key scanner used by strict
 // readers. Step I/O boundaries use it before decoding alias structs in custom
 // UnmarshalJSON implementations.
@@ -60,7 +73,26 @@ func RejectDuplicateJSONKeys(data []byte) error {
 	return rejectDuplicateKeys(data)
 }
 
+func decodeStrictJSONObjectFields(data []byte) (map[string]json.RawMessage, error) {
+	if err := rejectDuplicateKeys(data); err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var raw map[string]json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return nil, err
+	}
+	var rest any
+	if err := dec.Decode(&rest); err != io.EOF {
+		return nil, ErrTrailingJSON
+	}
+	return raw, nil
+}
+
 func rejectDuplicateKeys(data []byte) error {
+	if len(trimStrictJSONPayload(data)) == 0 {
+		return ErrEmptyJSON
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := scanJSONValue(dec); err != nil {
 		return err
@@ -72,6 +104,12 @@ func rejectDuplicateKeys(data []byte) error {
 		return err
 	}
 	return nil
+}
+
+func trimStrictJSONPayload(data []byte) []byte {
+	trimmed := bytes.TrimSpace(data)
+	trimmed = bytes.TrimPrefix(trimmed, []byte{0xEF, 0xBB, 0xBF})
+	return bytes.TrimSpace(trimmed)
 }
 
 func scanJSONValue(dec *json.Decoder) error {

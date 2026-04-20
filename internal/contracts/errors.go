@@ -17,6 +17,10 @@ var (
 	// same object key twice at the same nesting level.
 	ErrDuplicateJSONKey = errors.New("contracts: duplicate JSON object key")
 
+	// ErrEmptyJSON is returned when a strict JSON reader receives an empty or
+	// whitespace-only payload (including a bare UTF-8 BOM).
+	ErrEmptyJSON = errors.New("contracts: empty JSON payload")
+
 	// ErrUnknownManifestKind is returned when a Manifest envelope has a `kind`
 	// outside the {success, error, timeout} set.
 	ErrUnknownManifestKind = errors.New("contracts: unknown manifest kind")

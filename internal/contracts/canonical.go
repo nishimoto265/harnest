@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,10 +20,6 @@ import (
 // level, preserves arrays in-order, disables HTML escaping, and normalizes
 // numbers to the minimal JSON representation produced by Go's encoder.
 func CanonicalMarshal(v any) ([]byte, error) {
-	if err := rejectForbiddenCanonicalKinds(reflect.ValueOf(v), "$", make(map[uintptr]struct{})); err != nil {
-		return nil, err
-	}
-
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
@@ -39,6 +36,9 @@ func CanonicalMarshal(v any) ([]byte, error) {
 	if err := dec.Decode(&rest); err != io.EOF {
 		return nil, err
 	}
+	if err := rejectForbiddenCanonicalKinds(reflect.ValueOf(v), tree, "$"); err != nil {
+		return nil, err
+	}
 
 	var buf bytes.Buffer
 	if err := writeCanonicalJSON(&buf, tree); err != nil {
@@ -47,59 +47,65 @@ func CanonicalMarshal(v any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func rejectForbiddenCanonicalKinds(v reflect.Value, path string, seen map[uintptr]struct{}) error {
+func rejectForbiddenCanonicalKinds(v reflect.Value, tree any, path string) error {
 	if !v.IsValid() {
 		return nil
 	}
-
-	if shouldTrackCanonicalVisit(v) {
-		ptr := v.Pointer()
-		if ptr != 0 {
-			if _, ok := seen[ptr]; ok {
-				return &json.UnsupportedValueError{
-					Value: v,
-					Str:   fmt.Sprintf("encountered a cycle via %s", path),
-				}
-			}
-			seen[ptr] = struct{}{}
-			defer delete(seen, ptr)
+	for v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil
 		}
+		v = v.Elem()
 	}
 
 	switch v.Kind() {
-	case reflect.Interface:
-		if v.IsNil() {
-			return nil
-		}
-		return rejectForbiddenCanonicalKinds(v.Elem(), path, seen)
-	case reflect.Pointer:
-		if v.IsNil() {
-			return nil
-		}
-		return rejectForbiddenCanonicalKinds(v.Elem(), path, seen)
 	case reflect.Struct:
+		obj, ok := tree.(map[string]any)
+		if !ok {
+			return nil
+		}
 		t := v.Type()
-		for _, field := range cachedCanonicalActiveFields(t) {
+		fields := cachedCanonicalActiveFields(t)
+		for key, child := range obj {
+			field, ok := findCanonicalFieldByName(fields, key)
+			if !ok {
+				continue
+			}
 			fieldValue := canonicalValueByIndex(v, field.index)
 			if !fieldValue.IsValid() {
 				continue
 			}
-			if err := rejectForbiddenCanonicalKinds(fieldValue, path+"."+canonicalFieldPath(t, field.index), seen); err != nil {
+			if err := rejectForbiddenCanonicalKinds(fieldValue, child, path+"."+canonicalFieldPath(t, field.index)); err != nil {
 				return err
 			}
 		}
 		return nil
 	case reflect.Slice, reflect.Array:
-		for i := 0; i < v.Len(); i++ {
-			if err := rejectForbiddenCanonicalKinds(v.Index(i), fmt.Sprintf("%s[%d]", path, i), seen); err != nil {
+		items, ok := tree.([]any)
+		if !ok {
+			return nil
+		}
+		limit := v.Len()
+		if len(items) < limit {
+			limit = len(items)
+		}
+		for i := 0; i < limit; i++ {
+			if err := rejectForbiddenCanonicalKinds(v.Index(i), items[i], fmt.Sprintf("%s[%d]", path, i)); err != nil {
 				return err
 			}
 		}
 		return nil
 	case reflect.Map:
-		iter := v.MapRange()
-		for iter.Next() {
-			if err := rejectForbiddenCanonicalKinds(iter.Value(), fmt.Sprintf("%s[%v]", path, iter.Key()), seen); err != nil {
+		obj, ok := tree.(map[string]any)
+		if !ok {
+			return nil
+		}
+		for key, child := range obj {
+			value, ok := canonicalMapValueByJSONKey(v, key)
+			if !ok {
+				continue
+			}
+			if err := rejectForbiddenCanonicalKinds(value, child, fmt.Sprintf("%s[%q]", path, key)); err != nil {
 				return err
 			}
 		}
@@ -113,13 +119,63 @@ func rejectForbiddenCanonicalKinds(v reflect.Value, path string, seen map[uintpt
 	}
 }
 
-func shouldTrackCanonicalVisit(v reflect.Value) bool {
-	switch v.Kind() {
-	case reflect.Pointer, reflect.Map, reflect.Slice:
-		return !v.IsNil()
-	default:
-		return false
+func findCanonicalFieldByName(fields []canonicalActiveField, name string) (canonicalActiveField, bool) {
+	for _, field := range fields {
+		if field.name == name {
+			return field, true
+		}
 	}
+	return canonicalActiveField{}, false
+}
+
+func canonicalMapValueByJSONKey(v reflect.Value, key string) (reflect.Value, bool) {
+	keyType := v.Type().Key()
+	switch keyType.Kind() {
+	case reflect.String:
+		value := v.MapIndex(reflect.ValueOf(key).Convert(keyType))
+		return value, value.IsValid()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		parsed, err := strconv.ParseInt(key, 10, 64)
+		if err != nil {
+			return reflect.Value{}, false
+		}
+		keyValue := reflect.New(keyType).Elem()
+		keyValue.SetInt(parsed)
+		value := v.MapIndex(keyValue)
+		return value, value.IsValid()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		parsed, err := strconv.ParseUint(key, 10, 64)
+		if err != nil {
+			return reflect.Value{}, false
+		}
+		keyValue := reflect.New(keyType).Elem()
+		keyValue.SetUint(parsed)
+		value := v.MapIndex(keyValue)
+		return value, value.IsValid()
+	default:
+		iter := v.MapRange()
+		for iter.Next() {
+			marshaledKey, err := canonicalMapKeyString(iter.Key())
+			if err != nil {
+				return reflect.Value{}, false
+			}
+			if marshaledKey == key {
+				return iter.Value(), true
+			}
+		}
+		return reflect.Value{}, false
+	}
+}
+
+func canonicalMapKeyString(v reflect.Value) (string, error) {
+	if textMarshaler, ok := v.Interface().(encoding.TextMarshaler); ok {
+		data, err := textMarshaler.MarshalText()
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+	return "", fmt.Errorf("contracts: canonical marshal: unsupported map key type %s", v.Type())
 }
 
 type canonicalActiveField struct {

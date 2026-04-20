@@ -389,9 +389,17 @@ func TestDecodeAndValidateStep70Response_RejectsForgedIdempotencyKey(t *testing.
 	resp := validStep70Response()
 	adopt := mustDecisionAdopt(t, resp.payload.Decision)
 	adopt.IdempotencyKey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-	resp.payload.Decision.Value = adopt
+	raw := struct {
+		RunID    contracts.RunID         `json:"run_id"`
+		Decision contracts.DecisionAdopt `json:"decision"`
+		Promoted bool                    `json:"promoted"`
+	}{
+		RunID:    resp.payload.RunID,
+		Decision: adopt,
+		Promoted: resp.payload.Promoted,
+	}
 
-	_, err := DecodeAndValidateStep70Response(mustMarshalStep70PayloadJSON(t, resp), req)
+	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, raw), req)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, contracts.ErrDecisionIdempotencyKeyMismatch)
 }
@@ -473,7 +481,8 @@ func TestStep40Request_Validate_RegistryPathHardening(t *testing.T) {
 		wantErr    error
 		wantAnyErr bool
 	}{
-		{name: "clean absolute", path: "/a/b"},
+		{name: "clean absolute", path: "/a/rules-registry.jsonl"},
+		{name: "wrong basename", path: "/a/hosts", wantErr: ErrRegistryPathBasename},
 		{name: "parent escape", path: "/a/../b", wantErr: ErrRegistryPathNotClean},
 		{name: "dot segment", path: "/a/./b", wantErr: ErrRegistryPathNotClean},
 		{name: "relative", path: "a/b", wantErr: ErrRegistryPathNotAbsolute},
@@ -505,7 +514,8 @@ func TestStep70Request_Validate_RegistryPathHardening(t *testing.T) {
 		wantErr    error
 		wantAnyErr bool
 	}{
-		{name: "clean absolute", path: "/a/b"},
+		{name: "clean absolute", path: "/a/rules-registry.jsonl"},
+		{name: "wrong basename", path: "/a/hosts", wantErr: ErrRegistryPathBasename},
 		{name: "parent escape", path: "/a/../b", wantErr: ErrRegistryPathNotClean},
 		{name: "dot segment", path: "/a/./b", wantErr: ErrRegistryPathNotClean},
 		{name: "relative", path: "a/b", wantErr: ErrRegistryPathNotAbsolute},

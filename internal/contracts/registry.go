@@ -1,7 +1,6 @@
 package contracts
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -130,22 +129,15 @@ var (
 )
 
 func (e *RuleRegistryRolledBack) UnmarshalJSON(data []byte) error {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	if _, ok := raw["target_offset"]; !ok {
-		return ErrRegistryRolledBackMissingTargetOffset
-	}
 	type alias RuleRegistryRolledBack
 	var a alias
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&a); err != nil {
+	if err := decodeStrictWithRequiredFields(data, &a, map[string]error{
+		"target_offset": ErrRegistryRolledBackMissingTargetOffset,
+	}); err != nil {
 		return err
 	}
 	*e = RuleRegistryRolledBack(a)
-	return nil
+	return e.Validate()
 }
 
 func (e RuleRegistryRolledBack) Validate() error {
@@ -366,6 +358,9 @@ func (e RuleRegistryEntry) MarshalJSON() ([]byte, error) {
 	if e.Value == nil {
 		return nil, ErrUnknownRegistryKind
 	}
+	if err := e.Validate(); err != nil {
+		return nil, err
+	}
 	return json.Marshal(e.Value)
 }
 
@@ -460,22 +455,15 @@ type RuleIdempotencyIndexEntry struct {
 }
 
 func (e *RuleIdempotencyIndexEntry) UnmarshalJSON(data []byte) error {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	if _, ok := raw["registry_offset"]; !ok {
-		return ErrRuleIdempotencyIndexMissingOffset
-	}
 	type alias RuleIdempotencyIndexEntry
 	var a alias
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&a); err != nil {
+	if err := decodeStrictWithRequiredFields(data, &a, map[string]error{
+		"registry_offset": ErrRuleIdempotencyIndexMissingOffset,
+	}); err != nil {
 		return err
 	}
 	*e = RuleIdempotencyIndexEntry(a)
-	return nil
+	return e.Validate()
 }
 
 func (e RuleIdempotencyIndexEntry) Validate() error {

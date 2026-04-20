@@ -225,7 +225,9 @@ step30/60 は必ず後者を使う。
 ### 4KB JSONL overflow 棚卸し
 
 - `scores-*.jsonl`: reasons 1000字/次元 + 超過時 `30/reasons/<sha256>.txt` sidecar + `reasons_overflow_ref`
+- `scores-*-raw.jsonl`: reasons 1000字/次元 + 超過時 sidecar + `reasons_overflow_ref`
 - `compliance-*.jsonl`: rationale 500字 cap
+- `compliance-*-raw.jsonl`: rationale 500字 cap + 超過時 `rationale_overflow_ref`
 - `classification.jsonl`: `{schema_version, run_id, candidate_id, kind, similarity_score, matched_rule_id?, rationale?, rationale_overflow_ref?, classified_at}`。`rationale` 500字 cap (`problem` field は存在しない)
 - `processed.jsonl`: `detail` 300字 cap + 超過時 sidecar + `detail_overflow_ref`
 - `pairwise.jsonl`: justification 500字 cap

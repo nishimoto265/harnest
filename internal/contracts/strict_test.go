@@ -228,7 +228,7 @@ func TestCandidates_Validate_PropagatesCandidateError(t *testing.T) {
 				Kind:               CandidateKindUpdate,
 				TargetRuleID:       "", // missing
 				Title:              "x",
-				ProposedBodyPath:   "p",
+				ProposedBodyPath:   "40/candidates/c1.md",
 				ProposedBodySha256: "0000000000000000000000000000000000000000000000000000000000000001",
 			},
 		},
@@ -239,6 +239,20 @@ func TestCandidates_Validate_PropagatesCandidateError(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCandidateTargetRequired)
 	assert.True(t, strings.Contains(err.Error(), "candidates[0]"))
+}
+
+func TestCandidate_Validate_RejectsAbsoluteBodyPath(t *testing.T) {
+	c := Candidate{
+		CandidateID:        "c1",
+		Kind:               CandidateKindNew,
+		Title:              "x",
+		ProposedBodyPath:   "/tmp/c1.md",
+		ProposedBodySha256: "0000000000000000000000000000000000000000000000000000000000000001",
+	}
+	err := c.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCandidateBodyPathInvalid)
+	assert.ErrorIs(t, err, ErrPathRelativeAbsolute)
 }
 
 func TestCandidates_VerifyCandidatesHash_RoundTripAndTamper(t *testing.T) {
@@ -386,6 +400,7 @@ func TestDecodeStrict_IntentionRecord_EnforcesStageInvariant(t *testing.T) {
   "best_sha_before": "1111111111111111111111111111111111111111",
   "target_sha": "2222222222222222222222222222222222222222",
   "candidates_hash": "` + candidatesHash + `",
+  "registry_head_before": "",
   "started_at": "2026-04-20T10:00:00Z"
 }`)
 	var r IntentionRecord
@@ -465,4 +480,24 @@ func TestDecodeStrict_RejectsDuplicateNestedOverflowRefKey(t *testing.T) {
 	err := decodeStrict(data, &row)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrDuplicateJSONKey)
+}
+
+func TestDecodeStrict_RejectsEmptyPayloadsWithTypedError(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty", data: nil},
+		{name: "whitespace", data: []byte("  \n\t  ")},
+		{name: "bom only", data: []byte{0xEF, 0xBB, 0xBF}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out map[string]any
+			err := decodeStrict(tt.data, &out)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrEmptyJSON)
+		})
+	}
 }

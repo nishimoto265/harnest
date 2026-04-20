@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -69,8 +70,29 @@ var (
 	ErrIntentionMissingRegistryAppendResult = errors.New("contracts: intention: registry_append_result is required for this stage")
 	ErrIntentionMissingRecoveryReason       = errors.New("contracts: intention: recovery_reason is required for this stage")
 	ErrIntentionMissingFailedStep           = errors.New("contracts: intention: failed_step is required for this stage")
+	ErrIntentionMissingRegistryHeadBefore   = errors.New("contracts: intention: registry_head_before field is required")
 	ErrIntentionIdempotencyKeyMismatch      = errors.New("contracts: intention: idempotency_key does not match derived value")
 )
+
+func (r *IntentionRecord) UnmarshalJSON(data []byte) error {
+	type alias IntentionRecord
+	var a alias
+	if err := decodeStrictWithRequiredFields(data, &a, map[string]error{
+		"registry_head_before": ErrIntentionMissingRegistryHeadBefore,
+	}); err != nil {
+		return err
+	}
+	*r = IntentionRecord(a)
+	return r.Validate()
+}
+
+func (r IntentionRecord) MarshalJSON() ([]byte, error) {
+	if err := r.Validate(); err != nil {
+		return nil, err
+	}
+	type alias IntentionRecord
+	return json.Marshal(alias(r))
+}
 
 // Validate enforces stage-conditional required fields on top of tag-based
 // validation. Call site (reader / UnmarshalJSON / test) should invoke this

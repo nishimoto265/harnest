@@ -65,12 +65,16 @@ type Candidate struct {
 var (
 	ErrCandidateTargetRequired  = errors.New("contracts: candidate: target_rule_id is required for kind=update/duplicate")
 	ErrCandidateTargetForbidden = errors.New("contracts: candidate: target_rule_id must be empty for kind=new")
+	ErrCandidateBodyPathInvalid = errors.New("contracts: candidate: proposed_body_path must be a clean run-relative path")
 )
 
 // Validate runs tag-based struct validation + kind-specific invariants.
 func (c Candidate) Validate() error {
 	if err := validateStruct(c); err != nil {
 		return err
+	}
+	if err := EnsureCleanRelativePath(c.ProposedBodyPath); err != nil {
+		return fmt.Errorf("%w: %w", ErrCandidateBodyPathInvalid, err)
 	}
 	switch c.Kind {
 	case CandidateKindUpdate, CandidateKindDuplicate:
@@ -143,6 +147,9 @@ func (c Candidates) Validate() error {
 // order (no map[string]any). This is the shared producer/verifier algorithm
 // for `<run>/40/candidates.json`.
 func CanonicalCandidatesHash(items []Candidate) string {
+	if items == nil {
+		items = []Candidate{}
+	}
 	data, err := CanonicalMarshal(items)
 	if err != nil {
 		panic(fmt.Sprintf("contracts: unexpected CanonicalMarshal failure: %v", err))

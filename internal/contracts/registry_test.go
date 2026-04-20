@@ -369,6 +369,27 @@ func TestRegistry_RolledBack_RejectsMissingTargetOffset(t *testing.T) {
 	assert.ErrorIs(t, err, ErrRegistryRolledBackMissingTargetOffset)
 }
 
+func TestRegistry_RolledBack_RejectsDuplicateTargetOffsetKey(t *testing.T) {
+	data := `{
+  "kind": "rolled_back",
+  "schema_version": "1",
+  "target_op_id": "0000000000000000000000000000000000000000000000000000000000000002",
+  "target_offset": 1,
+  "target_offset": 2,
+  "target_sha256": "0000000000000000000000000000000000000000000000000000000000000030",
+  "by_run_id": "2026-04-22-PR44-abcdef2",
+  "rollback_reason": "lease_failure",
+  "failed_step": "70",
+  "version_seq": 3,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000088",
+  "at": "2026-04-22T12:00:00Z"
+}`
+	var e RuleRegistryRolledBack
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicateJSONKey)
+}
+
 // finding #6: status_changed は active↔deprecated 遷移のみ許容。active→archived
 // 等を status_changed で送ると reject。
 func TestRegistry_StatusChanged_Reject_ActiveToArchived(t *testing.T) {
@@ -500,6 +521,44 @@ func TestRuleIdempotencyIndexEntry_RejectsMissingRegistryOffset(t *testing.T) {
 	err := decodeStrict(data, &entry)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrRuleIdempotencyIndexMissingOffset)
+}
+
+func TestRuleIdempotencyIndexEntry_RejectsDuplicateRegistryOffsetKey(t *testing.T) {
+	data := `{
+  "idempotency_key": "0000000000000000000000000000000000000000000000000000000000000002",
+  "registry_offset": 0,
+  "registry_offset": 1,
+  "registry_sha256": "0000000000000000000000000000000000000000000000000000000000000003",
+  "kind": "added",
+  "at": "2026-04-20T12:00:00Z"
+}`
+	var entry RuleIdempotencyIndexEntry
+	err := json.Unmarshal([]byte(data), &entry)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicateJSONKey)
+}
+
+func TestRuleRegistryEntry_MarshalJSON_RejectsVariantMismatch(t *testing.T) {
+	entry := RuleRegistryEntry{
+		Kind: RegistryKindAdded,
+		Value: RuleRegistryUpdated{
+			Kind:           RegistryKindUpdated,
+			SchemaVersion:  "1",
+			RuleID:         "r-0001",
+			RulePath:       "rules/r-0001.md",
+			Sha256:         "0000000000000000000000000000000000000000000000000000000000000010",
+			PrevSha256:     "0000000000000000000000000000000000000000000000000000000000000001",
+			IdempotencyKey: "0000000000000000000000000000000000000000000000000000000000000003",
+			VersionSeq:     2,
+			PrevHash:       "0000000000000000000000000000000000000000000000000000000000000099",
+			ByRunID:        "2026-04-21-PR43-abcdef1",
+			At:             time.Now(),
+		},
+	}
+
+	_, err := json.Marshal(entry)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryVariantTypeMismatch)
 }
 
 func TestRuleIdempotencyIndexEntry_RejectsNegativeOffset(t *testing.T) {

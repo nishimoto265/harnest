@@ -2,6 +2,7 @@ package stepio
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -62,4 +63,18 @@ func (r *Step30Response) UnmarshalJSON(data []byte) error {
 
 func (r Step30Response) Validate() error {
 	return validation.Instance().Struct(r)
+}
+
+func DecodeAndValidateStep30Response(data []byte, req Step30Request) (Step30Response, error) {
+	var resp Step30Response
+	if err := resp.UnmarshalJSON(data); err != nil {
+		return Step30Response{}, err
+	}
+	if err := req.Validate(); err != nil {
+		return Step30Response{}, err
+	}
+	if resp.RunID != req.TaskPackage.RunID {
+		return Step30Response{}, fmt.Errorf("%w: response.run_id=%s request.run_id=%s", ErrResponseRunIDMismatch, resp.RunID, req.TaskPackage.RunID)
+	}
+	return resp, nil
 }

@@ -192,6 +192,8 @@ var (
 	ErrStateWarningRegistryStepForbidden = errors.New("contracts: state warning: registry size warnings from sunset_tick must omit step")
 	ErrStateWarningRegistryStep70Scope   = errors.New("contracts: state warning: registry size warnings from step70 require pr and run_id")
 	ErrStateWarningRegistrySunsetScope   = errors.New("contracts: state warning: registry size warnings from sunset_tick must be global telemetry")
+	ErrStateWarningRegistryHighMinimum   = errors.New("contracts: state warning: registry_size_high count must be >= 1501")
+	ErrStateWarningRegistryCriticalMin   = errors.New("contracts: state warning: registry_size_critical count must be >= 2001")
 	ErrStateVariantTypeMismatch          = errors.New("contracts: state: kind does not match variant type")
 	ErrStateVariantKindMismatch          = errors.New("contracts: state: kind does not match inner kind field")
 )
@@ -238,6 +240,12 @@ func (e StateEntryWarning) Validate() error {
 			}
 		default:
 			return ErrStateWarningRegistrySource
+		}
+		if e.Kind == StateKindWarningRegistrySizeHigh && *e.Count < 1501 {
+			return fmt.Errorf("%w: count=%d", ErrStateWarningRegistryHighMinimum, *e.Count)
+		}
+		if e.Kind == StateKindWarningRegistrySizeCritical && *e.Count < 2001 {
+			return fmt.Errorf("%w: count=%d", ErrStateWarningRegistryCriticalMin, *e.Count)
 		}
 	default:
 		return ErrUnknownStateKind
@@ -466,6 +474,9 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 func (e StateEntry) MarshalJSON() ([]byte, error) {
 	if e.Value == nil {
 		return nil, ErrUnknownStateKind
+	}
+	if err := e.Validate(); err != nil {
+		return nil, err
 	}
 	return json.Marshal(e.Value)
 }

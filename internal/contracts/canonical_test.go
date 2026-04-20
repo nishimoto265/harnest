@@ -3,6 +3,7 @@ package contracts
 import (
 	"encoding/json"
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -207,27 +208,29 @@ func TestCanonicalMarshal_RejectsForbiddenKindsInAnonymousEmbeddedStructs(t *tes
 }
 
 func TestCanonicalMarshal_IgnoresConflictingEmbeddedTaggedFieldsThatJSONDrops(t *testing.T) {
-	type EmbeddedA struct {
-		Score float64 `json:"score"`
-	}
-	type EmbeddedB struct {
-		Value int `json:"score"`
-	}
-	type payload struct {
-		EmbeddedA
-		EmbeddedB
-	}
+	embeddedAType := reflect.StructOf([]reflect.StructField{{
+		Name: "Score",
+		Type: reflect.TypeOf(float64(0)),
+		Tag:  `json:"score"`,
+	}})
+	embeddedBType := reflect.StructOf([]reflect.StructField{{
+		Name: "Value",
+		Type: reflect.TypeOf(int(0)),
+		Tag:  `json:"score"`,
+	}})
+	payloadType := reflect.StructOf([]reflect.StructField{
+		{Name: "EmbeddedA", Type: embeddedAType, Anonymous: true},
+		{Name: "EmbeddedB", Type: embeddedBType, Anonymous: true},
+	})
+	v := reflect.New(payloadType).Elem()
+	v.Field(0).Field(0).SetFloat(1.5)
+	v.Field(1).Field(0).SetInt(2)
 
-	v := payload{
-		EmbeddedA: EmbeddedA{Score: 1.5},
-		EmbeddedB: EmbeddedB{Value: 2},
-	}
-
-	raw, err := json.Marshal(v)
+	raw, err := json.Marshal(v.Interface())
 	require.NoError(t, err)
 	assert.Equal(t, `{}`, string(raw))
 
-	canonical, err := CanonicalMarshal(v)
+	canonical, err := CanonicalMarshal(v.Interface())
 	require.NoError(t, err)
 	assert.Equal(t, `{}`, string(canonical))
 }
@@ -259,24 +262,24 @@ func TestCanonicalMarshal_UsesTaggedFieldOverConflictingUntaggedEmbeddedField(t 
 }
 
 func TestCanonicalMarshal_UsesTaggedOverrideInsteadOfHiddenPromotedEmbeddedField(t *testing.T) {
-	type Embedded struct {
-		Score float64 `json:"score"`
-	}
-	type payload struct {
-		Embedded
-		Score int `json:"score"`
-	}
+	embeddedType := reflect.StructOf([]reflect.StructField{{
+		Name: "Score",
+		Type: reflect.TypeOf(float64(0)),
+		Tag:  `json:"score"`,
+	}})
+	payloadType := reflect.StructOf([]reflect.StructField{
+		{Name: "Embedded", Type: embeddedType, Anonymous: true},
+		{Name: "Score", Type: reflect.TypeOf(int(0)), Tag: `json:"score"`},
+	})
+	v := reflect.New(payloadType).Elem()
+	v.Field(0).Field(0).SetFloat(1.5)
+	v.Field(1).SetInt(2)
 
-	v := payload{
-		Embedded: Embedded{Score: 1.5},
-		Score:    2,
-	}
-
-	raw, err := json.Marshal(v)
+	raw, err := json.Marshal(v.Interface())
 	require.NoError(t, err)
 	assert.Equal(t, `{"score":2}`, string(raw))
 
-	canonical, err := CanonicalMarshal(v)
+	canonical, err := CanonicalMarshal(v.Interface())
 	require.NoError(t, err)
 	assert.Equal(t, `{"score":2}`, string(canonical))
 }
@@ -318,6 +321,39 @@ func TestCanonicalMarshal_SkipsUnexportedNonEmbeddedStructFields(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, `{}`, string(data))
+}
+
+func TestCanonicalMarshal_RespectsOmitEmptyBeforeForbiddenKindCheck(t *testing.T) {
+	type payload struct {
+		F float64 `json:"f,omitempty"`
+	}
+
+	data, err := CanonicalMarshal(payload{})
+	require.NoError(t, err)
+	assert.Equal(t, `{}`, string(data))
+
+	_, err = CanonicalMarshal(payload{F: 1.5})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCanonicalForbiddenKind)
+}
+
+func TestCanonicalMarshal_AllowsDistinctSlicesSharingBackingArray(t *testing.T) {
+	backing := []int{1, 2, 3}
+	value := struct {
+		A []int `json:"a"`
+		B []int `json:"b"`
+	}{
+		A: backing[:2],
+		B: backing[:3],
+	}
+
+	data, err := CanonicalMarshal(value)
+	require.NoError(t, err)
+	assert.Equal(t, `{"a":[1,2],"b":[1,2,3]}`, string(data))
+}
+
+func TestCanonicalCandidatesHash_NormalizesNilAndEmptySlices(t *testing.T) {
+	assert.Equal(t, CanonicalCandidatesHash(nil), CanonicalCandidatesHash([]Candidate{}))
 }
 
 func TestCanonicalMarshal_RejectsPointerCycles(t *testing.T) {

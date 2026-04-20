@@ -3,6 +3,7 @@ package contracts
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -36,8 +37,10 @@ type ManifestVariant interface {
 }
 
 var (
-	ErrManifestVariantTypeMismatch = errors.New("contracts: manifest: kind does not match variant type")
-	ErrManifestVariantKindMismatch = errors.New("contracts: manifest: kind does not match inner kind field")
+	ErrManifestVariantTypeMismatch        = errors.New("contracts: manifest: kind does not match variant type")
+	ErrManifestVariantKindMismatch        = errors.New("contracts: manifest: kind does not match inner kind field")
+	ErrManifestArtifactPathPrefixMismatch = errors.New("contracts: manifest: artifact path prefix must match pass and agent")
+	ErrManifestErrorMissingExitCode       = errors.New("contracts: manifest: error.exit_code field is required")
 )
 
 // ManifestSuccess: agent が実装 + commit + checklist 記入まで完走した状態.
@@ -72,7 +75,30 @@ type ManifestSuccess struct {
 
 func (ManifestSuccess) manifestVariant() {}
 
+func (m ManifestSuccess) Validate() error {
+	if err := validateStruct(m); err != nil {
+		return err
+	}
+	prefix := manifestArtifactPrefix(m.Pass, m.Agent)
+	for field, path := range map[string]string{
+		"diff_path":      m.DiffPath,
+		"session_path":   m.SessionPath,
+		"checklist_path": m.ChecklistPath,
+	} {
+		if err := EnsureRelativePathUnderPrefix(path, prefix); err != nil {
+			if errors.Is(err, ErrPathRelativeBadPrefix) {
+				return fmt.Errorf("%w: field=%s path=%q required_prefix=%q", ErrManifestArtifactPathPrefixMismatch, field, path, prefix)
+			}
+			return fmt.Errorf("contracts: manifest: %s: %w", field, err)
+		}
+	}
+	return nil
+}
+
 // ManifestError: agent wrapper が非 timeout で error exit した記録.
+// Non-success manifests are emitted before any commit or artifact hand-off, so
+// commit metadata / diff/session/checklist artifact paths are intentionally
+// absent by contract.
 type ManifestError struct {
 	Kind          ManifestKind `json:"kind" validate:"required,eq=error"`
 	SchemaVersion string       `json:"schema_version" validate:"required,oneof=1"`
@@ -81,7 +107,7 @@ type ManifestError struct {
 	Agent         AgentID      `json:"agent" validate:"required,agent_id_fmt"`
 
 	// ExitCode: claude CLI が返した exit code.
-	ExitCode int `json:"exit_code" validate:"required"`
+	ExitCode int `json:"exit_code" validate:"gte=0"`
 	// Reason: classifier が判定した kind を短い string で記録
 	// (rate_limit / budget / context / signal / unknown).
 	Reason string `json:"reason" validate:"required,oneof=rate_limit budget context signal unknown"`
@@ -94,7 +120,26 @@ type ManifestError struct {
 
 func (ManifestError) manifestVariant() {}
 
+func (m *ManifestError) UnmarshalJSON(data []byte) error {
+	type alias ManifestError
+	var a alias
+	if err := decodeStrictWithRequiredFields(data, &a, map[string]error{
+		"exit_code": ErrManifestErrorMissingExitCode,
+	}); err != nil {
+		return err
+	}
+	*m = ManifestError(a)
+	return nil
+}
+
+func (m ManifestError) Validate() error {
+	return validateStruct(m)
+}
+
 // ManifestTimeout: agent が wall-clock timeout に到達した記録.
+// Non-success manifests are emitted before any commit or artifact hand-off, so
+// commit metadata / diff/session/checklist artifact paths are intentionally
+// absent by contract.
 type ManifestTimeout struct {
 	Kind          ManifestKind `json:"kind" validate:"required,eq=timeout"`
 	SchemaVersion string       `json:"schema_version" validate:"required,oneof=1"`
@@ -110,6 +155,10 @@ type ManifestTimeout struct {
 }
 
 func (ManifestTimeout) manifestVariant() {}
+
+func (m ManifestTimeout) Validate() error {
+	return validateStruct(m)
+}
 
 // UnmarshalJSON implements strict tagged-union decoding for Manifest.
 // io-contracts.md §4 / Go 実装計画.md §0-bootstrap-1 に従う:
@@ -167,6 +216,9 @@ func (m Manifest) MarshalJSON() ([]byte, error) {
 	if m.Value == nil {
 		return nil, ErrUnknownManifestKind
 	}
+	if err := m.Validate(); err != nil {
+		return nil, err
+	}
 	return json.Marshal(m.Value)
 }
 
@@ -214,5 +266,16 @@ func manifestVariantMetadata(v ManifestVariant) (expected ManifestKind, inner Ma
 		return ManifestKindTimeout, vv.Kind, nil
 	default:
 		return "", "", ErrUnknownManifestKind
+	}
+}
+
+func manifestArtifactPrefix(pass int, agent AgentID) string {
+	switch pass {
+	case 1:
+		return fmt.Sprintf("20-pass1/%s", agent)
+	case 2:
+		return fmt.Sprintf("50-pass2/%s", agent)
+	default:
+		return fmt.Sprintf("unknown-pass/%s", agent)
 	}
 }

@@ -18,7 +18,26 @@ var (
 	ErrResponseRunIDMismatch             = errors.New("stepio: response.run_id must equal request.task_package.run_id")
 	ErrAgentResultOverlap                = errors.New("stepio: response agent must not appear in both results and rescue_exhausted")
 	ErrAgentCoverageMismatch             = errors.New("stepio: response agents must partition request.agents exactly")
+	ErrRegistryPathNotAbsolute           = errors.New("stepio: registry_path must be an absolute path")
+	ErrRegistryPathNotClean              = errors.New("stepio: registry_path must be a clean absolute path without . or .. elements")
+	ErrRegistryPathBasename              = errors.New("stepio: registry_path basename must be rules-registry.jsonl")
 )
+
+func validateRegistryPath(path string) error {
+	if err := contracts.EnsureCleanAbsolutePathWithBasename(path, "rules-registry.jsonl"); err != nil {
+		switch {
+		case errors.Is(err, contracts.ErrPathNotAbsolute):
+			return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotAbsolute, path)
+		case errors.Is(err, contracts.ErrPathNotClean), errors.Is(err, contracts.ErrPathContainsNUL):
+			return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotClean, path)
+		case errors.Is(err, contracts.ErrPathBasenameMismatch):
+			return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathBasename, path)
+		default:
+			return err
+		}
+	}
+	return nil
+}
 
 func validateAgentsWithinPass(agents []contracts.AgentID, pkg contracts.TaskPackage, pass int, errWrap error) error {
 	allowed := map[contracts.AgentID]struct{}{}
@@ -107,6 +126,56 @@ func validateImplementationPartition(results []Step20AgentResult, rescue []Rescu
 		}
 	}
 	return nil
+}
+
+func cloneImplementationResults(results []Step20AgentResult) []Step20AgentResult {
+	if results == nil {
+		return nil
+	}
+	cloned := make([]Step20AgentResult, len(results))
+	for i := range results {
+		cloned[i] = Step20AgentResult{
+			Agent:    results[i].Agent,
+			Manifest: cloneManifest(results[i].Manifest),
+		}
+	}
+	return cloned
+}
+
+func cloneRescueExhausted(items []RescueExhausted) []RescueExhausted {
+	if items == nil {
+		return nil
+	}
+	cloned := make([]RescueExhausted, len(items))
+	copy(cloned, items)
+	return cloned
+}
+
+func cloneManifest(m contracts.Manifest) contracts.Manifest {
+	cloned := contracts.Manifest{Kind: m.Kind}
+	switch v := m.Value.(type) {
+	case contracts.ManifestSuccess:
+		cloned.Value = v
+	case *contracts.ManifestSuccess:
+		if v != nil {
+			cloned.Value = *v
+		}
+	case contracts.ManifestError:
+		cloned.Value = v
+	case *contracts.ManifestError:
+		if v != nil {
+			cloned.Value = *v
+		}
+	case contracts.ManifestTimeout:
+		cloned.Value = v
+	case *contracts.ManifestTimeout:
+		if v != nil {
+			cloned.Value = *v
+		}
+	default:
+		cloned.Value = nil
+	}
+	return cloned
 }
 
 func manifestMetadata(m contracts.Manifest) (pass int, agent contracts.AgentID, runID contracts.RunID, err error) {

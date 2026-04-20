@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -60,6 +61,25 @@ func TestManifest_Error_Parse(t *testing.T) {
 	assert.True(t, ok)
 }
 
+func TestManifest_Error_Parse_AcceptsZeroExitCode(t *testing.T) {
+	data := `{
+  "kind": "error",
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "pass": 1,
+  "agent": "a2",
+  "exit_code": 0,
+  "reason": "rate_limit",
+  "started_at": "2026-04-20T10:00:00Z",
+  "finished_at": "2026-04-20T10:01:00Z"
+}`
+	var m Manifest
+	require.NoError(t, json.Unmarshal([]byte(data), &m))
+	v, ok := m.Value.(ManifestError)
+	require.True(t, ok)
+	assert.Equal(t, 0, v.ExitCode)
+}
+
 func TestManifest_Timeout_Parse(t *testing.T) {
 	data := `{
   "kind": "timeout",
@@ -99,6 +119,23 @@ func TestManifest_Reject_MissingRequired(t *testing.T) {
 	var m Manifest
 	err := json.Unmarshal([]byte(data), &m)
 	assert.Error(t, err)
+}
+
+func TestManifest_Error_RejectsMissingExitCodeField(t *testing.T) {
+	data := `{
+  "kind": "error",
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "pass": 1,
+  "agent": "a2",
+  "reason": "rate_limit",
+  "started_at": "2026-04-20T10:00:00Z",
+  "finished_at": "2026-04-20T10:01:00Z"
+}`
+	var m Manifest
+	err := json.Unmarshal([]byte(data), &m)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrManifestErrorMissingExitCode)
 }
 
 func TestManifest_Reject_WrongKind(t *testing.T) {
@@ -304,4 +341,50 @@ func TestManifest_Validate_AcceptsValueAndPointerVariants(t *testing.T) {
 			assert.NoError(t, tt.m.Validate())
 		})
 	}
+}
+
+func TestManifestSuccess_Validate_RejectsAbsoluteArtifactPath(t *testing.T) {
+	var m Manifest
+	require.NoError(t, json.Unmarshal([]byte(fixtureManifestSuccess(t)), &m))
+	v := m.Value.(ManifestSuccess)
+	v.DiffPath = "/tmp/diff.patch"
+	m.Value = v
+
+	err := m.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPathRelativeAbsolute)
+}
+
+func TestManifestSuccess_Validate_RejectsPassAgentPrefixMismatch(t *testing.T) {
+	var m Manifest
+	require.NoError(t, json.Unmarshal([]byte(fixtureManifestSuccess(t)), &m))
+	v := m.Value.(ManifestSuccess)
+	v.Pass = 2
+	m.Value = v
+
+	err := m.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrManifestArtifactPathPrefixMismatch)
+}
+
+func TestManifest_MarshalJSON_RejectsVariantMismatch(t *testing.T) {
+	now := time.Now()
+	m := Manifest{
+		Kind: ManifestKindSuccess,
+		Value: ManifestError{
+			Kind:          ManifestKindError,
+			SchemaVersion: "1",
+			RunID:         "2026-04-20-PR42-abcdef0",
+			Pass:          1,
+			Agent:         "a2",
+			ExitCode:      1,
+			Reason:        "rate_limit",
+			StartedAt:     now,
+			FinishedAt:    now,
+		},
+	}
+
+	_, err := json.Marshal(m)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrManifestVariantTypeMismatch)
 }

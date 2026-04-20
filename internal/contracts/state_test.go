@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,6 +65,22 @@ func TestState_Warning_RejectsRegistryWarningWithoutCount(t *testing.T) {
 	err := json.Unmarshal([]byte(data), &e)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStateWarningRegistryCount)
+}
+
+func TestState_Warning_RejectsRegistrySizeHighBelowMinimum(t *testing.T) {
+	data := `{"kind":"registry_size_high","source":"step70","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","count":1500,"at":"2026-04-20T12:00:00Z"}`
+	var e StateEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStateWarningRegistryHighMinimum)
+}
+
+func TestState_Warning_RejectsRegistrySizeCriticalBelowMinimum(t *testing.T) {
+	data := `{"kind":"registry_size_critical","source":"sunset_tick","count":2000,"at":"2026-04-20T12:00:00Z"}`
+	var e StateEntry
+	err := json.Unmarshal([]byte(data), &e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStateWarningRegistryCriticalMin)
 }
 
 func TestState_Warning_RejectsRescueRetryWithoutPRScope(t *testing.T) {
@@ -363,4 +380,22 @@ func TestState_Validate_AcceptsValueAndPointerVariants(t *testing.T) {
 			assert.NoError(t, tt.entry.Validate())
 		})
 	}
+}
+
+func TestStateEntry_MarshalJSON_RejectsVariantMismatch(t *testing.T) {
+	now := time.Now()
+	entry := StateEntry{
+		Kind: StateKindStarted,
+		Value: StateEntryStepDone{
+			Kind:  StateKindStepDone,
+			PR:    42,
+			RunID: "2026-04-20-PR42-abcdef0",
+			Step:  FailedStep20,
+			At:    now,
+		},
+	}
+
+	_, err := json.Marshal(entry)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStateVariantTypeMismatch)
 }

@@ -1,6 +1,7 @@
 package stepio
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,10 @@ func validStep10Response() Step10Response {
 }
 
 func validManifestSuccess(pass int, agent contracts.AgentID) contracts.Manifest {
+	prefix := "20-pass1"
+	if pass == 2 {
+		prefix = "50-pass2"
+	}
 	return contracts.Manifest{
 		Kind: contracts.ManifestKindSuccess,
 		Value: contracts.ManifestSuccess{
@@ -40,9 +45,9 @@ func validManifestSuccess(pass int, agent contracts.AgentID) contracts.Manifest 
 			BranchName:    "branch-" + string(agent),
 			HeadSHA:       "2222222222222222222222222222222222222222",
 			BaseSHA:       "1111111111111111111111111111111111111111",
-			DiffPath:      "20-pass1/" + string(agent) + "/diff.patch",
-			SessionPath:   "20-pass1/" + string(agent) + "/session.jsonl",
-			ChecklistPath: "20-pass1/" + string(agent) + "/checklist-result.json",
+			DiffPath:      prefix + "/" + string(agent) + "/diff.patch",
+			SessionPath:   prefix + "/" + string(agent) + "/session.jsonl",
+			ChecklistPath: prefix + "/" + string(agent) + "/checklist-result.json",
 			PromptVersion: "p1",
 			StartedAt:     time.Now(),
 			FinishedAt:    time.Now(),
@@ -51,14 +56,10 @@ func validManifestSuccess(pass int, agent contracts.AgentID) contracts.Manifest 
 }
 
 func validStep20Response() Step20Response {
-	return Step20Response{
-		RunID: "2026-04-20-PR42-abcdef0",
-		Pass:  1,
-		Results: []Step20AgentResult{{
-			Agent:    "a1",
-			Manifest: validManifestSuccess(1, "a1"),
-		}},
-	}
+	return newTestStep20Response("2026-04-20-PR42-abcdef0", 1, []Step20AgentResult{{
+		Agent:    "a1",
+		Manifest: validManifestSuccess(1, "a1"),
+	}}, nil, true)
 }
 
 func validStep20Request() Step20Request {
@@ -113,14 +114,10 @@ func validStep50Request() Step50Request {
 }
 
 func validStep50Response() Step50Response {
-	return Step50Response{
-		RunID: "2026-04-20-PR42-abcdef0",
-		Pass:  2,
-		Results: []Step20AgentResult{{
-			Agent:    "a1",
-			Manifest: validManifestSuccess(2, "a1"),
-		}},
-	}
+	return newTestStep50Response("2026-04-20-PR42-abcdef0", 2, []Step20AgentResult{{
+		Agent:    "a1",
+		Manifest: validManifestSuccess(2, "a1"),
+	}}, nil, true)
 }
 
 func validStep60Request() Step60Request {
@@ -147,6 +144,30 @@ func replaceJSONFragment(t *testing.T, data []byte, old, new string) []byte {
 	raw := string(data)
 	require.Contains(t, raw, old)
 	return []byte(strings.Replace(raw, old, new, 1))
+}
+
+func newTestStep20Response(runID contracts.RunID, pass int, results []Step20AgentResult, rescue []RescueExhausted, bound bool) Step20Response {
+	return Step20Response{
+		payload: step20ResponsePayload{
+			RunID:           runID,
+			Pass:            pass,
+			Results:         cloneImplementationResults(results),
+			RescueExhausted: cloneRescueExhausted(rescue),
+		},
+		requestBoundChecked: bound,
+	}
+}
+
+func newTestStep50Response(runID contracts.RunID, pass int, results []Step20AgentResult, rescue []RescueExhausted, bound bool) Step50Response {
+	return Step50Response{
+		payload: step50ResponsePayload{
+			RunID:           runID,
+			Pass:            pass,
+			Results:         cloneImplementationResults(results),
+			RescueExhausted: cloneRescueExhausted(rescue),
+		},
+		requestBoundChecked: bound,
+	}
 }
 
 func assertJSONBoundaryFailures(t *testing.T, valid []byte, unmarshal func([]byte) error, anchor, duplicate, remove string) {
@@ -328,7 +349,7 @@ func TestStep10Response_Validate_RejectsTaskPackageMismatch(t *testing.T) {
 
 func TestStep20Response_Validate_RejectsManifestAgentMismatch(t *testing.T) {
 	resp := validStep20Response()
-	resp.Results[0].Manifest = validManifestSuccess(1, "a2")
+	resp.payload.Results[0].Manifest = validManifestSuccess(1, "a2")
 
 	err := resp.Validate()
 	require.Error(t, err)
@@ -362,9 +383,18 @@ func TestStep40Request_Validate_RejectsRelativeRegistryPath(t *testing.T) {
 	assert.ErrorIs(t, err, ErrRegistryPathNotAbsolute)
 }
 
+func TestStep40Request_Validate_RejectsWrongRegistryBasename(t *testing.T) {
+	req := validStep40Request()
+	req.RegistryPath = "/tmp/runs/hosts"
+
+	err := req.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryPathBasename)
+}
+
 func TestStep50Response_Validate_RejectsManifestPassMismatch(t *testing.T) {
 	resp := validStep50Response()
-	resp.Results[0].Manifest = validManifestSuccess(1, "a1")
+	resp.payload.Results[0].Manifest = validManifestSuccess(1, "a1")
 
 	err := resp.Validate()
 	require.Error(t, err)
@@ -382,18 +412,13 @@ func TestStep60Request_Validate_RejectsScorableAgentOutsidePass(t *testing.T) {
 
 func TestDecodeAndValidateStep20Response_RejectsAgentOverlap(t *testing.T) {
 	req := validStep20Request()
-	resp := Step20Response{
-		RunID: "2026-04-20-PR42-abcdef0",
-		Pass:  1,
-		Results: []Step20AgentResult{
-			{Agent: "a1", Manifest: validManifestSuccess(1, "a1")},
-			{Agent: "a2", Manifest: validManifestSuccess(1, "a2")},
-		},
-		RescueExhausted: []RescueExhausted{
-			{Agent: "a2", RetryCount: 3},
-			{Agent: "a3", RetryCount: 3},
-		},
-	}
+	resp := newTestStep20Response("2026-04-20-PR42-abcdef0", 1, []Step20AgentResult{
+		{Agent: "a1", Manifest: validManifestSuccess(1, "a1")},
+		{Agent: "a2", Manifest: validManifestSuccess(1, "a2")},
+	}, []RescueExhausted{
+		{Agent: "a2", RetryCount: 3},
+		{Agent: "a3", RetryCount: 3},
+	}, true)
 
 	_, err := DecodeAndValidateStep20Response(mustMarshalJSON(t, resp), req)
 	require.Error(t, err)
@@ -402,16 +427,11 @@ func TestDecodeAndValidateStep20Response_RejectsAgentOverlap(t *testing.T) {
 
 func TestDecodeAndValidateStep20Response_RejectsCoverageMismatch(t *testing.T) {
 	req := validStep20Request()
-	resp := Step20Response{
-		RunID: "2026-04-20-PR42-abcdef0",
-		Pass:  1,
-		Results: []Step20AgentResult{
-			{Agent: "a1", Manifest: validManifestSuccess(1, "a1")},
-		},
-		RescueExhausted: []RescueExhausted{
-			{Agent: "a2", RetryCount: 3},
-		},
-	}
+	resp := newTestStep20Response("2026-04-20-PR42-abcdef0", 1, []Step20AgentResult{
+		{Agent: "a1", Manifest: validManifestSuccess(1, "a1")},
+	}, []RescueExhausted{
+		{Agent: "a2", RetryCount: 3},
+	}, true)
 
 	_, err := DecodeAndValidateStep20Response(mustMarshalJSON(t, resp), req)
 	require.Error(t, err)
@@ -420,37 +440,30 @@ func TestDecodeAndValidateStep20Response_RejectsCoverageMismatch(t *testing.T) {
 
 func TestDecodeAndValidateStep20Response_AcceptsExactPartition(t *testing.T) {
 	req := validStep20Request()
-	resp := Step20Response{
-		RunID: "2026-04-20-PR42-abcdef0",
-		Pass:  1,
-		Results: []Step20AgentResult{
-			{Agent: "a1", Manifest: validManifestSuccess(1, "a1")},
-			{Agent: "a2", Manifest: validManifestSuccess(1, "a2")},
-		},
-		RescueExhausted: []RescueExhausted{
-			{Agent: "a3", RetryCount: 3},
-		},
-	}
+	resp := newTestStep20Response("2026-04-20-PR42-abcdef0", 1, []Step20AgentResult{
+		{Agent: "a1", Manifest: validManifestSuccess(1, "a1")},
+		{Agent: "a2", Manifest: validManifestSuccess(1, "a2")},
+	}, []RescueExhausted{
+		{Agent: "a3", RetryCount: 3},
+	}, true)
 
 	got, err := DecodeAndValidateStep20Response(mustMarshalJSON(t, resp), req)
 	require.NoError(t, err)
-	assert.Equal(t, resp.RunID, got.RunID)
+	runID, err := got.RunID()
+	require.NoError(t, err)
+	assert.Equal(t, req.TaskPackage.RunID, runID)
+	assert.True(t, got.RequestBound())
 }
 
 func TestDecodeAndValidateStep20Response_RejectsCrossRunReplay(t *testing.T) {
 	req := validStep20Request()
 	req.TaskPackage.RunID = "2026-04-21-PR42-abcdef0"
-	resp := Step20Response{
-		RunID: "2026-04-20-PR42-abcdef0",
-		Pass:  1,
-		Results: []Step20AgentResult{
-			{Agent: "a1", Manifest: validManifestSuccess(1, "a1")},
-			{Agent: "a2", Manifest: validManifestSuccess(1, "a2")},
-		},
-		RescueExhausted: []RescueExhausted{
-			{Agent: "a3", RetryCount: 3},
-		},
-	}
+	resp := newTestStep20Response("2026-04-20-PR42-abcdef0", 1, []Step20AgentResult{
+		{Agent: "a1", Manifest: validManifestSuccess(1, "a1")},
+		{Agent: "a2", Manifest: validManifestSuccess(1, "a2")},
+	}, []RescueExhausted{
+		{Agent: "a3", RetryCount: 3},
+	}, true)
 
 	_, err := DecodeAndValidateStep20Response(mustMarshalJSON(t, resp), req)
 	require.Error(t, err)
@@ -459,17 +472,12 @@ func TestDecodeAndValidateStep20Response_RejectsCrossRunReplay(t *testing.T) {
 
 func TestDecodeAndValidateStep50Response_RejectsCoverageMismatchOnInjectedAgent(t *testing.T) {
 	req := validStep50Request()
-	resp := Step50Response{
-		RunID: "2026-04-20-PR42-abcdef0",
-		Pass:  2,
-		Results: []Step20AgentResult{
-			{Agent: "a1", Manifest: validManifestSuccess(2, "a1")},
-			{Agent: "a2", Manifest: validManifestSuccess(2, "a2")},
-		},
-		RescueExhausted: []RescueExhausted{
-			{Agent: "a4", RetryCount: 3},
-		},
-	}
+	resp := newTestStep50Response("2026-04-20-PR42-abcdef0", 2, []Step20AgentResult{
+		{Agent: "a1", Manifest: validManifestSuccess(2, "a1")},
+		{Agent: "a2", Manifest: validManifestSuccess(2, "a2")},
+	}, []RescueExhausted{
+		{Agent: "a4", RetryCount: 3},
+	}, true)
 
 	_, err := DecodeAndValidateStep50Response(mustMarshalJSON(t, resp), req)
 	require.Error(t, err)
@@ -478,39 +486,104 @@ func TestDecodeAndValidateStep50Response_RejectsCoverageMismatchOnInjectedAgent(
 
 func TestDecodeAndValidateStep50Response_AcceptsExactPartition(t *testing.T) {
 	req := validStep50Request()
-	resp := Step50Response{
-		RunID: "2026-04-20-PR42-abcdef0",
-		Pass:  2,
-		Results: []Step20AgentResult{
-			{Agent: "a1", Manifest: validManifestSuccess(2, "a1")},
-			{Agent: "a3", Manifest: validManifestSuccess(2, "a3")},
-		},
-		RescueExhausted: []RescueExhausted{
-			{Agent: "a2", RetryCount: 3},
-		},
-	}
+	resp := newTestStep50Response("2026-04-20-PR42-abcdef0", 2, []Step20AgentResult{
+		{Agent: "a1", Manifest: validManifestSuccess(2, "a1")},
+		{Agent: "a3", Manifest: validManifestSuccess(2, "a3")},
+	}, []RescueExhausted{
+		{Agent: "a2", RetryCount: 3},
+	}, true)
 
 	got, err := DecodeAndValidateStep50Response(mustMarshalJSON(t, resp), req)
 	require.NoError(t, err)
-	assert.Equal(t, resp.RunID, got.RunID)
+	runID, err := got.RunID()
+	require.NoError(t, err)
+	assert.Equal(t, req.TaskPackage.RunID, runID)
+	assert.True(t, got.RequestBound())
 }
 
 func TestDecodeAndValidateStep50Response_RejectsCrossRunReplay(t *testing.T) {
 	req := validStep50Request()
 	req.TaskPackage.RunID = "2026-04-21-PR42-abcdef0"
-	resp := Step50Response{
-		RunID: "2026-04-20-PR42-abcdef0",
-		Pass:  2,
-		Results: []Step20AgentResult{
-			{Agent: "a1", Manifest: validManifestSuccess(2, "a1")},
-			{Agent: "a3", Manifest: validManifestSuccess(2, "a3")},
-		},
-		RescueExhausted: []RescueExhausted{
-			{Agent: "a2", RetryCount: 3},
-		},
-	}
+	resp := newTestStep50Response("2026-04-20-PR42-abcdef0", 2, []Step20AgentResult{
+		{Agent: "a1", Manifest: validManifestSuccess(2, "a1")},
+		{Agent: "a3", Manifest: validManifestSuccess(2, "a3")},
+	}, []RescueExhausted{
+		{Agent: "a2", RetryCount: 3},
+	}, true)
 
 	_, err := DecodeAndValidateStep50Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrResponseRunIDMismatch)
+}
+
+func TestStep20Response_DirectJSONUnmarshal_LeavesResponseUnbound(t *testing.T) {
+	data := mustMarshalJSON(t, validStep20Response())
+
+	var resp Step20Response
+	require.NoError(t, json.Unmarshal(data, &resp))
+	assert.False(t, resp.RequestBound())
+
+	_, err := resp.RunID()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep20ResponseNotBound)
+}
+
+func TestStep50Response_DirectJSONUnmarshal_LeavesResponseUnbound(t *testing.T) {
+	data := mustMarshalJSON(t, validStep50Response())
+
+	var resp Step50Response
+	require.NoError(t, json.Unmarshal(data, &resp))
+	assert.False(t, resp.RequestBound())
+
+	_, err := resp.RunID()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep50ResponseNotBound)
+}
+
+func TestDecodeAndValidateStep10Response_RejectsCrossPRReplay(t *testing.T) {
+	req := validStep10Request()
+	req.PR = 43
+
+	_, err := DecodeAndValidateStep10Response(mustMarshalJSON(t, validStep10Response()), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep10RequestPRMismatch)
+}
+
+func TestDecodeAndValidateStep30Response_RejectsCrossRunReplayEvenWhenDirectDecodeSucceeds(t *testing.T) {
+	data := mustMarshalJSON(t, validStep30Response())
+
+	var direct Step30Response
+	require.NoError(t, json.Unmarshal(data, &direct))
+
+	req := validStep30Request()
+	req.TaskPackage.RunID = "2026-04-21-PR42-abcdef0"
+	_, err := DecodeAndValidateStep30Response(data, req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrResponseRunIDMismatch)
+}
+
+func TestDecodeAndValidateStep40Response_RejectsCrossRunReplayEvenWhenDirectDecodeSucceeds(t *testing.T) {
+	data := mustMarshalJSON(t, validStep40Response())
+
+	var direct Step40Response
+	require.NoError(t, json.Unmarshal(data, &direct))
+
+	req := validStep40Request()
+	req.TaskPackage.RunID = "2026-04-21-PR42-abcdef0"
+	_, err := DecodeAndValidateStep40Response(data, req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrResponseRunIDMismatch)
+}
+
+func TestDecodeAndValidateStep60Response_RejectsCrossRunReplayEvenWhenDirectDecodeSucceeds(t *testing.T) {
+	data := mustMarshalJSON(t, validStep60Response())
+
+	var direct Step60Response
+	require.NoError(t, json.Unmarshal(data, &direct))
+
+	req := validStep60Request()
+	req.TaskPackage.RunID = "2026-04-21-PR42-abcdef0"
+	_, err := DecodeAndValidateStep60Response(data, req)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrResponseRunIDMismatch)
 }

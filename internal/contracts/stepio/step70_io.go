@@ -98,15 +98,8 @@ func (r Step70Request) Validate() error {
 	if err := r.Candidates.VerifyCandidatesHash(); err != nil {
 		return err
 	}
-	if err := contracts.EnsureCleanAbsolutePath(r.RegistryPath); err != nil {
-		switch {
-		case errors.Is(err, contracts.ErrPathNotAbsolute):
-			return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotAbsolute, r.RegistryPath)
-		case errors.Is(err, contracts.ErrPathNotClean):
-			return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotClean, r.RegistryPath)
-		default:
-			return err
-		}
+	if err := validateRegistryPath(r.RegistryPath); err != nil {
+		return err
 	}
 	if r.TaskPackage.RunID != r.Candidates.RunID {
 		return fmt.Errorf("%w: task_package.run_id=%s candidates.run_id=%s", ErrStep70RequestRunIDMismatch, r.TaskPackage.RunID, r.Candidates.RunID)

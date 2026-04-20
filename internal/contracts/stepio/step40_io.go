@@ -28,8 +28,6 @@ type Step40Response struct {
 var (
 	ErrStep40ResponseRunIDMismatch   = errors.New("stepio: step40: response.run_id must equal candidates.run_id")
 	ErrStep40CandidatesCountMismatch = errors.New("stepio: step40: candidates_count must equal len(candidates.candidates)")
-	ErrRegistryPathNotAbsolute       = errors.New("stepio: registry_path must be an absolute path")
-	ErrRegistryPathNotClean          = errors.New("stepio: registry_path must be a clean absolute path without . or .. elements")
 )
 
 func (r *Step40Request) UnmarshalJSON(data []byte) error {
@@ -46,15 +44,8 @@ func (r Step40Request) Validate() error {
 	if err := validation.Instance().Struct(r); err != nil {
 		return err
 	}
-	if err := contracts.EnsureCleanAbsolutePath(r.RegistryPath); err != nil {
-		switch {
-		case errors.Is(err, contracts.ErrPathNotAbsolute):
-			return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotAbsolute, r.RegistryPath)
-		case errors.Is(err, contracts.ErrPathNotClean):
-			return fmt.Errorf("%w: registry_path=%q", ErrRegistryPathNotClean, r.RegistryPath)
-		default:
-			return err
-		}
+	if err := validateRegistryPath(r.RegistryPath); err != nil {
+		return err
 	}
 	return r.TaskPackage.Validate()
 }
@@ -83,4 +74,18 @@ func (r Step40Response) Validate() error {
 		return fmt.Errorf("%w: candidates_count=%d len(candidates)=%d", ErrStep40CandidatesCountMismatch, r.CandidatesCount, len(r.Candidates.Candidates))
 	}
 	return nil
+}
+
+func DecodeAndValidateStep40Response(data []byte, req Step40Request) (Step40Response, error) {
+	var resp Step40Response
+	if err := resp.UnmarshalJSON(data); err != nil {
+		return Step40Response{}, err
+	}
+	if err := req.Validate(); err != nil {
+		return Step40Response{}, err
+	}
+	if resp.RunID != req.TaskPackage.RunID {
+		return Step40Response{}, fmt.Errorf("%w: response.run_id=%s request.run_id=%s", ErrResponseRunIDMismatch, resp.RunID, req.TaskPackage.RunID)
+	}
+	return resp, nil
 }

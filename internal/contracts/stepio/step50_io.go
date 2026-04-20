@@ -1,6 +1,7 @@
 package stepio
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -53,28 +54,136 @@ func (r *Step50Request) UnmarshalJSON(data []byte) error {
 }
 
 // Step50Response is the output envelope for step 50 (mirrors Step20Response).
-type Step50Response struct {
+type step50ResponsePayload struct {
 	RunID           contracts.RunID     `json:"run_id" validate:"required,run_id_fmt"`
 	Pass            int                 `json:"pass" validate:"required,eq=2"` // 固定 2
 	Results         []Step20AgentResult `json:"results"`
 	RescueExhausted []RescueExhausted   `json:"rescue_exhausted,omitempty"`
 }
 
+// Step50Response is the opaque output envelope for step 50. Direct strict JSON
+// decoding remains response-local only; request-bound access is enabled only
+// through DecodeAndValidateStep50Response / NewStep50Response.
+type Step50Response struct {
+	payload             step50ResponsePayload
+	requestBoundChecked bool
+}
+
+var ErrStep50ResponseNotBound = errors.New("stepio: step50: response is not bound to a request; use DecodeAndValidateStep50Response")
+
 func (r *Step50Response) UnmarshalJSON(data []byte) error {
-	type alias Step50Response
-	var a alias
-	if err := contracts.DecodeStrictJSON(data, &a); err != nil {
+	var payload step50ResponsePayload
+	if err := contracts.DecodeStrictJSON(data, &payload); err != nil {
 		return err
 	}
-	*r = Step50Response(a)
-	return r.Validate()
+	if err := payload.validate(); err != nil {
+		return err
+	}
+	*r = newStep50Response(payload, false)
+	return nil
 }
 
 func (r Step50Response) Validate() error {
-	if err := validation.Instance().Struct(r); err != nil {
+	if !r.requestBoundChecked {
+		return ErrStep50ResponseNotBound
+	}
+	return r.payload.validate()
+}
+
+func (r Step50Response) MarshalJSON() ([]byte, error) {
+	if err := r.requireBound(); err != nil {
+		return nil, err
+	}
+	return json.Marshal(r.payload)
+}
+
+func (r Step50Response) RunID() (contracts.RunID, error) {
+	if err := r.requireBound(); err != nil {
+		return "", err
+	}
+	return r.payload.RunID, nil
+}
+
+func (r Step50Response) Pass() (int, error) {
+	if err := r.requireBound(); err != nil {
+		return 0, err
+	}
+	return r.payload.Pass, nil
+}
+
+func (r Step50Response) Results() ([]Step20AgentResult, error) {
+	if err := r.requireBound(); err != nil {
+		return nil, err
+	}
+	return cloneImplementationResults(r.payload.Results), nil
+}
+
+func (r Step50Response) RescueExhausted() ([]RescueExhausted, error) {
+	if err := r.requireBound(); err != nil {
+		return nil, err
+	}
+	return cloneRescueExhausted(r.payload.RescueExhausted), nil
+}
+
+func (r Step50Response) RequestBound() bool {
+	return r.requestBoundChecked
+}
+
+func (r Step50Response) DecodedAndBound() bool {
+	return r.RequestBound()
+}
+
+func (r Step50Response) requireBound() error {
+	return r.Validate()
+}
+
+func (p step50ResponsePayload) validate() error {
+	if err := validation.Instance().Struct(p); err != nil {
 		return err
 	}
-	return validateImplementationResponse(r.RunID, r.Pass, r.Results, r.RescueExhausted)
+	return validateImplementationResponse(p.RunID, p.Pass, p.Results, p.RescueExhausted)
+}
+
+func (p step50ResponsePayload) validateAgainstRequest(req Step50Request) error {
+	if err := req.Validate(); err != nil {
+		return err
+	}
+	if err := p.validate(); err != nil {
+		return err
+	}
+	if err := validateImplementationPartition(p.Results, p.RescueExhausted, req.Agents); err != nil {
+		return err
+	}
+	if p.RunID != req.TaskPackage.RunID {
+		return fmt.Errorf("%w: response.run_id=%s request.run_id=%s", ErrResponseRunIDMismatch, p.RunID, req.TaskPackage.RunID)
+	}
+	return nil
+}
+
+func newStep50Response(payload step50ResponsePayload, requestBound bool) Step50Response {
+	return Step50Response{
+		payload: step50ResponsePayload{
+			RunID:           payload.RunID,
+			Pass:            payload.Pass,
+			Results:         cloneImplementationResults(payload.Results),
+			RescueExhausted: cloneRescueExhausted(payload.RescueExhausted),
+		},
+		requestBoundChecked: requestBound,
+	}
+}
+
+// NewStep50Response constructs a request-bound step50 response for writers.
+func NewStep50Response(results []Step20AgentResult, rescueExhausted []RescueExhausted, req Step50Request) (Step50Response, error) {
+	payload := step50ResponsePayload{
+		RunID:           req.TaskPackage.RunID,
+		Pass:            2,
+		Results:         cloneImplementationResults(results),
+		RescueExhausted: cloneRescueExhausted(rescueExhausted),
+	}
+	if err := payload.validateAgainstRequest(req); err != nil {
+		return Step50Response{}, err
+	}
+	return newStep50Response(payload, true), nil
 }
 
 // DecodeAndValidateStep50Response applies the response-local strict decode and
@@ -85,14 +194,8 @@ func DecodeAndValidateStep50Response(data []byte, req Step50Request) (Step50Resp
 	if err := resp.UnmarshalJSON(data); err != nil {
 		return Step50Response{}, err
 	}
-	if err := req.Validate(); err != nil {
+	if err := resp.payload.validateAgainstRequest(req); err != nil {
 		return Step50Response{}, err
 	}
-	if err := validateImplementationPartition(resp.Results, resp.RescueExhausted, req.Agents); err != nil {
-		return Step50Response{}, err
-	}
-	if resp.RunID != req.TaskPackage.RunID {
-		return Step50Response{}, fmt.Errorf("%w: response.run_id=%s request.run_id=%s", ErrResponseRunIDMismatch, resp.RunID, req.TaskPackage.RunID)
-	}
-	return resp, nil
+	return newStep50Response(resp.payload, true), nil
 }

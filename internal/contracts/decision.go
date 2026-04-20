@@ -1,7 +1,6 @@
 package contracts
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -165,22 +164,15 @@ var ErrRegistryAppendResultMissingOffset = errors.New("contracts: registry_appen
 // UnmarshalJSON enforces physical presence of the `offset` field (can't rely on
 // Go zero-value since 0 is a valid registry offset).
 func (r *RegistryAppendResult) UnmarshalJSON(data []byte) error {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	if _, ok := raw["offset"]; !ok {
-		return ErrRegistryAppendResultMissingOffset
-	}
 	type alias RegistryAppendResult
 	var a alias
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&a); err != nil {
+	if err := decodeStrictWithRequiredFields(data, &a, map[string]error{
+		"offset": ErrRegistryAppendResultMissingOffset,
+	}); err != nil {
 		return err
 	}
 	*r = RegistryAppendResult(a)
-	return nil
+	return validateStruct(*r)
 }
 
 // UnmarshalJSON implements strict tagged-union decoding for Decision.
@@ -242,6 +234,9 @@ func (d *Decision) UnmarshalJSON(data []byte) error {
 func (d Decision) MarshalJSON() ([]byte, error) {
 	if d.Value == nil {
 		return nil, ErrUnknownDecisionAction
+	}
+	if err := d.Validate(); err != nil {
+		return nil, err
 	}
 	return json.Marshal(d.Value)
 }

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -119,6 +121,7 @@ func TestWorktreeAllocation_Validate_PathHardening(t *testing.T) {
 		{name: "parent escape", path: "/a/../b", wantErr: ErrWorktreePathNotClean},
 		{name: "dot segment", path: "/a/./b", wantErr: ErrWorktreePathNotClean},
 		{name: "relative", path: "a/b", wantErr: ErrWorktreePathNotAbsolute},
+		{name: "nul byte", path: "/a/\x00/b", wantErr: ErrWorktreePathNotClean},
 		{name: "empty", path: "", wantAnyErr: true},
 	}
 
@@ -138,6 +141,22 @@ func TestWorktreeAllocation_Validate_PathHardening(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTaskPackage_Validate_RejectsCanonicalDuplicateSymlinkPath(t *testing.T) {
+	tmp := t.TempDir()
+	actual := filepath.Join(tmp, "actual")
+	alias := filepath.Join(tmp, "alias")
+	require.NoError(t, os.Mkdir(actual, 0o755))
+	require.NoError(t, os.Symlink(actual, alias))
+
+	pkg := validTaskPackage()
+	pkg.Worktrees[0].Path = actual
+	pkg.Worktrees[3].Path = alias
+
+	err := pkg.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTaskPackageDuplicatePath)
 }
 
 func TestTaskPackage_Validate_Reject_PassCountMismatch(t *testing.T) {
@@ -608,4 +627,51 @@ func TestIntentionRecord_Validate_RejectsForgedIdempotencyKeyAcrossStages(t *tes
 			assert.ErrorIs(t, err, ErrIntentionIdempotencyKeyMismatch)
 		})
 	}
+}
+
+func TestIntentionRecord_UnmarshalJSON_RejectsMissingRegistryHeadBefore(t *testing.T) {
+	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
+	data := []byte(`{
+  "schema_version": "1",
+  "stage": "planning",
+  "idempotency_key": "` + ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash) + `",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "best_sha_before": "1111111111111111111111111111111111111111",
+  "target_sha": "2222222222222222222222222222222222222222",
+  "candidates_hash": "` + candidatesHash + `",
+  "started_at": "2026-04-20T10:00:00Z"
+}`)
+	var record IntentionRecord
+	err := json.Unmarshal(data, &record)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingRegistryHeadBefore)
+}
+
+func TestIntentionRecord_UnmarshalJSON_AcceptsExplicitEmptyRegistryHeadBefore(t *testing.T) {
+	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
+	data := []byte(`{
+  "schema_version": "1",
+  "stage": "planning",
+  "idempotency_key": "` + ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash) + `",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "best_sha_before": "1111111111111111111111111111111111111111",
+  "target_sha": "2222222222222222222222222222222222222222",
+  "candidates_hash": "` + candidatesHash + `",
+  "registry_head_before": "",
+  "started_at": "2026-04-20T10:00:00Z"
+}`)
+	var record IntentionRecord
+	require.NoError(t, json.Unmarshal(data, &record))
+	assert.Equal(t, "", record.RegistryHeadBefore)
+}
+
+func TestIntentionRecord_MarshalJSON_RejectsForgedIdempotencyKey(t *testing.T) {
+	record := validIntentionBase()
+	record.Stage = IntentionStagePlanning
+	record.RegistryHeadBefore = ""
+	record.IdempotencyKey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+	_, err := json.Marshal(record)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionIdempotencyKeyMismatch)
 }

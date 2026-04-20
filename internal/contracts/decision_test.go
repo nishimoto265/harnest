@@ -108,6 +108,14 @@ func TestRegistryAppendResult_Accept_ZeroOffset(t *testing.T) {
 	assert.EqualValues(t, 0, r.Offset)
 }
 
+func TestRegistryAppendResult_RejectsDuplicateOffsetKey(t *testing.T) {
+	data := `{"offset":0,"offset":1,"sha256":"0000000000000000000000000000000000000000000000000000000000000003"}`
+	var r RegistryAppendResult
+	err := json.Unmarshal([]byte(data), &r)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicateJSONKey)
+}
+
 func TestDecision_Adopt_Reject_MissingOffsetInAppendResult(t *testing.T) {
 	// DecisionAdopt の registry_append_result 内 offset 欠落は全体の decode エラー.
 	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
@@ -253,4 +261,21 @@ func TestDecision_Validate_RejectsForgedAdoptIdempotencyKey(t *testing.T) {
 	err := d.Validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrDecisionIdempotencyKeyMismatch)
+}
+
+func TestDecision_MarshalJSON_RejectsVariantMismatch(t *testing.T) {
+	d := Decision{
+		Action: DecisionActionAdopt,
+		Value: DecisionReject{
+			Action:        DecisionActionReject,
+			SchemaVersion: "1",
+			RunID:         "2026-04-20-PR42-abcdef0",
+			Reason:        "below_threshold",
+			DecidedAt:     time.Now(),
+		},
+	}
+
+	_, err := json.Marshal(d)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDecisionVariantTypeMismatch)
 }

@@ -33,6 +33,8 @@ type Step10Response struct {
 var (
 	ErrStep10ResponseRunIDMismatch   = errors.New("stepio: step10: response.run_id must equal task_package.run_id")
 	ErrStep10ResponseBaseSHAMismatch = errors.New("stepio: step10: response.base_sha must equal task_package.base_sha")
+	ErrStep10RequestPRMismatch       = errors.New("stepio: step10: response.task_package.pr must equal request.pr")
+	ErrStep10RequestBestBranch       = errors.New("stepio: step10: response.task_package.best_branch must equal request.best_branch")
 )
 
 func (r *Step10Request) UnmarshalJSON(data []byte) error {
@@ -73,4 +75,25 @@ func (r Step10Response) Validate() error {
 		return fmt.Errorf("%w: response.base_sha=%s task_package.base_sha=%s", ErrStep10ResponseBaseSHAMismatch, r.BaseSHA, r.TaskPackage.BaseSHA)
 	}
 	return nil
+}
+
+// DecodeAndValidateStep10Response is the sanctioned read boundary for step10
+// responses when the original request is available. Step10Request does not
+// carry run_id/base_sha, so the request-bound invariants are the request-derived
+// task metadata that step10 rehydrates into task_package.
+func DecodeAndValidateStep10Response(data []byte, req Step10Request) (Step10Response, error) {
+	var resp Step10Response
+	if err := resp.UnmarshalJSON(data); err != nil {
+		return Step10Response{}, err
+	}
+	if err := req.Validate(); err != nil {
+		return Step10Response{}, err
+	}
+	if resp.TaskPackage.PR != req.PR {
+		return Step10Response{}, fmt.Errorf("%w: response.pr=%d request.pr=%d", ErrStep10RequestPRMismatch, resp.TaskPackage.PR, req.PR)
+	}
+	if resp.TaskPackage.BestBranch != req.BestBranch {
+		return Step10Response{}, fmt.Errorf("%w: response.best_branch=%q request.best_branch=%q", ErrStep10RequestBestBranch, resp.TaskPackage.BestBranch, req.BestBranch)
+	}
+	return resp, nil
 }

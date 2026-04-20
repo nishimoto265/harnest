@@ -112,7 +112,7 @@ func (w WorktreeAllocation) Validate() error {
 		switch {
 		case errors.Is(err, ErrPathNotAbsolute):
 			return fmt.Errorf("%w: path=%q", ErrWorktreePathNotAbsolute, w.Path)
-		case errors.Is(err, ErrPathNotClean):
+		case errors.Is(err, ErrPathNotClean), errors.Is(err, ErrPathContainsNUL):
 			return fmt.Errorf("%w: path=%q", ErrWorktreePathNotClean, w.Path)
 		default:
 			return err
@@ -129,10 +129,14 @@ func (p TaskPackage) validateWorktreePathBranchUniqueness() error {
 	paths := make(map[string]int, len(p.Worktrees))
 	branches := make(map[string]int, len(p.Worktrees))
 	for i, w := range p.Worktrees {
-		if prev, dup := paths[w.Path]; dup {
-			return fmt.Errorf("%w: path=%q indices=%d,%d", ErrTaskPackageDuplicatePath, w.Path, prev, i)
+		canonicalPath, err := CanonicalizePathForUniqueness(w.Path)
+		if err != nil {
+			return fmt.Errorf("worktrees[%d].path: %w", i, err)
 		}
-		paths[w.Path] = i
+		if prev, dup := paths[canonicalPath]; dup {
+			return fmt.Errorf("%w: canonical_path=%q paths=%q,%q indices=%d,%d", ErrTaskPackageDuplicatePath, canonicalPath, p.Worktrees[prev].Path, w.Path, prev, i)
+		}
+		paths[canonicalPath] = i
 		if prev, dup := branches[w.Branch]; dup {
 			return fmt.Errorf("%w: branch=%q indices=%d,%d", ErrTaskPackageDuplicateBranch, w.Branch, prev, i)
 		}
