@@ -2,6 +2,7 @@ package stepio
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,6 +105,21 @@ func validStep70Request() Step70Request {
 		Candidates:   validCandidates(),
 		RegistryPath: "/tmp/runs/rules-registry.jsonl",
 	}
+}
+
+func validStep70Response() Step70Response {
+	return Step70Response{
+		RunID:    "2026-04-20-PR42-abcdef0",
+		Decision: validAdoptDecision(),
+		Promoted: true,
+	}
+}
+
+func mustMarshalJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	data, err := json.Marshal(v)
+	require.NoError(t, err)
+	return data
 }
 
 func TestStep70Request_Validate_Valid(t *testing.T) {
@@ -306,21 +322,89 @@ func TestStep70Response_Validate_RejectsForgedAdoptIdempotencyKey(t *testing.T) 
 	assert.ErrorIs(t, err, ErrStep70AdoptIdempotencyKeyMismatch)
 }
 
-func TestStep70Response_ValidateAgainstRequest_RejectsCandidatesHashMismatch(t *testing.T) {
+func TestDecodeAndValidateStep70Response_RejectsDuplicateTopLevelKey(t *testing.T) {
 	req := validStep70Request()
-	resp := Step70Response{
-		RunID:    req.TaskPackage.RunID,
-		Decision: validAdoptDecision(),
-		Promoted: true,
-	}
+	raw := string(mustMarshalJSON(t, validStep70Response()))
+	raw = strings.Replace(raw, `"promoted":true`, `"promoted":true,"promoted":false`, 1)
+
+	_, err := DecodeAndValidateStep70Response([]byte(raw), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, contracts.ErrDuplicateJSONKey)
+}
+
+func TestDecodeAndValidateStep70Response_RejectsUnknownTopLevelField(t *testing.T) {
+	req := validStep70Request()
+	raw := string(mustMarshalJSON(t, validStep70Response()))
+	raw = strings.Replace(raw, `"promoted":true`, `"unexpected":true,"promoted":true`, 1)
+
+	_, err := DecodeAndValidateStep70Response([]byte(raw), req)
+	require.Error(t, err)
+}
+
+func TestDecodeAndValidateStep70Response_RejectsTrailingTokens(t *testing.T) {
+	req := validStep70Request()
+	raw := append(mustMarshalJSON(t, validStep70Response()), []byte(`{"extra":true}`)...)
+
+	_, err := DecodeAndValidateStep70Response(raw, req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, contracts.ErrTrailingJSON)
+}
+
+func TestDecodeAndValidateStep70Response_RejectsPromotedActionMismatch(t *testing.T) {
+	req := validStep70Request()
+	resp := validStep70Response()
+	resp.Promoted = false
+
+	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep70AdoptRequiresPromoted)
+}
+
+func TestDecodeAndValidateStep70Response_RejectsDecisionRunIDMismatch(t *testing.T) {
+	req := validStep70Request()
+	resp := validStep70Response()
+	resp.RunID = "2026-04-21-PR42-abcdef0"
+
+	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep70ResponseRunIDMismatch)
+}
+
+func TestDecodeAndValidateStep70Response_RejectsRequestRunIDMismatch(t *testing.T) {
+	req := validStep70Request()
+	req.TaskPackage.RunID = "2026-04-21-PR42-abcdef0"
+	req.Candidates.RunID = req.TaskPackage.RunID
+	req.Candidates.CandidatesHash = contracts.CanonicalCandidatesHash(req.Candidates.Candidates)
+	resp := validStep70Response()
+
+	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep70RequestResponseRunIDMismatch)
+}
+
+func TestDecodeAndValidateStep70Response_RejectsCandidatesHashMismatch(t *testing.T) {
+	req := validStep70Request()
+	resp := validStep70Response()
 	adopt := resp.Decision.Value.(contracts.DecisionAdopt)
 	adopt.CandidatesHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	adopt.IdempotencyKey = contracts.ComputeAdoptIdempotencyKey(string(adopt.RunID), adopt.TargetSha, adopt.BestShaBefore, adopt.CandidatesHash)
 	resp.Decision.Value = adopt
 
-	err := resp.ValidateAgainstRequest(req)
+	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStep70AdoptCandidatesHashMismatch)
+}
+
+func TestDecodeAndValidateStep70Response_RejectsForgedIdempotencyKey(t *testing.T) {
+	req := validStep70Request()
+	resp := validStep70Response()
+	adopt := resp.Decision.Value.(contracts.DecisionAdopt)
+	adopt.IdempotencyKey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	resp.Decision.Value = adopt
+
+	_, err := DecodeAndValidateStep70Response(mustMarshalJSON(t, resp), req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStep70AdoptIdempotencyKeyMismatch)
 }
 
 func TestStep70Request_UnmarshalJSON_RejectsDuplicateTopLevelKey(t *testing.T) {

@@ -90,6 +90,43 @@ func (r Step70Request) Validate() error {
 	return nil
 }
 
+func (r *Step70Response) UnmarshalJSON(data []byte) error {
+	decoded, err := decodeStep70Response(data)
+	if err != nil {
+		return err
+	}
+	*r = decoded
+	return nil
+}
+
+// DecodeAndValidateStep70Response is the sanctioned read boundary for a step70
+// response when the originating request is available. It enforces strict JSON
+// decode, response-local invariants, and request-bound cross-checks in one
+// place so callers cannot accidentally skip the request-aware validation.
+func DecodeAndValidateStep70Response(data []byte, req Step70Request) (Step70Response, error) {
+	resp, err := decodeStep70Response(data)
+	if err != nil {
+		return Step70Response{}, err
+	}
+	if err := resp.validateAgainstRequest(req); err != nil {
+		return Step70Response{}, err
+	}
+	return resp, nil
+}
+
+func decodeStep70Response(data []byte) (Step70Response, error) {
+	type alias Step70Response
+	var a alias
+	if err := contracts.DecodeStrictJSON(data, &a); err != nil {
+		return Step70Response{}, err
+	}
+	resp := Step70Response(a)
+	if err := resp.Validate(); err != nil {
+		return Step70Response{}, err
+	}
+	return resp, nil
+}
+
 // Validate enforces tag-based validation + Decision internal validation +
 // Promoted/Action consistency (finding #5).
 func (r Step70Response) Validate() error {
@@ -143,7 +180,7 @@ func (r Step70Response) Validate() error {
 	return nil
 }
 
-func (r Step70Response) ValidateAgainstRequest(req Step70Request) error {
+func (r Step70Response) validateAgainstRequest(req Step70Request) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}

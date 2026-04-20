@@ -95,17 +95,7 @@ func writeCanonicalNumber(buf *bytes.Buffer, n json.Number) error {
 		buf.WriteString(strconv.FormatInt(i, 10))
 		return nil
 	}
-
-	f, err := n.Float64()
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(f)
-	if err != nil {
-		return err
-	}
-	buf.Write(data)
-	return nil
+	return fmt.Errorf("%w: %s", ErrCanonicalNonInteger, n.String())
 }
 
 func writeCanonicalScalar(buf *bytes.Buffer, v any) error {

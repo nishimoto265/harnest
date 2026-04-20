@@ -226,13 +226,18 @@ step30/60 は必ず後者を使う。
 
 - `scores-*.jsonl`: reasons 1000字/次元 + 超過時 `30/reasons/<sha256>.txt` sidecar + `reasons_overflow_ref`
 - `compliance-*.jsonl`: rationale 500字 cap
-- `classification.jsonl`: problem/rationale 各 500字 cap
+- `classification.jsonl`: `{schema_version, run_id, candidate_id, kind, similarity_score, matched_rule_id?, rationale?, rationale_overflow_ref?, classified_at}`。`rationale` 500字 cap (`problem` field は存在しない)
 - `processed.jsonl`: reason 300字 cap + 超過時 sidecar
 - `pairwise.jsonl`: justification 500字 cap
 - `rules-registry.jsonl`: 本体は `<runs_base>/rules/<rule_id>.md` sidecar、registry entry は **tagged union**:
-  - **promotion entries** (step70 から): `{kind: 'added' | 'updated', rule_id, rule_path, sha256, idempotency_key, version_seq, prev_hash, by_run_id, at}`
-  - **rollback entries** (step70 から、rev18): `{kind: 'rolled_back', target_op_id, target_offset, target_sha256, by_run_id, rollback_reason, failed_step, version_seq, prev_hash, at}` — **`target_op_id` は rollback 対象 promotion entry の `idempotency_key` と同値**(rev20 明示、Codex rev19 #2 H1 対応)。reader は同 target_op_id (= 旧 adoption の idempotency_key) を持つ promotion entry の adoption を無効扱い
-  - **sunset entries** (archive/cycle③ から): `{kind: 'status_changed' | 'archived' | 'restored', rule_id, prev_status, new_status, op_id (=sha256(sunset_run_id||rule_id||transition)), version_seq, prev_hash, by_sunset_run_id, at}`(rev16 明示、Codex rev16 R3 対応)
+  - **promotion entries** (step70 から):
+    - `added`: `{kind: 'added', schema_version, rule_id, rule_path, sha256, idempotency_key, version_seq, prev_hash, by_run_id, at}`
+    - `updated`: `{kind: 'updated', schema_version, rule_id, rule_path, sha256, prev_sha256, idempotency_key, version_seq, prev_hash, by_run_id, at}`
+  - **rollback entries** (step70 から、rev18): `{kind: 'rolled_back', schema_version, target_op_id, target_offset, target_sha256, by_run_id, rollback_reason, failed_step, version_seq, prev_hash, at}` — **`target_op_id` は rollback 対象 promotion entry の `idempotency_key` と同値**(rev20 明示、Codex rev19 #2 H1 対応)。reader は同 target_op_id (= 旧 adoption の idempotency_key) を持つ promotion entry の adoption を無効扱い
+  - **sunset entries** (archive/cycle③ から):
+    - `status_changed`: `{kind: 'status_changed', schema_version, rule_id, prev_status, new_status, transition, op_id, version_seq, prev_hash, by_sunset_run_id, at}`
+    - `archived`: `{kind: 'archived', schema_version, rule_id, prev_status, new_status, op_id, version_seq, prev_hash, by_sunset_run_id, at}`
+    - `restored`: `{kind: 'restored', schema_version, rule_id, prev_status, new_status, op_id, version_seq, prev_hash, by_sunset_run_id, at}`
   - 全 kind とも 4KB cap、長文は sidecar 参照
 
 ### Intention の atomic overwrite と tmp cleanup (rev5 新規)
@@ -296,17 +301,22 @@ yaml KnownFields(true) + validator / slog JSON handler / config.yaml.example
 ### 0-C: state (rev9: vocabulary 完全同期)
 - Append/Read/Summarize/IsTerminal/UnprocessedPRs/MaxRecordedPR
 - **Terminal events**: `completed / failed / promoted / rollback / skipped / timeout / needs_manual_recovery`
-- **Non-terminal events (resume 対象)**: `started / step_done / interrupted / promoting / warning`
+- **Non-terminal events (resume 対象)**: `started / step_done / interrupted / promoting / registry_size_high / registry_size_critical / rescue_retry`
 - Schema(全 event に `step` required):
   - `started { pr, run_id, step: 10 }`
   - `step_done { pr, run_id, step }`
   - `interrupted { pr, run_id, step, reason: 'rate_limit' | 'budget' | 'context' | 'signal' | 'unknown' | 'pre_push_crash', detail?, detail_overflow_ref? }`
   - `promoting { pr, run_id, step: 70 }` (rev9 non-terminal)
-  - `warning { pr?, run_id?, step, kind, count?, detail?, detail_overflow_ref? }` (rev22 `pr/run_id` optional 化、rev26 全箇所同期、Codex rev25 指摘の warning drift 対応)
+  - `registry_size_high` / `registry_size_critical`: `{ kind, pr?, run_id?, source, step?, count, detail?, detail_overflow_ref?, at }`
+    - `source: 'step70'` のとき `pr` / `run_id` 必須、`step: '70'` 必須。PR-scoped resume 対象
+    - `source: 'sunset_tick'` のとき `pr` / `run_id` / `step` はすべて禁止。global telemetry 専用で resume 対象外
+  - `rescue_retry`: `{ kind, pr, run_id, step, detail?, detail_overflow_ref?, at }`
+    - `step` は `'20' | '50'`
+    - `source` field は禁止。PR-scoped resume 対象
   - `needs_manual_recovery { pr, run_id, step, reason, failed_step, detail?, detail_overflow_ref? }`
   - `promoted / rollback / failed / timeout / completed / skipped` は既存踏襲 + `step` required
 - `detail` 300字 cap、超過時 sidecar `<run>/processed-details/<sha256>.txt`、`detail_overflow_ref` に path + sha256
-- `ResumeTarget(entries) []ResumeRequest`: non-terminal PR の run_id と最後の step を列挙(`promoting/warning` も含む、Codex rev8 R1/R3 対応)
+- `ResumeTarget(entries) []ResumeRequest`: non-terminal PR の run_id と最後の step を列挙(`promoting / registry_size_high / registry_size_critical / rescue_retry` を含む、Codex rev8 R1/R3 対応)
 - **processed-index.jsonl は Phase 0 では実装しない**(rev10 決定、Codex rev9 R1/R2 対応): 個人運用 1 PR/日 × 10年 = 3650 entry 程度なら起動時 full scan で十分。index 実装は future work として記載、ただし validation/rebuild 契約が未詰めなため rev10 ではスコープ外
 - **unit test**: vocabulary 全種 / overflow / resume target 算出 / IsTerminal 判定(needs_manual_recovery=true)
 - **atomic migration**: Phase 0-bootstrap で一括実装
@@ -330,7 +340,7 @@ yaml KnownFields(true) + validator / slog JSON handler / config.yaml.example
     2. 各 step (10/20/30/40/50/60/70) の launch 直前に sentinel 再 scan
     3. **step70 の long-running path 内**(Claude rev21 H1 対応): stage 遷移ごと(planning→branch_pushed、branch_pushed→registry_appended、registry_appended→decision_written、decision_written→finalized)の **直前**に sentinel 再 scan。自 run のものは除外(自 run が scan 中に自 sentinel 書く race は無い)、**他 run の sentinel が検出されたら step70 は即 abort**(branch push 前なら intention 削除で side-effect ゼロ rollback、push 済みなら rollback path へ、具体的分岐は io-contracts §step70 参照)
   - いずれかで sentinel 発見 → 現 work を abort(side-effect なしで exit 0、次 tick 再評価)
-  - **resume precedence** (rev8, Codex rev7 R2 対応): 上記 sentinel gate を通過した後、`processed.jsonl` から non-terminal PR (`started / step_done / interrupted / promoting / warning`) を列挙 → 既存 run_id で先行 resume → 全 resolve 完了後に `detect` で新規 PR を enqueue。fresh detect が resume 待ち run を追い抜かないことを保証
+  - **resume precedence** (rev8, Codex rev7 R2 対応): 上記 sentinel gate を通過した後、`processed.jsonl` から non-terminal PR (`started / step_done / interrupted / promoting / registry_size_high / registry_size_critical / rescue_retry`) を列挙 → 既存 run_id で先行 resume → 全 resolve 完了後に `detect` で新規 PR を enqueue。fresh detect が resume 待ち run を追い抜かないことを保証
 - `budget.go`: file counter + TTL + daily reset
 - `intention.go`: staged transaction primitives (Write/ReadIntention, atomic overwrite per stage, recovery decoder)
 - `sunset_tick.go`: **lock → stale marker reconcile → 24h gate → run → finalize** の順 (rev5 修正、Codex R1 #3, R3 #4 対応)。**lock 取得・解放・stale marker reconcile・archive 呼出のロジックは `internal/archive/sunset.go` 側に集約**(`auto-improve sunset` CLI と `sunset_tick.go` 両方が同 lock 経路 `archive.RunSunsetWithLock(opts)` を call する。Phase 1-F の archive owner が responsible)、sunset_tick.go と cmd/sunset.go は wiring のみ。これにより locking ownership 一本化(rev16、Codex rev16 R2 対応):
@@ -352,7 +362,7 @@ yaml KnownFields(true) + validator / slog JSON handler / config.yaml.example
   - 起動時に `processed.jsonl` を読み、各 PR の最後 event を取得
   - terminal (`completed/failed/promoted/rollback/skipped/timeout/needs_manual_recovery`) → skip
   - non-terminal (`started/step_done/interrupted/promoting/registry_size_high/registry_size_critical/rescue_retry`) → **同じ run_id で cycle resume**
-  - **warning 系 event の特殊扱い** (rev28、Codex rev27 #2 対応): PR-scoped (`pr` + `run_id` 両方 present) の場合のみ resume target。**pr 不在の global telemetry event**(例: `source: 'sunset_tick'` の `registry_size_critical`)は **resume queue に乗らない、telemetry 専用**。起動時 scan は `pr` field 存在でフィルタ
+  - **registry telemetry / rescue_retry event の特殊扱い** (rev28、Codex rev27 #2 対応): PR-scoped (`pr` + `run_id` 両方 present) の場合のみ resume target。**pr 不在の global telemetry event**(例: `source: 'sunset_tick'` の `registry_size_critical`)は **resume queue に乗らない、telemetry 専用**。起動時 scan は `pr` field 存在でフィルタ
   - `<runs_base>/needs-recovery/*.json` と `<runs_base>/needs-recovery/*.aborted.json` 両方 sentinel scan: 1件でもあれば 全新規 step70 を block
 - **Signal handling**: SIGTERM/SIGINT → 現 step graceful stop → state.lock 取得 → `processed interrupted { step, reason: 'signal' }` append → state.lock release → **保持中の lock を全て defer unlock**(step70 実行中なら promotion.lock も保持、外なら state.lock のみ短期間保持) → exit 0
 - **Rate limit 検出**: `internal/interruption.Classify()` 経由で判定 → `interrupted { step, reason: 'rate_limit' }` append → defer unlock → exit 0

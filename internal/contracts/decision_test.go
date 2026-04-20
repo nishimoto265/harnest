@@ -181,3 +181,46 @@ func TestDecision_Validate_RejectsOuterActionInnerActionMismatch(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrDecisionVariantActionMismatch)
 }
+
+func TestDecision_Validate_AcceptsValueAndPointerVariants(t *testing.T) {
+	parse := func(raw string) Decision {
+		var d Decision
+		require.NoError(t, json.Unmarshal([]byte(raw), &d))
+		return d
+	}
+
+	adopt := parse(fixtureDecisionAdopt())
+	reject := parse(`{"action":"reject","schema_version":"1","run_id":"2026-04-20-PR42-abcdef0","reason":"below_threshold","decided_at":"2026-04-20T12:00:00Z"}`)
+	noop := parse(`{"action":"noop","schema_version":"1","run_id":"2026-04-20-PR42-abcdef0","reason":"no_candidates","decided_at":"2026-04-20T12:00:00Z"}`)
+	rollback := parse(`{
+  "action": "rollback",
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "rollback_reason": "lease_failure",
+  "failed_step": "70",
+  "decided_at": "2026-04-20T12:00:00Z"
+}`)
+
+	tests := []struct {
+		name string
+		d    Decision
+	}{
+		{name: "adopt value", d: adopt},
+		{name: "adopt pointer", d: func() Decision { v := adopt.Value.(DecisionAdopt); return Decision{Action: adopt.Action, Value: &v} }()},
+		{name: "reject value", d: reject},
+		{name: "reject pointer", d: func() Decision { v := reject.Value.(DecisionReject); return Decision{Action: reject.Action, Value: &v} }()},
+		{name: "noop value", d: noop},
+		{name: "noop pointer", d: func() Decision { v := noop.Value.(DecisionNoop); return Decision{Action: noop.Action, Value: &v} }()},
+		{name: "rollback value", d: rollback},
+		{name: "rollback pointer", d: func() Decision {
+			v := rollback.Value.(DecisionRollback)
+			return Decision{Action: rollback.Action, Value: &v}
+		}()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NoError(t, tt.d.Validate())
+		})
+	}
+}

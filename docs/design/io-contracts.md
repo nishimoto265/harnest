@@ -169,6 +169,29 @@ longer free-text は **schema で capping 済み** + overflow 時は sidecar (sh
   - registry append 時は `{registry append → fsync → index append → fsync}` の順。index 書込み失敗時は次回起動時 rebuild で吸収(registry が単一 source of truth)
   - 不整合 or 構築失敗時は **fallback として tail scan を使う**(安全側、idempotency lookup は bounded scan に戻る)
 
+**`rules-registry.jsonl` row schemas** (strict decode は以下の closed union のみ受理):
+- `RuleRegistryAdded`
+  - required: `kind='added'`, `schema_version`, `rule_id`, `rule_path`, `sha256`, `idempotency_key`, `version_seq`, `by_run_id`, `at`
+  - optional: `prev_hash`
+- `RuleRegistryUpdated`
+  - required: `kind='updated'`, `schema_version`, `rule_id`, `rule_path`, `sha256`, `prev_sha256`, `idempotency_key`, `version_seq`, `by_run_id`, `at`
+  - optional: `prev_hash`
+- `RuleRegistryRolledBack`
+  - required: `kind='rolled_back'`, `schema_version`, `target_op_id`, `target_offset`, `target_sha256`, `by_run_id`, `rollback_reason`, `failed_step`, `version_seq`, `at`
+  - optional: `prev_hash`
+- `RuleRegistryStatusChanged`
+  - required: `kind='status_changed'`, `schema_version`, `rule_id`, `prev_status`, `new_status`, `transition`, `op_id`, `version_seq`, `by_sunset_run_id`, `at`
+  - optional: `prev_hash`
+  - valid transitions: `active -> deprecated` with `transition='deprecate'`, `deprecated -> active` with `transition='activate'`
+- `RuleRegistryArchived`
+  - required: `kind='archived'`, `schema_version`, `rule_id`, `prev_status`, `new_status`, `op_id`, `version_seq`, `by_sunset_run_id`, `at`
+  - optional: `prev_hash`
+  - valid transition: `prev_status in {active, deprecated}` and `new_status='archived'`
+- `RuleRegistryRestored`
+  - required: `kind='restored'`, `schema_version`, `rule_id`, `prev_status`, `new_status`, `op_id`, `version_seq`, `by_sunset_run_id`, `at`
+  - optional: `prev_hash`
+  - valid transition: `prev_status='archived'` and `new_status in {active, deprecated}`
+
 「最新勝ち」の reduce は `internal/io/jsonl.go#CollapseByKey()` を使う(自前 reduce を書かない)。
 
 ### 4. Strict JSON (Go 実装ガイド)
@@ -468,6 +491,12 @@ You are a code judge. Consider this task description:
 **出力**:
 - `<run>/40/candidates.json` (`CandidatesSchema`)
 - `<run>/40/classification.jsonl` (1候補1行、`ClassificationEntrySchema`)
+  - required: `schema_version`, `run_id`, `candidate_id`, `kind`, `similarity_score`, `classified_at`
+  - optional: `matched_rule_id`, `rationale`, `rationale_overflow_ref`
+  - `kind`: `new | update | duplicate`
+  - `similarity_score`: `0..100` の integer
+  - `rationale` は 500 字 cap、超過時 `rationale_overflow_ref`
+  - `problem` field は存在しない
 
 ---
 
@@ -596,7 +625,7 @@ step70 の **live 排他は flock**、**needs_manual_recovery の block は dura
 2. **Terminal rollback (staged transaction)** — branch 状態が確定した場合のみ。**rollback 自体も crash-safe な stage 遷移**(rev19、Codex rev18 R1 critical 対応):
    - **stage `rolling_back_branch_reverted` に intention overwrite**(branch revert 完了 mark)
    - 以下、idempotent steps:
-     1. **registry rollback entry append**(`intention.registry_append_result` が non-null の場合のみ): `rules-registry.jsonl` に `{kind: 'rolled_back', target_op_id, target_offset, target_sha256, by_run_id, rollback_reason, failed_step, version_seq, prev_hash, at}` を append。append 前に末尾 **N=2000** 件(promotion idempotency と同定数、`RegistryTailScanN` 定数で共通化)を tail scan し同 `target_op_id` の `rolled_back` entry が既存なら skip(idempotent)。1500+ で idempotency-index.jsonl も併用。reader は CollapseByKey 的に `rolled_back` 付き op を無効扱い。
+     1. **registry rollback entry append**(`intention.registry_append_result` が non-null の場合のみ): `rules-registry.jsonl` に `{kind: 'rolled_back', schema_version, target_op_id, target_offset, target_sha256, by_run_id, rollback_reason, failed_step, version_seq, prev_hash, at}` を append。append 前に末尾 **N=2000** 件(promotion idempotency と同定数、`RegistryTailScanN` 定数で共通化)を tail scan し同 `target_op_id` の `rolled_back` entry が既存なら skip(idempotent)。1500+ で idempotency-index.jsonl も併用。reader は CollapseByKey 的に `rolled_back` 付き op を無効扱い。
      2. intention を `rolling_back_registry_appended` に overwrite
      3. `decision.json` atomic write (`action: 'rollback'`, `rollback_reason`, `failed_step`)
      4. intention を `rolling_back_decision_written` に overwrite

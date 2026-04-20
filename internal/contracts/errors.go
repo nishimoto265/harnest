@@ -41,4 +41,8 @@ var (
 	// ErrCandidatesHashMismatch is returned when candidates_hash is empty or
 	// does not match the canonical hash of candidates[].
 	ErrCandidatesHashMismatch = errors.New("contracts: candidates_hash mismatch")
+
+	// ErrCanonicalNonInteger is returned when canonical JSON encounters a
+	// number that is not representable as an int64 integer.
+	ErrCanonicalNonInteger = errors.New("contracts: canonical marshal: number must be an int64 integer")
 )

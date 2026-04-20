@@ -255,11 +255,31 @@ func decisionVariantMetadata(v DecisionVariant) (expected DecisionAction, inner 
 	switch vv := v.(type) {
 	case DecisionAdopt:
 		return DecisionActionAdopt, vv.Action, vv.RunID, nil
+	case *DecisionAdopt:
+		if vv == nil {
+			return "", "", "", ErrUnknownDecisionAction
+		}
+		return DecisionActionAdopt, vv.Action, vv.RunID, nil
 	case DecisionReject:
+		return DecisionActionReject, vv.Action, vv.RunID, nil
+	case *DecisionReject:
+		if vv == nil {
+			return "", "", "", ErrUnknownDecisionAction
+		}
 		return DecisionActionReject, vv.Action, vv.RunID, nil
 	case DecisionNoop:
 		return DecisionActionNoop, vv.Action, vv.RunID, nil
+	case *DecisionNoop:
+		if vv == nil {
+			return "", "", "", ErrUnknownDecisionAction
+		}
+		return DecisionActionNoop, vv.Action, vv.RunID, nil
 	case DecisionRollback:
+		return DecisionActionRollback, vv.Action, vv.RunID, nil
+	case *DecisionRollback:
+		if vv == nil {
+			return "", "", "", ErrUnknownDecisionAction
+		}
 		return DecisionActionRollback, vv.Action, vv.RunID, nil
 	default:
 		return "", "", "", ErrUnknownDecisionAction

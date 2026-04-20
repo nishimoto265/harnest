@@ -241,3 +241,67 @@ func TestManifest_Validate_RejectsTaggedUnionMismatches(t *testing.T) {
 		})
 	}
 }
+
+func TestManifest_Validate_AcceptsValueAndPointerVariants(t *testing.T) {
+	success := func() Manifest {
+		var m Manifest
+		require.NoError(t, json.Unmarshal([]byte(fixtureManifestSuccess(t)), &m))
+		return m
+	}()
+	errorManifest := func() Manifest {
+		var m Manifest
+		require.NoError(t, json.Unmarshal([]byte(`{
+  "kind": "error",
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "pass": 1,
+  "agent": "a2",
+  "exit_code": 1,
+  "reason": "rate_limit",
+  "started_at": "2026-04-20T10:00:00Z",
+  "finished_at": "2026-04-20T10:01:00Z"
+}`), &m))
+		return m
+	}()
+	timeout := func() Manifest {
+		var m Manifest
+		require.NoError(t, json.Unmarshal([]byte(`{
+  "kind": "timeout",
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "pass": 2,
+  "agent": "a3",
+  "timeout_seconds": 3600,
+  "started_at": "2026-04-20T10:00:00Z",
+  "finished_at": "2026-04-20T11:00:00Z"
+}`), &m))
+		return m
+	}()
+
+	tests := []struct {
+		name string
+		m    Manifest
+	}{
+		{name: "success value", m: success},
+		{name: "success pointer", m: func() Manifest {
+			v := success.Value.(ManifestSuccess)
+			return Manifest{Kind: success.Kind, Value: &v}
+		}()},
+		{name: "error value", m: errorManifest},
+		{name: "error pointer", m: func() Manifest {
+			v := errorManifest.Value.(ManifestError)
+			return Manifest{Kind: errorManifest.Kind, Value: &v}
+		}()},
+		{name: "timeout value", m: timeout},
+		{name: "timeout pointer", m: func() Manifest {
+			v := timeout.Value.(ManifestTimeout)
+			return Manifest{Kind: timeout.Kind, Value: &v}
+		}()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NoError(t, tt.m.Validate())
+		})
+	}
+}

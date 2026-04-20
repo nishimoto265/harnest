@@ -492,27 +492,87 @@ func stateVariantMetadata(v StateVariant) (expected StateKind, inner StateKind, 
 	switch vv := v.(type) {
 	case StateEntryStarted:
 		return StateKindStarted, vv.Kind, nil
+	case *StateEntryStarted:
+		if vv == nil {
+			return "", "", ErrUnknownStateKind
+		}
+		return StateKindStarted, vv.Kind, nil
 	case StateEntryStepDone:
+		return StateKindStepDone, vv.Kind, nil
+	case *StateEntryStepDone:
+		if vv == nil {
+			return "", "", ErrUnknownStateKind
+		}
 		return StateKindStepDone, vv.Kind, nil
 	case StateEntryInterrupted:
 		return StateKindInterrupted, vv.Kind, nil
+	case *StateEntryInterrupted:
+		if vv == nil {
+			return "", "", ErrUnknownStateKind
+		}
+		return StateKindInterrupted, vv.Kind, nil
 	case StateEntryPromoting:
+		return StateKindPromoting, vv.Kind, nil
+	case *StateEntryPromoting:
+		if vv == nil {
+			return "", "", ErrUnknownStateKind
+		}
 		return StateKindPromoting, vv.Kind, nil
 	case StateEntryWarning:
 		return vv.Kind, vv.Kind, nil
+	case *StateEntryWarning:
+		if vv == nil {
+			return "", "", ErrUnknownStateKind
+		}
+		return vv.Kind, vv.Kind, nil
 	case StateEntryCompleted:
+		return StateKindCompleted, vv.Kind, nil
+	case *StateEntryCompleted:
+		if vv == nil {
+			return "", "", ErrUnknownStateKind
+		}
 		return StateKindCompleted, vv.Kind, nil
 	case StateEntryFailed:
 		return StateKindFailed, vv.Kind, nil
+	case *StateEntryFailed:
+		if vv == nil {
+			return "", "", ErrUnknownStateKind
+		}
+		return StateKindFailed, vv.Kind, nil
 	case StateEntryPromoted:
+		return StateKindPromoted, vv.Kind, nil
+	case *StateEntryPromoted:
+		if vv == nil {
+			return "", "", ErrUnknownStateKind
+		}
 		return StateKindPromoted, vv.Kind, nil
 	case StateEntryRollback:
 		return StateKindRollback, vv.Kind, nil
+	case *StateEntryRollback:
+		if vv == nil {
+			return "", "", ErrUnknownStateKind
+		}
+		return StateKindRollback, vv.Kind, nil
 	case StateEntrySkipped:
+		return StateKindSkipped, vv.Kind, nil
+	case *StateEntrySkipped:
+		if vv == nil {
+			return "", "", ErrUnknownStateKind
+		}
 		return StateKindSkipped, vv.Kind, nil
 	case StateEntryTimeout:
 		return StateKindTimeout, vv.Kind, nil
+	case *StateEntryTimeout:
+		if vv == nil {
+			return "", "", ErrUnknownStateKind
+		}
+		return StateKindTimeout, vv.Kind, nil
 	case StateEntryNeedsManualRecovery:
+		return StateKindNeedsManualRecovery, vv.Kind, nil
+	case *StateEntryNeedsManualRecovery:
+		if vv == nil {
+			return "", "", ErrUnknownStateKind
+		}
 		return StateKindNeedsManualRecovery, vv.Kind, nil
 	default:
 		return "", "", ErrUnknownStateKind

@@ -258,3 +258,109 @@ func TestState_Validate_RejectsTaggedUnionMismatches(t *testing.T) {
 		})
 	}
 }
+
+func TestState_Validate_AcceptsValueAndPointerVariants(t *testing.T) {
+	fixtures := map[StateKind]string{
+		StateKindStarted:                     fixtureStateStarted(),
+		StateKindStepDone:                    `{"kind":"step_done","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"20","at":"2026-04-20T10:30:00Z"}`,
+		StateKindInterrupted:                 `{"kind":"interrupted","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"30","reason":"rate_limit","at":"2026-04-20T11:00:00Z"}`,
+		StateKindPromoting:                   `{"kind":"promoting","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","at":"2026-04-20T12:00:00Z"}`,
+		StateKindWarningRegistrySizeHigh:     `{"kind":"registry_size_high","source":"step70","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","count":1501,"at":"2026-04-20T12:00:00Z"}`,
+		StateKindWarningRegistrySizeCritical: `{"kind":"registry_size_critical","source":"sunset_tick","count":2001,"at":"2026-04-20T12:00:00Z"}`,
+		StateKindWarningRescueRetry:          `{"kind":"rescue_retry","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"20","at":"2026-04-20T12:00:00Z"}`,
+		StateKindCompleted:                   `{"kind":"completed","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","at":"2026-04-20T12:00:00Z"}`,
+		StateKindFailed:                      `{"kind":"failed","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"30","reason":"judge_failed","at":"2026-04-20T12:00:00Z"}`,
+		StateKindPromoted:                    `{"kind":"promoted","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","at":"2026-04-20T12:00:00Z"}`,
+		StateKindRollback:                    `{"kind":"rollback","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","rollback_reason":"transactional_failure","failed_step":"70","at":"2026-04-20T12:00:00Z"}`,
+		StateKindSkipped:                     `{"kind":"skipped","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"10","at":"2026-04-20T12:00:00Z"}`,
+		StateKindTimeout:                     `{"kind":"timeout","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"20","at":"2026-04-20T12:00:00Z"}`,
+		StateKindNeedsManualRecovery:         `{"kind":"needs_manual_recovery","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","reason":"remote_divergence","failed_step":"70","at":"2026-04-20T12:00:00Z"}`,
+	}
+	parse := func(kind StateKind) StateEntry {
+		var e StateEntry
+		require.NoError(t, json.Unmarshal([]byte(fixtures[kind]), &e))
+		return e
+	}
+
+	tests := []struct {
+		name  string
+		entry StateEntry
+	}{
+		{name: "started value", entry: parse(StateKindStarted)},
+		{name: "step_done value", entry: parse(StateKindStepDone)},
+		{name: "interrupted value", entry: parse(StateKindInterrupted)},
+		{name: "promoting value", entry: parse(StateKindPromoting)},
+		{name: "registry_size_high value", entry: parse(StateKindWarningRegistrySizeHigh)},
+		{name: "registry_size_critical value", entry: parse(StateKindWarningRegistrySizeCritical)},
+		{name: "rescue_retry value", entry: parse(StateKindWarningRescueRetry)},
+		{name: "completed value", entry: parse(StateKindCompleted)},
+		{name: "failed value", entry: parse(StateKindFailed)},
+		{name: "promoted value", entry: parse(StateKindPromoted)},
+		{name: "rollback value", entry: parse(StateKindRollback)},
+		{name: "skipped value", entry: parse(StateKindSkipped)},
+		{name: "timeout value", entry: parse(StateKindTimeout)},
+		{name: "needs_manual_recovery value", entry: parse(StateKindNeedsManualRecovery)},
+		{name: "started pointer", entry: func() StateEntry {
+			v := parse(StateKindStarted).Value.(StateEntryStarted)
+			return StateEntry{Kind: StateKindStarted, Value: &v}
+		}()},
+		{name: "step_done pointer", entry: func() StateEntry {
+			v := parse(StateKindStepDone).Value.(StateEntryStepDone)
+			return StateEntry{Kind: StateKindStepDone, Value: &v}
+		}()},
+		{name: "interrupted pointer", entry: func() StateEntry {
+			v := parse(StateKindInterrupted).Value.(StateEntryInterrupted)
+			return StateEntry{Kind: StateKindInterrupted, Value: &v}
+		}()},
+		{name: "promoting pointer", entry: func() StateEntry {
+			v := parse(StateKindPromoting).Value.(StateEntryPromoting)
+			return StateEntry{Kind: StateKindPromoting, Value: &v}
+		}()},
+		{name: "registry_size_high pointer", entry: func() StateEntry {
+			v := parse(StateKindWarningRegistrySizeHigh).Value.(StateEntryWarning)
+			return StateEntry{Kind: StateKindWarningRegistrySizeHigh, Value: &v}
+		}()},
+		{name: "registry_size_critical pointer", entry: func() StateEntry {
+			v := parse(StateKindWarningRegistrySizeCritical).Value.(StateEntryWarning)
+			return StateEntry{Kind: StateKindWarningRegistrySizeCritical, Value: &v}
+		}()},
+		{name: "rescue_retry pointer", entry: func() StateEntry {
+			v := parse(StateKindWarningRescueRetry).Value.(StateEntryWarning)
+			return StateEntry{Kind: StateKindWarningRescueRetry, Value: &v}
+		}()},
+		{name: "completed pointer", entry: func() StateEntry {
+			v := parse(StateKindCompleted).Value.(StateEntryCompleted)
+			return StateEntry{Kind: StateKindCompleted, Value: &v}
+		}()},
+		{name: "failed pointer", entry: func() StateEntry {
+			v := parse(StateKindFailed).Value.(StateEntryFailed)
+			return StateEntry{Kind: StateKindFailed, Value: &v}
+		}()},
+		{name: "promoted pointer", entry: func() StateEntry {
+			v := parse(StateKindPromoted).Value.(StateEntryPromoted)
+			return StateEntry{Kind: StateKindPromoted, Value: &v}
+		}()},
+		{name: "rollback pointer", entry: func() StateEntry {
+			v := parse(StateKindRollback).Value.(StateEntryRollback)
+			return StateEntry{Kind: StateKindRollback, Value: &v}
+		}()},
+		{name: "skipped pointer", entry: func() StateEntry {
+			v := parse(StateKindSkipped).Value.(StateEntrySkipped)
+			return StateEntry{Kind: StateKindSkipped, Value: &v}
+		}()},
+		{name: "timeout pointer", entry: func() StateEntry {
+			v := parse(StateKindTimeout).Value.(StateEntryTimeout)
+			return StateEntry{Kind: StateKindTimeout, Value: &v}
+		}()},
+		{name: "needs_manual_recovery pointer", entry: func() StateEntry {
+			v := parse(StateKindNeedsManualRecovery).Value.(StateEntryNeedsManualRecovery)
+			return StateEntry{Kind: StateKindNeedsManualRecovery, Value: &v}
+		}()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NoError(t, tt.entry.Validate())
+		})
+	}
+}

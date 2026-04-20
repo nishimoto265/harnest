@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -74,4 +75,49 @@ func TestCanonicalCandidatesHash_HTMLStringsInvariantAcrossEscapeForms(t *testin
 	require.NoError(t, json.Unmarshal(rawLiteral, &literal))
 
 	assert.Equal(t, CanonicalCandidatesHash(escaped), CanonicalCandidatesHash(literal))
+}
+
+func TestCanonicalMarshal_RejectsNonIntegerNumbers(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "decimal", value: json.Number("1.0")},
+		{name: "exponent", value: json.Number("1e0")},
+		{name: "fraction", value: json.Number("3.14")},
+		{name: "int64 overflow positive", value: json.Number("9223372036854775808")},
+		{name: "int64 overflow negative", value: json.Number("-9223372036854775809")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := CanonicalMarshal(tt.value)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrCanonicalNonInteger)
+		})
+	}
+}
+
+func TestCanonicalMarshal_RejectsNaNAndInfinity(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "NaN", value: math.NaN()},
+		{name: "positive infinity", value: math.Inf(1)},
+		{name: "negative infinity", value: math.Inf(-1)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := CanonicalMarshal(tt.value)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestCanonicalMarshal_NormalizesNegativeZero(t *testing.T) {
+	data, err := CanonicalMarshal(json.Number("-0"))
+	require.NoError(t, err)
+	assert.Equal(t, "0", string(data))
 }

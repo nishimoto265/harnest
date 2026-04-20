@@ -193,9 +193,24 @@ func manifestVariantMetadata(v ManifestVariant) (expected ManifestKind, inner Ma
 	switch vv := v.(type) {
 	case ManifestSuccess:
 		return ManifestKindSuccess, vv.Kind, nil
+	case *ManifestSuccess:
+		if vv == nil {
+			return "", "", ErrUnknownManifestKind
+		}
+		return ManifestKindSuccess, vv.Kind, nil
 	case ManifestError:
 		return ManifestKindError, vv.Kind, nil
+	case *ManifestError:
+		if vv == nil {
+			return "", "", ErrUnknownManifestKind
+		}
+		return ManifestKindError, vv.Kind, nil
 	case ManifestTimeout:
+		return ManifestKindTimeout, vv.Kind, nil
+	case *ManifestTimeout:
+		if vv == nil {
+			return "", "", ErrUnknownManifestKind
+		}
 		return ManifestKindTimeout, vv.Kind, nil
 	default:
 		return "", "", ErrUnknownManifestKind

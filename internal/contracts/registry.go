@@ -393,15 +393,45 @@ func ruleRegistryVariantMetadata(v RuleRegistryVariant) (expected RegistryKind, 
 	switch vv := v.(type) {
 	case RuleRegistryAdded:
 		return RegistryKindAdded, vv.Kind, nil
+	case *RuleRegistryAdded:
+		if vv == nil {
+			return "", "", ErrUnknownRegistryKind
+		}
+		return RegistryKindAdded, vv.Kind, nil
 	case RuleRegistryUpdated:
+		return RegistryKindUpdated, vv.Kind, nil
+	case *RuleRegistryUpdated:
+		if vv == nil {
+			return "", "", ErrUnknownRegistryKind
+		}
 		return RegistryKindUpdated, vv.Kind, nil
 	case RuleRegistryRolledBack:
 		return RegistryKindRolledBack, vv.Kind, nil
+	case *RuleRegistryRolledBack:
+		if vv == nil {
+			return "", "", ErrUnknownRegistryKind
+		}
+		return RegistryKindRolledBack, vv.Kind, nil
 	case RuleRegistryStatusChanged:
+		return RegistryKindStatusChanged, vv.Kind, nil
+	case *RuleRegistryStatusChanged:
+		if vv == nil {
+			return "", "", ErrUnknownRegistryKind
+		}
 		return RegistryKindStatusChanged, vv.Kind, nil
 	case RuleRegistryArchived:
 		return RegistryKindArchived, vv.Kind, nil
+	case *RuleRegistryArchived:
+		if vv == nil {
+			return "", "", ErrUnknownRegistryKind
+		}
+		return RegistryKindArchived, vv.Kind, nil
 	case RuleRegistryRestored:
+		return RegistryKindRestored, vv.Kind, nil
+	case *RuleRegistryRestored:
+		if vv == nil {
+			return "", "", ErrUnknownRegistryKind
+		}
 		return RegistryKindRestored, vv.Kind, nil
 	default:
 		return "", "", ErrUnknownRegistryKind
