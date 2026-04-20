@@ -89,6 +89,39 @@ func TestDecision_Reject_TrailingBytes(t *testing.T) {
 	assert.Error(t, json.Unmarshal([]byte(data), &d))
 }
 
+// finding #6: RegistryAppendResult.offset は JSON 上の physical 存在が必須.
+// Go zero-value (0) は合法 offset のため tag required では検出できない。
+func TestRegistryAppendResult_Reject_MissingOffset(t *testing.T) {
+	data := `{"sha256":"0000000000000000000000000000000000000000000000000000000000000003"}`
+	var r RegistryAppendResult
+	err := json.Unmarshal([]byte(data), &r)
+	assert.ErrorIs(t, err, ErrRegistryAppendResultMissingOffset)
+}
+
+func TestRegistryAppendResult_Accept_ZeroOffset(t *testing.T) {
+	data := `{"offset":0,"sha256":"0000000000000000000000000000000000000000000000000000000000000003"}`
+	var r RegistryAppendResult
+	require.NoError(t, json.Unmarshal([]byte(data), &r))
+	assert.EqualValues(t, 0, r.Offset)
+}
+
+func TestDecision_Adopt_Reject_MissingOffsetInAppendResult(t *testing.T) {
+	// DecisionAdopt の registry_append_result 内 offset 欠落は全体の decode エラー.
+	data := `{
+  "action": "adopt",
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "idempotency_key": "0000000000000000000000000000000000000000000000000000000000000001",
+  "best_sha_before": "1111111111111111111111111111111111111111",
+  "target_sha": "2222222222222222222222222222222222222222",
+  "candidates_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+  "registry_append_result": {"sha256": "0000000000000000000000000000000000000000000000000000000000000003"},
+  "decided_at": "2026-04-20T12:00:00Z"
+}`
+	var d Decision
+	assert.Error(t, json.Unmarshal([]byte(data), &d))
+}
+
 func TestDecision_Reject_BadRollbackReason(t *testing.T) {
 	data := `{
   "action": "rollback",

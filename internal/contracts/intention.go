@@ -1,6 +1,9 @@
 package contracts
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // IntentionStage is the staged-transaction state stored in `<run>/70/intention.json`.
 // io-contracts.md §step70 Stage 遷移 + rolling_back_* stages + needs_manual_recovery.
@@ -54,4 +57,46 @@ type IntentionRecord struct {
 	// rolling_back_* 時にのみ populate.
 	RecoveryReason RollbackReason `json:"recovery_reason,omitempty" validate:"omitempty,oneof=lease_failure remote_divergence registry_divergence worktree_rescue_loop manual_abort_pending_cleanup transactional_failure"`
 	FailedStep     FailedStep     `json:"failed_step,omitempty" validate:"omitempty,oneof=10 20 30 40 50 60 70"`
+}
+
+// Stage-based conditional required errors. io-contracts.md §step70 Stage 遷移:
+//   - stage=registry_appended / decision_written / rolling_back_registry_appended /
+//     rolling_back_decision_written → registry_append_result 必須 (non-nil)
+//   - stage=needs_manual_recovery / rolling_back_*                       →
+//     recovery_reason + failed_step 必須
+var (
+	ErrIntentionMissingRegistryAppendResult = errors.New("contracts: intention: registry_append_result is required for this stage")
+	ErrIntentionMissingRecoveryReason       = errors.New("contracts: intention: recovery_reason is required for this stage")
+	ErrIntentionMissingFailedStep           = errors.New("contracts: intention: failed_step is required for this stage")
+)
+
+// Validate enforces stage-conditional required fields on top of tag-based
+// validation. Call site (reader / UnmarshalJSON / test) should invoke this
+// after validator.Struct succeeds.
+func (r IntentionRecord) Validate() error {
+	if err := validateStruct(r); err != nil {
+		return err
+	}
+	switch r.Stage {
+	case IntentionStageRegistryAppended,
+		IntentionStageDecisionWritten,
+		IntentionStageRollingBackRegistryAppended,
+		IntentionStageRollingBackDecisionWritten:
+		if r.RegistryAppendResult == nil {
+			return ErrIntentionMissingRegistryAppendResult
+		}
+	}
+	switch r.Stage {
+	case IntentionStageNeedsManualRecovery,
+		IntentionStageRollingBackBranchReverted,
+		IntentionStageRollingBackRegistryAppended,
+		IntentionStageRollingBackDecisionWritten:
+		if string(r.RecoveryReason) == "" {
+			return ErrIntentionMissingRecoveryReason
+		}
+		if string(r.FailedStep) == "" {
+			return ErrIntentionMissingFailedStep
+		}
+	}
+	return nil
 }

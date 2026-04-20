@@ -5,14 +5,16 @@ import "github.com/nishimoto265/auto-improve/internal/contracts"
 // Step70Request is the input envelope for step 70 (decide + apply).
 // io-contracts.md §step 70。`<runs_base>/promotion.lock` は step 実装側で
 // acquire/release する契約で、orchestrator は lock 状態を意識しない。
+//
+// `best_sha_before` は step70 が promotion.lock 取得後に自身で remote
+// `best_branch` を読む契約 (orchestrator が pre-read した値は渡さない)。
+// `candidates_hash` は Candidates.CandidatesHash が source of truth のため
+// 重複させない。
 type Step70Request struct {
 	TaskPackage contracts.TaskPackage `json:"task_package"`
 	// Candidates: step40 の出力を読み込み済みで渡す。
+	// Candidates.CandidatesHash が intention.IdempotencyKey 計算の source of truth。
 	Candidates contracts.Candidates `json:"candidates"`
-	// CandidatesHash: intention.IdempotencyKey 計算に使用。
-	CandidatesHash string `json:"candidates_hash"`
-	// BestShaBefore: planning 開始時点の remote best_branch HEAD。
-	BestShaBefore string `json:"best_sha_before"`
 	// RegistryPath: `<runs_base>/rules-registry.jsonl` の絶対 path。
 	RegistryPath string `json:"registry_path"`
 }

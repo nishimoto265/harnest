@@ -1,15 +1,58 @@
 package stepio
 
-import "github.com/nishimoto265/auto-improve/internal/contracts"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/auto-improve/internal/validation"
+)
 
 // Step20Request is the input envelope for step 20 (implement pass1).
 // io-contracts.md §step 20 / 50.
 type Step20Request struct {
 	TaskPackage contracts.TaskPackage `json:"task_package"`
 	// Agents: step20 が並列起動する agent 一覧 (通常 a1 / a2 / a3)。
-	Agents []contracts.AgentID `json:"agents"`
+	Agents []contracts.AgentID `json:"agents" validate:"required,unique,dive,agent_id_fmt"`
 	// TimeoutSeconds: agent 1 体あたりの wall-clock timeout。
-	TimeoutSeconds int `json:"timeout_seconds"`
+	TimeoutSeconds int `json:"timeout_seconds" validate:"required,gt=0"`
+}
+
+// ErrStep20AgentPassMismatch is returned when the Agents slice does not match
+// the pass-1 agent set in TaskPackage.Worktrees (subset + full coverage).
+var ErrStep20AgentPassMismatch = errors.New("stepio: step20: agents do not match TaskPackage.Worktrees[pass=1]")
+
+// Validate enforces tag-based validation + structural invariant:
+// every Agent must appear in TaskPackage.Worktrees[pass==1] and together cover
+// all pass-1 agent IDs.
+func (r Step20Request) Validate() error {
+	if err := validation.Instance().Struct(r); err != nil {
+		return err
+	}
+	return validateAgentsAgainstPass(r.Agents, r.TaskPackage, 1)
+}
+
+// validateAgentsAgainstPass enforces: Agents set == set of worktrees[pass==p].Agent.
+func validateAgentsAgainstPass(agents []contracts.AgentID, pkg contracts.TaskPackage, pass int) error {
+	want := map[contracts.AgentID]struct{}{}
+	for _, w := range pkg.Worktrees {
+		if w.Pass == pass {
+			want[w.Agent] = struct{}{}
+		}
+	}
+	got := map[contracts.AgentID]struct{}{}
+	for _, a := range agents {
+		got[a] = struct{}{}
+	}
+	if len(got) != len(want) {
+		return fmt.Errorf("%w: agents=%d worktrees(pass=%d)=%d", ErrStep20AgentPassMismatch, len(got), pass, len(want))
+	}
+	for a := range got {
+		if _, ok := want[a]; !ok {
+			return fmt.Errorf("%w: agent %s not present in worktrees(pass=%d)", ErrStep20AgentPassMismatch, a, pass)
+		}
+	}
+	return nil
 }
 
 // Step20AgentResult: 各 agent ごとの実行結果。manifest は Manifest tagged union。

@@ -36,9 +36,11 @@ func TestState_Interrupted_Parse(t *testing.T) {
 
 func TestState_Warning_GlobalTelemetry(t *testing.T) {
 	// pr / run_id を欠いた global telemetry warning (io-contracts.md rev22)
-	data := `{"kind":"warning","step":"70","warning_kind":"registry_size_critical","count":2001,"at":"2026-04-20T12:00:00Z"}`
+	// warning sub-kind は `kind` 直接 (outer envelope の `warning` wrap は無い)。
+	data := `{"kind":"registry_size_critical","step":"70","count":2001,"at":"2026-04-20T12:00:00Z"}`
 	var e StateEntry
 	require.NoError(t, json.Unmarshal([]byte(data), &e))
+	assert.True(t, e.Kind.IsWarning())
 	w := e.Value.(StateEntryWarning)
 	assert.Nil(t, w.PR)
 	assert.Nil(t, w.RunID)
@@ -47,9 +49,10 @@ func TestState_Warning_GlobalTelemetry(t *testing.T) {
 }
 
 func TestState_Warning_PRScoped(t *testing.T) {
-	data := `{"kind":"warning","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","warning_kind":"registry_size_high","count":1501,"at":"2026-04-20T12:00:00Z"}`
+	data := `{"kind":"registry_size_high","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","count":1501,"at":"2026-04-20T12:00:00Z"}`
 	var e StateEntry
 	require.NoError(t, json.Unmarshal([]byte(data), &e))
+	assert.True(t, e.Kind.IsWarning())
 }
 
 func TestState_NeedsManualRecovery_Parse(t *testing.T) {
@@ -92,6 +95,13 @@ func TestState_Reject_WrongKind(t *testing.T) {
 	assert.ErrorIs(t, err, ErrUnknownStateKind)
 }
 
+// finding #3: started.step は eq=10 固定。step=20 の started は reject される。
+func TestState_Reject_Started_StepNot10(t *testing.T) {
+	data := `{"kind":"started","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"20","at":"2026-04-20T10:00:00Z"}`
+	var e StateEntry
+	assert.Error(t, json.Unmarshal([]byte(data), &e))
+}
+
 func TestState_Reject_TrailingBytes(t *testing.T) {
 	data := fixtureStateStarted() + "garbage"
 	var e StateEntry
@@ -106,7 +116,15 @@ func TestState_Reject_TrailingJSON(t *testing.T) {
 
 func TestState_IsTerminal_Coverage(t *testing.T) {
 	// 全 StateKind を列挙し IsTerminal の期待値を verify
-	nonTerm := []StateKind{StateKindStarted, StateKindStepDone, StateKindInterrupted, StateKindPromoting, StateKindWarning}
+	nonTerm := []StateKind{
+		StateKindStarted,
+		StateKindStepDone,
+		StateKindInterrupted,
+		StateKindPromoting,
+		StateKindWarningRegistrySizeHigh,
+		StateKindWarningRegistrySizeCritical,
+		StateKindWarningRescueRetry,
+	}
 	term := []StateKind{StateKindCompleted, StateKindFailed, StateKindPromoted, StateKindRollback, StateKindSkipped, StateKindTimeout, StateKindNeedsManualRecovery}
 	for _, k := range nonTerm {
 		assert.False(t, k.IsTerminal(), string(k))

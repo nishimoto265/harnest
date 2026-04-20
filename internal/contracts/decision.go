@@ -1,7 +1,9 @@
 package contracts
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -130,9 +132,36 @@ func (DecisionRollback) decisionVariant() {}
 // decision after a successful append to rules-registry.jsonl.
 //
 // Numeric type 規約: offset は int64 (uint64 禁止, io-contracts.md rev23/rev24).
+// offset は Go zero-value (0) が合法値 (= 最初の entry) のため、`required` tag
+// では欠落検出できない。custom UnmarshalJSON で JSON 側 field 存在を物理検証する.
 type RegistryAppendResult struct {
 	Offset int64  `json:"offset" validate:"gte=0"`
 	Sha256 string `json:"sha256" validate:"required,sha256_hex"`
+}
+
+// ErrRegistryAppendResultMissingOffset is returned when the `offset` key is
+// absent from a RegistryAppendResult JSON body (zero-value 問題回避).
+var ErrRegistryAppendResultMissingOffset = errors.New("contracts: registry_append_result: offset field is required")
+
+// UnmarshalJSON enforces physical presence of the `offset` field (can't rely on
+// Go zero-value since 0 is a valid registry offset).
+func (r *RegistryAppendResult) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["offset"]; !ok {
+		return ErrRegistryAppendResultMissingOffset
+	}
+	type alias RegistryAppendResult
+	var a alias
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&a); err != nil {
+		return err
+	}
+	*r = RegistryAppendResult(a)
+	return nil
 }
 
 // UnmarshalJSON implements strict tagged-union decoding for Decision.

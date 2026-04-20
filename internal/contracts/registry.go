@@ -125,10 +125,14 @@ type RuleRegistryStatusChanged struct {
 func (RuleRegistryStatusChanged) ruleRegistryVariant() {}
 
 // RuleRegistryArchived: 明示的 archive (kind=archived).
+// io-contracts.md §rules-registry: status_changed / archived / restored は
+// prev_status / new_status を持つ.
 type RuleRegistryArchived struct {
 	Kind          RegistryKind `json:"kind" validate:"required,eq=archived"`
 	SchemaVersion string       `json:"schema_version" validate:"required,oneof=1"`
 	RuleID        string       `json:"rule_id" validate:"required"`
+	PrevStatus    RuleStatus   `json:"prev_status" validate:"required,oneof=active deprecated archived"`
+	NewStatus     RuleStatus   `json:"new_status" validate:"required,oneof=active deprecated archived"`
 	OpID          string       `json:"op_id" validate:"required,sha256_hex"`
 	VersionSeq    int64        `json:"version_seq" validate:"required,gte=1"`
 	PrevHash      string       `json:"prev_hash" validate:"required,sha256_hex"`
@@ -143,6 +147,8 @@ type RuleRegistryRestored struct {
 	Kind          RegistryKind `json:"kind" validate:"required,eq=restored"`
 	SchemaVersion string       `json:"schema_version" validate:"required,oneof=1"`
 	RuleID        string       `json:"rule_id" validate:"required"`
+	PrevStatus    RuleStatus   `json:"prev_status" validate:"required,oneof=active deprecated archived"`
+	NewStatus     RuleStatus   `json:"new_status" validate:"required,oneof=active deprecated archived"`
 	OpID          string       `json:"op_id" validate:"required,sha256_hex"`
 	VersionSeq    int64        `json:"version_seq" validate:"required,gte=1"`
 	PrevHash      string       `json:"prev_hash" validate:"required,sha256_hex"`

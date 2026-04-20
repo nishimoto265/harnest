@@ -90,6 +90,79 @@ func TestRegistry_StatusChanged_Parse(t *testing.T) {
 	assert.Equal(t, RegistryKindStatusChanged, e.Kind)
 }
 
+// finding #5: Archived / Restored variant は prev_status / new_status を持つ.
+func TestRegistry_Archived_Parse(t *testing.T) {
+	data := `{
+  "kind": "archived",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "deprecated",
+  "new_status": "archived",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000050",
+  "version_seq": 5,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000077",
+  "by_sunset_run_id": "sunset-2026-04-22",
+  "at": "2026-04-22T00:00:00Z"
+}`
+	var e RuleRegistryEntry
+	require.NoError(t, json.Unmarshal([]byte(data), &e))
+	v := e.Value.(RuleRegistryArchived)
+	assert.Equal(t, RuleStatusDeprecated, v.PrevStatus)
+	assert.Equal(t, RuleStatusArchived, v.NewStatus)
+}
+
+func TestRegistry_Archived_Reject_MissingPrevStatus(t *testing.T) {
+	data := `{
+  "kind": "archived",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "new_status": "archived",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000050",
+  "version_seq": 5,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000077",
+  "by_sunset_run_id": "sunset-2026-04-22",
+  "at": "2026-04-22T00:00:00Z"
+}`
+	var e RuleRegistryEntry
+	assert.Error(t, json.Unmarshal([]byte(data), &e))
+}
+
+func TestRegistry_Restored_Parse(t *testing.T) {
+	data := `{
+  "kind": "restored",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "archived",
+  "new_status": "active",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000060",
+  "version_seq": 6,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000066",
+  "by_sunset_run_id": "sunset-2026-05-01",
+  "at": "2026-05-01T00:00:00Z"
+}`
+	var e RuleRegistryEntry
+	require.NoError(t, json.Unmarshal([]byte(data), &e))
+	v := e.Value.(RuleRegistryRestored)
+	assert.Equal(t, RuleStatusArchived, v.PrevStatus)
+	assert.Equal(t, RuleStatusActive, v.NewStatus)
+}
+
+func TestRegistry_Restored_Reject_MissingNewStatus(t *testing.T) {
+	data := `{
+  "kind": "restored",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "archived",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000060",
+  "version_seq": 6,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000066",
+  "by_sunset_run_id": "sunset-2026-05-01",
+  "at": "2026-05-01T00:00:00Z"
+}`
+	var e RuleRegistryEntry
+	assert.Error(t, json.Unmarshal([]byte(data), &e))
+}
+
 func TestRegistry_Reject_WrongKind(t *testing.T) {
 	var e RuleRegistryEntry
 	err := json.Unmarshal([]byte(`{"kind":"bogus"}`), &e)

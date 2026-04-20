@@ -9,9 +9,13 @@ import (
 // io-contracts.md §6.1 Resume (crash-resistant execution).
 //
 // Non-terminal (resume 対象):
-//   started / step_done / interrupted / promoting / warning
+//   started / step_done / interrupted / promoting / warning (= 3 warning kinds)
 // Terminal (detect が再 queue しない):
 //   completed / failed / promoted / rollback / skipped / timeout / needs_manual_recovery
+//
+// Warning events carry the warning sub-kind directly in `kind` (io-contracts.md
+// §6.1 `warning { ..., kind, ... }`; rev33 closed enum). There is no outer
+// `kind: "warning"` wrapper — the sub-kind is the discriminator.
 type StateKind string
 
 const (
@@ -19,7 +23,6 @@ const (
 	StateKindStepDone             StateKind = "step_done"
 	StateKindInterrupted          StateKind = "interrupted"
 	StateKindPromoting            StateKind = "promoting"
-	StateKindWarning              StateKind = "warning"
 	StateKindCompleted            StateKind = "completed"
 	StateKindFailed               StateKind = "failed"
 	StateKindPromoted             StateKind = "promoted"
@@ -27,7 +30,23 @@ const (
 	StateKindSkipped              StateKind = "skipped"
 	StateKindTimeout              StateKind = "timeout"
 	StateKindNeedsManualRecovery  StateKind = "needs_manual_recovery"
+
+	// Warning sub-kinds — serialized directly as `kind`.
+	StateKindWarningRegistrySizeHigh     StateKind = "registry_size_high"
+	StateKindWarningRegistrySizeCritical StateKind = "registry_size_critical"
+	StateKindWarningRescueRetry          StateKind = "rescue_retry"
 )
+
+// IsWarning reports whether k is one of the 3 warning sub-kinds.
+func (k StateKind) IsWarning() bool {
+	switch k {
+	case StateKindWarningRegistrySizeHigh,
+		StateKindWarningRegistrySizeCritical,
+		StateKindWarningRescueRetry:
+		return true
+	}
+	return false
+}
 
 // IsTerminal reports whether the given StateKind is a terminal event
 // (detect が再 queue しない / resume 対象外).
@@ -58,13 +77,15 @@ const (
 	InterruptedReasonPrePushCrash  InterruptedReason = "pre_push_crash"
 )
 
-// WarningKind enum (io-contracts.md §warning event kind × emitter table、closed enum).
-type WarningKind string
+// WarningKind is an alias retained for code that wants to refer to the warning
+// sub-kinds without StateKind prefix. Values == StateKindWarning* constants.
+// io-contracts.md §warning event kind × emitter table、closed enum (rev33).
+type WarningKind = StateKind
 
 const (
-	WarningKindRegistrySizeHigh     WarningKind = "registry_size_high"
-	WarningKindRegistrySizeCritical WarningKind = "registry_size_critical"
-	WarningKindRescueRetry          WarningKind = "rescue_retry"
+	WarningKindRegistrySizeHigh     = StateKindWarningRegistrySizeHigh
+	WarningKindRegistrySizeCritical = StateKindWarningRegistrySizeCritical
+	WarningKindRescueRetry          = StateKindWarningRescueRetry
 )
 
 // StateEntry is one row appended to `<runs_base>/processed.jsonl`.
@@ -82,13 +103,14 @@ type StateVariant interface {
 
 // Common non-warning variants share (pr, run_id, step, at) + kind-specific fields.
 
-// StateEntryStarted: step=10 固定 (step10 開始前の意味).
+// StateEntryStarted: step=10 固定 (step10 開始前の意味, io-contracts.md §6.1
+// `started { pr, run_id, step: 10, at }`).
 type StateEntryStarted struct {
-	Kind   StateKind `json:"kind" validate:"required,eq=started"`
-	PR     int       `json:"pr" validate:"required,gt=0"`
-	RunID  RunID     `json:"run_id" validate:"required,run_id_fmt"`
-	Step   FailedStep `json:"step" validate:"required,oneof=10 20 30 40 50 60 70"`
-	At     time.Time `json:"at" validate:"required"`
+	Kind  StateKind  `json:"kind" validate:"required,eq=started"`
+	PR    int        `json:"pr" validate:"required,gt=0"`
+	RunID RunID      `json:"run_id" validate:"required,run_id_fmt"`
+	Step  FailedStep `json:"step" validate:"required,eq=10"`
+	At    time.Time  `json:"at" validate:"required"`
 }
 
 func (StateEntryStarted) stateVariant() {}
@@ -130,13 +152,14 @@ type StateEntryPromoting struct {
 func (StateEntryPromoting) stateVariant() {}
 
 // StateEntryWarning: 運用 alert. pr / run_id は optional (io-contracts.md rev22).
-// kind enum は closed (registry_size_high / registry_size_critical / rescue_retry).
+// `kind` は closed enum (registry_size_high / registry_size_critical /
+// rescue_retry). outer envelope `kind:"warning"` は無く、sub-kind が直接
+// discriminator を兼ねる (io-contracts.md §6.1 warning schema).
 type StateEntryWarning struct {
-	Kind              StateKind    `json:"kind" validate:"required,eq=warning"`
+	Kind              StateKind    `json:"kind" validate:"required,oneof=registry_size_high registry_size_critical rescue_retry"`
 	PR                *int         `json:"pr,omitempty" validate:"omitempty,gt=0"`
 	RunID             *RunID       `json:"run_id,omitempty" validate:"omitempty,run_id_fmt"`
 	Step              FailedStep   `json:"step" validate:"required,oneof=10 20 30 40 50 60 70"`
-	WarningKind       WarningKind  `json:"warning_kind" validate:"required,oneof=registry_size_high registry_size_critical rescue_retry"`
 	Count             *int64       `json:"count,omitempty" validate:"omitempty,gte=0"`
 	Detail            string       `json:"detail,omitempty" validate:"omitempty,max=300"`
 	DetailOverflowRef *OverflowRef `json:"detail_overflow_ref,omitempty" validate:"omitempty"`
@@ -282,7 +305,9 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		e.Kind, e.Value = env.Kind, v
-	case StateKindWarning:
+	case StateKindWarningRegistrySizeHigh,
+		StateKindWarningRegistrySizeCritical,
+		StateKindWarningRescueRetry:
 		var v StateEntryWarning
 		if err := decodeStrict(data, &v); err != nil {
 			return err

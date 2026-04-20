@@ -245,6 +245,101 @@ func TestIntentionRecord_Reject_BadStage(t *testing.T) {
 	assert.Error(t, validation.Instance().Struct(i))
 }
 
+// finding #1: stage に応じた required field を enforce する Validate() の動作確認。
+func validIntentionBase() IntentionRecord {
+	return IntentionRecord{
+		SchemaVersion:  "1",
+		IdempotencyKey: "0000000000000000000000000000000000000000000000000000000000000001",
+		RunID:          "2026-04-20-PR42-abcdef0",
+		BestShaBefore:  "1111111111111111111111111111111111111111",
+		TargetSha:      "2222222222222222222222222222222222222222",
+		CandidatesHash: "0000000000000000000000000000000000000000000000000000000000000002",
+		StartedAt:      time.Now(),
+	}
+}
+
+func TestIntentionRecord_Validate_Planning_NoExtraRequired(t *testing.T) {
+	r := validIntentionBase()
+	r.Stage = IntentionStagePlanning
+	assert.NoError(t, r.Validate())
+}
+
+func TestIntentionRecord_Validate_RegistryAppended_RequiresAppendResult(t *testing.T) {
+	r := validIntentionBase()
+	r.Stage = IntentionStageRegistryAppended
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingRegistryAppendResult)
+
+	// populate と OK になる
+	r.RegistryAppendResult = &RegistryAppendResult{Offset: 0, Sha256: "0000000000000000000000000000000000000000000000000000000000000003"}
+	assert.NoError(t, r.Validate())
+}
+
+func TestIntentionRecord_Validate_DecisionWritten_RequiresAppendResult(t *testing.T) {
+	r := validIntentionBase()
+	r.Stage = IntentionStageDecisionWritten
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingRegistryAppendResult)
+}
+
+func TestIntentionRecord_Validate_RollingBackRegistryAppended_RequiresAppendResultAndRecovery(t *testing.T) {
+	r := validIntentionBase()
+	r.Stage = IntentionStageRollingBackRegistryAppended
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingRegistryAppendResult)
+
+	// append_result 埋めると次は recovery_reason 欠落で fail.
+	r.RegistryAppendResult = &RegistryAppendResult{Offset: 42, Sha256: "0000000000000000000000000000000000000000000000000000000000000003"}
+	err = r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingRecoveryReason)
+
+	// recovery_reason 埋めると次は failed_step 欠落.
+	r.RecoveryReason = RollbackReasonLeaseFailure
+	err = r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingFailedStep)
+
+	r.FailedStep = FailedStep70
+	assert.NoError(t, r.Validate())
+}
+
+func TestIntentionRecord_Validate_RollingBackDecisionWritten_RequiresAll(t *testing.T) {
+	r := validIntentionBase()
+	r.Stage = IntentionStageRollingBackDecisionWritten
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingRegistryAppendResult)
+}
+
+func TestIntentionRecord_Validate_RollingBackBranchReverted_RequiresRecovery(t *testing.T) {
+	r := validIntentionBase()
+	r.Stage = IntentionStageRollingBackBranchReverted
+	// このステージは registry_append_result 要求なし、recovery_reason/failed_step 要求あり.
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingRecoveryReason)
+}
+
+func TestIntentionRecord_Validate_NeedsManualRecovery_RequiresRecoveryAndFailedStep(t *testing.T) {
+	r := validIntentionBase()
+	r.Stage = IntentionStageNeedsManualRecovery
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingRecoveryReason)
+
+	r.RecoveryReason = RollbackReasonRemoteDivergence
+	err = r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingFailedStep)
+
+	r.FailedStep = FailedStep70
+	assert.NoError(t, r.Validate())
+}
+
 func TestIntentionRecord_AllStagesEnumerated(t *testing.T) {
 	// 仕様: Stage enum は 8 種 (planning / branch_pushed / registry_appended /
 	// decision_written / rolling_back_branch_reverted /

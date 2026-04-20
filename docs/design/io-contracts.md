@@ -399,7 +399,7 @@ You are a code judge. Consider this task description:
 - claude CLI を 3体並列起動
 - 各 agent は実装 + checklist記入 + commit
 - 完了時に **atomic write** で `manifest.json` を出す(中身 = `ManifestSchema` 準拠)
-- timeout/error も manifest に記録(`exit_status`: `success` | `error` | `timeout` の discriminated union)
+- timeout/error も manifest に記録(`kind`: `success` | `error` | `timeout` の discriminated union)
 
 **出力**:
 - `<run>/{20-pass1|50-pass2}/<agent>/manifest.json`
@@ -636,7 +636,7 @@ refuse cell は全て「stderr に safe matrix + suggested_action を print、st
 
 | 状況 | 記録 | 次 step |
 |---|---|---|
-| step 20/50 agent timeout | `manifest.json` に `exit_status: "timeout"` で書かれる(なければ orchestrator が `timeout` event append) | その agent は採点対象外 |
+| step 20/50 agent timeout | `manifest.json` に `kind: "timeout"` で書かれる(なければ orchestrator が `timeout` event append) | その agent は採点対象外 |
 | step 20/50 全agent 失敗 | 全 manifest 不在 → `failed` event(orchestrator) | step 30 以降 skip |
 | step 30 ジャッジ失敗 | リトライ2回、それでもダメなら `failed` event | step 40 skip |
 | step 40 候補0件 | `candidates.json.candidates: []` | step 50-60 skip → best維持 → `completed` event |
