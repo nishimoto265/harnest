@@ -110,6 +110,7 @@ func TestRun_DefaultStub_EndToEnd(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
 	require.NoError(t, err)
+	orch.steps.Step20 = stubAgentSteps()
 
 	err = orch.Run(context.Background(), 77, RunOptions{
 		RunID: "2026-04-21-PR77-abcdef0",
@@ -219,6 +220,14 @@ func recordingAgentSteps(prefix string, recorder *callRecorder) map[contracts.Ag
 			prefix:   prefix,
 			recorder: recorder,
 		}
+	}
+	return steps
+}
+
+func stubAgentSteps() map[contracts.AgentID]Step {
+	steps := make(map[contracts.AgentID]Step, len(defaultAgents))
+	for _, agent := range defaultAgents {
+		steps[agent] = stubImplementStep{}
 	}
 	return steps
 }
