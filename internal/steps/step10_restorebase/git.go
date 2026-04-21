@@ -16,9 +16,9 @@ type GitClient interface {
 	//
 	// Idempotency:
 	//   - path does not exist  → create + return (created=true, nil)
-	//   - path already exists  → verify HEAD sha matches; if it does, return
-	//     (created=false, nil); otherwise return a wrapped error so the caller
-	//     can decide whether to cleanup.
+	//   - path already exists  → verify HEAD sha and branch match; if they do,
+	//     return (created=false, nil); otherwise return a wrapped error so the
+	//     caller can decide whether to cleanup.
 	WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha string) (created bool, err error)
 
 	// ResolveRef resolves a ref to a 40-hex SHA.
@@ -50,13 +50,8 @@ var ErrWorktreeDrift = errors.New("step10: worktree drift")
 
 func (g gitCLI) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha string) (bool, error) {
 	if _, err := g.stat(path); err == nil {
-		// Path exists. Verify it's a worktree at the expected sha.
-		head, herr := g.ResolveRef(ctx, path, "HEAD")
-		if herr != nil {
-			return false, fmt.Errorf("%w: path=%s: cannot resolve HEAD: %v", ErrWorktreeDrift, path, herr)
-		}
-		if head != sha {
-			return false, fmt.Errorf("%w: path=%s expected=%s actual=%s", ErrWorktreeDrift, path, sha, head)
+		if err := g.verifyWorktree(ctx, path, branch, sha); err != nil {
+			return false, err
 		}
 		return false, nil
 	} else if !os.IsNotExist(err) {
@@ -71,11 +66,41 @@ func (g gitCLI) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha str
 			if err2 != nil {
 				return false, fmt.Errorf("step10: git worktree add %s: %w: %s", path, err2, string(out2))
 			}
+			head, herr := g.ResolveRef(ctx, path, "HEAD")
+			if herr != nil {
+				return false, fmt.Errorf("%w: path=%s: cannot resolve HEAD after retry: %v", ErrWorktreeDrift, path, herr)
+			}
+			if head != sha {
+				return false, fmt.Errorf("%w: path=%s expected=%s actual=%s", ErrWorktreeDrift, path, sha, head)
+			}
 			return true, nil
 		}
 		return false, fmt.Errorf("step10: git worktree add %s: %w: %s", path, err, string(out))
 	}
 	return true, nil
+}
+
+func (g gitCLI) verifyWorktree(ctx context.Context, path, branch, sha string) error {
+	head, err := g.ResolveRef(ctx, path, "HEAD")
+	if err != nil {
+		return fmt.Errorf("%w: path=%s: cannot resolve HEAD: %v", ErrWorktreeDrift, path, err)
+	}
+	if head != sha {
+		return fmt.Errorf("%w: path=%s expected=%s actual=%s", ErrWorktreeDrift, path, sha, head)
+	}
+
+	out, err := g.run(ctx, "git", "-C", path, "branch", "--show-current")
+	if err != nil {
+		return fmt.Errorf("%w: path=%s: cannot resolve branch: %v: %s", ErrWorktreeDrift, path, err, string(out))
+	}
+	currentBranch := strings.TrimSpace(string(out))
+	if currentBranch == "" {
+		return fmt.Errorf("%w: path=%s expected_branch=%s actual=<detached>", ErrWorktreeDrift, path, branch)
+	}
+	if currentBranch != branch {
+		return fmt.Errorf("%w: path=%s expected_branch=%s actual_branch=%s", ErrWorktreeDrift, path, branch, currentBranch)
+	}
+	return nil
 }
 
 func (g gitCLI) ResolveRef(ctx context.Context, repoRoot, ref string) (string, error) {
@@ -85,4 +110,3 @@ func (g gitCLI) ResolveRef(ctx context.Context, repoRoot, ref string) (string, e
 	}
 	return strings.TrimSpace(string(out)), nil
 }
-

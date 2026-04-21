@@ -17,12 +17,14 @@ type LinkedIssue struct {
 
 // PRInfo is the subset of `gh pr view` output that step10 consumes.
 type PRInfo struct {
-	Number       int
-	Title        string
-	Body         string
-	BaseRefOid   string // merge-base SHA (40-hex) for a merged PR
-	HeadRefOid   string
-	LinkedIssues []LinkedIssue
+	Number                  int
+	Title                   string
+	Body                    string
+	BaseRefOid              string // current base-branch tip; debugging only
+	HeadRefOid              string // PR head tip; debugging only
+	MergeCommitOID          string
+	PotentialMergeCommitOID string
+	LinkedIssues            []LinkedIssue
 }
 
 // GHClient abstracts the `gh` CLI so tests can stub it.
@@ -54,12 +56,18 @@ func defaultCmdRunner(ctx context.Context, name string, args ...string) ([]byte,
 }
 
 type ghPRViewRaw struct {
-	Number                    int    `json:"number"`
-	Title                     string `json:"title"`
-	Body                      string `json:"body"`
-	BaseRefOid                string `json:"baseRefOid"`
-	HeadRefOid                string `json:"headRefOid"`
-	ClosingIssuesReferences   []struct {
+	Number      int    `json:"number"`
+	Title       string `json:"title"`
+	Body        string `json:"body"`
+	BaseRefOid  string `json:"baseRefOid"`
+	HeadRefOid  string `json:"headRefOid"`
+	MergeCommit *struct {
+		OID string `json:"oid"`
+	} `json:"mergeCommit"`
+	PotentialMergeCommit *struct {
+		OID string `json:"oid"`
+	} `json:"potentialMergeCommit"`
+	ClosingIssuesReferences []struct {
 		Number int    `json:"number"`
 		Title  string `json:"title"`
 	} `json:"closingIssuesReferences"`
@@ -76,7 +84,7 @@ type ghIssueViewRaw struct {
 func (c ghCLI) PRView(ctx context.Context, pr int, repo string) (PRInfo, error) {
 	prArgs := []string{
 		"pr", "view", fmt.Sprintf("%d", pr),
-		"--json", "number,title,body,baseRefOid,headRefOid,closingIssuesReferences",
+		"--json", "number,title,body,baseRefOid,headRefOid,mergeCommit,potentialMergeCommit,closingIssuesReferences",
 	}
 	if repo != "" {
 		prArgs = append(prArgs, "--repo", repo)
@@ -96,6 +104,12 @@ func (c ghCLI) PRView(ctx context.Context, pr int, repo string) (PRInfo, error) 
 		Body:       raw.Body,
 		BaseRefOid: raw.BaseRefOid,
 		HeadRefOid: raw.HeadRefOid,
+	}
+	if raw.MergeCommit != nil {
+		info.MergeCommitOID = raw.MergeCommit.OID
+	}
+	if raw.PotentialMergeCommit != nil {
+		info.PotentialMergeCommitOID = raw.PotentialMergeCommit.OID
 	}
 	for _, ref := range raw.ClosingIssuesReferences {
 		issue, err := c.issueView(ctx, ref.Number, repo)
