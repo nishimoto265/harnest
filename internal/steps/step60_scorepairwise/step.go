@@ -18,6 +18,11 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/judges"
 )
 
+var (
+	ErrNoScorablePass2Agents = errors.New("step60: no scorable pass2 agents found")
+	ErrPass1ScoresIncomplete = errors.New("step60: pass1 scores are incomplete")
+)
+
 type Input struct {
 	IO             internalio.RunContext
 	TaskPackage    *contracts.TaskPackage
@@ -49,50 +54,79 @@ type complianceKey struct {
 	RuleID string
 }
 
+type pairwiseKey struct {
+	AgentA contracts.AgentID
+	AgentB contracts.AgentID
+}
+
+type rawScoreKey struct {
+	Agent     contracts.AgentID
+	JudgeRole contracts.JudgeRole
+	Dimension contracts.Dimension
+}
+
+type rawComplianceKey struct {
+	Agent     contracts.AgentID
+	JudgeRole contracts.JudgeRole
+	RuleID    string
+}
+
+type step60Paths struct {
+	done            string
+	scoresRaw       string
+	scoresFinal     string
+	complianceRaw   string
+	complianceFinal string
+	pairwise        string
+}
+
+func (p step60Paths) truncateTargets() []string {
+	return []string{p.scoresRaw, p.scoresFinal, p.complianceRaw, p.complianceFinal, p.pairwise}
+}
+
+type scorablePass2Agent struct {
+	agent    contracts.AgentID
+	manifest *contracts.ManifestSuccess
+}
+
+// Run scores pass2 outputs, emits step60 final artifacts, and returns
+// ErrNoScorablePass2Agents before writing any JSONL when no pass2 manifest is
+// scorable for this run.
 func Run(ctx context.Context, in Input) error {
 	in, err := applyDefaults(in)
 	if err != nil {
 		return err
 	}
 
-	donePath, err := in.IO.ResolveRunRelative("60/done.marker")
+	resolvedAt := in.Now().UTC()
+	paths, err := resolveStep60Paths(in.IO)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(donePath); err == nil {
+	if _, err := os.Stat(paths.done); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("step60: stat done marker: %w", err)
+	}
+
+	scorableAgents, err := loadScorablePass2Agents(in.IO, deriveScorableAgents(in))
+	if err != nil {
 		return err
+	}
+	if len(scorableAgents) == 0 {
+		return ErrNoScorablePass2Agents
 	}
 
 	request := stepio.Step60Request{
 		TaskPackage:    *in.TaskPackage,
-		ScorableAgents: deriveScorableAgents(in),
+		ScorableAgents: scorableAgentIDs(scorableAgents),
 		RubricVersion:  in.RubricVersion,
 		PromptVersion:  in.PromptVersion,
 	}
 	if err := request.Validate(); err != nil {
-		return err
+		return fmt.Errorf("step60: validate request: %w", err)
 	}
-
-	scoresRawPath, err := in.IO.ResolveRunRelative("60/scores-B-raw.jsonl")
-	if err != nil {
-		return err
-	}
-	scoresFinalPath, err := in.IO.ResolveRunRelative("60/scores-B.jsonl")
-	if err != nil {
-		return err
-	}
-	complianceRawPath, err := in.IO.ResolveRunRelative("60/compliance-B-raw.jsonl")
-	if err != nil {
-		return err
-	}
-	complianceFinalPath, err := in.IO.ResolveRunRelative("60/compliance-B.jsonl")
-	if err != nil {
-		return err
-	}
-	pairwisePath, err := in.IO.ResolveRunRelative("60/pairwise.jsonl")
-	if err != nil {
+	if err := truncateStep60Artifacts(paths.truncateTargets()); err != nil {
 		return err
 	}
 
@@ -101,37 +135,29 @@ func Run(ctx context.Context, in Input) error {
 		return err
 	}
 
-	finalScores := make([]contracts.ScoreEntry, 0, len(request.ScorableAgents)*len(canonicalDimensions))
-	finalCompliance := make([]contracts.ComplianceEntry, 0, len(request.ScorableAgents))
-	pass2ScoresByAgent := make(map[contracts.AgentID][]contracts.ScoreEntry, len(request.ScorableAgents))
-	completedAgents := make([]contracts.AgentID, 0, len(request.ScorableAgents))
+	finalScores := make([]contracts.ScoreEntry, 0, len(scorableAgents)*len(canonicalDimensions))
+	finalCompliance := make([]contracts.ComplianceEntry, 0, len(scorableAgents))
+	pass2ScoresByAgent := make(map[contracts.AgentID][]contracts.ScoreEntry, len(scorableAgents))
+	completedAgents := make([]contracts.AgentID, 0, len(scorableAgents))
 
-	for _, agent := range request.ScorableAgents {
-		manifest, err := internalio.LoadScorableManifest(in.IO, 2, agent)
-		if shouldSkipAgent(err) {
-			continue
-		}
+	for _, agentInfo := range scorableAgents {
+		outputPath, err := in.IO.ResolveRunRelative(agentInfo.manifest.DiffPath)
 		if err != nil {
-			return err
-		}
-
-		outputPath, err := in.IO.ResolveRunRelative(manifest.DiffPath)
-		if err != nil {
-			return err
+			return fmt.Errorf("step60: resolve pass2 diff path for agent=%s: %w", agentInfo.agent, err)
 		}
 		judgeInput := judges.JudgeInput{
 			RunID:      in.TaskPackage.RunID,
 			Pass:       2,
-			Agent:      agent,
+			Agent:      agentInfo.agent,
 			OutputPath: outputPath,
 			RubricPath: in.RubricPath,
 		}
 
-		primaryOutput, err := in.Primary.ScoreOutput(ctx, judgeInput)
+		primaryOutput, err := scoreJudgeOutput(ctx, in.Primary, judgeInput, contracts.JudgeRolePrimary)
 		if err != nil {
 			return err
 		}
-		secondaryOutput, err := in.Secondary.ScoreOutput(ctx, judgeInput)
+		secondaryOutput, err := scoreJudgeOutput(ctx, in.Secondary, judgeInput, contracts.JudgeRoleSecondary)
 		if err != nil {
 			return err
 		}
@@ -141,11 +167,14 @@ func Run(ctx context.Context, in Input) error {
 		primaryCompliance := normalizeCompliance(primaryOutput.Compliance, in.RubricVersion, in.PromptVersion)
 		secondaryCompliance := normalizeCompliance(secondaryOutput.Compliance, in.RubricVersion, in.PromptVersion)
 
-		needArbiter := scoreDisagreement(primaryScores, secondaryScores) || complianceDisagreement(primaryCompliance, secondaryCompliance)
+		scoreDisagreements := collectScoreDisagreements(primaryScores, secondaryScores)
+		complianceDisagreements := collectComplianceDisagreements(primaryCompliance, secondaryCompliance)
+		needArbiter := len(scoreDisagreements) > 0 || len(complianceDisagreements) > 0
+
 		var arbiterScores map[contracts.Dimension]contracts.ScoreEntry
 		var arbiterCompliance map[string]contracts.ComplianceEntry
 		if needArbiter {
-			arbiterOutput, err := in.Arbiter.ScoreOutput(ctx, judgeInput)
+			arbiterOutput, err := scoreJudgeOutput(ctx, in.Arbiter, judgeInput, contracts.JudgeRoleArbiter)
 			if err != nil {
 				return err
 			}
@@ -153,38 +182,38 @@ func Run(ctx context.Context, in Input) error {
 			arbiterCompliance = normalizeCompliance(arbiterOutput.Compliance, in.RubricVersion, in.PromptVersion)
 		}
 
-		agentScores, err := emitScores(scoresRawPath, scoresFinalPath, agent, primaryScores, secondaryScores, arbiterScores)
+		agentScores, err := emitScores(paths.scoresRaw, paths.scoresFinal, agentInfo.agent, primaryScores, secondaryScores, arbiterScores, scoreDisagreements, resolvedAt)
 		if err != nil {
 			return err
 		}
-		agentCompliance, err := emitCompliance(complianceRawPath, complianceFinalPath, agent, primaryCompliance, secondaryCompliance, arbiterCompliance)
+		agentCompliance, err := emitCompliance(paths.complianceRaw, paths.complianceFinal, agentInfo.agent, primaryCompliance, secondaryCompliance, arbiterCompliance, resolvedAt, in.RubricVersion, in.PromptVersion)
 		if err != nil {
 			return err
 		}
 
 		if len(agentScores) != len(canonicalDimensions) {
-			return fmt.Errorf("step60: incomplete score set for agent=%s: got=%d want=%d", agent, len(agentScores), len(canonicalDimensions))
+			return fmt.Errorf("step60: incomplete score set for agent=%s: got=%d want=%d", agentInfo.agent, len(agentScores), len(canonicalDimensions))
 		}
 
-		completedAgents = append(completedAgents, agent)
+		completedAgents = append(completedAgents, agentInfo.agent)
 		finalScores = append(finalScores, agentScores...)
 		finalCompliance = append(finalCompliance, agentCompliance...)
-		pass2ScoresByAgent[agent] = agentScores
+		pass2ScoresByAgent[agentInfo.agent] = agentScores
 	}
 
 	pairwiseEntries := make([]contracts.PairwiseEntry, 0, len(completedAgents))
 	for _, agent := range completedAgents {
-		pass1Average, err := resolvePass1Average(ctx, in, agent, pass1ScoresByAgent[agent])
+		pass1Total, err := resolvePass1Total(in.IO, agent, pass1ScoresByAgent[agent])
 		if err != nil {
 			return err
 		}
-		pass2Average, err := averageScores(pass2ScoresByAgent[agent])
+		pass2Total, err := sumScores(pass2ScoresByAgent[agent])
 		if err != nil {
 			return err
 		}
-		entry := makePairwiseEntry(in, agent, pass1Average, pass2Average)
-		if err := internalio.AppendJSONL(pairwisePath, entry); err != nil {
-			return err
+		entry := makePairwiseEntry(in, agent, pass1Total, pass2Total, resolvedAt)
+		if err := internalio.AppendJSONL(paths.pairwise, entry); err != nil {
+			return fmt.Errorf("step60: append pairwise row for agent=%s: %w", agent, err)
 		}
 		pairwiseEntries = append(pairwiseEntries, entry)
 	}
@@ -196,16 +225,27 @@ func Run(ctx context.Context, in Input) error {
 		return fmt.Errorf("step60: final pairwise cardinality mismatch: pairwise=%d completed_agents=%d", len(pairwiseEntries), len(completedAgents))
 	}
 
-	scoresRawHash, err := hashFileOrEmpty(scoresRawPath)
+	scoresRawHash, err := hashRawScores(paths.scoresRaw)
 	if err != nil {
 		return err
 	}
-	complianceRawHash, err := hashFileOrEmpty(complianceRawPath)
+	complianceRawHash, err := hashRawCompliance(paths.complianceRaw)
+	if err != nil {
+		return err
+	}
+	scoresFinalHash, err := hashFinalScores(finalScores)
+	if err != nil {
+		return err
+	}
+	complianceFinalHash, err := hashFinalCompliance(finalCompliance)
+	if err != nil {
+		return err
+	}
+	pairwiseFinalHash, err := hashFinalPairwise(pairwiseEntries)
 	if err != nil {
 		return err
 	}
 
-	resolvedAt := in.Now().UTC()
 	marker := contracts.Step60DoneMarker{
 		CompletedAgents: completedAgents,
 		Dimensions:      append([]contracts.Dimension(nil), canonicalDimensions...),
@@ -215,9 +255,9 @@ func Run(ctx context.Context, in Input) error {
 			Pairwise:   int64(len(pairwiseEntries)),
 		},
 		ContentHashes: contracts.Step60DoneContentHashes{
-			ScoresFinal:     hashFinalScores(finalScores),
-			ComplianceFinal: hashFinalCompliance(finalCompliance),
-			PairwiseFinal:   hashFinalPairwise(pairwiseEntries),
+			ScoresFinal:     scoresFinalHash,
+			ComplianceFinal: complianceFinalHash,
+			PairwiseFinal:   pairwiseFinalHash,
 		},
 		RawHashes: contracts.StepDoneRawHashes{
 			ScoresRaw:     scoresRawHash,
@@ -226,9 +266,12 @@ func Run(ctx context.Context, in Input) error {
 		ResolvedAt: resolvedAt,
 	}
 	if err := marker.Validate(); err != nil {
-		return err
+		return fmt.Errorf("step60: validate done marker: %w", err)
 	}
-	return internalio.WriteJSONAtomic(donePath, marker)
+	if err := internalio.WriteJSONAtomic(paths.done, marker); err != nil {
+		return fmt.Errorf("step60: write done marker: %w", err)
+	}
+	return nil
 }
 
 func applyDefaults(in Input) (Input, error) {
@@ -265,6 +308,50 @@ func applyDefaults(in Input) (Input, error) {
 	return in, nil
 }
 
+func resolveStep60Paths(runIO internalio.RunContext) (step60Paths, error) {
+	donePath, err := runIO.ResolveRunRelative("60/done.marker")
+	if err != nil {
+		return step60Paths{}, fmt.Errorf("step60: resolve done marker path: %w", err)
+	}
+	scoresRawPath, err := runIO.ResolveRunRelative("60/scores-B-raw.jsonl")
+	if err != nil {
+		return step60Paths{}, fmt.Errorf("step60: resolve scores raw path: %w", err)
+	}
+	scoresFinalPath, err := runIO.ResolveRunRelative("60/scores-B.jsonl")
+	if err != nil {
+		return step60Paths{}, fmt.Errorf("step60: resolve scores final path: %w", err)
+	}
+	complianceRawPath, err := runIO.ResolveRunRelative("60/compliance-B-raw.jsonl")
+	if err != nil {
+		return step60Paths{}, fmt.Errorf("step60: resolve compliance raw path: %w", err)
+	}
+	complianceFinalPath, err := runIO.ResolveRunRelative("60/compliance-B.jsonl")
+	if err != nil {
+		return step60Paths{}, fmt.Errorf("step60: resolve compliance final path: %w", err)
+	}
+	pairwisePath, err := runIO.ResolveRunRelative("60/pairwise.jsonl")
+	if err != nil {
+		return step60Paths{}, fmt.Errorf("step60: resolve pairwise path: %w", err)
+	}
+	return step60Paths{
+		done:            donePath,
+		scoresRaw:       scoresRawPath,
+		scoresFinal:     scoresFinalPath,
+		complianceRaw:   complianceRawPath,
+		complianceFinal: complianceFinalPath,
+		pairwise:        pairwisePath,
+	}, nil
+}
+
+func truncateStep60Artifacts(paths []string) error {
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("step60: truncate artifact %s: %w", filepath.Base(path), err)
+		}
+	}
+	return nil
+}
+
 func deriveScorableAgents(in Input) []contracts.AgentID {
 	if len(in.ScorableAgents) > 0 {
 		agents := append([]contracts.AgentID(nil), in.ScorableAgents...)
@@ -282,8 +369,48 @@ func deriveScorableAgents(in Input) []contracts.AgentID {
 	return agents
 }
 
-func shouldSkipAgent(err error) bool {
-	return err != nil && (errors.Is(err, internalio.ErrNotScorable) || os.IsNotExist(err))
+func scorableAgentIDs(agents []scorablePass2Agent) []contracts.AgentID {
+	ids := make([]contracts.AgentID, 0, len(agents))
+	for _, agent := range agents {
+		ids = append(ids, agent.agent)
+	}
+	return ids
+}
+
+func loadScorablePass2Agents(runIO internalio.RunContext, agents []contracts.AgentID) ([]scorablePass2Agent, error) {
+	out := make([]scorablePass2Agent, 0, len(agents))
+	for _, agent := range agents {
+		manifestPath, err := runIO.ManifestPath(2, agent)
+		if err != nil {
+			return nil, fmt.Errorf("step60: resolve pass2 manifest path for agent=%s: %w", agent, err)
+		}
+		if _, err := os.Stat(manifestPath); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("step60: stat pass2 manifest for agent=%s: %w", agent, err)
+		}
+		manifest, err := internalio.LoadScorableManifest(runIO, 2, agent)
+		if errors.Is(err, internalio.ErrNotScorable) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("step60: load scorable pass2 manifest for agent=%s: %w", agent, err)
+		}
+		out = append(out, scorablePass2Agent{agent: agent, manifest: manifest})
+	}
+	return out, nil
+}
+
+func scoreJudgeOutput(ctx context.Context, judge judges.Judge, input judges.JudgeInput, role contracts.JudgeRole) (judges.JudgeOutput, error) {
+	output, err := judge.ScoreOutput(ctx, input)
+	if err != nil {
+		return judges.JudgeOutput{}, fmt.Errorf("step60: %s judge call for agent=%s: %w", role, input.Agent, err)
+	}
+	if err := output.ValidateFor(input); err != nil {
+		return judges.JudgeOutput{}, fmt.Errorf("step60: %s judge output validation for agent=%s: %w", role, input.Agent, err)
+	}
+	return output, nil
 }
 
 func normalizeScores(scores []contracts.ScoreEntry, rubricVersion, promptVersion string) map[contracts.Dimension]contracts.ScoreEntry {
@@ -306,37 +433,25 @@ func normalizeCompliance(entries []contracts.ComplianceEntry, rubricVersion, pro
 	return out
 }
 
-func scoreDisagreement(primary, secondary map[contracts.Dimension]contracts.ScoreEntry) bool {
+func collectScoreDisagreements(primary, secondary map[contracts.Dimension]contracts.ScoreEntry) map[contracts.Dimension]bool {
+	disagreements := make(map[contracts.Dimension]bool)
 	for _, dimension := range canonicalDimensions {
-		p, ok := primary[dimension]
-		if !ok {
-			return true
-		}
-		s, ok := secondary[dimension]
-		if !ok {
-			return true
-		}
-		if p.Score != s.Score || p.Reasons != s.Reasons {
-			return true
+		if !scoreValuesEqual(primary[dimension], secondary[dimension]) {
+			disagreements[dimension] = true
 		}
 	}
-	return false
+	return disagreements
 }
 
-func complianceDisagreement(primary, secondary map[string]contracts.ComplianceEntry) bool {
-	if len(primary) != len(secondary) {
-		return true
-	}
-	for ruleID, p := range primary {
-		s, ok := secondary[ruleID]
-		if !ok {
-			return true
-		}
-		if p.Verdict != s.Verdict {
-			return true
+func collectComplianceDisagreements(primary, secondary map[string]contracts.ComplianceEntry) map[string]bool {
+	disagreements := make(map[string]bool)
+	ruleIDs := unionRuleIDs(primary, secondary, nil)
+	for _, ruleID := range ruleIDs {
+		if complianceValue(primary, ruleID).Verdict != complianceValue(secondary, ruleID).Verdict {
+			disagreements[ruleID] = true
 		}
 	}
-	return false
+	return disagreements
 }
 
 func emitScores(
@@ -346,6 +461,8 @@ func emitScores(
 	primary map[contracts.Dimension]contracts.ScoreEntry,
 	secondary map[contracts.Dimension]contracts.ScoreEntry,
 	arbiter map[contracts.Dimension]contracts.ScoreEntry,
+	disagreements map[contracts.Dimension]bool,
+	resolvedAt time.Time,
 ) ([]contracts.ScoreEntry, error) {
 	finalScores := make([]contracts.ScoreEntry, 0, len(canonicalDimensions))
 	for _, dimension := range canonicalDimensions {
@@ -358,38 +475,50 @@ func emitScores(
 			return nil, fmt.Errorf("step60: secondary score missing dimension=%s agent=%s", dimension, agent)
 		}
 
-		primaryHash := scoreOutputHash(primaryScore)
-		secondaryHash := scoreOutputHash(secondaryScore)
+		primaryHash, err := scoreOutputHash(primaryScore)
+		if err != nil {
+			return nil, fmt.Errorf("step60: hash primary score agent=%s dimension=%s: %w", agent, dimension, err)
+		}
+		secondaryHash, err := scoreOutputHash(secondaryScore)
+		if err != nil {
+			return nil, fmt.Errorf("step60: hash secondary score agent=%s dimension=%s: %w", agent, dimension, err)
+		}
 		if err := internalio.AppendJSONL(scoresRawPath, makeRawScoreEntry(primaryScore, contracts.JudgeRolePrimary, primaryHash, nil, nil)); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("step60: append primary raw score agent=%s dimension=%s: %w", agent, dimension, err)
 		}
 		if err := internalio.AppendJSONL(scoresRawPath, makeRawScoreEntry(secondaryScore, contracts.JudgeRoleSecondary, secondaryHash, nil, nil)); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("step60: append secondary raw score agent=%s dimension=%s: %w", agent, dimension, err)
 		}
 
 		finalScore := primaryScore
-		if primaryScore.Score == secondaryScore.Score && primaryScore.Reasons == secondaryScore.Reasons {
-			finalScore.VerdictPath = contracts.VerdictPathAgreement
-		} else {
+		finalScore.ResolvedAt = resolvedAt
+		if disagreements[dimension] {
 			arbiterScore, ok := arbiter[dimension]
 			if !ok {
 				return nil, fmt.Errorf("step60: arbiter score missing dimension=%s agent=%s", dimension, agent)
 			}
+			arbiterHash, err := scoreOutputHash(arbiterScore)
+			if err != nil {
+				return nil, fmt.Errorf("step60: hash arbiter score agent=%s dimension=%s: %w", agent, dimension, err)
+			}
 			if err := internalio.AppendJSONL(scoresRawPath, makeRawScoreEntry(
 				arbiterScore,
 				contracts.JudgeRoleArbiter,
-				scoreOutputHash(arbiterScore),
+				arbiterHash,
 				&contracts.RawJudgeRef{Role: contracts.JudgeRolePrimary, Sha256: primaryHash},
 				&contracts.RawJudgeRef{Role: contracts.JudgeRoleSecondary, Sha256: secondaryHash},
 			)); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("step60: append arbiter raw score agent=%s dimension=%s: %w", agent, dimension, err)
 			}
 			finalScore = arbiterScore
-			finalScore.VerdictPath = contracts.VerdictPathArbitrated
+			finalScore.VerdictPath = resolveScoreVerdictPath(primaryScore, secondaryScore, arbiterScore)
+			finalScore.ResolvedAt = resolvedAt
+		} else {
+			finalScore.VerdictPath = contracts.VerdictPathAgreement
 		}
 
 		if err := internalio.AppendJSONL(scoresFinalPath, finalScore); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("step60: append final score agent=%s dimension=%s: %w", agent, dimension, err)
 		}
 		finalScores = append(finalScores, finalScore)
 	}
@@ -403,60 +532,187 @@ func emitCompliance(
 	primary map[string]contracts.ComplianceEntry,
 	secondary map[string]contracts.ComplianceEntry,
 	arbiter map[string]contracts.ComplianceEntry,
+	resolvedAt time.Time,
+	rubricVersion string,
+	promptVersion string,
 ) ([]contracts.ComplianceEntry, error) {
-	ruleIDs := make([]string, 0, len(primary))
-	for ruleID := range primary {
-		ruleIDs = append(ruleIDs, ruleID)
-	}
-	sort.Strings(ruleIDs)
-
+	ruleIDs := unionRuleIDs(primary, secondary, arbiter)
 	finalEntries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
+
 	for _, ruleID := range ruleIDs {
-		primaryEntry, ok := primary[ruleID]
-		if !ok {
-			return nil, fmt.Errorf("step60: primary compliance missing rule=%s agent=%s", ruleID, agent)
+		template := complianceTemplate(agent, ruleID, primary, secondary, arbiter, rubricVersion, promptVersion, resolvedAt)
+		primaryActual, primaryOK := primary[ruleID]
+		secondaryActual, secondaryOK := secondary[ruleID]
+		arbiterActual, arbiterOK := arbiter[ruleID]
+
+		primaryValue := template
+		secondaryValue := template
+		arbiterValue := template
+		primaryValue.Verdict = contracts.ComplianceVerdictMissed
+		secondaryValue.Verdict = contracts.ComplianceVerdictMissed
+		arbiterValue.Verdict = contracts.ComplianceVerdictMissed
+
+		primaryHash, err := complianceOutputHash(primaryValue)
+		if err != nil {
+			return nil, fmt.Errorf("step60: hash synthetic primary compliance agent=%s rule=%s: %w", agent, ruleID, err)
 		}
-		secondaryEntry, ok := secondary[ruleID]
-		if !ok {
-			return nil, fmt.Errorf("step60: secondary compliance missing rule=%s agent=%s", ruleID, agent)
+		secondaryHash, err := complianceOutputHash(secondaryValue)
+		if err != nil {
+			return nil, fmt.Errorf("step60: hash synthetic secondary compliance agent=%s rule=%s: %w", agent, ruleID, err)
 		}
 
-		primaryHash := complianceOutputHash(primaryEntry)
-		secondaryHash := complianceOutputHash(secondaryEntry)
-		if err := internalio.AppendJSONL(complianceRawPath, makeRawComplianceEntry(primaryEntry, contracts.JudgeRolePrimary, primaryHash, nil, nil)); err != nil {
-			return nil, err
+		if primaryOK {
+			primaryValue = primaryActual
+			primaryHash, err = complianceOutputHash(primaryActual)
+			if err != nil {
+				return nil, fmt.Errorf("step60: hash primary compliance agent=%s rule=%s: %w", agent, ruleID, err)
+			}
+			if err := internalio.AppendJSONL(complianceRawPath, makeRawComplianceEntry(primaryActual, contracts.JudgeRolePrimary, primaryHash, nil, nil)); err != nil {
+				return nil, fmt.Errorf("step60: append primary raw compliance agent=%s rule=%s: %w", agent, ruleID, err)
+			}
 		}
-		if err := internalio.AppendJSONL(complianceRawPath, makeRawComplianceEntry(secondaryEntry, contracts.JudgeRoleSecondary, secondaryHash, nil, nil)); err != nil {
-			return nil, err
+		if secondaryOK {
+			secondaryValue = secondaryActual
+			secondaryHash, err = complianceOutputHash(secondaryActual)
+			if err != nil {
+				return nil, fmt.Errorf("step60: hash secondary compliance agent=%s rule=%s: %w", agent, ruleID, err)
+			}
+			if err := internalio.AppendJSONL(complianceRawPath, makeRawComplianceEntry(secondaryActual, contracts.JudgeRoleSecondary, secondaryHash, nil, nil)); err != nil {
+				return nil, fmt.Errorf("step60: append secondary raw compliance agent=%s rule=%s: %w", agent, ruleID, err)
+			}
 		}
-
-		finalEntry := primaryEntry
-		if primaryEntry.Verdict == secondaryEntry.Verdict {
-			finalEntry.VerdictPath = contracts.VerdictPathAgreement
-		} else {
-			arbiterEntry, ok := arbiter[ruleID]
-			if !ok {
-				return nil, fmt.Errorf("step60: arbiter compliance missing rule=%s agent=%s", ruleID, agent)
+		if arbiterOK {
+			arbiterValue = arbiterActual
+			arbiterHash, err := complianceOutputHash(arbiterActual)
+			if err != nil {
+				return nil, fmt.Errorf("step60: hash arbiter compliance agent=%s rule=%s: %w", agent, ruleID, err)
 			}
 			if err := internalio.AppendJSONL(complianceRawPath, makeRawComplianceEntry(
-				arbiterEntry,
+				arbiterActual,
 				contracts.JudgeRoleArbiter,
-				complianceOutputHash(arbiterEntry),
+				arbiterHash,
 				&contracts.RawJudgeRef{Role: contracts.JudgeRolePrimary, Sha256: primaryHash},
 				&contracts.RawJudgeRef{Role: contracts.JudgeRoleSecondary, Sha256: secondaryHash},
 			)); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("step60: append arbiter raw compliance agent=%s rule=%s: %w", agent, ruleID, err)
 			}
-			finalEntry = arbiterEntry
-			finalEntry.VerdictPath = contracts.VerdictPathArbitrated
 		}
 
+		finalEntry := primaryValue
+		if primaryValue.Verdict == secondaryValue.Verdict {
+			finalEntry.VerdictPath = contracts.VerdictPathAgreement
+		} else {
+			finalEntry = arbiterValue
+			finalEntry.VerdictPath = resolveComplianceVerdictPath(primaryValue, secondaryValue, arbiterValue)
+		}
+		finalEntry.ResolvedAt = resolvedAt
 		if err := internalio.AppendJSONL(complianceFinalPath, finalEntry); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("step60: append final compliance agent=%s rule=%s: %w", agent, ruleID, err)
 		}
 		finalEntries = append(finalEntries, finalEntry)
 	}
+
 	return finalEntries, nil
+}
+
+func unionRuleIDs(primary, secondary, arbiter map[string]contracts.ComplianceEntry) []string {
+	seen := make(map[string]struct{}, len(primary)+len(secondary)+len(arbiter))
+	ruleIDs := make([]string, 0, len(seen))
+	for ruleID := range primary {
+		if _, ok := seen[ruleID]; ok {
+			continue
+		}
+		seen[ruleID] = struct{}{}
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	for ruleID := range secondary {
+		if _, ok := seen[ruleID]; ok {
+			continue
+		}
+		seen[ruleID] = struct{}{}
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	for ruleID := range arbiter {
+		if _, ok := seen[ruleID]; ok {
+			continue
+		}
+		seen[ruleID] = struct{}{}
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	sort.Strings(ruleIDs)
+	return ruleIDs
+}
+
+func complianceTemplate(
+	agent contracts.AgentID,
+	ruleID string,
+	primary map[string]contracts.ComplianceEntry,
+	secondary map[string]contracts.ComplianceEntry,
+	arbiter map[string]contracts.ComplianceEntry,
+	rubricVersion string,
+	promptVersion string,
+	resolvedAt time.Time,
+) contracts.ComplianceEntry {
+	for _, source := range []map[string]contracts.ComplianceEntry{primary, secondary, arbiter} {
+		if entry, ok := source[ruleID]; ok {
+			entry.ResolvedAt = resolvedAt
+			entry.VerdictPath = contracts.VerdictPathSingle
+			return entry
+		}
+	}
+	return contracts.ComplianceEntry{
+		SchemaVersion: "1",
+		Agent:         agent,
+		RuleID:        ruleID,
+		VerdictPath:   contracts.VerdictPathSingle,
+		RubricVersion: rubricVersion,
+		PromptVersion: promptVersion,
+		ResolvedAt:    resolvedAt,
+	}
+}
+
+func complianceValue(entries map[string]contracts.ComplianceEntry, ruleID string) contracts.ComplianceEntry {
+	if entry, ok := entries[ruleID]; ok {
+		return entry
+	}
+	return contracts.ComplianceEntry{Verdict: contracts.ComplianceVerdictMissed}
+}
+
+func resolveScoreVerdictPath(primary, secondary, arbiter contracts.ScoreEntry) contracts.VerdictPath {
+	if scoreValuesEqual(primary, secondary) {
+		return contracts.VerdictPathAgreement
+	}
+	if scoreValuesEqual(arbiter, primary) || scoreValuesEqual(arbiter, secondary) {
+		return contracts.VerdictPathArbitrated
+	}
+	return contracts.VerdictPathArbiterOverruled
+}
+
+func resolveComplianceVerdictPath(primary, secondary, arbiter contracts.ComplianceEntry) contracts.VerdictPath {
+	if primary.Verdict == secondary.Verdict {
+		return contracts.VerdictPathAgreement
+	}
+	if arbiter.Verdict == primary.Verdict || arbiter.Verdict == secondary.Verdict {
+		return contracts.VerdictPathArbitrated
+	}
+	return contracts.VerdictPathArbiterOverruled
+}
+
+func scoreValuesEqual(a, b contracts.ScoreEntry) bool {
+	return a.Score == b.Score &&
+		a.Reasons == b.Reasons &&
+		overflowRefEqual(a.ReasonsOverflowRef, b.ReasonsOverflowRef)
+}
+
+func overflowRefEqual(a, b *contracts.OverflowRef) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return a.Path == b.Path && a.Sha256 == b.Sha256
+	}
 }
 
 func makeRawScoreEntry(
@@ -514,11 +770,11 @@ func makeRawComplianceEntry(
 func loadPass1Scores(runIO internalio.RunContext) (map[contracts.AgentID][]contracts.ScoreEntry, error) {
 	path, err := runIO.ResolveRunRelative("30/scores-A.jsonl")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("step60: resolve pass1 scores path: %w", err)
 	}
 	rows, err := internalio.ReadJSONL[contracts.ScoreEntry](path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("step60: read pass1 scores: %w", err)
 	}
 	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ScoreEntry) scoreKey {
 		return scoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
@@ -530,60 +786,43 @@ func loadPass1Scores(runIO internalio.RunContext) (map[contracts.AgentID][]contr
 	return byAgent, nil
 }
 
-func resolvePass1Average(ctx context.Context, in Input, agent contracts.AgentID, scores []contracts.ScoreEntry) (float64, error) {
+func resolvePass1Total(runIO internalio.RunContext, agent contracts.AgentID, scores []contracts.ScoreEntry) (int, error) {
 	if len(scores) == len(canonicalDimensions) {
-		return averageScores(scores)
+		return sumScores(scores)
 	}
-
-	outputPath, err := in.IO.ResolveRunRelative(filepath.Join("20-pass1", string(agent), "diff.patch"))
+	path, err := runIO.ResolveRunRelative("30/scores-A.jsonl")
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("step60: resolve pass1 scores path for agent=%s: %w", agent, err)
 	}
-	output, err := in.Primary.ScoreOutput(ctx, judges.JudgeInput{
-		RunID:      in.TaskPackage.RunID,
-		Pass:       1,
-		Agent:      agent,
-		OutputPath: outputPath,
-		RubricPath: in.RubricPath,
-	})
-	if err != nil {
-		return 0, err
-	}
-	fallbackScores := make([]contracts.ScoreEntry, 0, len(output.Scores))
-	for _, score := range output.Scores {
-		score.RubricVersion = in.RubricVersion
-		score.PromptVersion = in.PromptVersion
-		fallbackScores = append(fallbackScores, score)
-	}
-	return averageScores(fallbackScores)
+	return 0, fmt.Errorf("%w: agent=%s file=%s got=%d want=%d", ErrPass1ScoresIncomplete, agent, path, len(scores), len(canonicalDimensions))
 }
 
-func averageScores(scores []contracts.ScoreEntry) (float64, error) {
+func sumScores(scores []contracts.ScoreEntry) (int, error) {
 	if len(scores) != len(canonicalDimensions) {
-		return 0, fmt.Errorf("step60: average requires %d scores, got %d", len(canonicalDimensions), len(scores))
+		return 0, fmt.Errorf("step60: score sum requires %d scores, got %d", len(canonicalDimensions), len(scores))
 	}
 	var total int
 	for _, score := range scores {
 		total += score.Score
 	}
-	return float64(total) / float64(len(scores)), nil
+	return total, nil
 }
 
-func makePairwiseEntry(in Input, agent contracts.AgentID, pass1Average, pass2Average float64) contracts.PairwiseEntry {
+func makePairwiseEntry(in Input, agent contracts.AgentID, pass1Total, pass2Total int, resolvedAt time.Time) contracts.PairwiseEntry {
 	winner := contracts.PairwiseWinnerTie
 	switch {
-	case pass2Average > pass1Average:
+	case pass2Total > pass1Total:
 		winner = contracts.PairwiseWinnerB
-	case pass1Average > pass2Average:
+	case pass1Total > pass2Total:
 		winner = contracts.PairwiseWinnerA
 	}
 
 	margin := contracts.PairwiseMarginSlight
-	delta := math.Abs(pass2Average - pass1Average)
+	delta := math.Abs(float64(pass2Total - pass1Total))
 	switch {
-	case delta > 10:
+	case delta > 50:
 		margin = contracts.PairwiseMarginDecisive
-	case delta > 3:
+	case delta > 15:
 		margin = contracts.PairwiseMarginClear
 	}
 
@@ -594,69 +833,213 @@ func makePairwiseEntry(in Input, agent contracts.AgentID, pass1Average, pass2Ave
 		AgentB:        agent,
 		Winner:        winner,
 		Margin:        margin,
-		Justification: fmt.Sprintf("pass1_avg=%.1f pass2_avg=%.1f", pass1Average, pass2Average),
-		VerdictPath:   contracts.VerdictPathAgreement,
+		Justification: fmt.Sprintf("pass1_total=%d pass2_total=%d", pass1Total, pass2Total),
+		// pairwise is derived from step30/step60 aggregates, not a multi-judge verdict.
+		VerdictPath:   contracts.VerdictPathSingle,
 		RubricVersion: in.RubricVersion,
 		PromptVersion: in.PromptVersion,
-		ResolvedAt:    in.Now().UTC(),
+		ResolvedAt:    resolvedAt,
 	}
 }
 
-func scoreOutputHash(score contracts.ScoreEntry) string {
+func scoreOutputHash(score contracts.ScoreEntry) (string, error) {
 	return canonicalSHA256(score)
 }
 
-func complianceOutputHash(entry contracts.ComplianceEntry) string {
+func complianceOutputHash(entry contracts.ComplianceEntry) (string, error) {
 	return canonicalSHA256(entry)
 }
 
-func hashFileOrEmpty(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return sha256Hex(nil), nil
-		}
-		return "", err
-	}
-	return sha256Hex(data), nil
-}
-
-// Final-layer content hashes are defined as sha256(canonical-json(collapsed rows))
-// rather than file-byte hashes so append/rewrite mechanics cannot affect the digest.
-func hashFinalScores(entries []contracts.ScoreEntry) string {
+func hashFinalScores(entries []contracts.ScoreEntry) (string, error) {
 	collapsed := internalio.CollapseByKey(entries, func(entry contracts.ScoreEntry) scoreKey {
 		return scoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
 	})
-	return canonicalSliceHash(collapsed)
+	sort.Slice(collapsed, func(i, j int) bool {
+		if collapsed[i].Agent != collapsed[j].Agent {
+			return collapsed[i].Agent < collapsed[j].Agent
+		}
+		return collapsed[i].Dimension < collapsed[j].Dimension
+	})
+	return hashCanonicalRows(collapsed)
 }
 
-func hashFinalCompliance(entries []contracts.ComplianceEntry) string {
+func hashFinalCompliance(entries []contracts.ComplianceEntry) (string, error) {
 	collapsed := internalio.CollapseByKey(entries, func(entry contracts.ComplianceEntry) complianceKey {
 		return complianceKey{Agent: entry.Agent, RuleID: entry.RuleID}
 	})
-	return canonicalSliceHash(collapsed)
-}
-
-func hashFinalPairwise(entries []contracts.PairwiseEntry) string {
-	collapsed := internalio.CollapseByKey(entries, func(entry contracts.PairwiseEntry) contracts.AgentID {
-		return entry.AgentA
+	sort.Slice(collapsed, func(i, j int) bool {
+		if collapsed[i].Agent != collapsed[j].Agent {
+			return collapsed[i].Agent < collapsed[j].Agent
+		}
+		return collapsed[i].RuleID < collapsed[j].RuleID
 	})
-	return canonicalSliceHash(collapsed)
+	return hashCanonicalRows(collapsed)
 }
 
-func canonicalSliceHash[T any](entries []T) string {
-	if entries == nil {
-		entries = []T{}
+func hashFinalPairwise(entries []contracts.PairwiseEntry) (string, error) {
+	collapsed := internalio.CollapseByKey(entries, func(entry contracts.PairwiseEntry) pairwiseKey {
+		return pairwiseKey{AgentA: entry.AgentA, AgentB: entry.AgentB}
+	})
+	sort.Slice(collapsed, func(i, j int) bool {
+		if collapsed[i].AgentA != collapsed[j].AgentA {
+			return collapsed[i].AgentA < collapsed[j].AgentA
+		}
+		return collapsed[i].AgentB < collapsed[j].AgentB
+	})
+	return hashCanonicalRows(collapsed)
+}
+
+func hashRawScores(path string) (string, error) {
+	rows, err := internalio.ReadJSONL[contracts.RawScoreEntry](path)
+	if err != nil {
+		return "", fmt.Errorf("step60: read raw scores for hashing: %w", err)
 	}
-	return canonicalSHA256(entries)
+	reduced := reduceRawScores(rows)
+	sort.Slice(reduced, func(i, j int) bool {
+		if reduced[i].Agent != reduced[j].Agent {
+			return reduced[i].Agent < reduced[j].Agent
+		}
+		if reduced[i].JudgeRole != reduced[j].JudgeRole {
+			return reduced[i].JudgeRole < reduced[j].JudgeRole
+		}
+		return reduced[i].Dimension < reduced[j].Dimension
+	})
+	return hashCanonicalRows(reduced)
 }
 
-func canonicalSHA256(v any) string {
+func hashRawCompliance(path string) (string, error) {
+	rows, err := internalio.ReadJSONL[contracts.RawComplianceEntry](path)
+	if err != nil {
+		return "", fmt.Errorf("step60: read raw compliance for hashing: %w", err)
+	}
+	reduced := reduceRawCompliance(rows)
+	sort.Slice(reduced, func(i, j int) bool {
+		if reduced[i].Agent != reduced[j].Agent {
+			return reduced[i].Agent < reduced[j].Agent
+		}
+		if reduced[i].JudgeRole != reduced[j].JudgeRole {
+			return reduced[i].JudgeRole < reduced[j].JudgeRole
+		}
+		return reduced[i].RuleID < reduced[j].RuleID
+	})
+	return hashCanonicalRows(reduced)
+}
+
+func reduceRawScores(rows []contracts.RawScoreEntry) []contracts.RawScoreEntry {
+	primarySecondary := make([]contracts.RawScoreEntry, 0, len(rows))
+	arbiterRows := make([]contracts.RawScoreEntry, 0, len(rows))
+	for _, row := range rows {
+		if row.JudgeRole == contracts.JudgeRoleArbiter {
+			arbiterRows = append(arbiterRows, row)
+			continue
+		}
+		primarySecondary = append(primarySecondary, row)
+	}
+
+	collapsed := internalio.CollapseByKey(primarySecondary, func(row contracts.RawScoreEntry) rawScoreKey {
+		return rawScoreKey{Agent: row.Agent, JudgeRole: row.JudgeRole, Dimension: row.Dimension}
+	})
+	latestPrimary := make(map[scoreKey]contracts.RawScoreEntry, len(collapsed))
+	latestSecondary := make(map[scoreKey]contracts.RawScoreEntry, len(collapsed))
+	for _, row := range collapsed {
+		key := scoreKey{Agent: row.Agent, Dimension: row.Dimension}
+		switch row.JudgeRole {
+		case contracts.JudgeRolePrimary:
+			latestPrimary[key] = row
+		case contracts.JudgeRoleSecondary:
+			latestSecondary[key] = row
+		}
+	}
+
+	validArbiters := make([]contracts.RawScoreEntry, 0, len(arbiterRows))
+	for _, row := range arbiterRows {
+		key := scoreKey{Agent: row.Agent, Dimension: row.Dimension}
+		primaryRow, ok := latestPrimary[key]
+		if !ok || row.PrimaryRef == nil || row.PrimaryRef.Sha256 != primaryRow.OutputSha256 {
+			continue
+		}
+		secondaryRow, ok := latestSecondary[key]
+		if !ok || row.SecondaryRef == nil || row.SecondaryRef.Sha256 != secondaryRow.OutputSha256 {
+			continue
+		}
+		validArbiters = append(validArbiters, row)
+	}
+	collapsedArbiters := internalio.CollapseByKey(validArbiters, func(row contracts.RawScoreEntry) rawScoreKey {
+		return rawScoreKey{Agent: row.Agent, JudgeRole: row.JudgeRole, Dimension: row.Dimension}
+	})
+	return append(collapsed, collapsedArbiters...)
+}
+
+func reduceRawCompliance(rows []contracts.RawComplianceEntry) []contracts.RawComplianceEntry {
+	primarySecondary := make([]contracts.RawComplianceEntry, 0, len(rows))
+	arbiterRows := make([]contracts.RawComplianceEntry, 0, len(rows))
+	for _, row := range rows {
+		if row.JudgeRole == contracts.JudgeRoleArbiter {
+			arbiterRows = append(arbiterRows, row)
+			continue
+		}
+		primarySecondary = append(primarySecondary, row)
+	}
+
+	collapsed := internalio.CollapseByKey(primarySecondary, func(row contracts.RawComplianceEntry) rawComplianceKey {
+		return rawComplianceKey{Agent: row.Agent, JudgeRole: row.JudgeRole, RuleID: row.RuleID}
+	})
+	latestPrimary := make(map[complianceKey]contracts.RawComplianceEntry, len(collapsed))
+	latestSecondary := make(map[complianceKey]contracts.RawComplianceEntry, len(collapsed))
+	for _, row := range collapsed {
+		key := complianceKey{Agent: row.Agent, RuleID: row.RuleID}
+		switch row.JudgeRole {
+		case contracts.JudgeRolePrimary:
+			latestPrimary[key] = row
+		case contracts.JudgeRoleSecondary:
+			latestSecondary[key] = row
+		}
+	}
+
+	validArbiters := make([]contracts.RawComplianceEntry, 0, len(arbiterRows))
+	for _, row := range arbiterRows {
+		key := complianceKey{Agent: row.Agent, RuleID: row.RuleID}
+		primaryRow, ok := latestPrimary[key]
+		if !ok || row.PrimaryRef == nil || row.PrimaryRef.Sha256 != primaryRow.OutputSha256 {
+			continue
+		}
+		secondaryRow, ok := latestSecondary[key]
+		if !ok || row.SecondaryRef == nil || row.SecondaryRef.Sha256 != secondaryRow.OutputSha256 {
+			continue
+		}
+		validArbiters = append(validArbiters, row)
+	}
+	collapsedArbiters := internalio.CollapseByKey(validArbiters, func(row contracts.RawComplianceEntry) rawComplianceKey {
+		return rawComplianceKey{Agent: row.Agent, JudgeRole: row.JudgeRole, RuleID: row.RuleID}
+	})
+	return append(collapsed, collapsedArbiters...)
+}
+
+func hashCanonicalRows[T any](records []T) (string, error) {
+	hasher := sha256.New()
+	for i, record := range records {
+		if i > 0 {
+			if _, err := hasher.Write([]byte{0}); err != nil {
+				return "", err
+			}
+		}
+		payload, err := contracts.CanonicalMarshal(record)
+		if err != nil {
+			return "", err
+		}
+		if _, err := hasher.Write(payload); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func canonicalSHA256(v any) (string, error) {
 	data, err := contracts.CanonicalMarshal(v)
 	if err != nil {
-		panic(fmt.Sprintf("step60: canonical marshal failed: %v", err))
+		return "", err
 	}
-	return sha256Hex(data)
+	return sha256Hex(data), nil
 }
 
 func sha256Hex(data []byte) string {
