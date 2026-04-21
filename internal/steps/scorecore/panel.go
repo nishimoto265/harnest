@@ -25,12 +25,13 @@ const (
 
 // Sentinel errors surfaced by panel resolution.
 var (
-	ErrPanelPrimaryRequired = errors.New("scorecore: primary judge is required")
-	ErrPanelOutputSha256    = errors.New("scorecore: output_sha256 is required and must be sha256 hex")
-	ErrPanelStepDir         = errors.New("scorecore: stepDir must be \"30\" or \"60\"")
-	ErrPanelThreshold       = errors.New("scorecore: disagreement threshold must be >= 0")
-	ErrPanelDimensionMatch  = errors.New("scorecore: primary and secondary dimension sets must match")
-	ErrPanelArbiterRequired = errors.New("scorecore: arbiter judge is required for disagreement resolution")
+	ErrPanelPrimaryRequired     = errors.New("scorecore: primary judge is required")
+	ErrPanelOutputSha256        = errors.New("scorecore: output_sha256 is required and must be sha256 hex")
+	ErrPanelStepDir             = errors.New("scorecore: stepDir must be \"30\" or \"60\"")
+	ErrPanelThreshold           = errors.New("scorecore: disagreement threshold must be >= 0")
+	ErrPanelDimensionMatch      = errors.New("scorecore: primary and secondary dimension sets must match")
+	ErrPanelArbiterRequired     = errors.New("scorecore: arbiter judge is required for disagreement resolution")
+	ErrPanelArbiterRuleCoverage = errors.New("scorecore: arbiter compliance rule coverage mismatch")
 )
 
 // PanelInput carries all per-agent inputs needed by Resolve.
@@ -179,6 +180,9 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 	}
 	arbiterRawCompliance, err := buildRawComplianceEntries(arbiterOut, in, contracts.JudgeRoleArbiter, primaryComplianceRefs, secondaryComplianceRefs)
 	if err != nil {
+		return PanelResult{}, err
+	}
+	if err := validateArbiterComplianceCoverage(primaryRawCompliance, secondaryRawCompliance, arbiterRawCompliance); err != nil {
 		return PanelResult{}, err
 	}
 

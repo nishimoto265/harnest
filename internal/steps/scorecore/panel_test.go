@@ -287,6 +287,123 @@ func TestBuildFinalResultFromRaw_RequiresArbiterOnDisagreement(t *testing.T) {
 	require.ErrorIs(t, err, ErrPanelArbiterRequired)
 }
 
+func TestPanelResolver_Resolve_RejectsIncompleteArbiterComplianceCoverage(t *testing.T) {
+	runCtx := newTestRunContext(t)
+	input := testJudgeInput(runCtx.RunID)
+
+	withVerdicts := func(role judges.Role, score int, verdicts []contracts.ComplianceEntry) judges.JudgeOutput {
+		return judges.JudgeOutput{
+			Scores:     allDimScores(runCtx.RunID, role, score),
+			Compliance: verdicts,
+			Arbiter:    role == judges.RoleArbiter,
+		}
+	}
+
+	primaryCompliance := []contracts.ComplianceEntry{
+		complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant),
+		complianceEntry(runCtx.RunID, "rule-b", contracts.ComplianceVerdictViolated),
+	}
+	secondaryCompliance := []contracts.ComplianceEntry{
+		complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant),
+		complianceEntry(runCtx.RunID, "rule-b", contracts.ComplianceVerdictViolated),
+	}
+	arbiterCompliance := []contracts.ComplianceEntry{
+		complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant),
+	}
+
+	r := NewPanelResolver()
+	_, err := r.Resolve(context.Background(), PanelInput{
+		Primary:               fakeJudge{out: withVerdicts(judges.RolePrimary, 80, primaryCompliance)},
+		Secondary:             fakeJudge{out: withVerdicts(judges.RoleSecondary, 60, secondaryCompliance)},
+		Arbiter:               fakeJudge{out: withVerdicts(judges.RoleArbiter, 75, arbiterCompliance)},
+		JudgeInput:            input,
+		OutputSha256:          testSha256Hex,
+		DisagreementThreshold: 5,
+		RunContext:            runCtx,
+		StepDir:               "30",
+	})
+	require.ErrorIs(t, err, ErrPanelArbiterRuleCoverage)
+}
+
+func TestBuildFinalResultFromRaw_RejectsIncompleteArbiterComplianceCoverage(t *testing.T) {
+	runCtx := newTestRunContext(t)
+	resolver := NewPanelResolver()
+	panelInput := PanelInput{
+		JudgeInput:            testJudgeInput(runCtx.RunID),
+		OutputSha256:          testSha256Hex,
+		DisagreementThreshold: 5,
+		RunContext:            runCtx,
+		StepDir:               "30",
+	}
+
+	primary, err := resolver.ResolveRole(
+		context.Background(),
+		panelInput,
+		contracts.JudgeRolePrimary,
+		fakeJudge{out: judges.JudgeOutput{
+			Scores: allDimScores(runCtx.RunID, judges.RolePrimary, 80),
+			Compliance: []contracts.ComplianceEntry{
+				complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant),
+				complianceEntry(runCtx.RunID, "rule-b", contracts.ComplianceVerdictViolated),
+			},
+		}},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	secondary, err := resolver.ResolveRole(
+		context.Background(),
+		panelInput,
+		contracts.JudgeRoleSecondary,
+		fakeJudge{out: judges.JudgeOutput{
+			Scores: allDimScores(runCtx.RunID, judges.RoleSecondary, 60),
+			Compliance: []contracts.ComplianceEntry{
+				complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant),
+				complianceEntry(runCtx.RunID, "rule-b", contracts.ComplianceVerdictViolated),
+			},
+		}},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	arbiter, err := resolver.ResolveRole(
+		context.Background(),
+		panelInput,
+		contracts.JudgeRoleArbiter,
+		fakeJudge{out: judges.JudgeOutput{
+			Scores: allDimScores(runCtx.RunID, judges.RoleArbiter, 75),
+			Compliance: []contracts.ComplianceEntry{
+				complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant),
+			},
+			Arbiter: true,
+		}},
+		primary.RawScores,
+		secondary.RawScores,
+		primary.RawCompliance,
+		secondary.RawCompliance,
+	)
+	require.NoError(t, err)
+
+	_, err = BuildFinalResultFromRaw(
+		primary.RawScores,
+		secondary.RawScores,
+		arbiter.RawScores,
+		primary.RawCompliance,
+		secondary.RawCompliance,
+		arbiter.RawCompliance,
+		5,
+		true,
+		true,
+	)
+	require.ErrorIs(t, err, ErrPanelArbiterRuleCoverage)
+}
+
 func TestPanelResolver_ResolveRole_RejectsJudgeOutputIdentityMismatch(t *testing.T) {
 	runCtx := newTestRunContext(t)
 	input := testJudgeInput(runCtx.RunID)

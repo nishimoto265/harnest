@@ -236,6 +236,37 @@ func TestStep30Score_AllowsEmptyComplianceAcrossPanel(t *testing.T) {
 	assert.Empty(t, complianceFinal)
 }
 
+func TestStep30Score_RejectsIncompleteArbiterComplianceCoverage(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			verdicts := []ruleVerdict{
+				{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
+				{ruleID: "rule-b", verdict: contracts.ComplianceVerdictViolated},
+			}
+			switch role {
+			case contracts.JudgeRoleSecondary:
+				score = 60
+			case contracts.JudgeRoleArbiter:
+				score = 75
+				verdicts = verdicts[:1]
+			}
+			return makeJudgeOutput(input, role, score, verdicts)
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	err := step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg})
+	require.ErrorIs(t, err, scorecore.ErrPanelArbiterRuleCoverage)
+
+	markerPath, pathErr := runCtx.ResolveRunRelative("30/done.marker")
+	require.NoError(t, pathErr)
+	_, statErr := os.Stat(markerPath)
+	require.Error(t, statErr)
+	assert.True(t, os.IsNotExist(statErr))
+}
+
 func TestStep30Score_PreservesComplianceHistoryAfterRuleShrink(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
 	currentVerdicts := []ruleVerdict{
