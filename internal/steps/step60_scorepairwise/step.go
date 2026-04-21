@@ -212,7 +212,7 @@ func Run(ctx context.Context, in Input) error {
 			return err
 		}
 		entry := makePairwiseEntry(in, agent, pass1AverageTenths, pass2AverageTenths, resolvedAt)
-		if err := internalio.AppendJSONL(paths.Pairwise, entry); err != nil {
+		if err := appendJSONLWithParentDirSync(paths.Pairwise, entry); err != nil {
 			return fmt.Errorf("step60: append pairwise row for agent=%s: %w", agent, err)
 		}
 		pairwiseEntries = append(pairwiseEntries, entry)
@@ -526,10 +526,10 @@ func emitScores(
 		if err != nil {
 			return nil, fmt.Errorf("step60: hash secondary score dimension=%s agent=%s: %w", dimension, agent, err)
 		}
-		if err := internalio.AppendJSONL(paths.ScoresRaw, makeRawScoreEntry(primaryScore, contracts.JudgeRolePrimary, primaryHash, nil, nil, meta.ResolvedAt)); err != nil {
+		if err := appendJSONLWithParentDirSync(paths.ScoresRaw, makeRawScoreEntry(primaryScore, contracts.JudgeRolePrimary, primaryHash, nil, nil, meta.ResolvedAt)); err != nil {
 			return nil, fmt.Errorf("step60: append primary raw score dimension=%s agent=%s: %w", dimension, agent, err)
 		}
-		if err := internalio.AppendJSONL(paths.ScoresRaw, makeRawScoreEntry(secondaryScore, contracts.JudgeRoleSecondary, secondaryHash, nil, nil, meta.ResolvedAt)); err != nil {
+		if err := appendJSONLWithParentDirSync(paths.ScoresRaw, makeRawScoreEntry(secondaryScore, contracts.JudgeRoleSecondary, secondaryHash, nil, nil, meta.ResolvedAt)); err != nil {
 			return nil, fmt.Errorf("step60: append secondary raw score dimension=%s agent=%s: %w", dimension, agent, err)
 		}
 
@@ -543,7 +543,7 @@ func emitScores(
 			if err != nil {
 				return nil, fmt.Errorf("step60: hash arbiter score dimension=%s agent=%s: %w", dimension, agent, err)
 			}
-			if err := internalio.AppendJSONL(paths.ScoresRaw, makeRawScoreEntry(
+			if err := appendJSONLWithParentDirSync(paths.ScoresRaw, makeRawScoreEntry(
 				arbiterScore,
 				contracts.JudgeRoleArbiter,
 				arbiterHash,
@@ -556,7 +556,7 @@ func emitScores(
 			finalScore = finalizeScore(meta, arbiterScore, scoreVerdictPath(primaryScore, secondaryScore, arbiterScore))
 		}
 
-		if err := internalio.AppendJSONL(paths.ScoresFinal, finalScore); err != nil {
+		if err := appendJSONLWithParentDirSync(paths.ScoresFinal, finalScore); err != nil {
 			return nil, fmt.Errorf("step60: append final score dimension=%s agent=%s: %w", dimension, agent, err)
 		}
 		finalScores = append(finalScores, finalScore)
@@ -586,7 +586,7 @@ func emitCompliance(
 			if err != nil {
 				return nil, fmt.Errorf("step60: hash primary compliance rule=%s agent=%s: %w", ruleID, agent, err)
 			}
-			if err := internalio.AppendJSONL(paths.ComplianceRaw, makeRawComplianceEntry(primaryEntry, contracts.JudgeRolePrimary, primaryHash, nil, nil, meta.ResolvedAt)); err != nil {
+			if err := appendJSONLWithParentDirSync(paths.ComplianceRaw, makeRawComplianceEntry(primaryEntry, contracts.JudgeRolePrimary, primaryHash, nil, nil, meta.ResolvedAt)); err != nil {
 				return nil, fmt.Errorf("step60: append primary raw compliance rule=%s agent=%s: %w", ruleID, agent, err)
 			}
 		}
@@ -597,7 +597,7 @@ func emitCompliance(
 			if err != nil {
 				return nil, fmt.Errorf("step60: hash secondary compliance rule=%s agent=%s: %w", ruleID, agent, err)
 			}
-			if err := internalio.AppendJSONL(paths.ComplianceRaw, makeRawComplianceEntry(secondaryEntry, contracts.JudgeRoleSecondary, secondaryHash, nil, nil, meta.ResolvedAt)); err != nil {
+			if err := appendJSONLWithParentDirSync(paths.ComplianceRaw, makeRawComplianceEntry(secondaryEntry, contracts.JudgeRoleSecondary, secondaryHash, nil, nil, meta.ResolvedAt)); err != nil {
 				return nil, fmt.Errorf("step60: append secondary raw compliance rule=%s agent=%s: %w", ruleID, agent, err)
 			}
 		}
@@ -615,7 +615,7 @@ func emitCompliance(
 			// RawJudgeRef requires both refs for judge_role=arbiter. When only the arbiter
 			// emitted a rule, persist it as a single-source raw row under the canonical
 			// primary slot so compliance-B-raw.jsonl still retains traceable provenance.
-			if err := internalio.AppendJSONL(paths.ComplianceRaw, makeRawComplianceEntry(
+			if err := appendJSONLWithParentDirSync(paths.ComplianceRaw, makeRawComplianceEntry(
 				arbiterEntry,
 				contracts.JudgeRolePrimary,
 				arbiterHash,
@@ -640,7 +640,7 @@ func emitCompliance(
 			if err != nil {
 				return nil, fmt.Errorf("step60: hash arbiter compliance rule=%s agent=%s: %w", ruleID, agent, err)
 			}
-			if err := internalio.AppendJSONL(paths.ComplianceRaw, makeRawComplianceEntry(
+			if err := appendJSONLWithParentDirSync(paths.ComplianceRaw, makeRawComplianceEntry(
 				arbiterEntry,
 				contracts.JudgeRoleArbiter,
 				arbiterHash,
@@ -653,7 +653,7 @@ func emitCompliance(
 			finalEntry = finalizeCompliance(meta, arbiterEntry, complianceVerdictPath(primaryDecision, secondaryDecision, arbiterEntry))
 		}
 
-		if err := internalio.AppendJSONL(paths.ComplianceFinal, finalEntry); err != nil {
+		if err := appendJSONLWithParentDirSync(paths.ComplianceFinal, finalEntry); err != nil {
 			return nil, fmt.Errorf("step60: append final compliance rule=%s agent=%s: %w", ruleID, agent, err)
 		}
 		finalEntries = append(finalEntries, finalEntry)
@@ -1018,14 +1018,6 @@ func complianceRuleIDs(
 	}
 	sort.Strings(ruleIDs)
 	return ruleIDs
-}
-
-func complianceVerdict(entries map[string]contracts.ComplianceEntry, ruleID string) contracts.ComplianceVerdict {
-	entry, ok := entries[ruleID]
-	if !ok {
-		return contracts.ComplianceVerdictMissed
-	}
-	return entry.Verdict
 }
 
 func scoreOutputHash(score contracts.ScoreEntry) (string, error) {

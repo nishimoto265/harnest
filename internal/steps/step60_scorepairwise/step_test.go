@@ -86,6 +86,12 @@ func TestRun_HappyPath(t *testing.T) {
 	assert.Equal(t, marker.RawHashes.ComplianceRaw, mustHashReducedRawCompliance(t, runIO))
 }
 
+func TestAppendJSONLWithParentDirSync_ReturnsAppendError(t *testing.T) {
+	err := appendJSONLWithParentDirSync("relative/path.jsonl", contracts.ScoreEntry{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, contracts.ErrPathNotAbsolute)
+}
+
 func TestRun_IdempotentWhenDoneMarkerExists(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		agents:          []contracts.AgentID{"a1", "a2", "a3"},
