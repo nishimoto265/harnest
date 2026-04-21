@@ -9,15 +9,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/steps/step20_implement"
 )
 
-func defaultSteps() Steps {
+func defaultSteps(cfg *config.Config) Steps {
 	step20 := make(map[contracts.AgentID]Step, len(defaultAgents))
 	step50 := make(map[contracts.AgentID]Step, len(defaultAgents))
+	implStep := step20_implement.NewStep(cfg)
 	for _, agent := range defaultAgents {
-		step20[agent] = stubImplementStep{}
+		step20[agent] = step20Adapter{impl: implStep}
 		step50[agent] = stubImplementStep{}
 	}
 	return Steps{
@@ -30,6 +33,28 @@ func defaultSteps() Steps {
 		Step70:  stubStep70{},
 		Archive: stubArchiveStep{},
 	}
+}
+
+type step20Adapter struct {
+	impl *step20_implement.Step
+}
+
+func (s step20Adapter) Run(ctx context.Context, run *StepRunContext) error {
+	if s.impl == nil {
+		return errors.New("orchestrator: step20 implementation is not configured")
+	}
+	if run == nil {
+		return errors.New("orchestrator: step run context is required")
+	}
+	return s.impl.Run(ctx, step20_implement.RunContext{
+		Config:      run.Config,
+		Logger:      run.Logger,
+		PR:          run.PR,
+		Pass:        run.Pass,
+		Agent:       run.Agent,
+		IO:          run.IO,
+		TaskPackage: run.TaskPackage,
+	})
 }
 
 type stubStep10 struct{}
