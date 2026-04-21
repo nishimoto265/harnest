@@ -29,13 +29,7 @@ func AppendJSONL(path string, record any) error {
 		return err
 	}
 	defer f.Close()
-	if _, err := f.Write(payload); err != nil {
-		return err
-	}
-	if _, err := f.Write([]byte{'\n'}); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
+	if err := appendJSONLPayload(f, payload); err != nil {
 		return err
 	}
 	return directorySync(filepath.Dir(path))
@@ -130,4 +124,51 @@ func trimJSONLLine(line []byte) []byte {
 
 func isEOF(err error) bool {
 	return errors.Is(err, stdio.EOF)
+}
+
+type jsonlAppendFile interface {
+	Write([]byte) (int, error)
+	Seek(offset int64, whence int) (int64, error)
+	Sync() error
+	Truncate(size int64) error
+}
+
+func appendJSONLPayload(f jsonlAppendFile, payload []byte) error {
+	originalSize, err := f.Seek(0, stdio.SeekEnd)
+	if err != nil {
+		return err
+	}
+	if err := writeAll(f, payload); err != nil {
+		rollbackJSONLAppend(f, originalSize)
+		return err
+	}
+	if err := writeAll(f, []byte{'\n'}); err != nil {
+		rollbackJSONLAppend(f, originalSize)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		rollbackJSONLAppend(f, originalSize)
+		return err
+	}
+	return nil
+}
+
+func writeAll(w stdio.Writer, payload []byte) error {
+	for len(payload) > 0 {
+		n, err := w.Write(payload)
+		if n > 0 {
+			payload = payload[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return stdio.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+func rollbackJSONLAppend(f jsonlAppendFile, originalSize int64) {
+	_ = f.Truncate(originalSize)
 }

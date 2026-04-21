@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -234,6 +235,114 @@ func TestStep30Score_AllowsEmptyComplianceAcrossPanel(t *testing.T) {
 	assert.Empty(t, complianceFinal)
 }
 
+func TestStep30Score_RewritesFinalComplianceAfterRuleShrink(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			if role == contracts.JudgeRoleSecondary {
+				score = 79
+			}
+			return makeJudgeOutput(input, role, score, []ruleVerdict{
+				{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
+				{ruleID: "rule-b", verdict: contracts.ComplianceVerdictViolated},
+			})
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(markerPath))
+
+	for _, agent := range []contracts.AgentID{"a1", "a2", "a3"} {
+		manifest, loadErr := internalio.LoadScorableManifest(runCtx, 1, agent)
+		require.NoError(t, loadErr)
+		writeRel(t, runCtx, manifest.DiffPath, "updated fixture diff for "+string(agent)+"\n")
+	}
+
+	provider.outputs = func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+		score := 80
+		if role == contracts.JudgeRoleSecondary {
+			score = 79
+		}
+		return makeJudgeOutput(input, role, score, []ruleVerdict{
+			{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
+		})
+	}
+	provider.reset()
+
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
+	require.NoError(t, err)
+	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](complianceFinalPath)
+	require.NoError(t, err)
+	require.Len(t, complianceFinal, 3)
+	for _, row := range complianceFinal {
+		assert.Equal(t, "rule-a", row.RuleID)
+	}
+
+	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), marker.ExpectedCounts.Compliance)
+}
+
+func TestStep30Score_RunSerializesSameRunWrites(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	provider := &blockingPanelProvider{
+		delay: 25 * time.Millisecond,
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			if role == contracts.JudgeRoleSecondary {
+				score = 79
+			}
+			return makeJudgeOutput(input, role, score, []ruleVerdict{
+				{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
+			})
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+
+	errCh := make(chan error, 2)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errCh <- step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg})
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, 3, provider.callsFor(contracts.JudgeRolePrimary))
+	assert.Equal(t, 3, provider.callsFor(contracts.JudgeRoleSecondary))
+	assert.Equal(t, 0, provider.callsFor(contracts.JudgeRoleArbiter))
+	assert.Equal(t, 1, provider.maxConcurrentCalls())
+
+	scoreRawPath, err := runCtx.ResolveRunRelative("30/scores-A-raw.jsonl")
+	require.NoError(t, err)
+	scoreRaw, err := internalio.ReadJSONL[contracts.RawScoreEntry](scoreRawPath)
+	require.NoError(t, err)
+	assert.Len(t, scoreRaw, 30)
+
+	complianceRawPath, err := runCtx.ResolveRunRelative("30/compliance-A-raw.jsonl")
+	require.NoError(t, err)
+	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](complianceRawPath)
+	require.NoError(t, err)
+	assert.Len(t, complianceRaw, 6)
+}
+
 // seedStep30Fixtures creates a minimal RunContext + TaskPackage with pass-1
 // manifests for every agent in `agents`. Pass-2 worktrees are included in the
 // package but without manifests so step30 ignores them.
@@ -326,11 +435,14 @@ func itoa(i int) string {
 }
 
 type fakePanelProvider struct {
+	mu      sync.Mutex
 	outputs func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput
 	calls   map[contracts.JudgeRole]int
 }
 
 func (p *fakePanelProvider) Judges(input judges.JudgeInput) (judges.Judge, judges.Judge, judges.Judge, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.calls == nil {
 		p.calls = make(map[contracts.JudgeRole]int)
 	}
@@ -341,6 +453,8 @@ func (p *fakePanelProvider) Judges(input judges.JudgeInput) (judges.Judge, judge
 }
 
 func (p *fakePanelProvider) reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	clear(p.calls)
 }
 
@@ -351,8 +465,11 @@ type fakePanelJudge struct {
 }
 
 func (j fakePanelJudge) ScoreOutput(_ context.Context, _ judges.JudgeInput) (judges.JudgeOutput, error) {
+	j.provider.mu.Lock()
 	j.provider.calls[j.role]++
-	return j.provider.outputs(j.input, j.role), nil
+	outputs := j.provider.outputs
+	j.provider.mu.Unlock()
+	return outputs(j.input, j.role), nil
 }
 
 type ruleVerdict struct {
@@ -451,4 +568,66 @@ func countRawComplianceForAgentAndSHA(rows []contracts.RawComplianceEntry, agent
 		}
 	}
 	return count
+}
+
+type blockingPanelProvider struct {
+	mu          sync.Mutex
+	delay       time.Duration
+	inFlight    int
+	maxInFlight int
+	calls       map[contracts.JudgeRole]int
+	outputs     func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput
+}
+
+func (p *blockingPanelProvider) Judges(input judges.JudgeInput) (judges.Judge, judges.Judge, judges.Judge, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.calls == nil {
+		p.calls = make(map[contracts.JudgeRole]int)
+	}
+	return blockingPanelJudge{provider: p, input: input, role: contracts.JudgeRolePrimary},
+		blockingPanelJudge{provider: p, input: input, role: contracts.JudgeRoleSecondary},
+		blockingPanelJudge{provider: p, input: input, role: contracts.JudgeRoleArbiter},
+		nil
+}
+
+func (p *blockingPanelProvider) beginCall(role contracts.JudgeRole) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls[role]++
+	p.inFlight++
+	if p.inFlight > p.maxInFlight {
+		p.maxInFlight = p.inFlight
+	}
+}
+
+func (p *blockingPanelProvider) endCall() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.inFlight--
+}
+
+func (p *blockingPanelProvider) callsFor(role contracts.JudgeRole) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls[role]
+}
+
+func (p *blockingPanelProvider) maxConcurrentCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.maxInFlight
+}
+
+type blockingPanelJudge struct {
+	provider *blockingPanelProvider
+	input    judges.JudgeInput
+	role     contracts.JudgeRole
+}
+
+func (j blockingPanelJudge) ScoreOutput(_ context.Context, _ judges.JudgeInput) (judges.JudgeOutput, error) {
+	j.provider.beginCall(j.role)
+	defer j.provider.endCall()
+	time.Sleep(j.provider.delay)
+	return j.provider.outputs(j.input, j.role), nil
 }

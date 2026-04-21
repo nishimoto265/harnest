@@ -103,10 +103,24 @@ var (
 
 // Run executes the step. Idempotent: a second call after a valid done.marker
 // is a no-op; an invalid marker is removed and the step restarts.
-func (s *Step) Run(ctx context.Context, req Request) error {
+func (s *Step) Run(ctx context.Context, req Request) (runErr error) {
 	if req.TaskPackage == nil {
 		return ErrNoTaskPackage
 	}
+
+	lockPath, err := req.RunContext.ResolveRunRelative("30/.step30.lock")
+	if err != nil {
+		return err
+	}
+	lock, err := internalio.AcquireFileLock(lockPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if unlockErr := lock.Unlock(); runErr == nil && unlockErr != nil {
+			runErr = unlockErr
+		}
+	}()
 
 	paths, err := stepPaths(req.RunContext)
 	if err != nil {
@@ -247,6 +261,9 @@ func (s *Step) Run(ctx context.Context, req Request) error {
 	for _, a := range scorableAgents {
 		agentIDs = append(agentIDs, a.agent)
 	}
+	if err := rewriteExpectedFinalCompliance(paths, state, agentIDs); err != nil {
+		return fmt.Errorf("step30_score: rewrite final compliance: %w", err)
+	}
 
 	marker, err := scorecore.BuildStep30DoneMarker(scorecore.Step30MarkerInputs{
 		Agents:     agentIDs,
@@ -352,8 +369,8 @@ func (s *Step) runRole(
 	if role == contracts.JudgeRolePrimary || role == contracts.JudgeRoleSecondary {
 		agentState.clearArbiter()
 	}
-	agentState.upsertRawScores(result.RawScores)
-	agentState.upsertRawCompliance(result.RawCompliance)
+	agentState.replaceRawScores(role, result.RawScores)
+	agentState.replaceRawCompliance(role, result.RawCompliance)
 	return nil
 }
 
@@ -469,10 +486,10 @@ func loadResumeState(paths stepPathsResult) (*resumeState, error) {
 	}
 
 	state := &resumeState{agents: make(map[contracts.AgentID]*resumeAgentState)}
-	for _, row := range scorecore.CollapseRawScores(scoreRaw) {
+	for _, row := range currentRawScores(scoreRaw) {
 		state.agent(row.Agent).upsertRawScores([]contracts.RawScoreEntry{row})
 	}
-	for _, row := range scorecore.CollapseRawCompliance(complianceRaw) {
+	for _, row := range currentRawCompliance(complianceRaw) {
 		state.agent(row.Agent).upsertRawCompliance([]contracts.RawComplianceEntry{row})
 	}
 	for _, row := range scorecore.CollapseFinalScores(scoreFinal) {
@@ -512,10 +529,26 @@ func (s *resumeAgentState) upsertRawScores(rows []contracts.RawScoreEntry) {
 	}
 }
 
+func (s *resumeAgentState) replaceRawScores(role contracts.JudgeRole, rows []contracts.RawScoreEntry) {
+	replaced := make(map[contracts.Dimension]contracts.RawScoreEntry, len(rows))
+	for _, row := range rows {
+		replaced[row.Dimension] = row
+	}
+	s.rawScores[role] = replaced
+}
+
 func (s *resumeAgentState) upsertRawCompliance(rows []contracts.RawComplianceEntry) {
 	for _, row := range rows {
 		s.rawCompliance[row.JudgeRole][row.RuleID] = row
 	}
+}
+
+func (s *resumeAgentState) replaceRawCompliance(role contracts.JudgeRole, rows []contracts.RawComplianceEntry) {
+	replaced := make(map[string]contracts.RawComplianceEntry, len(rows))
+	for _, row := range rows {
+		replaced[row.RuleID] = row
+	}
+	s.rawCompliance[role] = replaced
 }
 
 func (s *resumeAgentState) upsertFinalScores(rows []contracts.ScoreEntry) {
@@ -528,6 +561,14 @@ func (s *resumeAgentState) upsertFinalCompliance(rows []contracts.ComplianceEntr
 	for _, row := range rows {
 		s.finalCompliance[row.RuleID] = row
 	}
+}
+
+func (s *resumeAgentState) replaceFinalCompliance(rows []contracts.ComplianceEntry) {
+	replaced := make(map[string]contracts.ComplianceEntry, len(rows))
+	for _, row := range rows {
+		replaced[row.RuleID] = row
+	}
+	s.finalCompliance = replaced
 }
 
 func (s *resumeAgentState) clearArbiter() {
@@ -612,23 +653,71 @@ func appendExpectedFinal(paths stepPathsResult, state *resumeAgentState, result 
 		}
 		state.upsertFinalScores([]contracts.ScoreEntry{row})
 	}
-	for _, row := range result.FinalCompliance {
-		current, ok := state.finalCompliance[row.RuleID]
-		if ok {
-			same, err := sameCanonicalJSON(current, row)
+	state.replaceFinalCompliance(result.FinalCompliance)
+	return nil
+}
+
+func rewriteExpectedFinalCompliance(paths stepPathsResult, state *resumeState, agents []contracts.AgentID) error {
+	sortedAgents := append([]contracts.AgentID(nil), agents...)
+	sort.Slice(sortedAgents, func(i, j int) bool {
+		return sortedAgents[i] < sortedAgents[j]
+	})
+
+	var buffer bytes.Buffer
+	for _, agent := range sortedAgents {
+		agentState, ok := state.agents[agent]
+		if !ok {
+			continue
+		}
+		rules := make([]string, 0, len(agentState.finalCompliance))
+		for ruleID := range agentState.finalCompliance {
+			rules = append(rules, ruleID)
+		}
+		sort.Strings(rules)
+		for _, ruleID := range rules {
+			payload, err := contracts.CanonicalMarshal(agentState.finalCompliance[ruleID])
 			if err != nil {
 				return err
 			}
-			if same {
-				continue
-			}
+			buffer.Write(payload)
+			buffer.WriteByte('\n')
 		}
-		if err := internalio.AppendJSONL(paths.ComplianceFinal, row); err != nil {
-			return err
-		}
-		state.upsertFinalCompliance([]contracts.ComplianceEntry{row})
 	}
-	return nil
+	return internalio.WriteAtomic(paths.ComplianceFinal, buffer.Bytes())
+}
+
+func currentRawScores(rows []contracts.RawScoreEntry) []contracts.RawScoreEntry {
+	if len(rows) == 0 {
+		return nil
+	}
+	latestOutputByRole := make(map[[2]string]string, len(rows))
+	filtered := make([]contracts.RawScoreEntry, 0, len(rows))
+	for _, row := range rows {
+		latestOutputByRole[[2]string{string(row.Agent), string(row.JudgeRole)}] = row.OutputSha256
+	}
+	for _, row := range rows {
+		if latestOutputByRole[[2]string{string(row.Agent), string(row.JudgeRole)}] == row.OutputSha256 {
+			filtered = append(filtered, row)
+		}
+	}
+	return scorecore.CollapseRawScores(filtered)
+}
+
+func currentRawCompliance(rows []contracts.RawComplianceEntry) []contracts.RawComplianceEntry {
+	if len(rows) == 0 {
+		return nil
+	}
+	latestOutputByRole := make(map[[2]string]string, len(rows))
+	filtered := make([]contracts.RawComplianceEntry, 0, len(rows))
+	for _, row := range rows {
+		latestOutputByRole[[2]string{string(row.Agent), string(row.JudgeRole)}] = row.OutputSha256
+	}
+	for _, row := range rows {
+		if latestOutputByRole[[2]string{string(row.Agent), string(row.JudgeRole)}] == row.OutputSha256 {
+			filtered = append(filtered, row)
+		}
+	}
+	return scorecore.CollapseRawCompliance(filtered)
 }
 
 func sameCanonicalJSON(left, right any) (bool, error) {

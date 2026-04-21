@@ -1,10 +1,12 @@
 package io
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	stdio "io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +98,39 @@ func TestAppendJSONL_SyncsParentDirectory(t *testing.T) {
 
 	require.NoError(t, AppendJSONL(path, testJSONLRecord{Name: "alpha"}))
 	require.Equal(t, []string{filepath.Dir(path)}, synced)
+}
+
+func TestAppendJSONLPayload_RollsBackOnPartialWrite(t *testing.T) {
+	t.Parallel()
+
+	file := &failingAppendFile{
+		data:      []byte("{\"name\":\"seed\"}\n"),
+		failAfter: int64(len(filePayload(testJSONLRecord{Name: "beta"})) - 2),
+	}
+
+	err := appendJSONLPayload(file, filePayload(testJSONLRecord{Name: "beta"}))
+	require.Error(t, err)
+
+	assert.Equal(t, "{\"name\":\"seed\"}\n", string(file.data))
+	assert.Equal(t, int64(len(file.data)), file.truncatedTo)
+	assert.False(t, file.synced)
+}
+
+func TestAppendJSONLPayload_RollsBackOnSyncFailure(t *testing.T) {
+	t.Parallel()
+
+	file := &failingAppendFile{
+		data:      []byte("{\"name\":\"seed\"}\n"),
+		syncErr:   errors.New("sync failed"),
+		failAfter: -1,
+	}
+
+	err := appendJSONLPayload(file, filePayload(testJSONLRecord{Name: "beta"}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sync failed")
+
+	assert.Equal(t, "{\"name\":\"seed\"}\n", string(file.data))
+	assert.Equal(t, int64(len(file.data)), file.truncatedTo)
 }
 
 func TestReadJSONL_StrictDecodeFailures(t *testing.T) {
@@ -337,6 +372,70 @@ func TestAppendRegistryEntryCASAndIndexRebuild(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, loadedIndex, 2)
 	assert.Equal(t, indexEntries, loadedIndex)
+}
+
+func filePayload(record testJSONLRecord) []byte {
+	payload, err := marshalJSONLRecord(record)
+	if err != nil {
+		panic(err)
+	}
+	return payload
+}
+
+type failingAppendFile struct {
+	data        []byte
+	offset      int64
+	failAfter   int64
+	syncErr     error
+	synced      bool
+	truncatedTo int64
+}
+
+func (f *failingAppendFile) Write(p []byte) (int, error) {
+	if f.failAfter >= 0 && f.offset >= f.failAfter {
+		return 0, errors.New("write failed")
+	}
+	if f.failAfter >= 0 && f.offset+int64(len(p)) > f.failAfter {
+		allowed := int(f.failAfter - f.offset)
+		if allowed < 0 {
+			allowed = 0
+		}
+		f.data = append(f.data, p[:allowed]...)
+		f.offset += int64(allowed)
+		return allowed, errors.New("write failed")
+	}
+	f.data = append(f.data, p...)
+	f.offset += int64(len(p))
+	return len(p), nil
+}
+
+func (f *failingAppendFile) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case stdio.SeekEnd:
+		f.offset = int64(len(f.data)) + offset
+	case stdio.SeekStart:
+		f.offset = offset
+	case stdio.SeekCurrent:
+		f.offset += offset
+	default:
+		return 0, fmt.Errorf("invalid whence %d", whence)
+	}
+	return f.offset, nil
+}
+
+func (f *failingAppendFile) Sync() error {
+	f.synced = true
+	return f.syncErr
+}
+
+func (f *failingAppendFile) Truncate(size int64) error {
+	if size < 0 || size > int64(len(f.data)) {
+		return fmt.Errorf("invalid truncate size %d", size)
+	}
+	f.data = bytes.Clone(f.data[:size])
+	f.offset = size
+	f.truncatedTo = size
+	return nil
 }
 
 func newTestRunContext(t *testing.T) RunContext {
