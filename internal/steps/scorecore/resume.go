@@ -116,10 +116,13 @@ func BuildFinalResultFromRaw(
 	if err != nil {
 		return PanelResult{}, err
 	}
-	if !disagree || !arbiterPresent {
+	if !disagree {
 		return assembleFinalFromRaw(primaryScores, primaryCompliance, contracts.VerdictPathAgreement), nil
 	}
-	if len(arbiterScores) == 0 || len(arbiterCompliance) == 0 {
+	if !arbiterPresent {
+		return PanelResult{}, ErrPanelArbiterRequired
+	}
+	if len(arbiterScores) == 0 || (len(primaryCompliance) > 0 && len(arbiterCompliance) == 0) {
 		return PanelResult{}, ErrPanelArbiterRowsRequired
 	}
 

@@ -30,6 +30,7 @@ var (
 	ErrPanelStepDir         = errors.New("scorecore: stepDir must be \"30\" or \"60\"")
 	ErrPanelThreshold       = errors.New("scorecore: disagreement threshold must be >= 0")
 	ErrPanelDimensionMatch  = errors.New("scorecore: primary and secondary dimension sets must match")
+	ErrPanelArbiterRequired = errors.New("scorecore: arbiter judge is required for disagreement resolution")
 )
 
 // PanelInput carries all per-agent inputs needed by Resolve.
@@ -123,11 +124,8 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 		return PanelResult{}, err
 	}
 
-	if !disagree || in.Arbiter == nil {
+	if !disagree {
 		verdict := contracts.VerdictPathAgreement
-		if !disagree && in.Arbiter == nil && in.Secondary == nil {
-			verdict = contracts.VerdictPathSingle
-		}
 		result := PanelResult{
 			RawScores:     append(append([]contracts.RawScoreEntry{}, primaryRaw...), secondaryRaw...),
 			RawCompliance: append(append([]contracts.RawComplianceEntry{}, primaryRawCompliance...), secondaryRawCompliance...),
@@ -137,6 +135,9 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 		result.FinalScores = finalScoresFromRaw(primaryRaw, verdict)
 		result.FinalCompliance = finalComplianceFromRaw(primaryRawCompliance, verdict)
 		return result, nil
+	}
+	if in.Arbiter == nil {
+		return PanelResult{}, ErrPanelArbiterRequired
 	}
 
 	// Arbiter path. Compute refs against primary/secondary rows.
