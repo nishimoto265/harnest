@@ -11,6 +11,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/steps/step30_score"
 )
 
 func defaultSteps() Steps {
@@ -23,13 +24,30 @@ func defaultSteps() Steps {
 	return Steps{
 		Step10:  stubStep10{},
 		Step20:  step20,
-		Step30:  stubMarkerStep{path: "30/done.marker"},
+		Step30:  newStep30ScoreAdapter(step30_score.New()),
 		Step40:  stubStep40{},
 		Step50:  step50,
 		Step60:  stubMarkerStep{path: "60/done.marker"},
 		Step70:  stubStep70{},
 		Archive: stubArchiveStep{},
 	}
+}
+
+// step30ScoreAdapter bridges step30_score.Step to orchestrator.Step without
+// pulling the orchestrator package into step30_score (one-way import graph).
+type step30ScoreAdapter struct {
+	step *step30_score.Step
+}
+
+func newStep30ScoreAdapter(step *step30_score.Step) step30ScoreAdapter {
+	return step30ScoreAdapter{step: step}
+}
+
+func (a step30ScoreAdapter) Run(ctx context.Context, run *StepRunContext) error {
+	return a.step.Run(ctx, step30_score.Request{
+		RunContext:  run.IO,
+		TaskPackage: run.TaskPackage,
+	})
 }
 
 type stubStep10 struct{}
