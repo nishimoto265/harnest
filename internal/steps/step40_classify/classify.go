@@ -1,6 +1,7 @@
 package step40_classify
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -365,15 +366,27 @@ func writeClassificationJSONL(runIO internalio.RunContext, classifications []con
 	if err != nil {
 		return err
 	}
-	if err := internalio.WriteAtomic(path, nil); err != nil {
-		return err
-	}
+
+	var buffer bytes.Buffer
 	for _, entry := range classifications {
-		if err := internalio.AppendJSONL(path, entry); err != nil {
+		if _, err := contracts.MarshalStrict(entry); err != nil {
+			return err
+		}
+		payload, err := contracts.CanonicalMarshal(entry)
+		if err != nil {
+			return err
+		}
+		if len(payload)+1 > internalio.JSONLMaxLineBytes {
+			return internalio.ErrEntryTooLarge
+		}
+		if _, err := buffer.Write(payload); err != nil {
+			return err
+		}
+		if err := buffer.WriteByte('\n'); err != nil {
 			return err
 		}
 	}
-	return nil
+	return internalio.WriteAtomic(path, buffer.Bytes())
 }
 
 func sha256Hex(data []byte) string {

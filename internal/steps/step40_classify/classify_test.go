@@ -157,6 +157,110 @@ func TestRun_RerunTruncatesClassificationJSONL(t *testing.T) {
 	assert.Equal(t, got.Candidates[0].CandidateID, classifications[0].CandidateID)
 }
 
+func TestRun_RerunKeepsCandidatesHashStable(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+	writeCompliance(t, cfg.IO,
+		testComplianceEntry(cfg.IO.RunID, "rule-updated", contracts.ComplianceVerdictViolated),
+		testComplianceEntry(cfg.IO.RunID, "rule-added", contracts.ComplianceVerdictMissed),
+	)
+	writeRegistry(t, cfg.registryPath(),
+		registryUpdated("rule-updated", strings.Repeat("5", 64)),
+		registryAdded("rule-added", strings.Repeat("6", 64)),
+	)
+
+	first, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+
+	second, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+
+	assert.Equal(t, first.CandidatesHash, second.CandidatesHash)
+	assert.NoError(t, second.VerifyCandidatesHash())
+}
+
+func TestRun_RegistryVariantsProduceExpectedCandidateKinds(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+	writeCompliance(t, cfg.IO,
+		testComplianceEntry(cfg.IO.RunID, "rule-updated", contracts.ComplianceVerdictViolated),
+		testComplianceEntry(cfg.IO.RunID, "rule-status-active", contracts.ComplianceVerdictMissed),
+		testComplianceEntry(cfg.IO.RunID, "rule-rolled-back", contracts.ComplianceVerdictInvalidException),
+	)
+	writeRegistry(t, cfg.registryPath(),
+		registryUpdated("rule-updated", strings.Repeat("7", 64)),
+		registryStatusChanged(
+			"rule-status-active",
+			contracts.RuleStatusActive,
+			contracts.RuleStatusDeprecated,
+			contracts.SunsetTransitionDeprecate,
+			strings.Repeat("8", 64),
+		),
+		registryAdded("rule-rolled-back", strings.Repeat("9", 64)),
+		registryRolledBack(strings.Repeat("9", 64)),
+	)
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Len(t, got.Candidates, 3)
+
+	kinds := map[string]contracts.CandidateKind{}
+	targets := map[string]string{}
+	for _, candidate := range got.Candidates {
+		ruleID := strings.TrimPrefix(candidate.Title, "Rule candidate for ")
+		kinds[ruleID] = candidate.Kind
+		targets[ruleID] = candidate.TargetRuleID
+	}
+
+	assert.Equal(t, contracts.CandidateKindUpdate, kinds["rule-updated"])
+	assert.Equal(t, "rule-updated", targets["rule-updated"])
+	assert.Equal(t, contracts.CandidateKindUpdate, kinds["rule-status-active"])
+	assert.Equal(t, "rule-status-active", targets["rule-status-active"])
+	assert.Equal(t, contracts.CandidateKindNew, kinds["rule-rolled-back"])
+	assert.Empty(t, targets["rule-rolled-back"])
+}
+
+func TestActiveRulesFromRegistry_Variants(t *testing.T) {
+	t.Run("updated entry keeps rule active", func(t *testing.T) {
+		active := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
+			registryUpdated("rule-updated", strings.Repeat("a", 64)),
+		})
+
+		assert.True(t, active["rule-updated"])
+	})
+
+	t.Run("status_changed follows archived state", func(t *testing.T) {
+		active := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
+			registryStatusChanged(
+				"rule-status-archived",
+				contracts.RuleStatusActive,
+				contracts.RuleStatusArchived,
+				contracts.SunsetTransitionArchive,
+				strings.Repeat("b", 64),
+			),
+			registryStatusChanged(
+				"rule-status-deprecated",
+				contracts.RuleStatusActive,
+				contracts.RuleStatusDeprecated,
+				contracts.SunsetTransitionDeprecate,
+				strings.Repeat("c", 64),
+			),
+		})
+
+		assert.False(t, active["rule-status-archived"])
+		assert.True(t, active["rule-status-deprecated"])
+	})
+
+	t.Run("rolled_back added entry restores previous inactive state", func(t *testing.T) {
+		active := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
+			registryAdded("rule-rolled-back", strings.Repeat("d", 64)),
+			registryRolledBack(strings.Repeat("d", 64)),
+		})
+
+		assert.False(t, active["rule-rolled-back"])
+	})
+}
+
 func newTestConfig(t *testing.T) Config {
 	t.Helper()
 
@@ -328,6 +432,43 @@ func registryAdded(ruleID, idempotencyKey string) contracts.RuleRegistryEntry {
 	}
 }
 
+func registryUpdated(ruleID, idempotencyKey string) contracts.RuleRegistryEntry {
+	return contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindUpdated,
+		Value: contracts.RuleRegistryUpdated{
+			Kind:           contracts.RegistryKindUpdated,
+			SchemaVersion:  "1",
+			RuleID:         ruleID,
+			RulePath:       filepath.Join("rules", ruleID+".md"),
+			Sha256:         strings.Repeat("b", 64),
+			PrevSha256:     strings.Repeat("a", 64),
+			IdempotencyKey: idempotencyKey,
+			VersionSeq:     2,
+			PrevHash:       strings.Repeat("c", 64),
+			ByRunID:        "2026-04-20-PR2-bbbbbbb",
+			At:             time.Date(2026, 4, 20, 9, 30, 0, 0, time.UTC),
+		},
+	}
+}
+
+func registryStatusChanged(ruleID string, prevStatus, newStatus contracts.RuleStatus, transition contracts.SunsetTransition, opID string) contracts.RuleRegistryEntry {
+	return contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindStatusChanged,
+		Value: contracts.RuleRegistryStatusChanged{
+			Kind:          contracts.RegistryKindStatusChanged,
+			SchemaVersion: "1",
+			RuleID:        ruleID,
+			PrevStatus:    prevStatus,
+			NewStatus:     newStatus,
+			Transition:    transition,
+			OpID:          opID,
+			VersionSeq:    1,
+			BySunsetRunID: "sunset-3",
+			At:            time.Date(2026, 4, 20, 10, 30, 0, 0, time.UTC),
+		},
+	}
+}
+
 func registryArchived(ruleID, opID string) contracts.RuleRegistryEntry {
 	return contracts.RuleRegistryEntry{
 		Kind: contracts.RegistryKindArchived,
@@ -341,6 +482,25 @@ func registryArchived(ruleID, opID string) contracts.RuleRegistryEntry {
 			VersionSeq:    1,
 			BySunsetRunID: "sunset-1",
 			At:            time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC),
+		},
+	}
+}
+
+func registryRolledBack(targetOpID string) contracts.RuleRegistryEntry {
+	return contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindRolledBack,
+		Value: contracts.RuleRegistryRolledBack{
+			Kind:           contracts.RegistryKindRolledBack,
+			SchemaVersion:  "1",
+			TargetOpID:     targetOpID,
+			TargetOffset:   0,
+			TargetSha256:   strings.Repeat("e", 64),
+			ByRunID:        "2026-04-20-PR3-ccccccc",
+			RollbackReason: contracts.RollbackReasonTransactionalFailure,
+			FailedStep:     contracts.FailedStep70,
+			VersionSeq:     2,
+			PrevHash:       strings.Repeat("f", 64),
+			At:             time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC),
 		},
 	}
 }
