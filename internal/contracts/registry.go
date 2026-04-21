@@ -122,6 +122,7 @@ func (RuleRegistryRolledBack) ruleRegistryVariant() {}
 
 var (
 	ErrRegistryPrevHashSequenceMismatch      = errors.New("contracts: registry: prev_hash is required when version_seq > 1")
+	ErrRegistryPrevHashMustBeEmptyOnFirst    = errors.New("contracts: registry: prev_hash must be empty when version_seq == 1")
 	ErrRegistryRolledBackMissingTargetOffset = errors.New("contracts: registry: rolled_back: target_offset field is required")
 	ErrRuleIdempotencyIndexMissingOffset     = errors.New("contracts: registry: idempotency-index: registry_offset field is required")
 	ErrRegistryVariantTypeMismatch           = errors.New("contracts: registry: kind does not match variant type")
@@ -435,6 +436,9 @@ func ruleRegistryVariantMetadata(v RuleRegistryVariant) (expected RegistryKind, 
 }
 
 func validateRegistryChain(versionSeq int64, prevHash string) error {
+	if versionSeq == 1 && prevHash != "" {
+		return fmt.Errorf("%w: version_seq=%d prev_hash=%q", ErrRegistryPrevHashMustBeEmptyOnFirst, versionSeq, prevHash)
+	}
 	if versionSeq > 1 && prevHash == "" {
 		return fmt.Errorf("%w: version_seq=%d prev_hash=%q", ErrRegistryPrevHashSequenceMismatch, versionSeq, prevHash)
 	}

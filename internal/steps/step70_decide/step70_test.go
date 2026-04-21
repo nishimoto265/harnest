@@ -67,7 +67,7 @@ func TestRun_SentinelBlocksExecution(t *testing.T) {
 	assert.NoFileExists(t, decisionPath)
 }
 
-func TestNextRegistryVersionForRule_IsRuleScoped(t *testing.T) {
+func TestNextRegistryVersionForRule_IsChainScoped(t *testing.T) {
 	lines := []registryLine{
 		{
 			Entry: contracts.RuleRegistryEntry{
@@ -111,10 +111,10 @@ func TestNextRegistryVersionForRule_IsRuleScoped(t *testing.T) {
 		},
 	}
 
-	assert.EqualValues(t, 5, nextRegistryVersionForRule(lines, "rule-a"))
-	assert.EqualValues(t, 6, nextRegistryVersionForRule(lines, "rule-b"))
+	assert.EqualValues(t, 8, nextRegistryVersionForRule(lines, "rule-a"))
+	assert.EqualValues(t, 8, nextRegistryVersionForRule(lines, "rule-b"))
 	assert.EqualValues(t, 8, nextRegistryVersionForRule(lines, "rule-c"))
-	assert.EqualValues(t, 1, nextRegistryVersionForRule(lines, "rule-d"))
+	assert.EqualValues(t, 8, nextRegistryVersionForRule(lines, "rule-d"))
 }
 
 func TestRun_ResumeFromBranchPushed_IdempotencyHit(t *testing.T) {

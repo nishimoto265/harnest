@@ -190,6 +190,13 @@ func transitionKey(t Transition) string {
 	}
 }
 
+func registryPrevHashForVersion(versionSeq int64, prevHash string) string {
+	if versionSeq == 1 {
+		return ""
+	}
+	return prevHash
+}
+
 func buildRegistryEntry(path string, t Transition, sunsetRunID, opID string, at time.Time) (contracts.RuleRegistryEntry, error) {
 	lines, err := readRegistryLines(path)
 	if err != nil {
@@ -212,7 +219,7 @@ func buildRegistryEntry(path string, t Transition, sunsetRunID, opID string, at 
 			Transition:    t.Transition,
 			OpID:          opID,
 			VersionSeq:    versionSeq,
-			PrevHash:      prevHash,
+			PrevHash:      registryPrevHashForVersion(versionSeq, prevHash),
 			BySunsetRunID: sunsetRunID,
 			At:            at,
 		}
@@ -226,7 +233,7 @@ func buildRegistryEntry(path string, t Transition, sunsetRunID, opID string, at 
 			NewStatus:     contracts.RuleStatusArchived,
 			OpID:          opID,
 			VersionSeq:    versionSeq,
-			PrevHash:      prevHash,
+			PrevHash:      registryPrevHashForVersion(versionSeq, prevHash),
 			BySunsetRunID: sunsetRunID,
 			At:            at,
 		}
@@ -240,7 +247,7 @@ func buildRegistryEntry(path string, t Transition, sunsetRunID, opID string, at 
 			NewStatus:     t.NewStatus,
 			OpID:          opID,
 			VersionSeq:    versionSeq,
-			PrevHash:      prevHash,
+			PrevHash:      registryPrevHashForVersion(versionSeq, prevHash),
 			BySunsetRunID: sunsetRunID,
 			At:            at,
 		}
@@ -250,33 +257,30 @@ func buildRegistryEntry(path string, t Transition, sunsetRunID, opID string, at 
 	}
 }
 
-func nextRegistryVersion(lines []registryLine, ruleID string) int64 {
-	var seq int64
-	for _, line := range lines {
-		switch v := line.Entry.Value.(type) {
-		case contracts.RuleRegistryAdded:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		case contracts.RuleRegistryUpdated:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		case contracts.RuleRegistryStatusChanged:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		case contracts.RuleRegistryArchived:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		case contracts.RuleRegistryRestored:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		}
+func nextRegistryVersion(lines []registryLine, _ string) int64 {
+	if len(lines) == 0 {
+		return 1
 	}
-	return seq + 1
+	return registryVersionSeq(lines[len(lines)-1].Entry) + 1
+}
+
+func registryVersionSeq(entry contracts.RuleRegistryEntry) int64 {
+	switch v := entry.Value.(type) {
+	case contracts.RuleRegistryAdded:
+		return v.VersionSeq
+	case contracts.RuleRegistryUpdated:
+		return v.VersionSeq
+	case contracts.RuleRegistryRolledBack:
+		return v.VersionSeq
+	case contracts.RuleRegistryStatusChanged:
+		return v.VersionSeq
+	case contracts.RuleRegistryArchived:
+		return v.VersionSeq
+	case contracts.RuleRegistryRestored:
+		return v.VersionSeq
+	default:
+		return 0
+	}
 }
 
 func findByOpID(path, opID string) (contracts.RegistryAppendResult, bool, error) {

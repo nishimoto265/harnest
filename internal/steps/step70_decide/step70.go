@@ -713,19 +713,26 @@ func deriveRegistryChain(entry contracts.RuleRegistryEntry, path string) (contra
 	switch v := entry.Value.(type) {
 	case contracts.RuleRegistryAdded:
 		v.VersionSeq = nextRegistryVersionForRule(lines, v.RuleID)
-		v.PrevHash = prevHash
+		v.PrevHash = registryPrevHashForVersion(v.VersionSeq, prevHash)
 		return contracts.RuleRegistryEntry{Kind: entry.Kind, Value: v}, nil
 	case contracts.RuleRegistryUpdated:
 		v.VersionSeq = nextRegistryVersionForRule(lines, v.RuleID)
-		v.PrevHash = prevHash
+		v.PrevHash = registryPrevHashForVersion(v.VersionSeq, prevHash)
 		return contracts.RuleRegistryEntry{Kind: entry.Kind, Value: v}, nil
 	case contracts.RuleRegistryRolledBack:
 		v.VersionSeq = nextRegistryVersionForRollback(lines, v.TargetOpID)
-		v.PrevHash = prevHash
+		v.PrevHash = registryPrevHashForVersion(v.VersionSeq, prevHash)
 		return contracts.RuleRegistryEntry{Kind: entry.Kind, Value: v}, nil
 	default:
 		return entry, nil
 	}
+}
+
+func registryPrevHashForVersion(versionSeq int64, prevHash string) string {
+	if versionSeq == 1 {
+		return ""
+	}
+	return prevHash
 }
 
 func plannedAdoptionFromRegistryEntries(intentionIdempotencyKey string, entries []contracts.RuleRegistryEntry) (*contracts.PlannedAdoption, error) {
@@ -869,33 +876,11 @@ func targetFromIntention(pkg *contracts.TaskPackage, intention contracts.Intenti
 	}
 }
 
-func nextRegistryVersionForRule(lines []registryLine, ruleID string) int64 {
-	var seq int64
-	for _, line := range lines {
-		switch v := line.Entry.Value.(type) {
-		case contracts.RuleRegistryAdded:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		case contracts.RuleRegistryUpdated:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		case contracts.RuleRegistryStatusChanged:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		case contracts.RuleRegistryArchived:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		case contracts.RuleRegistryRestored:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		}
+func nextRegistryVersionForRule(lines []registryLine, _ string) int64 {
+	if len(lines) == 0 {
+		return 1
 	}
-	return seq + 1
+	return registryVersionSeq(lines[len(lines)-1].Entry) + 1
 }
 
 func appendIfMissing(values []string, value string) []string {
