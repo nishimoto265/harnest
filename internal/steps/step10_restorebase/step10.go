@@ -17,6 +17,7 @@ package step10restorebase
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,7 @@ type Input struct {
 	RunCtx        internalio.RunContext
 	Agents        []contracts.AgentID // defaults to DefaultAgents when empty
 	Now           func() time.Time    // test hook; defaults to time.Now().UTC()
+	Logger        *slog.Logger
 }
 
 // Result wraps the validated Step10Response.
@@ -90,7 +92,7 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("step10: gh pr view: %w", err)
 	}
-	derivedBaseSHA, err := r.deriveBaseSHA(ctx, in.RepoRoot, pr)
+	derivedBaseSHA, err := r.deriveBaseSHA(ctx, in.RepoRoot, pr, in.Logger)
 	if err != nil {
 		return Result{}, err
 	}
@@ -158,9 +160,19 @@ func readPersistedBaseSHA(path string) (string, bool, error) {
 	return sha, true, nil
 }
 
-func (r *Runner) deriveBaseSHA(ctx context.Context, repoRoot string, pr PRInfo) (string, error) {
+func (r *Runner) deriveBaseSHA(ctx context.Context, repoRoot string, pr PRInfo, logger *slog.Logger) (string, error) {
 	if pr.MergeCommitOID == "" {
-		return "", fmt.Errorf("step10 requires a merged PR")
+		if pr.State != "MERGED" {
+			return "", fmt.Errorf("step10 requires a merged PR: state=%q", pr.State)
+		}
+		if err := validation.Instance().Var(pr.BaseRefOid, "required,sha1_hex"); err != nil {
+			return "", fmt.Errorf("step10: base_ref_oid is not a 40-hex sha: %q: %w", pr.BaseRefOid, err)
+		}
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("step10: mergeCommit missing for merged PR; falling back to baseRefOid", "pr", pr.Number, "base_ref_oid", pr.BaseRefOid)
+		return pr.BaseRefOid, nil
 	}
 	if err := validation.Instance().Var(pr.MergeCommitOID, "required,sha1_hex"); err != nil {
 		return "", fmt.Errorf("step10: merge_commit_oid is not a 40-hex sha: %q: %w", pr.MergeCommitOID, err)

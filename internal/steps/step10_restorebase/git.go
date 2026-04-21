@@ -83,7 +83,12 @@ func (g gitCLI) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha str
 				return false, fmt.Errorf("%w: path=%s: cannot resolve HEAD after retry: %v", ErrWorktreeDrift, path, herr)
 			}
 			if head != sha {
-				return false, fmt.Errorf("%w: path=%s expected=%s actual=%s", ErrWorktreeDrift, path, sha, head)
+				removeOut, removeErr := g.run(ctx, "git", "-C", repoRoot, "worktree", "remove", "--force", path)
+				driftErr := fmt.Errorf("%w: path=%s expected=%s actual=%s", ErrWorktreeDrift, path, sha, head)
+				if removeErr != nil {
+					return false, fmt.Errorf("%w; cleanup failed: git worktree remove --force %s: %v: %s", driftErr, path, removeErr, strings.TrimSpace(string(removeOut)))
+				}
+				return false, driftErr
 			}
 			return true, nil
 		}
