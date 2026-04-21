@@ -12,11 +12,13 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
@@ -42,6 +44,17 @@ func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation co
 	}
 	if state.ExpectedBaseSHA != allocation.BaseSHA {
 		return 0, fmt.Errorf("step20: resume state base mismatch: expected=%s got=%s", state.ExpectedBaseSHA, allocation.BaseSHA)
+	}
+	if state.Pid == 0 {
+		if state.RetryCount >= rescueMaxRetries(run.Config, s.cfg) {
+			return 0, &RescueExhaustedError{
+				Rescue: stepio.RescueExhausted{
+					Agent:      run.Agent,
+					RetryCount: state.RetryCount,
+				},
+			}
+		}
+		return state.RetryCount, nil
 	}
 
 	stale, _, err := heartbeatStale(agentDir, s.staleAfter, s.now().UTC())
@@ -192,9 +205,11 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	}
 
 	state.RetryCount = nextRetry
-	state.StartedAt = s.now().UTC()
-	state.LastHeartbeat = state.StartedAt
-	if err := touchHeartbeat(agentDir, state.LastHeartbeat); err != nil {
+	state.StartedAt = time.Time{}
+	state.LastHeartbeat = time.Time{}
+	state.Pid = 0
+	state.Pgid = 0
+	if err := os.Remove(heartbeatPath(agentDir)); err != nil && !os.IsNotExist(err) {
 		return 0, err
 	}
 	if err := saveResumeState(agentDir, state); err != nil {
@@ -419,6 +434,7 @@ func gitOutputContext(ctx context.Context, transform func(string) string, worktr
 func gitOutputBytes(worktreePath string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = worktreePath
+	cmd.Env = processenv.Sanitize()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("step20: git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -429,6 +445,7 @@ func gitOutputBytes(worktreePath string, args ...string) ([]byte, error) {
 func gitOutputBytesContext(ctx context.Context, worktreePath string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = worktreePath
+	cmd.Env = processenv.Sanitize()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() != nil {

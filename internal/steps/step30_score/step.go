@@ -134,7 +134,16 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		return err
 	}
 	if valid {
-		return nil
+		versionsMatch, err := step30VersionsMatch(paths, s.rubricVersion, s.promptVersion)
+		if err != nil {
+			return err
+		}
+		if versionsMatch {
+			return nil
+		}
+	}
+	if valid {
+		_ = os.Remove(paths.MarkerPath)
 	}
 	// Marker exists but no longer matches the underlying jsonl — remove it
 	// so BuildStep30DoneMarker can re-assert the invariant.
@@ -205,14 +214,14 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		}
 		agentState := state.agent(agent.agent)
 
-		if err := s.ensureRole(ctx, paths, panelInput, agentState, contracts.JudgeRolePrimary, primary); err != nil {
+		if err := s.ensureRole(ctx, paths, panelInput, agentState, contracts.JudgeRolePrimary, primary, s.rubricVersion, s.promptVersion); err != nil {
 			return fmt.Errorf("step30_score: resolve primary agent=%s: %w", agent.agent, err)
 		}
 		if secondary != nil {
-			if err := s.ensureRole(ctx, paths, panelInput, agentState, contracts.JudgeRoleSecondary, secondary); err != nil {
+			if err := s.ensureRole(ctx, paths, panelInput, agentState, contracts.JudgeRoleSecondary, secondary, s.rubricVersion, s.promptVersion); err != nil {
 				return fmt.Errorf("step30_score: resolve secondary agent=%s: %w", agent.agent, err)
 			}
-			if err := s.refreshPrimarySecondaryIfNeeded(ctx, paths, panelInput, agentState, primary, secondary); err != nil {
+			if err := s.refreshPrimarySecondaryIfNeeded(ctx, paths, panelInput, agentState, primary, secondary, s.rubricVersion, s.promptVersion); err != nil {
 				return fmt.Errorf("step30_score: refresh panel agent=%s: %w", agent.agent, err)
 			}
 		}
@@ -230,7 +239,7 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 			}
 		}
 		if secondary != nil && disagree && arbiter != nil {
-			if !agentState.arbiterCompleteFor(primaryCompliance, panelInput.OutputSha256) {
+			if !agentState.arbiterCompleteFor(primaryCompliance, panelInput.OutputSha256, s.rubricVersion, s.promptVersion) {
 				if err := s.runRole(ctx, paths, panelInput, agentState, contracts.JudgeRoleArbiter, arbiter); err != nil {
 					return fmt.Errorf("step30_score: resolve arbiter agent=%s: %w", agent.agent, err)
 				}
@@ -293,8 +302,10 @@ func (s *Step) ensureRole(
 	agentState *resumeAgentState,
 	role contracts.JudgeRole,
 	judge judges.Judge,
+	rubricVersion string,
+	promptVersion string,
 ) error {
-	if agentState.roleComplete(role, panelInput.OutputSha256) {
+	if agentState.roleComplete(role, panelInput.OutputSha256, rubricVersion, promptVersion) {
 		return nil
 	}
 	return s.runRole(ctx, paths, panelInput, agentState, role, judge)
@@ -306,6 +317,8 @@ func (s *Step) refreshPrimarySecondaryIfNeeded(
 	panelInput scorecore.PanelInput,
 	agentState *resumeAgentState,
 	primary, secondary judges.Judge,
+	rubricVersion string,
+	promptVersion string,
 ) error {
 	_, err := scorecore.PanelDisagrees(
 		agentState.rawScoreSlice(contracts.JudgeRolePrimary),
@@ -580,8 +593,8 @@ func (s *resumeAgentState) clearArbiter() {
 	s.rawCompliance[contracts.JudgeRoleArbiter] = map[string]contracts.RawComplianceEntry{}
 }
 
-func (s *resumeAgentState) roleComplete(role contracts.JudgeRole, outputSha string) bool {
-	return hasAllDimensions(s.rawScores[role]) && s.roleOutputShaMatches(role, outputSha)
+func (s *resumeAgentState) roleComplete(role contracts.JudgeRole, outputSha, rubricVersion, promptVersion string) bool {
+	return hasAllDimensions(s.rawScores[role]) && s.roleOutputShaMatches(role, outputSha) && s.roleVersionMatches(role, rubricVersion, promptVersion)
 }
 
 func (s *resumeAgentState) rawScoreSlice(role contracts.JudgeRole) []contracts.RawScoreEntry {
@@ -622,11 +635,14 @@ func (s *resumeAgentState) currentComplianceRuleIDs() map[string]struct{} {
 	return rules
 }
 
-func (s *resumeAgentState) arbiterCompleteFor(primaryCompliance []contracts.RawComplianceEntry, outputSha string) bool {
+func (s *resumeAgentState) arbiterCompleteFor(primaryCompliance []contracts.RawComplianceEntry, outputSha, rubricVersion, promptVersion string) bool {
 	if !hasAllDimensions(s.rawScores[contracts.JudgeRoleArbiter]) {
 		return false
 	}
 	if !s.roleOutputShaMatches(contracts.JudgeRoleArbiter, outputSha) {
+		return false
+	}
+	if !s.roleVersionMatches(contracts.JudgeRoleArbiter, rubricVersion, promptVersion) {
 		return false
 	}
 	if len(s.rawCompliance[contracts.JudgeRoleArbiter]) != len(primaryCompliance) {
@@ -634,6 +650,20 @@ func (s *resumeAgentState) arbiterCompleteFor(primaryCompliance []contracts.RawC
 	}
 	for _, row := range primaryCompliance {
 		if _, ok := s.rawCompliance[contracts.JudgeRoleArbiter][row.RuleID]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *resumeAgentState) roleVersionMatches(role contracts.JudgeRole, rubricVersion, promptVersion string) bool {
+	for _, row := range s.rawScores[role] {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false
+		}
+	}
+	for _, row := range s.rawCompliance[role] {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
 			return false
 		}
 	}
@@ -723,6 +753,46 @@ func allDimensions() []contracts.Dimension {
 		contracts.DimensionDiscipline,
 		contracts.DimensionCommunication,
 	}
+}
+
+func step30VersionsMatch(paths stepPathsResult, rubricVersion, promptVersion string) (bool, error) {
+	scoreRaw, err := internalio.ReadJSONL[contracts.RawScoreEntry](paths.ScoreRaw)
+	if err != nil {
+		return false, err
+	}
+	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](paths.ComplianceRaw)
+	if err != nil {
+		return false, err
+	}
+	scoreFinal, err := internalio.ReadJSONL[contracts.ScoreEntry](paths.ScoreFinal)
+	if err != nil {
+		return false, err
+	}
+	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](paths.ComplianceFinal)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range scoreRaw {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false, nil
+		}
+	}
+	for _, row := range complianceRaw {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false, nil
+		}
+	}
+	for _, row := range scoreFinal {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false, nil
+		}
+	}
+	for _, row := range complianceFinal {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (s *Step) resolveRubricPath(runCtx internalio.RunContext) (string, error) {

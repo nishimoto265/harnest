@@ -73,6 +73,12 @@ func (e RuleRegistryAdded) Validate() error {
 	if err := validateStruct(e); err != nil {
 		return err
 	}
+	if err := ValidateRuleID(e.RuleID); err != nil {
+		return err
+	}
+	if err := ValidateRulePath(e.RulePath); err != nil {
+		return err
+	}
 	return validateRegistryChain(e.VersionSeq, e.PrevHash)
 }
 
@@ -95,6 +101,12 @@ func (RuleRegistryUpdated) ruleRegistryVariant() {}
 
 func (e RuleRegistryUpdated) Validate() error {
 	if err := validateStruct(e); err != nil {
+		return err
+	}
+	if err := ValidateRuleID(e.RuleID); err != nil {
+		return err
+	}
+	if err := ValidateRulePath(e.RulePath); err != nil {
 		return err
 	}
 	return validateRegistryChain(e.VersionSeq, e.PrevHash)
@@ -223,6 +235,9 @@ func (e RuleRegistryStatusChanged) Validate() error {
 	if err := validateStruct(e); err != nil {
 		return err
 	}
+	if err := ValidateRuleID(e.RuleID); err != nil {
+		return err
+	}
 	if err := validateRegistryChain(e.VersionSeq, e.PrevHash); err != nil {
 		return err
 	}
@@ -247,6 +262,9 @@ func (e RuleRegistryArchived) Validate() error {
 	if err := validateStruct(e); err != nil {
 		return err
 	}
+	if err := ValidateRuleID(e.RuleID); err != nil {
+		return err
+	}
 	if err := validateRegistryChain(e.VersionSeq, e.PrevHash); err != nil {
 		return err
 	}
@@ -265,6 +283,9 @@ func (e RuleRegistryArchived) Validate() error {
 // Validate enforces tag-based validation + restored transition semantics.
 func (e RuleRegistryRestored) Validate() error {
 	if err := validateStruct(e); err != nil {
+		return err
+	}
+	if err := ValidateRuleID(e.RuleID); err != nil {
 		return err
 	}
 	if err := validateRegistryChain(e.VersionSeq, e.PrevHash); err != nil {

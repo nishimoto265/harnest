@@ -759,6 +759,72 @@ func TestStepRunSuccessArtifactsHonorContextCancellation(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr))
 }
 
+func TestStepRun_RescueStartFailureLeavesNoPhantomLease(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	fx.seedResumeState(t, 0)
+
+	failingStep := newStep(fx.cfg, stepOptions{
+		now:               time.Now,
+		heartbeatInterval: 10 * time.Millisecond,
+		staleAfter:        time.Second,
+		runner:            failBeforeStartRunner{},
+	})
+	err := failingStep.Run(context.Background(), fx.run)
+	require.ErrorContains(t, err, "synthetic start failure")
+
+	state, ok, err := loadResumeState(fx.agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, 1, state.RetryCount)
+	assert.Zero(t, state.Pid)
+	assert.Zero(t, state.Pgid)
+
+	_, statErr := os.Stat(fx.heartbeatLeasePath())
+	require.Error(t, statErr)
+	require.True(t, os.IsNotExist(statErr))
+
+	require.NoError(t, fx.step.Run(context.Background(), fx.run))
+}
+
+func TestStepRun_GitCommandsIgnoreInheritedGitDir(t *testing.T) {
+	fx := newTestFixture(t, 5)
+
+	otherRepo := filepath.Join(t.TempDir(), "other-repo")
+	otherBase := initGitRepo(t, otherRepo, "other/pass1/a1")
+	runGit(t, otherRepo, "commit", "--allow-empty", "-m", "other-head")
+	otherHead := strings.TrimSpace(runGit(t, otherRepo, "rev-parse", "HEAD"))
+	require.NotEqual(t, otherBase, otherHead)
+
+	t.Setenv("GIT_DIR", filepath.Join(otherRepo, ".git"))
+	t.Setenv("GIT_WORK_TREE", otherRepo)
+
+	require.NoError(t, fx.step.Run(context.Background(), fx.run))
+
+	manifest := fx.readManifest(t)
+	success := manifest.Value.(contracts.ManifestSuccess)
+	assert.Equal(t, fx.baseSHA, success.HeadSHA)
+	assert.NotEqual(t, otherHead, success.HeadSHA)
+}
+
+func TestRenderPrompt_UsesChecklistAtWorktreeRoot(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	promptText, err := renderPrompt(fx.cfg, promptData{
+		TaskPackage: fx.run.TaskPackage,
+		Agent:       fx.run.Agent,
+		OutputDir:   manifestPrefix(fx.run.Pass, fx.run.Agent),
+		TaskPrompt:  "Implement the requested change.",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, promptText, "checklist_output_path: checklist-result.json")
+	assert.Contains(t, promptText, "checklist-result.json in the worktree root")
+}
+
+type failBeforeStartRunner struct{}
+
+func (failBeforeStartRunner) Run(context.Context, runnerRequest) (runnerResult, error) {
+	return runnerResult{}, errors.New("synthetic start failure")
+}
+
 func TestPidAliveTreatsEPERMAsAlive(t *testing.T) {
 	originalKill := killProcess
 	killProcess = func(pid int, sig syscall.Signal) error {

@@ -128,6 +128,8 @@ func Run(ctx context.Context, in Input) error {
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("step60: stat done marker: %w", err)
+	} else if err := resetStep60Outputs(paths); err != nil {
+		return err
 	}
 
 	scorableRuns, err := collectScorableAgentRuns(in, declaredScorableAgents(in))
@@ -156,6 +158,10 @@ func Run(ctx context.Context, in Input) error {
 		PromptVersion: in.PromptVersion,
 		ResolvedAt:    resolvedAt,
 	}
+	rawState, err := loadStep60RawState(paths)
+	if err != nil {
+		return err
+	}
 
 	finalScores := make([]contracts.ScoreEntry, 0, len(scorableRuns)*len(canonicalDimensions))
 	finalCompliance := make([]contracts.ComplianceEntry, 0, len(scorableRuns))
@@ -163,6 +169,24 @@ func Run(ctx context.Context, in Input) error {
 	completedAgents := make([]contracts.AgentID, 0, len(scorableRuns))
 
 	for _, run := range scorableRuns {
+		outputHash, err := fileSHA256(run.JudgeInput.OutputPath)
+		if err != nil {
+			return fmt.Errorf("step60: hash pass2 output for agent=%s: %w", run.Agent, err)
+		}
+		if result, ok, err := tryReuseRawPanelResult(rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion); err != nil {
+			return err
+		} else if ok {
+			agentScores, agentCompliance, err := appendPanelFinals(paths, meta, result)
+			if err != nil {
+				return err
+			}
+			completedAgents = append(completedAgents, run.Agent)
+			finalScores = append(finalScores, agentScores...)
+			finalCompliance = append(finalCompliance, agentCompliance...)
+			pass2ScoresByAgent[run.Agent] = agentScores
+			continue
+		}
+
 		primaryOutput, err := scoreJudgeOutput(ctx, "primary", in.Primary, run.JudgeInput)
 		if err != nil {
 			return err
@@ -178,10 +202,6 @@ func Run(ctx context.Context, in Input) error {
 		secondaryCompliance := normalizeCompliance(secondaryOutput.Compliance, in.RubricVersion, in.PromptVersion)
 
 		complianceDisagreements := complianceDisagreementRuleIDs(primaryCompliance, secondaryCompliance)
-		outputHash, err := fileSHA256(run.JudgeInput.OutputPath)
-		if err != nil {
-			return fmt.Errorf("step60: hash pass2 output for agent=%s: %w", run.Agent, err)
-		}
 		primaryRawScores, primaryScoreRefs, err := buildRawScores(primaryScores, outputHash, contracts.JudgeRolePrimary, nil, nil, meta.ResolvedAt)
 		if err != nil {
 			return err
@@ -752,9 +772,7 @@ func currentPairwiseState(path string) (int, string, error) {
 
 func resetStep60Outputs(paths step60Paths) error {
 	for _, path := range []string{
-		paths.ScoresRaw,
 		paths.ScoresFinal,
-		paths.ComplianceRaw,
 		paths.ComplianceFinal,
 		paths.Pairwise,
 	} {
@@ -763,6 +781,165 @@ func resetStep60Outputs(paths step60Paths) error {
 		}
 	}
 	return nil
+}
+
+type step60RawState struct {
+	scores     map[contracts.AgentID]map[contracts.JudgeRole]map[contracts.Dimension]contracts.RawScoreEntry
+	compliance map[contracts.AgentID]map[contracts.JudgeRole]map[string]contracts.RawComplianceEntry
+}
+
+func loadStep60RawState(paths step60Paths) (step60RawState, error) {
+	scoreRows, err := readJSONLOrEmpty[contracts.RawScoreEntry](paths.ScoresRaw)
+	if err != nil {
+		return step60RawState{}, err
+	}
+	complianceRows, err := readJSONLOrEmpty[contracts.RawComplianceEntry](paths.ComplianceRaw)
+	if err != nil {
+		return step60RawState{}, err
+	}
+	state := step60RawState{
+		scores:     map[contracts.AgentID]map[contracts.JudgeRole]map[contracts.Dimension]contracts.RawScoreEntry{},
+		compliance: map[contracts.AgentID]map[contracts.JudgeRole]map[string]contracts.RawComplianceEntry{},
+	}
+	for _, row := range reduceRawScores(scoreRows) {
+		state.ensureAgent(row.Agent)
+		state.scores[row.Agent][row.JudgeRole][row.Dimension] = row
+	}
+	for _, row := range reduceRawCompliance(complianceRows) {
+		state.ensureAgent(row.Agent)
+		state.compliance[row.Agent][row.JudgeRole][row.RuleID] = row
+	}
+	return state, nil
+}
+
+func (s *step60RawState) ensureAgent(agent contracts.AgentID) {
+	if _, ok := s.scores[agent]; !ok {
+		s.scores[agent] = map[contracts.JudgeRole]map[contracts.Dimension]contracts.RawScoreEntry{
+			contracts.JudgeRolePrimary:   {},
+			contracts.JudgeRoleSecondary: {},
+			contracts.JudgeRoleArbiter:   {},
+		}
+	}
+	if _, ok := s.compliance[agent]; !ok {
+		s.compliance[agent] = map[contracts.JudgeRole]map[string]contracts.RawComplianceEntry{
+			contracts.JudgeRolePrimary:   {},
+			contracts.JudgeRoleSecondary: {},
+			contracts.JudgeRoleArbiter:   {},
+		}
+	}
+}
+
+func (s step60RawState) scoreRows(agent contracts.AgentID, role contracts.JudgeRole) []contracts.RawScoreEntry {
+	roleRows := s.scores[agent][role]
+	out := make([]contracts.RawScoreEntry, 0, len(roleRows))
+	for _, dimension := range canonicalDimensions {
+		if row, ok := roleRows[dimension]; ok {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func (s step60RawState) complianceRows(agent contracts.AgentID, role contracts.JudgeRole) []contracts.RawComplianceEntry {
+	roleRows := s.compliance[agent][role]
+	ruleIDs := make([]string, 0, len(roleRows))
+	for ruleID := range roleRows {
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	sort.Strings(ruleIDs)
+	out := make([]contracts.RawComplianceEntry, 0, len(ruleIDs))
+	for _, ruleID := range ruleIDs {
+		out = append(out, roleRows[ruleID])
+	}
+	return out
+}
+
+func tryReuseRawPanelResult(state step60RawState, agent contracts.AgentID, outputHash, rubricVersion, promptVersion string) (scorecore.PanelResult, bool, error) {
+	primaryScores := state.scoreRows(agent, contracts.JudgeRolePrimary)
+	secondaryScores := state.scoreRows(agent, contracts.JudgeRoleSecondary)
+	primaryCompliance := state.complianceRows(agent, contracts.JudgeRolePrimary)
+	secondaryCompliance := state.complianceRows(agent, contracts.JudgeRoleSecondary)
+	if !rawRoleUsable(primaryScores, outputHash, rubricVersion, promptVersion) || !rawRoleUsable(secondaryScores, outputHash, rubricVersion, promptVersion) {
+		return scorecore.PanelResult{}, false, nil
+	}
+	if !rawComplianceUsable(primaryCompliance, outputHash, rubricVersion, promptVersion) || !rawComplianceUsable(secondaryCompliance, outputHash, rubricVersion, promptVersion) {
+		return scorecore.PanelResult{}, false, nil
+	}
+	arbiterScores := state.scoreRows(agent, contracts.JudgeRoleArbiter)
+	arbiterCompliance := state.complianceRows(agent, contracts.JudgeRoleArbiter)
+	if !rawRoleUsable(arbiterScores, outputHash, rubricVersion, promptVersion) {
+		arbiterScores = nil
+	}
+	if !rawComplianceUsable(arbiterCompliance, outputHash, rubricVersion, promptVersion) {
+		arbiterCompliance = nil
+	}
+	result, err := scorecore.BuildFinalResultFromRaw(
+		primaryScores,
+		secondaryScores,
+		arbiterScores,
+		primaryCompliance,
+		secondaryCompliance,
+		arbiterCompliance,
+		defaultDisagreementThreshold,
+		true,
+		len(arbiterScores) > 0 || len(arbiterCompliance) > 0,
+	)
+	if err != nil {
+		return scorecore.PanelResult{}, false, nil
+	}
+	return result, true, nil
+}
+
+func appendPanelFinals(paths step60Paths, meta finalMetadata, result scorecore.PanelResult) ([]contracts.ScoreEntry, []contracts.ComplianceEntry, error) {
+	finalScores := make([]contracts.ScoreEntry, 0, len(result.FinalScores))
+	finalCompliance := make([]contracts.ComplianceEntry, 0, len(result.FinalCompliance))
+	for _, row := range result.FinalScores {
+		finalScore := finalizeScore(meta, row, row.VerdictPath)
+		if err := appendJSONLWithParentDirSync(paths.ScoresFinal, finalScore); err != nil {
+			return nil, nil, err
+		}
+		finalScores = append(finalScores, finalScore)
+	}
+	for _, row := range result.FinalCompliance {
+		finalEntry := finalizeCompliance(meta, row, row.VerdictPath)
+		if err := appendJSONLWithParentDirSync(paths.ComplianceFinal, finalEntry); err != nil {
+			return nil, nil, err
+		}
+		finalCompliance = append(finalCompliance, finalEntry)
+	}
+	return finalScores, finalCompliance, nil
+}
+
+func rawRoleUsable(rows []contracts.RawScoreEntry, outputHash, rubricVersion, promptVersion string) bool {
+	if len(rows) != len(canonicalDimensions) {
+		return false
+	}
+	for _, row := range rows {
+		if row.OutputSha256 != outputHash || row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false
+		}
+	}
+	return true
+}
+
+func rawComplianceUsable(rows []contracts.RawComplianceEntry, outputHash, rubricVersion, promptVersion string) bool {
+	for _, row := range rows {
+		if row.OutputSha256 != outputHash || row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false
+		}
+	}
+	return true
+}
+
+func readJSONLOrEmpty[T any](path string) ([]T, error) {
+	rows, err := internalio.ReadJSONL[T](path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return rows, nil
 }
 
 func minInt(left, right int) int {

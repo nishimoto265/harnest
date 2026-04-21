@@ -16,6 +16,10 @@ if [ "${FAKE_SKIP_CHECKLIST:-0}" != "1" ]; then
 EOF
 fi
 
+if [ -n "${FAKE_CHECKOUT_REF_BEFORE_COMMIT:-}" ]; then
+  git checkout "${FAKE_CHECKOUT_REF_BEFORE_COMMIT}"
+fi
+
 git add -A
 git commit -m "fake implementation"
 

@@ -1,9 +1,12 @@
 package io
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 type FileLock struct {
@@ -16,6 +19,14 @@ func AcquirePromotionLock(ctx RunContext) (*FileLock, error) {
 }
 
 func AcquireFileLock(path string) (*FileLock, error) {
+	return acquireFileLock(path, false, nil)
+}
+
+func AcquireFileLockContext(ctx context.Context, path string) (*FileLock, error) {
+	return acquireFileLock(path, true, ctx)
+}
+
+func acquireFileLock(path string, nonBlocking bool, ctx context.Context) (*FileLock, error) {
 	if err := os.MkdirAll(filepath.Dir(path), defaultDirectoryPerm); err != nil {
 		return nil, err
 	}
@@ -23,7 +34,28 @@ func AcquireFileLock(path string) (*FileLock, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	mode := syscall.LOCK_EX
+	if nonBlocking {
+		mode |= syscall.LOCK_NB
+		for {
+			if err := syscall.Flock(int(f.Fd()), mode); err == nil {
+				return &FileLock{path: path, file: f}, nil
+			} else if !errors.Is(err, syscall.EWOULDBLOCK) {
+				_ = f.Close()
+				return nil, err
+			}
+			if ctx != nil {
+				select {
+				case <-ctx.Done():
+					_ = f.Close()
+					return nil, ctx.Err()
+				case <-time.After(50 * time.Millisecond):
+				}
+				continue
+			}
+		}
+	}
+	if err := syscall.Flock(int(f.Fd()), mode); err != nil {
 		_ = f.Close()
 		return nil, err
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 )
 
 // RealGitOps executes the production git commands against the source repo.
@@ -20,6 +21,7 @@ type RealGitOps struct {
 func (g RealGitOps) RemoteHead(ctx context.Context, branch string) (string, error) {
 	remote := g.remoteName()
 	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "ls-remote", "--heads", remote, branch)
+	cmd.Env = processenv.Sanitize()
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -39,6 +41,7 @@ func (g RealGitOps) PushForceWithLease(ctx context.Context, branch, targetSHA, e
 	refspec := fmt.Sprintf("%s:%s", targetSHA, branch)
 	lease := fmt.Sprintf("--force-with-lease=%s:%s", branch, expected)
 	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "push", remote, refspec, lease)
+	cmd.Env = processenv.Sanitize()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -63,6 +66,7 @@ func (g RealGitOps) RemoveWorktree(ctx context.Context, path string) error {
 		return fmt.Errorf("step70: git worktree remove refused for unregistered path %s", path)
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "worktree", "remove", "--force", path)
+	cmd.Env = processenv.Sanitize()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -95,6 +99,7 @@ func (g RealGitOps) remoteName() string {
 
 func (g RealGitOps) worktreeBelongsToRepo(ctx context.Context, path string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "worktree", "list", "--porcelain")
+	cmd.Env = processenv.Sanitize()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

@@ -228,16 +228,11 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	if err != nil {
 		return err
 	}
-	diffBytes, err := successDiffBytes(ctx, allocation.Path, allocation.BaseSHA)
-	if err != nil {
-		return err
-	}
-
 	diffPath, err := artifactPath(run.IO, run.Pass, run.Agent, diffFileName)
 	if err != nil {
 		return err
 	}
-	if err := internalio.WriteAtomic(diffPath, diffBytes); err != nil {
+	if err := agentrunner.WriteSuccessDiff(ctx, allocation.Path, allocation.BaseSHA, "step20", diffPath); err != nil {
 		return err
 	}
 

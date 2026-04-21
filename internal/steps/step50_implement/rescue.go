@@ -17,6 +17,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
@@ -249,12 +250,20 @@ func verifyRescueState(rescueDir string) error {
 
 func writeCommitBundle(ctx context.Context, repoPath, rescueDir, expectedBaseSHA string) (int, string, error) {
 	revListOutput, err := gitOutputBytesContext(ctx, repoPath, "rev-list", expectedBaseSHA+"..HEAD")
-	if err == nil && len(strings.Fields(string(revListOutput))) > 0 {
+	if err == nil {
+		commits := strings.Fields(string(revListOutput))
+		if len(commits) == 0 {
+			bundlePath := filepath.Join(rescueDir, "commits.bundle")
+			if err := writeAtomicImpl(bundlePath, nil); err != nil {
+				return 0, "", err
+			}
+			return 0, agentrunner.RescueBundleModeNone, nil
+		}
 		bundlePath := filepath.Join(rescueDir, "commits.bundle")
 		if err := runGitCommand(ctx, repoPath, "bundle", "create", bundlePath, expectedBaseSHA+"..HEAD"); err != nil {
 			return 0, "", err
 		}
-		return len(strings.Fields(string(revListOutput))), agentrunner.RescueBundleModeRange, nil
+		return len(commits), agentrunner.RescueBundleModeRange, nil
 	}
 
 	headOutput, err := gitOutputBytesContext(ctx, repoPath, "rev-list", "HEAD")
@@ -270,6 +279,7 @@ func writeCommitBundle(ctx context.Context, repoPath, rescueDir, expectedBaseSHA
 
 func runGitCommand(ctx context.Context, dir string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = processenv.Sanitize()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("step50: git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
@@ -279,6 +289,7 @@ func runGitCommand(ctx context.Context, dir string, args ...string) error {
 
 func gitOutputBytesContext(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = processenv.Sanitize()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()

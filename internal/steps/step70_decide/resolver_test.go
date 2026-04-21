@@ -3,6 +3,7 @@ package step70_decide
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,6 +103,83 @@ func TestResolveWinningAgent_CollapsesLatestScoresAndPairwiseRows(t *testing.T) 
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, contracts.AgentID("a2"), winningAgent)
+}
+
+func TestLatestRuleSha256_UsesRollbackAwareEffectiveState(t *testing.T) {
+	lines := []registryLine{
+		{Entry: contracts.RuleRegistryEntry{
+			Kind: contracts.RegistryKindAdded,
+			Value: contracts.RuleRegistryAdded{
+				Kind:           contracts.RegistryKindAdded,
+				SchemaVersion:  "1",
+				RuleID:         "rule-a",
+				RulePath:       "rules/rule-a.md",
+				Sha256:         strings.Repeat("1", 64),
+				IdempotencyKey: strings.Repeat("a", 64),
+				VersionSeq:     1,
+				ByRunID:        "2026-04-21-PR42-abcdef0",
+				At:             time.Now().UTC(),
+			},
+		}},
+		{Entry: contracts.RuleRegistryEntry{
+			Kind: contracts.RegistryKindUpdated,
+			Value: contracts.RuleRegistryUpdated{
+				Kind:           contracts.RegistryKindUpdated,
+				SchemaVersion:  "1",
+				RuleID:         "rule-a",
+				RulePath:       "rules/rule-a.md",
+				Sha256:         strings.Repeat("2", 64),
+				PrevSha256:     strings.Repeat("1", 64),
+				IdempotencyKey: strings.Repeat("b", 64),
+				VersionSeq:     2,
+				PrevHash:       strings.Repeat("f", 64),
+				ByRunID:        "2026-04-21-PR42-abcdef0",
+				At:             time.Now().UTC(),
+			},
+		}},
+		{Entry: contracts.RuleRegistryEntry{
+			Kind: contracts.RegistryKindRolledBack,
+			Value: contracts.RuleRegistryRolledBack{
+				Kind:           contracts.RegistryKindRolledBack,
+				SchemaVersion:  "1",
+				TargetOpID:     strings.Repeat("b", 64),
+				TargetOffset:   1,
+				TargetSha256:   strings.Repeat("2", 64),
+				ByRunID:        "2026-04-21-PR42-abcdef0",
+				RollbackReason: contracts.RollbackReasonTransactionalFailure,
+				FailedStep:     contracts.FailedStep70,
+				VersionSeq:     3,
+				PrevHash:       strings.Repeat("e", 64),
+				At:             time.Now().UTC(),
+			},
+		}},
+	}
+
+	got, err := latestRuleSha256(lines, "rule-a")
+	require.NoError(t, err)
+	assert.Equal(t, strings.Repeat("1", 64), got)
+}
+
+func TestLatestRuleSha256_RejectsInvalidExistingRulePath(t *testing.T) {
+	lines := []registryLine{
+		{Entry: contracts.RuleRegistryEntry{
+			Kind: contracts.RegistryKindAdded,
+			Value: contracts.RuleRegistryAdded{
+				Kind:           contracts.RegistryKindAdded,
+				SchemaVersion:  "1",
+				RuleID:         "rule-a",
+				RulePath:       "../needs-recovery/pwn.md",
+				Sha256:         strings.Repeat("1", 64),
+				IdempotencyKey: strings.Repeat("a", 64),
+				VersionSeq:     1,
+				ByRunID:        "2026-04-21-PR42-abcdef0",
+				At:             time.Now().UTC(),
+			},
+		}},
+	}
+
+	_, err := latestRuleSha256(lines, "rule-a")
+	require.ErrorContains(t, err, "invalid rule_path")
 }
 
 func newResolverRunContext(t *testing.T) internalio.RunContext {

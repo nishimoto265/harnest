@@ -11,6 +11,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/registryview"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 )
 
@@ -147,8 +148,14 @@ func (r FilesystemResolver) buildRegistryEntry(runCtx internalio.RunContext, can
 	if ruleID == "" {
 		return contracts.RuleRegistryEntry{}, fmt.Errorf("step70: missing rule_id for candidate %s", candidate.CandidateID)
 	}
+	if err := contracts.ValidateRuleID(ruleID); err != nil {
+		return contracts.RuleRegistryEntry{}, err
+	}
 
 	rulePath := filepath.Join("rules", ruleID+".md")
+	if err := contracts.ValidateRulePath(rulePath); err != nil {
+		return contracts.RuleRegistryEntry{}, err
+	}
 	if err := materializeRuleSidecar(runCtx, candidate, rulePath); err != nil {
 		return contracts.RuleRegistryEntry{}, err
 	}
@@ -193,22 +200,25 @@ func (r FilesystemResolver) buildRegistryEntry(runCtx internalio.RunContext, can
 }
 
 func latestRuleSha256(lines []registryLine, ruleID string) (string, error) {
-	for i := len(lines) - 1; i >= 0; i-- {
-		switch v := lines[i].Entry.Value.(type) {
-		case contracts.RuleRegistryUpdated:
-			if v.RuleID == ruleID {
-				return v.Sha256, nil
-			}
-		case contracts.RuleRegistryAdded:
-			if v.RuleID == ruleID {
-				return v.Sha256, nil
-			}
-		}
+	entries := make([]contracts.RuleRegistryEntry, 0, len(lines))
+	for _, line := range lines {
+		entries = append(entries, line.Entry)
 	}
-	return "", fmt.Errorf("step70: no prior rule content found for update rule_id=%s", ruleID)
+	states, err := registryview.Build(entries)
+	if err != nil {
+		return "", err
+	}
+	state, ok := states[ruleID]
+	if !ok || state.Sha256 == "" {
+		return "", fmt.Errorf("step70: no prior rule content found for update rule_id=%s", ruleID)
+	}
+	return state.Sha256, nil
 }
 
 func materializeRuleSidecar(runCtx internalio.RunContext, candidate contracts.Candidate, rulePath string) error {
+	if err := contracts.ValidateRulePath(rulePath); err != nil {
+		return err
+	}
 	srcPath, err := runCtx.ResolveRunRelative(candidate.ProposedBodyPath)
 	if err != nil {
 		return err

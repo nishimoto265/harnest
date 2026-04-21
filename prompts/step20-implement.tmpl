@@ -5,13 +5,14 @@ Inputs
 - run_id: {{ .TaskPackage.RunID }}
 - pass: 1
 - agent: {{ .Agent }}
-- output_dir: 20-pass1/{{ .Agent }}
+- run_artifact_dir: 20-pass1/{{ .Agent }}
+- checklist_output_path: checklist-result.json (write this at the worktree root)
 
 Expected artifacts
 - manifest.json
 - session.jsonl
 - diff.patch
-- checklist-result.json
+- checklist-result.json in the worktree root
 
 Manifest shape
 - kind: success | error | timeout

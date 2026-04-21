@@ -17,6 +17,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -335,13 +336,25 @@ func TestLoadRulePayloadsRejectsPathTraversal(t *testing.T) {
 				ProposedBodyPath:   "40/candidates/good.md",
 				ProposedBodySha256: bodySHA,
 			},
-			wantErr: `invalid target_rule_id "../rule"`,
+			wantErr: `invalid rule_id`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			writeCandidatesFileAtPath(t, candidatesPath, env.run.IO.RunID, []contracts.Candidate{tt.candidate})
+			if tt.name == "target_rule_id traversal" {
+				require.NoError(t, os.MkdirAll(filepath.Dir(candidatesPath), 0o755))
+				require.NoError(t, os.WriteFile(candidatesPath, []byte(`{"schema_version":"1","run_id":"`+string(env.run.IO.RunID)+`","candidates":[{"candidate_id":"cand-1","kind":"update","target_rule_id":"../rule","title":"Bad target rule id","proposed_body_path":"40/candidates/good.md","proposed_body_sha256":"`+bodySHA+`"}],"candidates_hash":"`+contracts.CanonicalCandidatesHash([]contracts.Candidate{{
+					CandidateID:        "cand-1",
+					Kind:               contracts.CandidateKindUpdate,
+					TargetRuleID:       "../rule",
+					Title:              "Bad target rule id",
+					ProposedBodyPath:   "40/candidates/good.md",
+					ProposedBodySha256: bodySHA,
+				}})+`","created_at":"2026-04-21T00:00:00Z"}`), 0o644))
+			} else {
+				writeCandidatesFileAtPath(t, candidatesPath, env.run.IO.RunID, []contracts.Candidate{tt.candidate})
+			}
 			_, err := LoadRulePayloads(candidatesPath)
 			require.ErrorContains(t, err, tt.wantErr)
 		})
@@ -359,7 +372,7 @@ func TestLoadRulePayloads_SkipsDuplicateCandidates(t *testing.T) {
 	candidateDuplicate := writeCandidateSidecar(t, env.run.IO, contracts.Candidate{
 		CandidateID:      "cand-dup",
 		Kind:             contracts.CandidateKindDuplicate,
-		TargetRuleID:     "rule.v1",
+		TargetRuleID:     "rule-v1",
 		Title:            "Duplicate rule",
 		ProposedBodyPath: "40/candidates/cand-dup.md",
 	}, "# cand-dup\nduplicate body\n")
@@ -373,12 +386,12 @@ func TestLoadRulePayloads_SkipsDuplicateCandidates(t *testing.T) {
 	assert.Equal(t, "cand-new", payloads[0].ID)
 }
 
-func TestLoadRulePayloads_AllowsNonRegexRuleID(t *testing.T) {
+func TestLoadRulePayloads_AllowsValidatedRuleID(t *testing.T) {
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
 	candidate := writeCandidateSidecar(t, env.run.IO, contracts.Candidate{
 		CandidateID:      "cand-1",
 		Kind:             contracts.CandidateKindUpdate,
-		TargetRuleID:     "rule.v1",
+		TargetRuleID:     "rule-v1",
 		Title:            "Updated rule",
 		ProposedBodyPath: "40/candidates/cand-1.md",
 	}, "# cand-1\nupdated body\n")
@@ -389,7 +402,7 @@ func TestLoadRulePayloads_AllowsNonRegexRuleID(t *testing.T) {
 	payloads, err := LoadRulePayloads(candidatesPath)
 	require.NoError(t, err)
 	require.Len(t, payloads, 1)
-	assert.Equal(t, "rule.v1", payloads[0].TargetRuleID)
+	assert.Equal(t, "rule-v1", payloads[0].TargetRuleID)
 }
 
 func TestCopyUntrackedFiles_SkipsSymlinksAndKeepsWhitespaceNames(t *testing.T) {
@@ -429,9 +442,42 @@ func TestShouldWriteTimeoutManifestRequiresRunError(t *testing.T) {
 	assert.True(t, shouldWriteTimeoutManifest(errors.New("run failed"), execCtx))
 }
 
+func TestWriteCommitBundle_ZeroCommitProducesEmptyBundle(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	rescueDir := t.TempDir()
+
+	commitCount, bundleMode, err := writeCommitBundle(context.Background(), env.run.TaskPackage.Worktrees[3].Path, rescueDir, env.run.TaskPackage.BaseSHA)
+	require.NoError(t, err)
+	assert.Equal(t, 0, commitCount)
+	assert.Equal(t, agentrunner.RescueBundleModeNone, bundleMode)
+
+	bundlePath := filepath.Join(rescueDir, "commits.bundle")
+	info, statErr := os.Stat(bundlePath)
+	require.NoError(t, statErr)
+	assert.EqualValues(t, 0, info.Size())
+}
+
+func TestStepRun_RejectsDetachedForeignHead(t *testing.T) {
+	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
+	t.Setenv("FAKE_AGENT", "a1")
+
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	runCommand(t, env.repoDir, "git", "checkout", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(env.repoDir, "foreign.txt"), []byte("foreign\n"), 0o644))
+	runCommand(t, env.repoDir, "git", "add", "foreign.txt")
+	runCommand(t, env.repoDir, "git", "commit", "-m", "foreign commit")
+	foreignSHA := strings.TrimSpace(runCommand(t, env.repoDir, "git", "rev-parse", "HEAD"))
+	runCommand(t, env.repoDir, "git", "checkout", "main")
+
+	t.Setenv("FAKE_CHECKOUT_REF_BEFORE_COMMIT", foreignSHA)
+	err := (Step{}).Run(context.Background(), env.run)
+	require.ErrorContains(t, err, "current branch mismatch")
+}
+
 type stepTestEnv struct {
 	run          RunContext
 	manifestPath string
+	repoDir      string
 }
 
 func newStepTestEnv(t *testing.T, script string, timeoutSeconds int) stepTestEnv {
@@ -491,6 +537,7 @@ func newStepTestEnv(t *testing.T, script string, timeoutSeconds int) stepTestEnv
 	return stepTestEnv{
 		run:          run,
 		manifestPath: manifestPath,
+		repoDir:      repoDir,
 	}
 }
 

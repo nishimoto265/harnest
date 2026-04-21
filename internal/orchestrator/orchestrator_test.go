@@ -20,6 +20,7 @@ import (
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 	"github.com/nishimoto265/auto-improve/internal/steps/step20_implement"
 	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
 	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
@@ -433,7 +434,7 @@ func TestRun_Step70NeedsManualRecovery_EndToEnd(t *testing.T) {
 	events, err := state.ScanEventsForRun(runCtx, runID)
 	require.NoError(t, err)
 	require.NotEmpty(t, events)
-	assert.Equal(t, contracts.StateKindNeedsManualRecovery, events[len(events)-1].Kind)
+	assert.Contains(t, eventKinds(events), contracts.StateKindNeedsManualRecovery)
 }
 
 func TestRun_DuplicateOnlyCandidatesSkipPass2AndStep60(t *testing.T) {
@@ -482,7 +483,42 @@ func TestRun_RescueExhaustedDoesNotWriteGlobalSentinel(t *testing.T) {
 	events, err := state.ScanEventsForRun(runCtx, runID)
 	require.NoError(t, err)
 	require.NotEmpty(t, events)
-	assert.Equal(t, contracts.StateKindNeedsManualRecovery, events[len(events)-1].Kind)
+	assert.Contains(t, eventKinds(events), contracts.StateKindNeedsManualRecovery)
+	manualIndex := -1
+	warningIndex := -1
+	for idx, event := range events {
+		if event.Kind == contracts.StateKindNeedsManualRecovery && manualIndex == -1 {
+			manualIndex = idx
+		}
+		if event.Kind == contracts.StateKindWarningRescueRetry && warningIndex == -1 {
+			warningIndex = idx
+		}
+	}
+	require.NotEqual(t, -1, manualIndex)
+	require.NotEqual(t, -1, warningIndex)
+	assert.Less(t, manualIndex, warningIndex)
+}
+
+func TestRun_RescueExhaustedDoesNotBlockOtherPRs(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	orch.steps.Step10 = stubStep10{}
+	orch.steps.Step20 = map[contracts.AgentID]Step{
+		"a1": rescueExhaustedStep{},
+		"a2": rescueExhaustedStep{},
+		"a3": rescueExhaustedStep{},
+	}
+
+	require.NoError(t, orch.Run(context.Background(), 77, RunOptions{RunID: "2026-04-21-PR77-abcdef0"}))
+
+	other, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	other.steps.Step10 = stubStep10{}
+	other.steps.Step20 = stubAgentSteps()
+	other.steps.Step70 = stubStep70{}
+	require.NoError(t, other.Run(context.Background(), 78, RunOptions{RunID: "2026-04-21-PR78-abcdef0"}))
 }
 
 func TestRun_ResumeStep30WithNoScorableAgentsFailsImmediately(t *testing.T) {
@@ -570,6 +606,7 @@ func TestStubStep40_UsesRequestBoundDecoder(t *testing.T) {
 		PromptVersion: "phase0",
 		ResolvedAt:    time.Now().UTC(),
 	}))
+	require.NoError(t, writeValidStep30ArtifactsForTest(runCtx))
 	require.NoError(t, internalio.WriteAtomic(runCtx.RulesRegistryPath(), nil))
 
 	called := false
@@ -591,6 +628,137 @@ func TestStubStep40_UsesRequestBoundDecoder(t *testing.T) {
 	assert.True(t, called)
 	require.NotNil(t, run.Candidates)
 	assert.Len(t, run.Candidates.Candidates, 1)
+}
+
+func TestRun_Step70TerminalEventSkipsStepDoneAndNextTickDoesNotResume(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	orch.steps.Step10 = stubStep10{}
+	orch.steps.Step20 = stubAgentSteps()
+	orch.steps.Step30 = stubMarkerStep{path: "30/done.marker"}
+	orch.steps.Step40 = duplicateOnlyCandidateStep{}
+	orch.steps.Step50 = stubAgentSteps()
+	orch.steps.Step60 = scriptedStep60Step{decode: orch.decoders.Step60}
+	orch.steps.Step70 = terminalPromoteStep{}
+
+	runID := contracts.RunID("2026-04-21-PR80-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 80, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	latest, err := state.LatestRunForPR(runCtx, 80)
+	require.NoError(t, err)
+	require.NotNil(t, latest.LastEvent)
+	assert.Equal(t, contracts.StateKindPromoted, latest.LastEvent.Kind)
+	assert.Equal(t, state.NextActionFreshStart, latest.Action)
+}
+
+func TestRun_LeaseContentionBecomesInterruptedAndResumeSucceeds(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	leaseStep := &leaseContendedOnceStep{}
+	orch.steps.Step10 = stubStep10{}
+	orch.steps.Step20 = map[contracts.AgentID]Step{
+		"a1": leaseStep,
+		"a2": stubImplementStep{},
+		"a3": stubImplementStep{},
+	}
+	orch.steps.Step30 = stubMarkerStep{path: "30/done.marker"}
+	orch.steps.Step40 = duplicateOnlyCandidateStep{}
+	orch.steps.Step70 = stubStep70{}
+
+	runID := contracts.RunID("2026-04-21-PR81-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 81, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	assert.Contains(t, eventKinds(events), contracts.StateKindInterrupted)
+
+	require.NoError(t, orch.Run(context.Background(), 81, RunOptions{RunID: runID}))
+	events, err = state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	assert.Contains(t, eventKinds(events), contracts.StateKindCompleted)
+}
+
+func TestRealStep70_RejectsTamperedFreshDecision(t *testing.T) {
+	cfg := testConfig(t)
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR82-abcdef0", cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
+
+	pkg := stubTaskPackageForRun(runCtx, 82)
+	candidates := forcedCandidate(runCtx.RunID)
+	run := &StepRunContext{
+		Config:        cfg,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PR:            82,
+		IO:            runCtx,
+		TaskPackage:   &pkg,
+		Candidates:    candidates,
+		IntentionFile: NewIntentionStore(runCtx),
+	}
+	step := realStep70{
+		cfg: cfg,
+		decode: func(data []byte, req any) (any, error) {
+			return stepio.DecodeAndValidateStep70Response(data, req.(stepio.Step70Request))
+		},
+		runFn: func(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, store step70_decide.IntentionWriter, deps step70_decide.Deps) error {
+			_ = ctx
+			_ = pr
+			_ = store
+			_ = deps
+			path, err := runCtx.ResolveRunRelative("70/decision.json")
+			if err != nil {
+				return err
+			}
+			return internalio.WriteJSONAtomic(path, contracts.Decision{
+				Action: contracts.DecisionActionNoop,
+				Value: contracts.DecisionNoop{
+					Action:        contracts.DecisionActionNoop,
+					SchemaVersion: "1",
+					RunID:         "2026-04-21-PR999-deadbee",
+					Reason:        "tampered",
+					DecidedAt:     time.Now().UTC(),
+				},
+			})
+		},
+	}
+
+	err = step.Run(context.Background(), run)
+	require.ErrorContains(t, err, "run_id")
+}
+
+func TestLoadRunContext_RejectsTaskPackageRunIDMismatch(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR83-abcdef0", runsBase, worktreeBase)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
+
+	pkg := stubTaskPackageForRun(runCtx, 83)
+	pkg.RunID = "2026-04-21-PR84-badcafe"
+	require.NoError(t, internalio.WriteJSONAtomic(runCtx.TaskPackagePath(), pkg))
+
+	_, err = loadRunContext(runCtx.RunID, runsBase, worktreeBase)
+	require.ErrorContains(t, err, "task package run_id mismatch")
+}
+
+func TestFirstNeedsRecoverySentinel_MalformedJSONMaintainsBlockedState(t *testing.T) {
+	runsBase := t.TempDir()
+	path := filepath.Join(runsBase, "needs-recovery", "2026-04-21-PR99-deadbee.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("{not-json"), 0o644))
+
+	sentinel, blocked, err := firstNeedsRecoverySentinel(runsBase)
+	require.NoError(t, err)
+	assert.True(t, blocked)
+	assert.Equal(t, contracts.RunID("2026-04-21-PR99-deadbee"), sentinel.RunID)
 }
 
 func TestRun_ResumeFromBranchPushed_EndToEnd(t *testing.T) {
@@ -847,6 +1015,85 @@ func (rescueExhaustedStep) Run(ctx context.Context, run *StepRunContext) error {
 	}
 }
 
+type leaseContendedOnceStep struct {
+	mu   sync.Mutex
+	seen bool
+}
+
+func (s *leaseContendedOnceStep) Run(ctx context.Context, run *StepRunContext) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.seen {
+		s.seen = true
+		return fmt.Errorf("%w: agent %s", step20_implement.ErrAgentLeaseContended, run.Agent)
+	}
+	return stubImplementStep{}.Run(ctx, run)
+}
+
+type terminalPromoteStep struct{}
+
+func (terminalPromoteStep) Run(ctx context.Context, run *StepRunContext) error {
+	_ = ctx
+	path, err := run.IO.ResolveRunRelative("70/decision.json")
+	if err != nil {
+		return err
+	}
+	bestShaBefore := strings.Repeat("1", 40)
+	targetSha := strings.Repeat("2", 40)
+	candidatesHash := strings.Repeat("3", 64)
+	decision := contracts.Decision{
+		Action: contracts.DecisionActionAdopt,
+		Value: contracts.DecisionAdopt{
+			Action:        contracts.DecisionActionAdopt,
+			SchemaVersion: "1",
+			RunID:         run.IO.RunID,
+			IdempotencyKey: contracts.ComputeAdoptIdempotencyKey(
+				string(run.IO.RunID),
+				targetSha,
+				bestShaBefore,
+				candidatesHash,
+			),
+			BestShaBefore:  bestShaBefore,
+			TargetSha:      targetSha,
+			CandidatesHash: candidatesHash,
+			RegistryAppendResult: contracts.RegistryAppendResult{
+				Offset: 0,
+				Sha256: strings.Repeat("a", 64),
+			},
+			DecidedAt: time.Now().UTC(),
+		},
+	}
+	if err := internalio.WriteJSONAtomic(path, decision); err != nil {
+		return err
+	}
+	writer := state.NewWriter(run.IO)
+	if err := writer.Append(promotedEntry(run.PR, run.IO.RunID, time.Now().UTC())); err != nil {
+		return err
+	}
+	run.Decision = &decision
+	return nil
+}
+
+func forcedCandidate(runID contracts.RunID) *contracts.Candidates {
+	body := "# Forced rule\n\nUse explicit resource cleanup.\n"
+	candidate := contracts.Candidate{
+		CandidateID:        "cand-forced-001",
+		Kind:               contracts.CandidateKindNew,
+		Title:              "Forced rule",
+		Problem:            "problem",
+		Rationale:          "rationale",
+		ProposedBodyPath:   "40/candidates/cand-forced-001.md",
+		ProposedBodySha256: sha256String(body),
+	}
+	return &contracts.Candidates{
+		SchemaVersion:  "1",
+		RunID:          runID,
+		Candidates:     []contracts.Candidate{candidate},
+		CandidatesHash: contracts.CanonicalCandidatesHash([]contracts.Candidate{candidate}),
+		CreatedAt:      time.Now().UTC(),
+	}
+}
+
 type scriptedStep60Step struct {
 	decode func([]byte, any) (any, error)
 }
@@ -1032,7 +1279,10 @@ state_dir="${AUTO_IMPROVE_GIT_STATE_DIR}"
 mkdir -p "$state_dir"
 
 if [ "${1:-}" = "-C" ]; then
+  repo_dir="$2"
   shift 2
+else
+  repo_dir="$(pwd)"
 fi
 
 subcmd="$1"
@@ -1047,8 +1297,17 @@ case "$subcmd" in
     case "${1:-}" in
       *^1) echo "${AUTO_IMPROVE_TEST_BASE_SHA}" ;;
       HEAD) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
+      refs/heads/*) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
       *) echo "${AUTO_IMPROVE_TEST_BEST_SHA}" ;;
     esac
+    ;;
+  fetch)
+    exit 0
+    ;;
+  merge-base)
+    if [ "${1:-}" = "--is-ancestor" ]; then
+      exit 0
+    fi
     ;;
   worktree)
     case "${1:-}" in
@@ -1076,7 +1335,15 @@ case "$subcmd" in
     exit 0
     ;;
   branch)
-    echo "stub-branch"
+    case "$(basename "$repo_dir")" in
+      *-pass1-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a1$//')/pass1/a1" ;;
+      *-pass1-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a2$//')/pass1/a2" ;;
+      *-pass1-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a3$//')/pass1/a3" ;;
+      *-pass2-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a1$//')/pass2/a1" ;;
+      *-pass2-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a2$//')/pass2/a2" ;;
+      *-pass2-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a3$//')/pass2/a3" ;;
+      *) echo "stub-branch" ;;
+    esac
     ;;
   ls-remote)
     if [ -f "$state_dir/after-push" ]; then
@@ -1104,7 +1371,10 @@ state_dir="${AUTO_IMPROVE_GIT_STATE_DIR}"
 mkdir -p "$state_dir"
 
 if [ "${1:-}" = "-C" ]; then
+  repo_dir="$2"
   shift 2
+else
+  repo_dir="$(pwd)"
 fi
 
 subcmd="$1"
@@ -1119,8 +1389,17 @@ case "$subcmd" in
     case "${1:-}" in
       *^1) echo "${AUTO_IMPROVE_TEST_BASE_SHA}" ;;
       HEAD) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
+      refs/heads/*) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
       *) echo "${AUTO_IMPROVE_TEST_BEST_SHA}" ;;
     esac
+    ;;
+  fetch)
+    exit 0
+    ;;
+  merge-base)
+    if [ "${1:-}" = "--is-ancestor" ]; then
+      exit 0
+    fi
     ;;
   worktree)
     case "${1:-}" in
@@ -1148,7 +1427,15 @@ case "$subcmd" in
     exit 0
     ;;
   branch)
-    echo "stub-branch"
+    case "$(basename "$repo_dir")" in
+      *-pass1-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a1$//')/pass1/a1" ;;
+      *-pass1-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a2$//')/pass1/a2" ;;
+      *-pass1-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a3$//')/pass1/a3" ;;
+      *-pass2-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a1$//')/pass2/a1" ;;
+      *-pass2-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a2$//')/pass2/a2" ;;
+      *-pass2-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a3$//')/pass2/a3" ;;
+      *) echo "stub-branch" ;;
+    esac
     ;;
   ls-remote)
     branch="${4:-best}"
@@ -1483,6 +1770,89 @@ func appendJSONLForTest(runCtx internalio.RunContext, rel string, record any) er
 		return err
 	}
 	return internalio.AppendJSONL(path, record)
+}
+
+func writeValidStep30ArtifactsForTest(runCtx internalio.RunContext) error {
+	scoreFinalPath, err := runCtx.ResolveRunRelative("30/scores-A.jsonl")
+	if err != nil {
+		return err
+	}
+	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
+	if err != nil {
+		return err
+	}
+	scoreRawPath, err := runCtx.ResolveRunRelative("30/scores-A-raw.jsonl")
+	if err != nil {
+		return err
+	}
+	complianceRawPath, err := runCtx.ResolveRunRelative("30/compliance-A-raw.jsonl")
+	if err != nil {
+		return err
+	}
+	scoreFinal, err := internalio.ReadJSONL[contracts.ScoreEntry](scoreFinalPath)
+	if err != nil {
+		return err
+	}
+	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](complianceFinalPath)
+	if err != nil {
+		return err
+	}
+	if err := internalio.WriteAtomic(scoreRawPath, nil); err != nil {
+		return err
+	}
+	for _, row := range scoreFinal {
+		if err := internalio.AppendJSONL(scoreRawPath, contracts.RawScoreEntry{
+			SchemaVersion: "1",
+			RunID:         row.RunID,
+			Pass:          row.Pass,
+			Agent:         row.Agent,
+			JudgeRole:     contracts.JudgeRolePrimary,
+			Dimension:     row.Dimension,
+			Score:         row.Score,
+			Reasons:       row.Reasons,
+			OutputSha256:  strings.Repeat("a", 64),
+			RubricVersion: row.RubricVersion,
+			PromptVersion: row.PromptVersion,
+			ResolvedAt:    row.ResolvedAt,
+		}); err != nil {
+			return err
+		}
+	}
+	if err := internalio.WriteAtomic(complianceRawPath, nil); err != nil {
+		return err
+	}
+	for _, row := range complianceFinal {
+		if err := internalio.AppendJSONL(complianceRawPath, contracts.RawComplianceEntry{
+			SchemaVersion: "1",
+			RunID:         row.RunID,
+			Pass:          row.Pass,
+			Agent:         row.Agent,
+			JudgeRole:     contracts.JudgeRolePrimary,
+			RuleID:        row.RuleID,
+			Verdict:       row.Verdict,
+			Rationale:     row.Rationale,
+			OutputSha256:  strings.Repeat("a", 64),
+			RubricVersion: row.RubricVersion,
+			PromptVersion: row.PromptVersion,
+			ResolvedAt:    row.ResolvedAt,
+		}); err != nil {
+			return err
+		}
+	}
+	marker, err := scorecore.BuildStep30DoneMarker(scorecore.Step30MarkerInputs{
+		Agents: []contracts.AgentID{"a1"},
+		Paths: scorecore.Step30MarkerPaths{
+			ScoreFinal:      scoreFinalPath,
+			ComplianceFinal: complianceFinalPath,
+			ScoreRaw:        scoreRawPath,
+			ComplianceRaw:   complianceRawPath,
+		},
+		ResolvedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	return scorecore.WriteStep30DoneMarker(runCtx, marker)
 }
 
 func seedResumeRun(t *testing.T, runCtx internalio.RunContext, pr int) error {

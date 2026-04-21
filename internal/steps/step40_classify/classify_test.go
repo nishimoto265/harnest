@@ -16,13 +16,14 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 )
 
 func TestRun_EmptyInputsFailClosed(t *testing.T) {
 	cfg := newTestConfig(t)
 
 	got, err := Run(context.Background(), cfg)
-	require.ErrorContains(t, err, "missing step30 artifact")
+	require.ErrorContains(t, err, "step30 done.marker is missing or invalid")
 	assert.Nil(t, got)
 }
 
@@ -290,17 +291,66 @@ func TestRun_ClassifiesDuplicateWhenExistingRuleBodyMatchesCandidate(t *testing.
 	assert.Equal(t, "rule-existing", got.Candidates[0].TargetRuleID)
 }
 
+func TestRun_RejectsPartialStep30WithoutDoneMarker(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+	writeCompliance(t, cfg.IO, testComplianceEntry(cfg.IO.RunID, "rule-a", contracts.ComplianceVerdictViolated))
+	require.NoError(t, os.Remove(mustResolveClassifyPath(t, cfg.IO, "30/done.marker")))
+
+	_, err := Run(context.Background(), cfg)
+	require.ErrorContains(t, err, "step30 done.marker is missing or invalid")
+}
+
+func TestRun_RejectsInvalidExistingRulePath(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+	writeCompliance(t, cfg.IO, testComplianceEntry(cfg.IO.RunID, "rule-a", contracts.ComplianceVerdictViolated))
+	require.NoError(t, os.WriteFile(cfg.registryPath(), []byte(`{"kind":"added","schema_version":"1","rule_id":"rule-a","rule_path":"../needs-recovery/pwn.md","sha256":"`+strings.Repeat("1", 64)+`","idempotency_key":"`+strings.Repeat("2", 64)+`","version_seq":1,"by_run_id":"2026-04-21-PR42-abcdef0","at":"2026-04-21T12:00:00Z"}`+"\n"), 0o644))
+
+	_, err := Run(context.Background(), cfg)
+	require.ErrorContains(t, err, "invalid rule_path")
+}
+
+func TestRun_DuplicateClassifierIgnoresRolledBackRuleBody(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+	writeCompliance(t, cfg.IO, testComplianceEntry(cfg.IO.RunID, "rule-dup", contracts.ComplianceVerdictViolated))
+
+	rulesDir := filepath.Join(filepath.Dir(cfg.registryPath()), "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	body := candidateBodyMarkdownWithEvidence(contracts.Candidate{
+		CandidateID:      "cand-existing",
+		Kind:             contracts.CandidateKindUpdate,
+		TargetRuleID:     "rule-dup",
+		Title:            "Rule candidate for rule-dup",
+		Problem:          "problem",
+		Rationale:        "rationale",
+		ProposedBodyPath: "40/candidates/cand-existing.md",
+	}, candidateEvidence{})
+	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "rule-dup.md"), []byte(body), 0o644))
+	writeRegistry(t, cfg.registryPath(),
+		registryAdded("rule-dup", strings.Repeat("9", 64)),
+		registryRolledBack(strings.Repeat("9", 64)),
+	)
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Len(t, got.Candidates, 1)
+	assert.Equal(t, contracts.CandidateKindNew, got.Candidates[0].Kind)
+}
+
 func TestActiveRulesFromRegistry_Variants(t *testing.T) {
 	t.Run("updated entry keeps rule active", func(t *testing.T) {
-		active := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
+		active, err := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
 			registryUpdated("rule-updated", strings.Repeat("a", 64)),
 		})
+		require.NoError(t, err)
 
 		assert.True(t, active["rule-updated"])
 	})
 
 	t.Run("status_changed follows archived state", func(t *testing.T) {
-		active := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
+		active, err := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
 			registryStatusChanged(
 				"rule-status-archived",
 				contracts.RuleStatusActive,
@@ -316,28 +366,31 @@ func TestActiveRulesFromRegistry_Variants(t *testing.T) {
 				strings.Repeat("c", 64),
 			),
 		})
+		require.NoError(t, err)
 
 		assert.False(t, active["rule-status-archived"])
 		assert.True(t, active["rule-status-deprecated"])
 	})
 
 	t.Run("rolled_back added entry restores previous inactive state", func(t *testing.T) {
-		active := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
+		active, err := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
 			registryAdded("rule-rolled-back", strings.Repeat("d", 64)),
 			registryRolledBack(strings.Repeat("d", 64)),
 		})
+		require.NoError(t, err)
 
 		assert.False(t, active["rule-rolled-back"])
 	})
 
 	t.Run("shared rollback target only reverts the latest matching rule", func(t *testing.T) {
 		shared := strings.Repeat("f", 64)
-		active := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
+		active, err := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
 			registryAdded("rule-a", shared),
 			registryAdded("rule-b", shared),
 			registryAdded("rule-c", shared),
 			registryRolledBack(shared),
 		})
+		require.NoError(t, err)
 
 		assert.True(t, active["rule-a"])
 		assert.True(t, active["rule-b"])
@@ -408,6 +461,7 @@ func writeScores(t *testing.T, runIO internalio.RunContext, entries ...contracts
 	path, err := runIO.ResolveRunRelative(scoresPath)
 	require.NoError(t, err)
 	writeJSONL(t, path, entries...)
+	refreshStep30Marker(t, runIO)
 }
 
 func writeCompliance(t *testing.T, runIO internalio.RunContext, entries ...contracts.ComplianceEntry) {
@@ -415,6 +469,7 @@ func writeCompliance(t *testing.T, runIO internalio.RunContext, entries ...contr
 	path, err := runIO.ResolveRunRelative(compliancePath)
 	require.NoError(t, err)
 	writeJSONL(t, path, entries...)
+	refreshStep30Marker(t, runIO)
 }
 
 func writeRegistry(t *testing.T, path string, entries ...contracts.RuleRegistryEntry) {
@@ -439,6 +494,13 @@ func readCandidatesFile(t *testing.T, runIO internalio.RunContext) contracts.Can
 	return got
 }
 
+func mustResolveClassifyPath(t *testing.T, runIO internalio.RunContext, rel string) string {
+	t.Helper()
+	path, err := runIO.ResolveRunRelative(rel)
+	require.NoError(t, err)
+	return path
+}
+
 func readClassificationFile(t *testing.T, runIO internalio.RunContext) []contracts.ClassificationEntry {
 	t.Helper()
 	path, err := runIO.ResolveRunRelative(classificationJSONLPath)
@@ -446,6 +508,89 @@ func readClassificationFile(t *testing.T, runIO internalio.RunContext) []contrac
 	got, err := internalio.ReadJSONL[contracts.ClassificationEntry](path)
 	require.NoError(t, err)
 	return got
+}
+
+func refreshStep30Marker(t *testing.T, runIO internalio.RunContext) {
+	t.Helper()
+	scoreFinalPath, err := runIO.ResolveRunRelative(scoresPath)
+	require.NoError(t, err)
+	complianceFinalPath, err := runIO.ResolveRunRelative(compliancePath)
+	require.NoError(t, err)
+	scoreRawPath, err := runIO.ResolveRunRelative("30/scores-A-raw.jsonl")
+	require.NoError(t, err)
+	complianceRawPath, err := runIO.ResolveRunRelative("30/compliance-A-raw.jsonl")
+	require.NoError(t, err)
+
+	scoreFinal, err := internalio.ReadJSONL[contracts.ScoreEntry](scoreFinalPath)
+	if err != nil {
+		scoreFinal = nil
+	}
+	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](complianceFinalPath)
+	if err != nil {
+		complianceFinal = nil
+	}
+
+	scoreRaw := make([]contracts.RawScoreEntry, 0, len(scoreFinal))
+	for _, row := range scoreFinal {
+		scoreRaw = append(scoreRaw, contracts.RawScoreEntry{
+			SchemaVersion: "1",
+			RunID:         row.RunID,
+			Pass:          row.Pass,
+			Agent:         row.Agent,
+			JudgeRole:     contracts.JudgeRolePrimary,
+			Dimension:     row.Dimension,
+			Score:         row.Score,
+			Reasons:       row.Reasons,
+			OutputSha256:  strings.Repeat("a", 64),
+			RubricVersion: row.RubricVersion,
+			PromptVersion: row.PromptVersion,
+			ResolvedAt:    row.ResolvedAt,
+		})
+	}
+	complianceRaw := make([]contracts.RawComplianceEntry, 0, len(complianceFinal))
+	for _, row := range complianceFinal {
+		complianceRaw = append(complianceRaw, contracts.RawComplianceEntry{
+			SchemaVersion: "1",
+			RunID:         row.RunID,
+			Pass:          row.Pass,
+			Agent:         row.Agent,
+			JudgeRole:     contracts.JudgeRolePrimary,
+			RuleID:        row.RuleID,
+			Verdict:       row.Verdict,
+			Rationale:     row.Rationale,
+			OutputSha256:  strings.Repeat("a", 64),
+			RubricVersion: row.RubricVersion,
+			PromptVersion: row.PromptVersion,
+			ResolvedAt:    row.ResolvedAt,
+		})
+	}
+	writeJSONL(t, scoreRawPath, scoreRaw...)
+	writeJSONL(t, complianceRawPath, complianceRaw...)
+
+	agents := make([]contracts.AgentID, 0)
+	seen := map[contracts.AgentID]struct{}{}
+	for _, row := range scoreFinal {
+		if _, ok := seen[row.Agent]; ok {
+			continue
+		}
+		seen[row.Agent] = struct{}{}
+		agents = append(agents, row.Agent)
+	}
+	if len(agents) == 0 {
+		return
+	}
+	marker, err := scorecore.BuildStep30DoneMarker(scorecore.Step30MarkerInputs{
+		Agents: agents,
+		Paths: scorecore.Step30MarkerPaths{
+			ScoreFinal:      scoreFinalPath,
+			ComplianceFinal: complianceFinalPath,
+			ScoreRaw:        scoreRawPath,
+			ComplianceRaw:   complianceRawPath,
+		},
+		ResolvedAt: time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+	require.NoError(t, scorecore.WriteStep30DoneMarker(runIO, marker))
 }
 
 func assertCandidateBodies(t *testing.T, runIO internalio.RunContext, candidates []contracts.Candidate) {

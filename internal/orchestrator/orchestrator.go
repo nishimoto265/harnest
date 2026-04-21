@@ -317,8 +317,14 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 				}
 				return err
 			}
-			if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep70, time.Now().UTC())); err != nil {
+			terminal, err := hasTerminalEvent(run.IO, run.IO.RunID)
+			if err != nil {
 				return err
+			}
+			if !terminal {
+				if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep70, time.Now().UTC())); err != nil {
+					return err
+				}
 			}
 			if err := o.appendTerminalDecision(run); err != nil {
 				return err
@@ -427,6 +433,9 @@ func loadRunContext(runID contracts.RunID, runsBase, worktreeBase string) (inter
 	if err != nil {
 		return internalio.RunContext{}, err
 	}
+	if pkg.RunID != runID {
+		return internalio.RunContext{}, fmt.Errorf("orchestrator: task package run_id mismatch: selected=%s package=%s", runID, pkg.RunID)
+	}
 	return internalio.RunContextFromTaskPackage(pkg, runsBase, worktreeBase)
 }
 
@@ -442,6 +451,9 @@ func (o *Orchestrator) loadPersistedArtifacts(run *StepRunContext) error {
 		pkg, err := internalio.ReadJSON[contracts.TaskPackage](run.IO.TaskPackagePath())
 		if err != nil {
 			return err
+		}
+		if pkg.RunID != run.IO.RunID {
+			return fmt.Errorf("orchestrator: task package run_id mismatch: expected=%s got=%s", run.IO.RunID, pkg.RunID)
 		}
 		run.TaskPackage = &pkg
 		ctx, err := internalio.RunContextFromTaskPackage(pkg, run.IO.RunsBase, run.IO.WorktreeBase)
@@ -644,6 +656,7 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 	}
 
 	rescueExhausted := make([]stepio.RescueExhausted, 0, len(agents))
+	var interruptedDetail string
 	for result := range errCh {
 		if result.err == nil {
 			continue
@@ -658,10 +671,26 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 			rescueExhausted = append(rescueExhausted, exhausted50.Result())
 			continue
 		}
+		switch {
+		case errors.Is(result.err, step20_implement.ErrAgentLeaseContended),
+			errors.Is(result.err, step20_implement.ErrRescueAbortedLeaseActive),
+			errors.Is(result.err, step50_implement.ErrAgentLeaseContended),
+			errors.Is(result.err, step50_implement.ErrRescueAbortedLeaseActive):
+			if interruptedDetail == "" {
+				interruptedDetail = fmt.Sprintf("agent=%s: %v", result.agent, result.err)
+			}
+			continue
+		}
 		return result.err
 	}
 	if len(rescueExhausted) > 0 {
 		if err := o.handleRescueExhausted(run, step, rescueExhausted); err != nil {
+			return err
+		}
+		return errStopPipeline
+	}
+	if interruptedDetail != "" {
+		if err := o.appendInterrupted(run.PR, run.IO.RunID, step, contracts.InterruptedReasonUnknown, interruptedDetail); err != nil {
 			return err
 		}
 		return errStopPipeline
@@ -1090,6 +1119,18 @@ func (o *Orchestrator) appendInterrupted(pr int, runID contracts.RunID, step con
 
 func (o *Orchestrator) handleRescueExhausted(run *StepRunContext, step contracts.FailedStep, exhausted []stepio.RescueExhausted) error {
 	now := time.Now().UTC()
+	manual := contracts.StateEntryNeedsManualRecovery{
+		Kind:       contracts.StateKindNeedsManualRecovery,
+		PR:         run.PR,
+		RunID:      run.IO.RunID,
+		Step:       step,
+		Reason:     contracts.RollbackReasonWorktreeRescueLoop,
+		FailedStep: step,
+		At:         now,
+	}
+	if err := o.appendState(contracts.StateEntry{Kind: manual.Kind, Value: manual}); err != nil {
+		return err
+	}
 	for _, item := range exhausted {
 		pr := run.PR
 		runID := run.IO.RunID
@@ -1107,16 +1148,7 @@ func (o *Orchestrator) handleRescueExhausted(run *StepRunContext, step contracts
 			return err
 		}
 	}
-	manual := contracts.StateEntryNeedsManualRecovery{
-		Kind:       contracts.StateKindNeedsManualRecovery,
-		PR:         run.PR,
-		RunID:      run.IO.RunID,
-		Step:       step,
-		Reason:     contracts.RollbackReasonWorktreeRescueLoop,
-		FailedStep: step,
-		At:         now,
-	}
-	return o.appendState(contracts.StateEntry{Kind: manual.Kind, Value: manual})
+	return nil
 }
 
 func (o *Orchestrator) ensureNoGlobalSentinel(runCtx internalio.RunContext) error {
@@ -1171,9 +1203,15 @@ func ensureNeedsRecoverySentinelFromState(runCtx internalio.RunContext, entry *c
 	}
 	switch value := entry.Value.(type) {
 	case contracts.StateEntryNeedsManualRecovery:
+		if value.Step != contracts.FailedStep70 || value.Reason == contracts.RollbackReasonWorktreeRescueLoop {
+			return nil
+		}
 		return ensureNeedsRecoverySentinel(runCtx, value.PR, value.RunID, value.Reason, value.FailedStep)
 	case *contracts.StateEntryNeedsManualRecovery:
 		if value == nil {
+			return nil
+		}
+		if value.Step != contracts.FailedStep70 || value.Reason == contracts.RollbackReasonWorktreeRescueLoop {
 			return nil
 		}
 		return ensureNeedsRecoverySentinel(runCtx, value.PR, value.RunID, value.Reason, value.FailedStep)
@@ -1225,9 +1263,28 @@ func firstNeedsRecoverySentinel(runsBase string) (contracts.NeedsRecoverySentine
 	for _, name := range names {
 		sentinel, err := internalio.ReadJSON[contracts.NeedsRecoverySentinel](filepath.Join(dir, name))
 		if err != nil {
-			return contracts.NeedsRecoverySentinel{}, false, err
+			return contracts.NeedsRecoverySentinel{RunID: sentinelRunIDFromFilename(name)}, true, nil
 		}
 		return sentinel, true, nil
 	}
 	return contracts.NeedsRecoverySentinel{}, false, nil
+}
+
+func hasTerminalEvent(runCtx internalio.RunContext, runID contracts.RunID) (bool, error) {
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range events {
+		if entry.Kind.IsTerminal() {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func sentinelRunIDFromFilename(name string) contracts.RunID {
+	name = strings.TrimSuffix(name, ".aborted.json")
+	name = strings.TrimSuffix(name, ".json")
+	return contracts.RunID(name)
 }

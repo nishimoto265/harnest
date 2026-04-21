@@ -177,6 +177,26 @@ func TestRun_HappyPath_SixWorktrees(t *testing.T) {
 	assert.Contains(t, reloaded.ReconstructedTaskPrompt, "## Linked issues")
 }
 
+func TestRun_FetchesMergeCommitBeforeResolveRef(t *testing.T) {
+	rc := newRunCtx(t)
+	repoRoot := t.TempDir()
+	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
+	runner := &Runner{
+		GH:  stubGH{info: PRInfo{Number: 42, Title: "improve X", MergeCommitOID: testMergeCommitOID}},
+		Git: git,
+	}
+
+	_, err := runner.Run(context.Background(), Input{
+		PR:         42,
+		BestBranch: "auto-improve/best",
+		RepoRoot:   repoRoot,
+		RunCtx:     rc,
+	})
+	require.NoError(t, err)
+	require.Contains(t, git.fetched, repoRoot+"::"+testMergeCommitOID)
+}
+
 func TestRun_Resume_NoNewWorktrees(t *testing.T) {
 	rc := newRunCtx(t)
 	gh := stubGH{info: PRInfo{
@@ -401,6 +421,8 @@ func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 		stat: os.Stat,
 		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 			switch {
+			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", testMergeCommitOID}):
+				return nil, nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", firstBranch, firstPath, testBaseSHA}):
@@ -443,6 +465,8 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 		stat: os.Stat,
 		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 			switch {
+			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", testMergeCommitOID}):
+				return nil, nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "list", "--porcelain"}):

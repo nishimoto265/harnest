@@ -3,6 +3,7 @@ package io
 import (
 	crand "crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,13 +53,24 @@ func RunContextFromTaskPackage(pkg contracts.TaskPackage, runsBase, worktreeBase
 	if err := pkg.Validate(); err != nil {
 		return RunContext{}, err
 	}
-	ctx, err := NewRunContext(pkg.RunID, runsBase, worktreeBase)
+	if err := contracts.EnsureCleanAbsolutePath(runsBase); err != nil {
+		return RunContext{}, err
+	}
+	if err := contracts.EnsureCleanAbsolutePath(worktreeBase); err != nil {
+		return RunContext{}, err
+	}
+	derivedWorktreeBase, err := derivePersistedWorktreeBase(pkg)
 	if err != nil {
 		return RunContext{}, err
 	}
+	ctx := RunContext{
+		RunID:        pkg.RunID,
+		RunsBase:     runsBase,
+		WorktreeBase: derivedWorktreeBase,
+	}
 	ctx.worktrees = make(map[int]map[contracts.AgentID]contracts.WorktreeAllocation, 2)
 	for _, worktree := range pkg.Worktrees {
-		if err := ctx.ValidateWorktreeAllocation(worktree); err != nil {
+		if err := validatePersistedWorktreeAllocation(pkg.RunID, worktree, derivedWorktreeBase); err != nil {
 			return RunContext{}, err
 		}
 		if _, ok := ctx.worktrees[worktree.Pass]; !ok {
@@ -131,9 +143,6 @@ func (ctx RunContext) worktreePath(pass int, agent contracts.AgentID) (string, e
 		return "", ErrWorktreePathUnavailable
 	}
 	if allocation, ok := ctx.worktrees[pass][agent]; ok {
-		if err := ctx.ValidateWorktreeAllocation(allocation); err != nil {
-			return "", err
-		}
 		return allocation.Path, nil
 	}
 	return "", ErrWorktreePathUnavailable
@@ -202,6 +211,9 @@ func LoadFinalizedManifest(ctx RunContext, pass int, agent contracts.AgentID) (*
 	if err != nil {
 		return nil, err
 	}
+	if err := validateManifestIdentity(manifest, ctx.RunID, pass, agent); err != nil {
+		return nil, err
+	}
 	return &manifest, nil
 }
 
@@ -227,6 +239,116 @@ func LoadScorableManifest(ctx RunContext, pass int, agent contracts.AgentID) (*c
 func validatePass(pass int) error {
 	if pass != 1 && pass != 2 {
 		return fmt.Errorf("%w: pass=%d", ErrInvalidPass, pass)
+	}
+	return nil
+}
+
+func derivePersistedWorktreeBase(pkg contracts.TaskPackage) (string, error) {
+	if len(pkg.Worktrees) == 0 {
+		return "", ErrWorktreePathUnavailable
+	}
+	base := filepath.Dir(pkg.Worktrees[0].Path)
+	if err := contracts.EnsureCleanAbsolutePath(base); err != nil {
+		return "", err
+	}
+	for _, worktree := range pkg.Worktrees[1:] {
+		candidateBase := filepath.Dir(worktree.Path)
+		if err := contracts.EnsureCleanAbsolutePath(candidateBase); err != nil {
+			return "", err
+		}
+		for {
+			rel, err := filepath.Rel(base, candidateBase)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				break
+			}
+			parent := filepath.Dir(base)
+			if parent == base {
+				return "", fmt.Errorf("%w: could not derive common base for %q and %q", ErrWorktreePathEscapesBase, pkg.Worktrees[0].Path, worktree.Path)
+			}
+			base = parent
+		}
+	}
+	return base, nil
+}
+
+func validatePersistedWorktreeAllocation(runID contracts.RunID, allocation contracts.WorktreeAllocation, worktreeBase string) error {
+	if err := allocation.Validate(); err != nil {
+		return err
+	}
+	baseKey, err := contracts.CanonicalizePathForUniqueness(worktreeBase)
+	if err != nil {
+		return err
+	}
+	pathKey, err := contracts.CanonicalizePathForUniqueness(allocation.Path)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(baseKey, pathKey)
+	if err != nil {
+		return err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%w: worktree_base=%q path=%q", ErrWorktreePathEscapesBase, worktreeBase, allocation.Path)
+	}
+	if !persistedWorktreePathMatches(runID, allocation) {
+		wantBase := fmt.Sprintf("%s-pass%d-%s", runID, allocation.Pass, allocation.Agent)
+		return fmt.Errorf("io: persisted worktree path mismatch: got=%q want=%q", allocation.Path, filepath.Join(worktreeBase, wantBase))
+	}
+	return nil
+}
+
+func persistedWorktreePathMatches(runID contracts.RunID, allocation contracts.WorktreeAllocation) bool {
+	base := filepath.Base(allocation.Path)
+	if base == fmt.Sprintf("%s-pass%d-%s", runID, allocation.Pass, allocation.Agent) {
+		return true
+	}
+	if base == fmt.Sprintf("pass%d-%s", allocation.Pass, allocation.Agent) {
+		return true
+	}
+	parent := filepath.Base(filepath.Dir(allocation.Path))
+	if base == string(allocation.Agent) && parent == fmt.Sprintf("pass%d", allocation.Pass) {
+		return true
+	}
+	return base == fmt.Sprintf("%d", allocation.Pass) && parent == string(allocation.Agent)
+}
+
+func validateManifestIdentity(manifest contracts.Manifest, runID contracts.RunID, pass int, agent contracts.AgentID) error {
+	switch value := manifest.Value.(type) {
+	case contracts.ManifestSuccess:
+		return validateManifestVariantIdentity(value.RunID, value.Pass, value.Agent, runID, pass, agent)
+	case *contracts.ManifestSuccess:
+		if value == nil {
+			return ErrNotScorable
+		}
+		return validateManifestVariantIdentity(value.RunID, value.Pass, value.Agent, runID, pass, agent)
+	case contracts.ManifestError:
+		return validateManifestVariantIdentity(value.RunID, value.Pass, value.Agent, runID, pass, agent)
+	case *contracts.ManifestError:
+		if value == nil {
+			return ErrNotScorable
+		}
+		return validateManifestVariantIdentity(value.RunID, value.Pass, value.Agent, runID, pass, agent)
+	case contracts.ManifestTimeout:
+		return validateManifestVariantIdentity(value.RunID, value.Pass, value.Agent, runID, pass, agent)
+	case *contracts.ManifestTimeout:
+		if value == nil {
+			return ErrNotScorable
+		}
+		return validateManifestVariantIdentity(value.RunID, value.Pass, value.Agent, runID, pass, agent)
+	default:
+		return errors.New("io: unsupported manifest variant")
+	}
+}
+
+func validateManifestVariantIdentity(actualRunID contracts.RunID, actualPass int, actualAgent contracts.AgentID, expectedRunID contracts.RunID, expectedPass int, expectedAgent contracts.AgentID) error {
+	if actualRunID != expectedRunID {
+		return fmt.Errorf("io: manifest run_id mismatch: got=%s want=%s", actualRunID, expectedRunID)
+	}
+	if actualPass != expectedPass {
+		return fmt.Errorf("io: manifest pass mismatch: got=%d want=%d", actualPass, expectedPass)
+	}
+	if actualAgent != expectedAgent {
+		return fmt.Errorf("io: manifest agent mismatch: got=%s want=%s", actualAgent, expectedAgent)
 	}
 	return nil
 }

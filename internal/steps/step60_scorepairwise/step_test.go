@@ -384,9 +384,54 @@ func TestRun_RerunWithoutMarkerPreservesReducedState(t *testing.T) {
 	afterMarker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
 
 	after := readStep60Artifacts(t, runIO)
-	assert.NotEqual(t, before, after)
+	assert.Equal(t, before["60/scores-B-raw.jsonl"], after["60/scores-B-raw.jsonl"])
+	assert.Equal(t, before["60/compliance-B-raw.jsonl"], after["60/compliance-B-raw.jsonl"])
 	assert.Equal(t, beforeMarker.RawHashes, afterMarker.RawHashes)
 	assert.Equal(t, beforeMarker.ContentHashes, afterMarker.ContentHashes)
+}
+
+func TestRun_RerunWithoutMarker_RebuildsFromRawWithoutRejudging(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+	now := time.Date(2026, 4, 21, 11, 30, 0, 0, time.UTC)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
+
+	paths, err := resolveStep60Paths(runIO)
+	require.NoError(t, err)
+	rawState, err := loadStep60RawState(paths)
+	require.NoError(t, err)
+	manifest, err := internalio.LoadScorableManifest(runIO, 2, "a1")
+	require.NoError(t, err)
+	outputPath, ok, err := resolveExistingManifestArtifact(runIO, manifest.DiffPath)
+	require.NoError(t, err)
+	require.True(t, ok)
+	outputHash, err := fileSHA256(outputPath)
+	require.NoError(t, err)
+	_, reusable, err := tryReuseRawPanelResult(rawState, "a1", outputHash, "default", "phase0-stub")
+	require.NoError(t, err)
+	require.True(t, reusable)
+
+	var called bool
+	noJudge := unexpectedCallJudge{called: &called}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     noJudge,
+		Secondary:   noJudge,
+		Arbiter:     noJudge,
+		Now:         func() time.Time { return now },
+	}))
+	assert.False(t, called)
 }
 
 func TestRun_NoScorableAgentsReturnsTypedError(t *testing.T) {

@@ -132,6 +132,12 @@ func (e PlannedAdoptionEntry) Validate() error {
 		}
 		return err
 	}
+	if err := ValidateRuleID(e.RuleID); err != nil {
+		return err
+	}
+	if err := ValidateRulePath(e.RulePath); err != nil {
+		return err
+	}
 	switch e.Kind {
 	case RegistryKindAdded:
 		if e.PrevSha256 != "" {

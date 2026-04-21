@@ -15,6 +15,8 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/registryview"
+	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 )
 
 const (
@@ -45,6 +47,11 @@ func Run(ctx context.Context, cfg Config) (*contracts.Candidates, error) {
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
+	}
+	if valid, err := step30Ready(cfg.IO); err != nil {
+		return nil, err
+	} else if !valid {
+		return nil, errors.New("step40_classify: step30 done.marker is missing or invalid")
 	}
 
 	scores, err := readJSONLAt[contracts.ScoreEntry](cfg.IO, scoresPath)
@@ -141,6 +148,31 @@ func readJSONLAt[T any](runIO internalio.RunContext, rel string) ([]T, error) {
 	return internalio.ReadJSONL[T](path)
 }
 
+func step30Ready(runIO internalio.RunContext) (bool, error) {
+	scoreFinal, err := runIO.ResolveRunRelative(scoresPath)
+	if err != nil {
+		return false, err
+	}
+	complianceFinal, err := runIO.ResolveRunRelative(compliancePath)
+	if err != nil {
+		return false, err
+	}
+	scoreRaw, err := runIO.ResolveRunRelative("30/scores-A-raw.jsonl")
+	if err != nil {
+		return false, err
+	}
+	complianceRaw, err := runIO.ResolveRunRelative("30/compliance-A-raw.jsonl")
+	if err != nil {
+		return false, err
+	}
+	return scorecore.VerifyStep30DoneMarker(runIO, scorecore.Step30MarkerPaths{
+		ScoreFinal:      scoreFinal,
+		ComplianceFinal: complianceFinal,
+		ScoreRaw:        scoreRaw,
+		ComplianceRaw:   complianceRaw,
+	})
+}
+
 func buildCandidates(runID contracts.RunID, now time.Time, scores []contracts.ScoreEntry, compliance []contracts.ComplianceEntry, registry []contracts.RuleRegistryEntry, registryBase string) ([]builtCandidate, error) {
 	if len(compliance) == 0 {
 		return []builtCandidate{}, nil
@@ -154,8 +186,14 @@ func buildCandidates(runID contracts.RunID, now time.Time, scores []contracts.Sc
 		return []builtCandidate{}, nil
 	}
 
-	activeRules := activeRulesFromRegistry(registry)
-	activeRuleBodies := activeRuleBodiesFromRegistry(registry, registryBase, activeRules)
+	activeRules, err := activeRulesFromRegistry(registry)
+	if err != nil {
+		return nil, err
+	}
+	activeRuleBodies, err := activeRuleBodiesFromRegistry(registry, registryBase, activeRules)
+	if err != nil {
+		return nil, err
+	}
 	scoreEvidence := collectScoreEvidence(scores)
 	ruleIDs := make([]string, 0, len(violations))
 	for ruleID := range violations {
@@ -198,107 +236,16 @@ func isViolationVerdict(verdict contracts.ComplianceVerdict) bool {
 	}
 }
 
-type ruleState struct {
-	exists  bool
-	lastSeq int
-}
-
-type rollbackState struct {
-	ruleID     string
-	prevExists bool
-	seq        int
-}
-
-func activeRulesFromRegistry(entries []contracts.RuleRegistryEntry) map[string]bool {
-	states := make(map[string]ruleState)
-	rollbackTargets := make(map[string][]rollbackState)
-
-	apply := func(ruleID string, exists bool, seq int) {
-		states[ruleID] = ruleState{exists: exists, lastSeq: seq}
+func activeRulesFromRegistry(entries []contracts.RuleRegistryEntry) (map[string]bool, error) {
+	states, err := registryview.Build(entries)
+	if err != nil {
+		return nil, err
 	}
-
-	for idx, entry := range entries {
-		seq := idx + 1
-		switch v := entry.Value.(type) {
-		case contracts.RuleRegistryAdded:
-			previous := states[v.RuleID]
-			rollbackTargets[v.IdempotencyKey] = append(rollbackTargets[v.IdempotencyKey], rollbackState{ruleID: v.RuleID, prevExists: previous.exists, seq: seq})
-			apply(v.RuleID, true, seq)
-		case *contracts.RuleRegistryAdded:
-			if v == nil {
-				continue
-			}
-			previous := states[v.RuleID]
-			rollbackTargets[v.IdempotencyKey] = append(rollbackTargets[v.IdempotencyKey], rollbackState{ruleID: v.RuleID, prevExists: previous.exists, seq: seq})
-			apply(v.RuleID, true, seq)
-		case contracts.RuleRegistryUpdated:
-			previous := states[v.RuleID]
-			rollbackTargets[v.IdempotencyKey] = append(rollbackTargets[v.IdempotencyKey], rollbackState{ruleID: v.RuleID, prevExists: previous.exists, seq: seq})
-			apply(v.RuleID, true, seq)
-		case *contracts.RuleRegistryUpdated:
-			if v == nil {
-				continue
-			}
-			previous := states[v.RuleID]
-			rollbackTargets[v.IdempotencyKey] = append(rollbackTargets[v.IdempotencyKey], rollbackState{ruleID: v.RuleID, prevExists: previous.exists, seq: seq})
-			apply(v.RuleID, true, seq)
-		case contracts.RuleRegistryStatusChanged:
-			apply(v.RuleID, v.NewStatus != contracts.RuleStatusArchived, seq)
-		case *contracts.RuleRegistryStatusChanged:
-			if v == nil {
-				continue
-			}
-			apply(v.RuleID, v.NewStatus != contracts.RuleStatusArchived, seq)
-		case contracts.RuleRegistryArchived:
-			apply(v.RuleID, false, seq)
-		case *contracts.RuleRegistryArchived:
-			if v == nil {
-				continue
-			}
-			apply(v.RuleID, false, seq)
-		case contracts.RuleRegistryRestored:
-			apply(v.RuleID, true, seq)
-		case *contracts.RuleRegistryRestored:
-			if v == nil {
-				continue
-			}
-			apply(v.RuleID, true, seq)
-		case contracts.RuleRegistryRolledBack:
-			rollbackRule(states, rollbackTargets, v.TargetOpID, seq)
-		case *contracts.RuleRegistryRolledBack:
-			if v == nil {
-				continue
-			}
-			rollbackRule(states, rollbackTargets, v.TargetOpID, seq)
-		}
-	}
-
 	active := make(map[string]bool, len(states))
-	for ruleID, state := range states {
-		if state.exists {
-			active[ruleID] = true
-		}
+	for ruleID, state := range registryview.Active(states) {
+		active[ruleID] = state.Exists
 	}
-	return active
-}
-
-func rollbackRule(states map[string]ruleState, rollbackTargets map[string][]rollbackState, targetOpID string, seq int) {
-	targets, ok := rollbackTargets[targetOpID]
-	if !ok {
-		return
-	}
-	for i := len(targets) - 1; i >= 0; i-- {
-		target := targets[i]
-		current := states[target.ruleID]
-		if current.lastSeq != target.seq {
-			continue
-		}
-		states[target.ruleID] = ruleState{
-			exists:  target.prevExists,
-			lastSeq: seq,
-		}
-		return
-	}
+	return active, nil
 }
 
 type candidateEvidence struct {
@@ -384,44 +331,24 @@ func buildCandidate(runID contracts.RunID, now time.Time, index int, ruleID stri
 	}, true, nil
 }
 
-func activeRuleBodiesFromRegistry(entries []contracts.RuleRegistryEntry, registryBase string, activeRules map[string]bool) map[string]string {
+func activeRuleBodiesFromRegistry(entries []contracts.RuleRegistryEntry, registryBase string, activeRules map[string]bool) (map[string]string, error) {
+	states, err := registryview.Build(entries)
+	if err != nil {
+		return nil, err
+	}
 	bodies := make(map[string]string, len(activeRules))
 	for ruleID := range activeRules {
-		path, ok := latestRulePath(entries, ruleID)
+		state, ok := states[ruleID]
 		if !ok {
 			continue
 		}
-		body, err := os.ReadFile(filepath.Join(registryBase, path))
+		body, err := os.ReadFile(filepath.Join(registryBase, state.RulePath))
 		if err != nil {
 			continue
 		}
 		bodies[ruleID] = string(body)
 	}
-	return bodies
-}
-
-func latestRulePath(entries []contracts.RuleRegistryEntry, ruleID string) (string, bool) {
-	for i := len(entries) - 1; i >= 0; i-- {
-		switch v := entries[i].Value.(type) {
-		case contracts.RuleRegistryUpdated:
-			if v.RuleID == ruleID {
-				return v.RulePath, true
-			}
-		case *contracts.RuleRegistryUpdated:
-			if v != nil && v.RuleID == ruleID {
-				return v.RulePath, true
-			}
-		case contracts.RuleRegistryAdded:
-			if v.RuleID == ruleID {
-				return v.RulePath, true
-			}
-		case *contracts.RuleRegistryAdded:
-			if v != nil && v.RuleID == ruleID {
-				return v.RulePath, true
-			}
-		}
-	}
-	return "", false
+	return bodies, nil
 }
 
 func bestDuplicateMatch(candidateBody string, activeRuleBodies map[string]string) (string, float64) {

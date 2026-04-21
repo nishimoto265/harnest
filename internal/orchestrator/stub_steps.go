@@ -41,7 +41,7 @@ func defaultSteps(cfg *config.Config, decoders ContractDecoders) Steps {
 		Step40:  stubStep40{decode: decoders.Step40},
 		Step50:  step50,
 		Step60:  step60Step{decode: decoders.Step60},
-		Step70:  realStep70{cfg: cfg},
+		Step70:  realStep70{cfg: cfg, decode: decoders.Step70},
 		Archive: realArchiveStep{},
 	}
 }
@@ -304,9 +304,10 @@ type stubMarkerStep struct {
 
 func (s stubMarkerStep) Run(ctx context.Context, run *StepRunContext) error {
 	if s.path == "30/done.marker" {
-		if err := seedStubPass1Scores(ctx, run); err != nil {
-			return err
-		}
+		return step30_score.New().Run(ctx, step30_score.Request{
+			RunContext:  run.IO,
+			TaskPackage: run.TaskPackage,
+		})
 	}
 	path, err := run.IO.ResolveRunRelative(s.path)
 	if err != nil {
@@ -653,10 +654,12 @@ func (stubArchiveStep) Run(ctx context.Context, run *StepRunContext) error {
 // pipeline runs without a promotion target emit a noop decision (matches the
 // prior stubStep70 behaviour for tests and empty-candidate flows).
 type realStep70 struct {
-	cfg *config.Config
+	cfg    *config.Config
+	decode func([]byte, any) (any, error)
+	runFn  func(context.Context, int, internalio.RunContext, *contracts.TaskPackage, *contracts.Candidates, step70_decide.IntentionWriter, step70_decide.Deps) error
 }
 
-func (realStep70) Run(ctx context.Context, run *StepRunContext) error {
+func (s realStep70) Run(ctx context.Context, run *StepRunContext) error {
 	if run.TaskPackage == nil {
 		return errors.New("orchestrator: step70 requires task_package")
 	}
@@ -681,7 +684,11 @@ func (realStep70) Run(ctx context.Context, run *StepRunContext) error {
 		RegistryHighAt: run.Config.RegistryHighThreshold,
 		RegistryCritAt: run.Config.RegistryCriticalThreshold,
 	}
-	if err := step70_decide.Run(ctx, run.PR, run.IO, run.TaskPackage, run.Candidates, store, deps); err != nil {
+	runStep := step70_decide.Run
+	if s.runFn != nil {
+		runStep = s.runFn
+	}
+	if err := runStep(ctx, run.PR, run.IO, run.TaskPackage, run.Candidates, store, deps); err != nil {
 		return err
 	}
 	decisionPath, err := run.IO.ResolveRunRelative("70/decision.json")
@@ -692,6 +699,24 @@ func (realStep70) Run(ctx context.Context, run *StepRunContext) error {
 		decision, err := internalio.ReadJSON[contracts.Decision](decisionPath)
 		if err != nil {
 			return err
+		}
+		if s.decode != nil {
+			req := stepio.Step70Request{
+				TaskPackage:  *run.TaskPackage,
+				Candidates:   *run.Candidates,
+				RegistryPath: run.IO.RulesRegistryPath(),
+			}
+			resp, err := step70_decide.BuildResponse(run.IO.RunID, decision, decision.Action == contracts.DecisionActionAdopt, req)
+			if err != nil {
+				return err
+			}
+			payload, err := resp.MarshalJSON()
+			if err != nil {
+				return err
+			}
+			if _, err := s.decode(payload, req); err != nil {
+				return err
+			}
 		}
 		run.Decision = &decision
 	}

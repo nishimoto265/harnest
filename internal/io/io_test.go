@@ -269,7 +269,52 @@ func TestRunContextFromTaskPackage_RejectsWorktreeOutsideConfiguredBase(t *testi
 
 	_, err := RunContextFromTaskPackage(pkg, runsBase, worktreeBase)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrWorktreePathEscapesBase)
+	assert.Contains(t, err.Error(), "persisted worktree path mismatch")
+}
+
+func TestRunContextFromTaskPackage_UsesPersistedWorktreeBaseForResume(t *testing.T) {
+	runsBase := t.TempDir()
+	currentWorktreeBase := t.TempDir()
+	persistedWorktreeBase := filepath.Join(t.TempDir(), "persisted-worktrees")
+	pkg := testTaskPackage(t, runsBase, persistedWorktreeBase)
+
+	ctx, err := RunContextFromTaskPackage(pkg, runsBase, currentWorktreeBase)
+	require.NoError(t, err)
+	assert.Equal(t, persistedWorktreeBase, ctx.WorktreeBase)
+
+	path, err := ctx.Pass1WorktreePath("a1")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(persistedWorktreeBase, fmt.Sprintf("%s-pass1-a1", pkg.RunID)), path)
+}
+
+func TestLoadFinalizedManifest_RejectsCrossRunManifestIdentity(t *testing.T) {
+	ctx := newTestRunContext(t)
+	otherRunID := contracts.RunID("2026-04-21-PR99-deadbee")
+	success := contracts.Manifest{
+		Kind: contracts.ManifestKindSuccess,
+		Value: contracts.ManifestSuccess{
+			Kind:          contracts.ManifestKindSuccess,
+			SchemaVersion: "1",
+			RunID:         otherRunID,
+			Pass:          1,
+			Agent:         "a1",
+			BranchName:    "run/a1",
+			HeadSHA:       strings.Repeat("1", 40),
+			BaseSHA:       strings.Repeat("2", 40),
+			DiffPath:      "20-pass1/a1/diff.patch",
+			SessionPath:   "20-pass1/a1/session.jsonl",
+			ChecklistPath: "20-pass1/a1/checklist-result.json",
+			PromptVersion: "prompt-v1",
+			StartedAt:     time.Unix(100, 0).UTC(),
+			FinishedAt:    time.Unix(200, 0).UTC(),
+		},
+	}
+	manifestPath, err := ctx.ManifestPath(1, "a1")
+	require.NoError(t, err)
+	require.NoError(t, WriteJSONAtomic(manifestPath, success))
+
+	_, err = LoadFinalizedManifest(ctx, 1, "a1")
+	require.ErrorContains(t, err, "manifest run_id mismatch")
 }
 
 func TestWriteAndReadSidecar(t *testing.T) {

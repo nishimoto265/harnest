@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 )
 
 // LinkedIssue describes a GitHub issue that is closed by the PR (via closing
@@ -61,6 +63,7 @@ func NewGHClientWithRunner(runner cmdRunner) GHClient {
 
 func defaultCmdRunner(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = processenv.Sanitize()
 	stdout, err := cmd.Output()
 	if err == nil {
 		return stdout, nil, nil

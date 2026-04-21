@@ -87,6 +87,9 @@ func (c Candidate) Validate() error {
 		if c.TargetRuleID == "" {
 			return fmt.Errorf("%w: candidate_id=%s kind=%s", ErrCandidateTargetRequired, c.CandidateID, c.Kind)
 		}
+		if err := ValidateRuleID(c.TargetRuleID); err != nil {
+			return fmt.Errorf("candidate_id=%s: %w", c.CandidateID, err)
+		}
 	case CandidateKindNew:
 		if c.TargetRuleID != "" {
 			return fmt.Errorf("%w: candidate_id=%s target_rule_id=%q", ErrCandidateTargetForbidden, c.CandidateID, c.TargetRuleID)
@@ -241,6 +244,9 @@ func (e *ClassificationEntry) UnmarshalJSON(data []byte) error {
 
 func (e ClassificationEntry) Validate() error {
 	if err := validateStruct(e); err != nil {
+		return err
+	}
+	if err := ValidateOptionalRuleID(e.MatchedRuleID); err != nil {
 		return err
 	}
 	return validateOverflowRefUnderPrefix("rationale_overflow_ref", e.RationaleOverflowRef, "40")

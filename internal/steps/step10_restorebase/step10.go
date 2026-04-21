@@ -165,6 +165,9 @@ func (r *Runner) deriveBaseSHA(ctx context.Context, repoRoot string, pr PRInfo, 
 		if err := validation.Instance().Var(pr.MergeCommitOID, "required,sha1_hex"); err != nil {
 			return "", fmt.Errorf("step10: merge_commit_oid is not a 40-hex sha: %q: %w", pr.MergeCommitOID, err)
 		}
+		if err := r.Git.FetchCommit(ctx, repoRoot, pr.MergeCommitOID); err != nil {
+			return "", fmt.Errorf("step10: fetch merge_commit_oid=%s: %w", pr.MergeCommitOID, err)
+		}
 		baseSHA, err := r.Git.ResolveRef(ctx, repoRoot, pr.MergeCommitOID+"^1")
 		if err != nil {
 			return "", fmt.Errorf("step10: resolve merge-base from merge_commit=%s: %w", pr.MergeCommitOID, err)

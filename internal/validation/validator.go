@@ -23,6 +23,12 @@ var runIDPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-PR\d+-[0-9a-f]{7}$`)
 // agentIDPattern: a1 / a2 / ... / a<positive int>  (no leading zero)
 var agentIDPattern = regexp.MustCompile(`^a[1-9]\d*$`)
 
+// ruleIDPattern: lowercase alnum with optional _ / - separators.
+var ruleIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// rulePathPattern: canonical rules/ sidecar path.
+var rulePathPattern = regexp.MustCompile(`^rules/[a-z0-9][a-z0-9_-]*\.md$`)
+
 // sha256HexPattern: 64 char lowercase hex
 var sha256HexPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -41,6 +47,12 @@ func Instance() *validator.Validate {
 		})
 		mustRegister(instance, "agent_id_fmt", func(fl validator.FieldLevel) bool {
 			return agentIDPattern.MatchString(fl.Field().String())
+		})
+		mustRegister(instance, "rule_id_fmt", func(fl validator.FieldLevel) bool {
+			return ruleIDPattern.MatchString(fl.Field().String())
+		})
+		mustRegister(instance, "rule_path_fmt", func(fl validator.FieldLevel) bool {
+			return rulePathPattern.MatchString(fl.Field().String())
 		})
 		mustRegister(instance, "sha256_hex", func(fl validator.FieldLevel) bool {
 			return sha256HexPattern.MatchString(fl.Field().String())

@@ -202,13 +202,43 @@ func TestRunSunset_IndexSyncFailureDoesNotAbortCommittedRegistryAppend(t *testin
 	assert.Len(t, lines, 1500)
 }
 
-func TestReadMarker_LegacyTwoLineFormatFailsClosed(t *testing.T) {
+func TestRunSunsetWithLock_ReconcilesLegacyTwoLineMarker(t *testing.T) {
 	runsBase := t.TempDir()
 	path := filepath.Join(runsBase, markerFilename)
 	require.NoError(t, os.WriteFile(path, []byte("2026-04-21T09:00:00Z\nlegacy-run\n"), 0o644))
 
-	_, err := readMarker(path)
-	require.Error(t, err)
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "sunset-now",
+		Transitions: nil,
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.AppendedOpIDs)
+	assert.NoFileExists(t, path)
+
+	lastSunset, err := os.ReadFile(filepath.Join(runsBase, lastSunsetFilename))
+	require.NoError(t, err)
+	assert.Contains(t, string(lastSunset), "2026-04-21T09:00:00Z")
+}
+
+func TestRunSunsetWithLock_AutoTickTimesOutOnPromotionLock(t *testing.T) {
+	runsBase := t.TempDir()
+	lock, err := internalio.AcquireFileLock(filepath.Join(runsBase, "promotion.lock"))
+	require.NoError(t, err)
+	defer func() { _ = lock.Unlock() }()
+
+	start := time.Now()
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "sunset-timeout",
+		Transitions: nil,
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+		LockTimeout: 100 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.AppendedOpIDs)
+	assert.Less(t, time.Since(start), time.Second)
 }
 
 func TestRunSunsetWithLock_StopsMutatingWhenSentinelAppearsMidRun(t *testing.T) {

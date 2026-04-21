@@ -28,10 +28,21 @@ case "$subcmd" in
       HEAD)
         echo "${AUTO_IMPROVE_TEST_TARGET_SHA}"
         ;;
+      refs/heads/*)
+        echo "${AUTO_IMPROVE_TEST_TARGET_SHA}"
+        ;;
       *)
         echo "${AUTO_IMPROVE_TEST_BEST_SHA}"
         ;;
     esac
+    ;;
+  fetch)
+    exit 0
+    ;;
+  merge-base)
+    if [ "${1:-}" = "--is-ancestor" ]; then
+      exit 0
+    fi
     ;;
   worktree)
     case "${1:-}" in
@@ -69,7 +80,15 @@ case "$subcmd" in
     exit 0
     ;;
   branch)
-    echo "stub-branch"
+    case "$(basename "$repo_dir")" in
+      *-pass1-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a1$//')/pass1/a1" ;;
+      *-pass1-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a2$//')/pass1/a2" ;;
+      *-pass1-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a3$//')/pass1/a3" ;;
+      *-pass2-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a1$//')/pass2/a1" ;;
+      *-pass2-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a2$//')/pass2/a2" ;;
+      *-pass2-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a3$//')/pass2/a3" ;;
+      *) echo "stub-branch" ;;
+    esac
     ;;
   ls-remote)
     branch="${4:-best}"

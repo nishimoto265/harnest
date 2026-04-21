@@ -48,6 +48,30 @@ func TestSuccessDiffBytes_PreservesLeadingWhitespaceInUntrackedFilename(t *testi
 	assert.Contains(t, string(diff), "diff --git a/ leading.txt b/ leading.txt")
 }
 
+func TestWriteSuccessDiff_CapsHugeUntrackedPatch(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, "", "git", "init", "-b", "main", repoDir)
+	runGit(t, repoDir, "git", "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "git", "config", "user.name", "Agent Runner Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repoDir, "git", "add", "README.md")
+	runGit(t, repoDir, "git", "commit", "-m", "base")
+
+	baseSHA := strings.TrimSpace(runGit(t, repoDir, "git", "rev-parse", "HEAD"))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "huge.txt"), []byte(strings.Repeat("x", maxSuccessDiffBytes)), 0o644))
+
+	destPath := filepath.Join(t.TempDir(), "diff.patch")
+	require.NoError(t, WriteSuccessDiff(context.Background(), repoDir, baseSHA, "test", destPath))
+
+	info, err := os.Stat(destPath)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, info.Size(), int64(maxSuccessDiffBytes))
+
+	diff, err := os.ReadFile(destPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(diff), "diff truncated")
+}
+
 func runGit(t *testing.T, dir string, name string, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

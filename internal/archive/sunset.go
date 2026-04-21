@@ -23,6 +23,7 @@ const (
 	markerFilename     = "sunset-running.marker"
 	lastSunsetFilename = "last-sunset-at"
 	defaultGate        = 24 * time.Hour
+	defaultLockTimeout = 30 * time.Second
 )
 
 var errBlockedBySentinel = errors.New("archive: blocked by sentinel")
@@ -36,6 +37,7 @@ type Opts struct {
 	Force       bool
 	Now         func() time.Time
 	Gate        time.Duration
+	LockTimeout time.Duration
 
 	RegistryHighAt int
 	RegistryCritAt int
@@ -134,7 +136,23 @@ func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 	}
 
 	lockPath := filepath.Join(opts.RunsBase, "promotion.lock")
-	lock, err := internalio.AcquireFileLock(lockPath)
+	var lock *internalio.FileLock
+	var err error
+	if opts.Force {
+		lock, err = internalio.AcquireFileLock(lockPath)
+	} else {
+		lockCtx := ctx
+		var cancel context.CancelFunc
+		if opts.LockTimeout > 0 {
+			lockCtx, cancel = context.WithTimeout(ctx, opts.LockTimeout)
+			defer cancel()
+		}
+		lock, err = internalio.AcquireFileLockContext(lockCtx, lockPath)
+		if errors.Is(err, context.DeadlineExceeded) {
+			slog.Warn("archive: promotion.lock acquisition timed out", slog.Duration("timeout", opts.LockTimeout))
+			return Result{}, nil
+		}
+	}
 	if err != nil {
 		return Result{}, fmt.Errorf("archive: acquire promotion.lock: %w", err)
 	}
@@ -196,6 +214,9 @@ func applyDefaults(o Opts) Opts {
 	}
 	if o.Gate == 0 {
 		o.Gate = defaultGate
+	}
+	if o.LockTimeout == 0 {
+		o.LockTimeout = defaultLockTimeout
 	}
 	if o.RegistryHighAt == 0 {
 		o.RegistryHighAt = 1500
@@ -347,6 +368,18 @@ func reconcileStaleMarker(ctx context.Context, opts Opts) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
+		var legacy legacySunsetMarker
+		if errors.As(err, &legacy) {
+			if !legacy.RecordedStartTime.IsZero() {
+				if err := writeLastSunsetAt(opts.RunsBase, legacy.RecordedStartTime); err != nil {
+					return err
+				}
+			}
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		}
 		return err
 	}
 	missing := make([]Transition, 0, len(marker.Transitions))
@@ -464,6 +497,11 @@ func sentinelExists(runsBase string) (bool, error) {
 }
 
 func readMarker(path string) (sunsetMarker, error) {
+	if marker, ok, err := readLegacyMarker(path); err != nil {
+		return sunsetMarker{}, err
+	} else if ok {
+		return sunsetMarker{}, marker
+	}
 	marker, err := internalio.ReadJSON[sunsetMarker](path)
 	if err != nil {
 		return sunsetMarker{}, err
@@ -472,6 +510,41 @@ func readMarker(path string) (sunsetMarker, error) {
 		return sunsetMarker{}, fmt.Errorf("archive: invalid stale marker contents")
 	}
 	return marker, nil
+}
+
+type legacySunsetMarker struct {
+	RecordedStartTime time.Time
+	SunsetRunID       string
+}
+
+func (m legacySunsetMarker) Error() string {
+	return fmt.Sprintf("archive: legacy stale marker detected: sunset_run_id=%s", m.SunsetRunID)
+}
+
+func readLegacyMarker(path string) (legacySunsetMarker, bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return legacySunsetMarker{}, false, err
+		}
+		return legacySunsetMarker{}, false, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		return legacySunsetMarker{}, false, nil
+	}
+	recordedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(lines[0]))
+	if err != nil {
+		return legacySunsetMarker{}, false, nil
+	}
+	sunsetRunID := strings.TrimSpace(lines[1])
+	if sunsetRunID == "" {
+		return legacySunsetMarker{}, false, nil
+	}
+	return legacySunsetMarker{
+		RecordedStartTime: recordedAt,
+		SunsetRunID:       sunsetRunID,
+	}, true, nil
 }
 
 func syncRegistryIndex(runsBase, registryPath string, entry contracts.RuleRegistryEntry, result contracts.RegistryAppendResult) error {
