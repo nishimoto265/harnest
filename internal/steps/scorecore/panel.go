@@ -92,6 +92,9 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 	if err != nil {
 		return PanelResult{}, fmt.Errorf("scorecore: primary: %w", err)
 	}
+	if err := primaryOut.ValidateFor(in.JudgeInput); err != nil {
+		return PanelResult{}, fmt.Errorf("scorecore: primary: %w", err)
+	}
 
 	primaryRaw, err := buildRawScoreEntries(primaryOut, in, contracts.JudgeRolePrimary, nil, nil)
 	if err != nil {
@@ -109,6 +112,9 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 
 	secondaryOut, err := in.Secondary.ScoreOutput(ctx, in.JudgeInput)
 	if err != nil {
+		return PanelResult{}, fmt.Errorf("scorecore: secondary: %w", err)
+	}
+	if err := secondaryOut.ValidateFor(in.JudgeInput); err != nil {
 		return PanelResult{}, fmt.Errorf("scorecore: secondary: %w", err)
 	}
 
@@ -162,6 +168,9 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 
 	arbiterOut, err := in.Arbiter.ScoreOutput(ctx, in.JudgeInput)
 	if err != nil {
+		return PanelResult{}, fmt.Errorf("scorecore: arbiter: %w", err)
+	}
+	if err := arbiterOut.ValidateFor(in.JudgeInput); err != nil {
 		return PanelResult{}, fmt.Errorf("scorecore: arbiter: %w", err)
 	}
 	arbiterRaw, err := buildRawScoreEntries(arbiterOut, in, contracts.JudgeRoleArbiter, primaryRefs, secondaryRefs)
