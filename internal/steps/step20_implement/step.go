@@ -28,6 +28,7 @@ const (
 	diffFileName        = "diff.patch"
 	checklistFileName   = "checklist-result.json"
 	rescuedDirName      = "rescued"
+	agentLockFileName   = ".agent.lock"
 	rescueLockFileName  = ".rescue.lock"
 	promptVersion       = string(prompt.TemplateStep20Implement)
 )
@@ -48,6 +49,7 @@ type Step struct {
 	heartbeatInterval time.Duration
 	staleAfter        time.Duration
 	runner            runner
+	hooks             stepHooks
 }
 
 func NewStep(cfg *config.Config) *Step {
@@ -59,6 +61,11 @@ type stepOptions struct {
 	heartbeatInterval time.Duration
 	staleAfter        time.Duration
 	runner            runner
+	hooks             stepHooks
+}
+
+type stepHooks struct {
+	afterRescueLock func(agentDir string) error
 }
 
 func newStep(cfg *config.Config, opts stepOptions) *Step {
@@ -80,6 +87,7 @@ func newStep(cfg *config.Config, opts stepOptions) *Step {
 		heartbeatInterval: opts.heartbeatInterval,
 		staleAfter:        opts.staleAfter,
 		runner:            opts.runner,
+		hooks:             opts.hooks,
 	}
 }
 
@@ -113,6 +121,14 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 	if err := ensureDir(agentDir); err != nil {
 		return err
 	}
+	agentLock, acquired, err := tryAcquireFileLock(filepath.Join(agentDir, agentLockFileName))
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		return fmt.Errorf("%w: agent=%s", ErrAgentLeaseContended, run.Agent)
+	}
+	defer agentLock.Unlock()
 
 	stepStartedAt := s.now().UTC()
 	retryCount, err := s.resumeIfNeeded(ctx, run, allocation, agentDir)
@@ -138,15 +154,17 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 		RetryCount:      retryCount,
 		LastHeartbeat:   stepStartedAt,
 	}
+	if err := touchHeartbeat(agentDir, state.LastHeartbeat); err != nil {
+		return err
+	}
 	if err := saveResumeState(agentDir, state); err != nil {
 		return err
 	}
 
 	heartbeat, err := startHeartbeat(ctx, heartbeatConfig{
-		agentDir:  agentDir,
-		interval:  s.heartbeatInterval,
-		now:       s.now,
-		baseState: state,
+		agentDir: agentDir,
+		interval: s.heartbeatInterval,
+		now:      s.now,
 	})
 	if err != nil {
 		return err

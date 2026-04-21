@@ -48,7 +48,7 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 	if err := ensureDir(filepath.Dir(req.SessionPath)); err != nil {
 		return runnerResult{}, err
 	}
-	sessionFile, err := os.OpenFile(req.SessionPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	sessionFile, err := os.OpenFile(req.SessionPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return runnerResult{}, err
 	}

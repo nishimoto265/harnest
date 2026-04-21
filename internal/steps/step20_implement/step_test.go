@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -134,6 +136,99 @@ func TestStepRun(t *testing.T) {
 				require.True(t, os.IsNotExist(statErr))
 			},
 		},
+		{
+			name:       "missing heartbeat stale rescue then success",
+			timeoutSec: 5,
+			env: map[string]string{
+				"FAKE_CLAUDE_STDOUT": `{"event":"missing-heartbeat-rescued"}` + "\n",
+			},
+			prepare: func(t *testing.T, fx *testFixture) {
+				fx.seedResumeStateWithOptions(t, 0, false, 999999)
+			},
+			assertion: func(t *testing.T, fx *testFixture, err error) {
+				require.NoError(t, err)
+				manifest := fx.readManifest(t)
+				_, ok := manifest.Value.(contracts.ManifestSuccess)
+				require.True(t, ok)
+
+				state, ok, readErr := loadResumeState(fx.agentDir)
+				require.NoError(t, readErr)
+				require.True(t, ok)
+				require.Equal(t, 1, state.RetryCount)
+
+				rescueState := fx.readLatestRescueState(t)
+				require.Equal(t, "none", rescueState.BundleMode)
+			},
+		},
+		{
+			name:       "rescue aborts when lease becomes active after flock",
+			timeoutSec: 5,
+			prepare: func(t *testing.T, fx *testFixture) {
+				fx.seedResumeState(t, 0)
+				hookTime := time.Now().Add(-30 * time.Second).UTC().Truncate(time.Second)
+				activeState := resumeState{
+					ExpectedBaseSHA: fx.baseSHA,
+					StartedAt:       hookTime,
+					Pid:             os.Getpid(),
+					RetryCount:      7,
+					LastHeartbeat:   hookTime,
+				}
+				fx.step.hooks.afterRescueLock = func(agentDir string) error {
+					if err := touchHeartbeat(agentDir, hookTime); err != nil {
+						return err
+					}
+					return saveResumeState(agentDir, activeState)
+				}
+			},
+			assertion: func(t *testing.T, fx *testFixture, err error) {
+				require.Error(t, err)
+				require.ErrorIs(t, err, ErrRescueAbortedLeaseActive)
+				_, statErr := os.Stat(fx.manifestPath())
+				require.Error(t, statErr)
+				require.True(t, os.IsNotExist(statErr))
+
+				state, ok, readErr := loadResumeState(fx.agentDir)
+				require.NoError(t, readErr)
+				require.True(t, ok)
+				require.Equal(t, os.Getpid(), state.Pid)
+				require.Equal(t, 7, state.RetryCount)
+
+				info, infoErr := os.Stat(filepath.Join(fx.agentDir, heartbeatFileName))
+				require.NoError(t, infoErr)
+				require.WithinDuration(t, state.LastHeartbeat, info.ModTime(), time.Second)
+			},
+		},
+		{
+			name:       "rescue falls back to full head bundle",
+			timeoutSec: 5,
+			env: map[string]string{
+				"FAKE_CLAUDE_STDOUT": `{"event":"fallback"}` + "\n",
+			},
+			prepare: func(t *testing.T, fx *testFixture) {
+				fx.seedResumeState(t, 0)
+				orig := runGitCommand
+				runGitCommand = func(ctx context.Context, worktreePath string, args ...string) ([]byte, error) {
+					if len(args) >= 2 && args[0] == "rev-list" && args[1] == fx.baseSHA+"..HEAD" {
+						return nil, fmt.Errorf("step20: git rev-list %s..HEAD: exit status 128: bad revision", fx.baseSHA)
+					}
+					return orig(ctx, worktreePath, args...)
+				}
+				t.Cleanup(func() {
+					runGitCommand = orig
+				})
+			},
+			assertion: func(t *testing.T, fx *testFixture, err error) {
+				require.NoError(t, err)
+				manifest := fx.readManifest(t)
+				_, ok := manifest.Value.(contracts.ManifestSuccess)
+				require.True(t, ok)
+
+				rescueState := fx.readLatestRescueState(t)
+				require.Equal(t, "full_head", rescueState.BundleMode)
+				require.Equal(t, fx.baseSHA, rescueState.RescuedHeadSHA)
+				require.GreaterOrEqual(t, rescueState.CommitCount, 1)
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -149,6 +244,97 @@ func TestStepRun(t *testing.T) {
 			tc.assertion(t, fx, err)
 		})
 	}
+}
+
+func TestStepRunReturnsContendedLeaseOnConcurrentStartup(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	runner := &blockingRunner{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	fx.step.runner = runner
+
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- fx.step.Run(context.Background(), fx.run)
+	}()
+
+	<-runner.started
+	secondErr := fx.step.Run(context.Background(), fx.run)
+	require.Error(t, secondErr)
+	require.ErrorIs(t, secondErr, ErrAgentLeaseContended)
+
+	close(runner.release)
+	require.NoError(t, <-firstErr)
+}
+
+func TestStepRunDoesNotResetWorktreeAfterRescueContextCancellation(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	fx.seedResumeState(t, 0)
+
+	scratchPath := filepath.Join(fx.worktree, "scratch.txt")
+	require.NoError(t, os.WriteFile(scratchPath, []byte("keep me"), 0o644))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	orig := runGitCommand
+	resetCalled := false
+	runGitCommand = func(ctx context.Context, worktreePath string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "HEAD" {
+			out, err := orig(ctx, worktreePath, args...)
+			cancel()
+			return out, err
+		}
+		if len(args) >= 2 && args[0] == "reset" && args[1] == "--hard" {
+			resetCalled = true
+		}
+		return orig(ctx, worktreePath, args...)
+	}
+	t.Cleanup(func() {
+		runGitCommand = orig
+		cancel()
+	})
+
+	err := fx.step.Run(ctx, fx.run)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, resetCalled)
+
+	bytes, readErr := os.ReadFile(scratchPath)
+	require.NoError(t, readErr)
+	require.Equal(t, "keep me", string(bytes))
+}
+
+func TestCommandRunnerTruncatesSessionFilePerAttempt(t *testing.T) {
+	root := t.TempDir()
+	scriptPath := writeFakeClaudeScript(t, root)
+	sessionPath := filepath.Join(root, sessionFileName)
+	require.NoError(t, os.WriteFile(sessionPath, []byte("stale\n"), 0o644))
+	t.Setenv("FAKE_CLAUDE_STDOUT", "fresh\n")
+
+	runner := commandRunner{now: time.Now}
+	_, err := runner.Run(context.Background(), runnerRequest{
+		Binary:      scriptPath,
+		Workdir:     root,
+		Prompt:      "test",
+		SessionPath: sessionPath,
+		Timeout:     time.Second,
+	})
+	require.NoError(t, err)
+
+	bytes, readErr := os.ReadFile(sessionPath)
+	require.NoError(t, readErr)
+	require.Equal(t, "fresh\n", string(bytes))
+}
+
+func TestPidAliveTreatsEPERMAsAlive(t *testing.T) {
+	orig := processKiller
+	processKiller = func(pid int, sig syscall.Signal) error {
+		return syscall.EPERM
+	}
+	t.Cleanup(func() {
+		processKiller = orig
+	})
+
+	require.True(t, pidAlive(1234))
 }
 
 type testFixture struct {
@@ -265,16 +451,60 @@ func (fx *testFixture) readManifest(t *testing.T) contracts.Manifest {
 
 func (fx *testFixture) seedResumeState(t *testing.T, retryCount int) {
 	t.Helper()
+	fx.seedResumeStateWithOptions(t, retryCount, true, 999999)
+}
+
+func (fx *testFixture) seedResumeStateWithOptions(t *testing.T, retryCount int, writeHeartbeat bool, pid int) {
+	t.Helper()
 	oldTime := time.Now().Add(-2 * time.Hour).UTC()
 	require.NoError(t, os.MkdirAll(fx.agentDir, 0o755))
 	require.NoError(t, saveResumeState(fx.agentDir, resumeState{
 		ExpectedBaseSHA: fx.baseSHA,
 		StartedAt:       oldTime,
-		Pid:             999999,
+		Pid:             pid,
 		RetryCount:      retryCount,
 		LastHeartbeat:   oldTime,
 	}))
-	require.NoError(t, touchHeartbeat(fx.agentDir, oldTime))
+	if writeHeartbeat {
+		require.NoError(t, touchHeartbeat(fx.agentDir, oldTime))
+	}
+}
+
+func (fx *testFixture) readLatestRescueState(t *testing.T) rescueStateFile {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(fx.agentDir, rescuedDirName))
+	require.NoError(t, err)
+	require.NotEmpty(t, entries)
+
+	latest := entries[len(entries)-1].Name()
+	state, readErr := internalio.ReadJSON[rescueStateFile](filepath.Join(fx.agentDir, rescuedDirName, latest, "state.json"))
+	require.NoError(t, readErr)
+	return state
+}
+
+type blockingRunner struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingRunner) Run(ctx context.Context, req runnerRequest) (runnerResult, error) {
+	if err := os.WriteFile(req.SessionPath, []byte("{\"event\":\"blocked\"}\n"), 0o644); err != nil {
+		return runnerResult{}, err
+	}
+	r.once.Do(func() {
+		close(r.started)
+	})
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return runnerResult{}, ctx.Err()
+	}
+	now := time.Now().UTC()
+	return runnerResult{
+		StartedAt:  now,
+		FinishedAt: now,
+	}, nil
 }
 
 func writeFakeClaudeScript(t *testing.T, dir string) string {

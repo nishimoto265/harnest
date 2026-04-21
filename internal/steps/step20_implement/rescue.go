@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,11 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+)
+
+var (
+	ErrAgentLeaseContended      = errors.New("step20: agent lease contended")
+	ErrRescueAbortedLeaseActive = errors.New("step20: rescue aborted because lease became active")
 )
 
 type RescueExhaustedError struct {
@@ -47,22 +53,27 @@ func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation co
 	}
 	if !stale {
 		if pidAlive(state.Pid) {
-			return 0, fmt.Errorf("step20: active lease exists for agent %s", run.Agent)
+			return 0, fmt.Errorf("%w: agent=%s", ErrRescueAbortedLeaseActive, run.Agent)
 		}
 		return 0, fmt.Errorf("step20: resume state is not stale for agent %s", run.Agent)
 	}
 	if pidAlive(state.Pid) {
-		return 0, fmt.Errorf("step20: stale heartbeat but process is still alive for agent %s", run.Agent)
+		return 0, fmt.Errorf("%w: agent=%s", ErrRescueAbortedLeaseActive, run.Agent)
 	}
 
-	lock, acquired, err := tryAcquireRescueLock(filepath.Join(agentDir, rescueLockFileName))
+	lock, acquired, err := tryAcquireFileLock(filepath.Join(agentDir, rescueLockFileName))
 	if err != nil {
 		return 0, err
 	}
 	if !acquired {
-		return 0, fmt.Errorf("step20: rescue already in progress for agent %s", run.Agent)
+		return 0, fmt.Errorf("%w: agent=%s", ErrAgentLeaseContended, run.Agent)
 	}
 	defer lock.Unlock()
+	if s.hooks.afterRescueLock != nil {
+		if err := s.hooks.afterRescueLock(agentDir); err != nil {
+			return 0, err
+		}
+	}
 
 	reloaded, ok, err := loadResumeState(agentDir)
 	if err != nil {
@@ -76,7 +87,7 @@ func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation co
 		return 0, err
 	}
 	if !stale || pidAlive(reloaded.Pid) {
-		return reloaded.RetryCount, nil
+		return 0, fmt.Errorf("%w: agent=%s", ErrRescueAbortedLeaseActive, run.Agent)
 	}
 	if reloaded.RetryCount >= rescueMaxRetries(run.Config, s.cfg) {
 		return 0, &RescueExhaustedError{
@@ -114,20 +125,22 @@ func rescueMaxRetries(runCfg, defaultCfg *config.Config) int {
 }
 
 func (s *Step) performRescue(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, agentDir string, state resumeState) (int, error) {
-	_ = ctx
+	if err := checkContext(ctx); err != nil {
+		return 0, err
+	}
 	rescueID := fmt.Sprintf("%s-%s-rescue-%d-%d", run.IO.RunID, run.Agent, state.RetryCount+1, s.now().UTC().Unix())
 	rescueDir := filepath.Join(agentDir, rescuedDirName, rescueID)
 	if err := ensureDir(filepath.Join(rescueDir, "untracked")); err != nil {
 		return 0, err
 	}
 
-	headSHA, err := gitOutput(strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
+	headSHA, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
 		return 0, err
 	}
 	artifacts := make([]rescueArtifactDigest, 0, 8)
 
-	commitCount, bundleMode, err := writeCommitBundle(allocation.Path, rescueDir, state.ExpectedBaseSHA)
+	commitCount, bundleMode, err := writeCommitBundle(ctx, allocation.Path, rescueDir, state.ExpectedBaseSHA)
 	if err != nil {
 		return 0, err
 	}
@@ -137,7 +150,10 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		return 0, err
 	}
 
-	if err := writeGitOutput(allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary"); err != nil {
+	if err := checkContext(ctx); err != nil {
+		return 0, err
+	}
+	if err := writeGitOutput(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary"); err != nil {
 		return 0, err
 	}
 	if digest, err := fileDigest(filepath.Join(rescueDir, "tracked.patch")); err == nil {
@@ -146,7 +162,10 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		return 0, err
 	}
 
-	if err := writeGitOutput(allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary"); err != nil {
+	if err := checkContext(ctx); err != nil {
+		return 0, err
+	}
+	if err := writeGitOutput(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary"); err != nil {
 		return 0, err
 	}
 	if digest, err := fileDigest(filepath.Join(rescueDir, "staged.patch")); err == nil {
@@ -155,14 +174,20 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		return 0, err
 	}
 
-	untrackedArtifacts, err := copyUntrackedFiles(allocation.Path, rescueDir)
+	if err := checkContext(ctx); err != nil {
+		return 0, err
+	}
+	untrackedArtifacts, err := copyUntrackedFiles(ctx, allocation.Path, rescueDir)
 	if err != nil {
 		return 0, err
 	}
 	artifacts = append(artifacts, untrackedArtifacts...)
 
 	ignoredPath := filepath.Join(rescueDir, "ignored.txt")
-	if err := writeIgnoredList(allocation.Path, ignoredPath); err != nil {
+	if err := checkContext(ctx); err != nil {
+		return 0, err
+	}
+	if err := writeIgnoredList(ctx, allocation.Path, ignoredPath); err != nil {
 		return 0, err
 	}
 	if digest, err := fileDigest(ignoredPath); err == nil {
@@ -184,14 +209,20 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := internalio.WriteJSONAtomic(filepath.Join(rescueDir, "state.json"), rescueState); err != nil {
 		return 0, err
 	}
-	if err := verifyRescueState(rescueDir); err != nil {
+	if err := verifyRescueState(ctx, rescueDir); err != nil {
 		return 0, err
 	}
 
-	if _, err := gitOutput(identity, allocation.Path, "reset", "--hard", state.ExpectedBaseSHA); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return 0, err
 	}
-	if _, err := gitOutput(identity, allocation.Path, "clean", "-fd"); err != nil {
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "reset", "--hard", state.ExpectedBaseSHA); err != nil {
+		return 0, err
+	}
+	if err := checkContext(ctx); err != nil {
+		return 0, err
+	}
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-fd"); err != nil {
 		return 0, err
 	}
 
@@ -199,20 +230,20 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	state.Pid = os.Getpid()
 	state.StartedAt = s.now().UTC()
 	state.LastHeartbeat = state.StartedAt
-	if err := saveResumeState(agentDir, state); err != nil {
+	if err := touchHeartbeat(agentDir, state.LastHeartbeat); err != nil {
 		return 0, err
 	}
-	if err := touchHeartbeat(agentDir, state.LastHeartbeat); err != nil {
+	if err := saveResumeState(agentDir, state); err != nil {
 		return 0, err
 	}
 	return nextRetry, nil
 }
 
-type rescueLock struct {
+type fileLock struct {
 	file *os.File
 }
 
-func tryAcquireRescueLock(path string) (*rescueLock, bool, error) {
+func tryAcquireFileLock(path string) (*fileLock, bool, error) {
 	if err := ensureDir(filepath.Dir(path)); err != nil {
 		return nil, false, err
 	}
@@ -222,15 +253,15 @@ func tryAcquireRescueLock(path string) (*rescueLock, bool, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
 			return nil, false, nil
 		}
 		return nil, false, err
 	}
-	return &rescueLock{file: f}, true, nil
+	return &fileLock{file: f}, true, nil
 }
 
-func (l *rescueLock) Unlock() error {
+func (l *fileLock) Unlock() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
@@ -258,39 +289,49 @@ type rescueArtifactDigest struct {
 	SHA256 string `json:"sha256" validate:"required,len=64,hexadecimal"`
 }
 
-func writeCommitBundle(worktreePath, rescueDir, baseSHA string) (int, string, error) {
+func writeCommitBundle(ctx context.Context, worktreePath, rescueDir, baseSHA string) (int, string, error) {
 	bundlePath := filepath.Join(rescueDir, "commits.bundle")
-	revList, err := gitOutput(identity, worktreePath, "rev-list", baseSHA+"..HEAD")
+	revList, err := gitOutputContext(ctx, identity, worktreePath, "rev-list", baseSHA+"..HEAD")
+	if err == nil {
+		trimmed := strings.TrimSpace(revList)
+		if trimmed == "" {
+			if err := internalio.WriteAtomic(bundlePath, nil); err != nil {
+				return 0, "", err
+			}
+			return 0, "none", nil
+		}
+		commitCount := len(strings.Split(trimmed, "\n"))
+		if _, err := gitOutputContext(ctx, identity, worktreePath, "bundle", "create", bundlePath, baseSHA+"..HEAD"); err == nil {
+			return commitCount, "range", nil
+		}
+	}
+	if err := checkContext(ctx); err != nil {
+		return 0, "", err
+	}
+	if _, err := gitOutputContext(ctx, identity, worktreePath, "bundle", "create", bundlePath, "HEAD", "--objects"); err != nil {
+		return 0, "", err
+	}
+	countOutput, err := gitOutputContext(ctx, strings.TrimSpace, worktreePath, "rev-list", "--count", "HEAD")
 	if err != nil {
 		return 0, "", err
 	}
-	trimmed := strings.TrimSpace(revList)
-	if trimmed == "" {
-		if err := internalio.WriteAtomic(bundlePath, nil); err != nil {
-			return 0, "", err
-		}
-		return 0, "none", nil
-	}
-	commitCount := len(strings.Split(trimmed, "\n"))
-	if _, err := gitOutput(identity, worktreePath, "bundle", "create", bundlePath, baseSHA+"..HEAD"); err == nil {
-		return commitCount, "range", nil
-	}
-	if _, err := gitOutput(identity, worktreePath, "bundle", "create", bundlePath, "HEAD"); err != nil {
+	commitCount, err := strconv.Atoi(countOutput)
+	if err != nil {
 		return 0, "", err
 	}
 	return commitCount, "full_head", nil
 }
 
-func writeGitOutput(worktreePath, target string, args ...string) error {
-	out, err := gitOutputBytes(worktreePath, args...)
+func writeGitOutput(ctx context.Context, worktreePath, target string, args ...string) error {
+	out, err := gitOutputBytesContext(ctx, worktreePath, args...)
 	if err != nil {
 		return err
 	}
 	return internalio.WriteAtomic(target, out)
 }
 
-func copyUntrackedFiles(worktreePath, rescueDir string) ([]rescueArtifactDigest, error) {
-	list, err := gitOutput(identity, worktreePath, "ls-files", "--others", "--exclude-standard", "-z")
+func copyUntrackedFiles(ctx context.Context, worktreePath, rescueDir string) ([]rescueArtifactDigest, error) {
+	list, err := gitOutputContext(ctx, identity, worktreePath, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return nil, err
 	}
@@ -301,6 +342,9 @@ func copyUntrackedFiles(worktreePath, rescueDir string) ([]rescueArtifactDigest,
 	for _, entry := range entries {
 		if entry == "" {
 			continue
+		}
+		if err := checkContext(ctx); err != nil {
+			return nil, err
 		}
 		cleaned := filepath.Clean(entry)
 		src := filepath.Join(worktreePath, cleaned)
@@ -343,8 +387,8 @@ func copyUntrackedFiles(worktreePath, rescueDir string) ([]rescueArtifactDigest,
 	return artifacts, nil
 }
 
-func writeIgnoredList(worktreePath, target string) error {
-	list, err := gitOutput(identity, worktreePath, "ls-files", "--others", "-i", "--exclude-standard", "-z")
+func writeIgnoredList(ctx context.Context, worktreePath, target string) error {
+	list, err := gitOutputContext(ctx, identity, worktreePath, "ls-files", "--others", "-i", "--exclude-standard", "-z")
 	if err != nil {
 		return err
 	}
@@ -352,12 +396,15 @@ func writeIgnoredList(worktreePath, target string) error {
 	return internalio.WriteAtomic(target, []byte(lines))
 }
 
-func verifyRescueState(rescueDir string) error {
+func verifyRescueState(ctx context.Context, rescueDir string) error {
 	state, err := internalio.ReadJSON[rescueStateFile](filepath.Join(rescueDir, "state.json"))
 	if err != nil {
 		return err
 	}
 	for _, artifact := range state.Artifacts {
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
 		path := filepath.Join(rescueDir, filepath.FromSlash(artifact.Path))
 		digest, err := fileDigest(path)
 		if err != nil {
@@ -409,7 +456,11 @@ func fileDigest(path string) (string, error) {
 }
 
 func gitOutput(transform func(string) string, worktreePath string, args ...string) (string, error) {
-	out, err := gitOutputBytes(worktreePath, args...)
+	return gitOutputContext(context.Background(), transform, worktreePath, args...)
+}
+
+func gitOutputContext(ctx context.Context, transform func(string) string, worktreePath string, args ...string) (string, error) {
+	out, err := gitOutputBytesContext(ctx, worktreePath, args...)
 	if err != nil {
 		return "", err
 	}
@@ -417,13 +468,21 @@ func gitOutput(transform func(string) string, worktreePath string, args ...strin
 }
 
 func gitOutputBytes(worktreePath string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", args...)
+	return gitOutputBytesContext(context.Background(), worktreePath, args...)
+}
+
+var runGitCommand = func(ctx context.Context, worktreePath string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = worktreePath
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("step20: git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+func gitOutputBytesContext(ctx context.Context, worktreePath string, args ...string) ([]byte, error) {
+	return runGitCommand(ctx, worktreePath, args...)
 }
 
 func identity(s string) string {
@@ -437,4 +496,11 @@ func syncDir(path string) error {
 	}
 	defer dir.Close()
 	return dir.Sync()
+}
+
+func checkContext(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Err()
 }

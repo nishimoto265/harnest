@@ -2,6 +2,7 @@ package step20_implement
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -9,6 +10,8 @@ import (
 
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 )
+
+var processKiller = syscall.Kill
 
 type resumeState struct {
 	ExpectedBaseSHA string    `json:"expected_base_sha" validate:"required,sha1_hex"`
@@ -46,10 +49,9 @@ func loadResumeState(agentDir string) (resumeState, bool, error) {
 }
 
 type heartbeatConfig struct {
-	agentDir  string
-	interval  time.Duration
-	now       func() time.Time
-	baseState resumeState
+	agentDir string
+	interval time.Duration
+	now      func() time.Time
 }
 
 type heartbeatHandle struct {
@@ -69,7 +71,6 @@ func startHeartbeat(ctx context.Context, cfg heartbeatConfig) (*heartbeatHandle,
 		defer close(handle.done)
 		ticker := time.NewTicker(cfg.interval)
 		defer ticker.Stop()
-		state := cfg.baseState
 		for {
 			select {
 			case <-ctx.Done():
@@ -78,8 +79,12 @@ func startHeartbeat(ctx context.Context, cfg heartbeatConfig) (*heartbeatHandle,
 				return
 			case <-ticker.C:
 				now := cfg.now().UTC()
-				state.LastHeartbeat = now
 				_ = touchHeartbeat(cfg.agentDir, now)
+				state, ok, err := loadResumeState(cfg.agentDir)
+				if err != nil || !ok {
+					continue
+				}
+				state.LastHeartbeat = now
 				_ = saveResumeState(cfg.agentDir, state)
 			}
 		}
@@ -107,7 +112,7 @@ func heartbeatStale(agentDir string, staleAfter time.Duration, now time.Time) (b
 	info, err := os.Stat(heartbeatPath(agentDir))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, time.Time{}, nil
+			return true, time.Time{}, nil
 		}
 		return false, time.Time{}, err
 	}
@@ -119,5 +124,13 @@ func pidAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	return syscall.Kill(pid, 0) == nil
+	err := processKiller(pid, 0)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, syscall.ESRCH):
+		return false
+	default:
+		return true
+	}
 }
