@@ -140,6 +140,9 @@ func (s stubMarkerStep) Run(ctx context.Context, run *StepRunContext) error {
 type step60Step struct{}
 
 func (step60Step) Run(ctx context.Context, run *StepRunContext) error {
+	if err := seedStubPass1Scores(ctx, run); err != nil {
+		return err
+	}
 	return step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
 		IO:          run.IO,
 		TaskPackage: run.TaskPackage,
@@ -147,6 +150,47 @@ func (step60Step) Run(ctx context.Context, run *StepRunContext) error {
 		Secondary:   judges.NewSecondaryStub(),
 		Arbiter:     judges.NewArbiterStub(),
 	})
+}
+
+func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {
+	scoresPath, err := run.IO.ResolveRunRelative("30/scores-A.jsonl")
+	if err != nil {
+		return fmt.Errorf("orchestrator: resolve step30 scores path: %w", err)
+	}
+	if _, err := os.Stat(scoresPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("orchestrator: stat step30 scores path: %w", err)
+	}
+
+	judge := judges.NewPrimaryStub()
+	rubricPath := filepath.Join(run.IO.RunDir(), "rubrics", "default.md")
+	for _, agent := range defaultAgents {
+		manifest, err := internalio.LoadScorableManifest(run.IO, 1, agent)
+		if err != nil {
+			return fmt.Errorf("orchestrator: load pass1 manifest for agent=%s: %w", agent, err)
+		}
+		outputPath, err := run.IO.ResolveRunRelative(manifest.DiffPath)
+		if err != nil {
+			return fmt.Errorf("orchestrator: resolve pass1 diff path for agent=%s: %w", agent, err)
+		}
+		output, err := judge.ScoreOutput(ctx, judges.JudgeInput{
+			RunID:      run.IO.RunID,
+			Pass:       1,
+			Agent:      agent,
+			OutputPath: outputPath,
+			RubricPath: rubricPath,
+		})
+		if err != nil {
+			return fmt.Errorf("orchestrator: score pass1 stub output for agent=%s: %w", agent, err)
+		}
+		for _, entry := range output.Scores {
+			if err := internalio.AppendJSONL(scoresPath, entry); err != nil {
+				return fmt.Errorf("orchestrator: append pass1 score for agent=%s dimension=%s: %w", agent, entry.Dimension, err)
+			}
+		}
+	}
+	return nil
 }
 
 type stubStep40 struct{}
