@@ -385,8 +385,7 @@ func TestRun_ComplianceSingleSideRuleKeepsRawProvenance(t *testing.T) {
 		score:        80,
 		reasonPrefix: "primary",
 		compliance: map[string]contracts.ComplianceVerdict{
-			"shared":         contracts.ComplianceVerdictCompliant,
-			"secondary-only": contracts.ComplianceVerdictValidException,
+			"shared": contracts.ComplianceVerdictCompliant,
 		},
 	}
 
@@ -420,6 +419,136 @@ func TestRun_ComplianceSingleSideRuleKeepsRawProvenance(t *testing.T) {
 	require.Len(t, secondaryOnly, 1)
 	assert.Equal(t, contracts.JudgeRoleSecondary, secondaryOnly[0].JudgeRole)
 	assert.Equal(t, contracts.ComplianceVerdictViolated, secondaryOnly[0].Verdict)
+}
+
+func TestRun_ComplianceArbiterOnlyRuleFinalizesAsSingle(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+
+	primary := scriptedJudge{
+		score:        80,
+		reasonPrefix: "primary",
+		compliance: map[string]contracts.ComplianceVerdict{
+			"shared":       contracts.ComplianceVerdictCompliant,
+			"primary-only": contracts.ComplianceVerdictViolated,
+		},
+	}
+	secondary := scriptedJudge{
+		score:        70,
+		reasonPrefix: "secondary",
+		compliance: map[string]contracts.ComplianceVerdict{
+			"shared":         contracts.ComplianceVerdictViolated,
+			"secondary-only": contracts.ComplianceVerdictInvalidException,
+		},
+	}
+	arbiter := scriptedJudge{
+		score:        80,
+		reasonPrefix: "arbiter",
+		compliance: map[string]contracts.ComplianceVerdict{
+			"arbiter-only": contracts.ComplianceVerdictValidException,
+			"shared":       contracts.ComplianceVerdictCompliant,
+		},
+	}
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     arbiter,
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 16, 30, 0, 0, time.UTC) },
+	}))
+
+	compliance := mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl")
+	byRule := make(map[string]contracts.ComplianceEntry, len(compliance))
+	for _, entry := range compliance {
+		byRule[entry.RuleID] = entry
+	}
+	require.Contains(t, byRule, "arbiter-only")
+	assert.Equal(t, contracts.ComplianceVerdictValidException, byRule["arbiter-only"].Verdict)
+	assert.Equal(t, contracts.VerdictPathSingle, byRule["arbiter-only"].VerdictPath)
+	assert.Equal(t, contracts.VerdictPathSingle, byRule["primary-only"].VerdictPath)
+	assert.Equal(t, contracts.VerdictPathSingle, byRule["secondary-only"].VerdictPath)
+
+	rawCompliance := mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl")
+	byRuleRaw := make(map[string][]contracts.RawComplianceEntry, len(rawCompliance))
+	for _, entry := range rawCompliance {
+		byRuleRaw[entry.RuleID] = append(byRuleRaw[entry.RuleID], entry)
+	}
+	require.Len(t, byRuleRaw["arbiter-only"], 1)
+	assert.Equal(t, contracts.JudgeRolePrimary, byRuleRaw["arbiter-only"][0].JudgeRole)
+	assert.Equal(t, contracts.ComplianceVerdictValidException, byRuleRaw["arbiter-only"][0].Verdict)
+	require.Len(t, byRuleRaw["primary-only"], 1)
+	assert.Equal(t, contracts.JudgeRolePrimary, byRuleRaw["primary-only"][0].JudgeRole)
+	require.Len(t, byRuleRaw["secondary-only"], 1)
+	assert.Equal(t, contracts.JudgeRoleSecondary, byRuleRaw["secondary-only"][0].JudgeRole)
+}
+
+func TestRun_SkipsPass2ManifestWithMissingDiffArtifact(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+
+	require.NoError(t, os.Remove(mustResolve(t, runIO, filepath.Join("50-pass2", "a3", "diff.patch"))))
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 16, 45, 0, 0, time.UTC) },
+	}))
+
+	marker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
+	assert.Equal(t, []contracts.AgentID{"a1", "a2"}, marker.CompletedAgents)
+	assert.EqualValues(t, 10, marker.ExpectedCounts.Scores)
+	assert.EqualValues(t, 2, marker.ExpectedCounts.Compliance)
+	assert.EqualValues(t, 2, marker.ExpectedCounts.Pairwise)
+}
+
+func TestRun_CanceledContextBetweenJudgeCallsAbortsBeforeSecondary(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	secondaryCalls := 0
+	primary := judgeFunc(func(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+		output, err := scriptedJudge{
+			score:        80,
+			reasonPrefix: "primary",
+			compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant},
+		}.ScoreOutput(ctx, input)
+		if err != nil {
+			return judges.JudgeOutput{}, err
+		}
+		cancel()
+		return output, nil
+	})
+	secondary := judgeFunc(func(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+		secondaryCalls++
+		return scriptedJudge{
+			score:        70,
+			reasonPrefix: "secondary",
+			compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictViolated},
+		}.ScoreOutput(ctx, input)
+	})
+
+	err := Run(ctx, Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 16, 50, 0, 0, time.UTC) },
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 0, secondaryCalls)
 }
 
 func TestRun_NormalizesRawResolvedAtToRunSnapshot(t *testing.T) {
@@ -494,6 +623,12 @@ type scriptedJudge struct {
 	reasonPrefix string
 	compliance   map[string]contracts.ComplianceVerdict
 	resolvedAt   time.Time
+}
+
+type judgeFunc func(context.Context, judges.JudgeInput) (judges.JudgeOutput, error)
+
+func (fn judgeFunc) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	return fn(ctx, input)
 }
 
 func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {

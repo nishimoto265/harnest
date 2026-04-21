@@ -373,6 +373,13 @@ func collectScorableAgentRuns(in Input, agents []contracts.AgentID) ([]scorableA
 		if err != nil {
 			return nil, fmt.Errorf("step60: load pass2 manifest for agent=%s: %w", agent, err)
 		}
+		available, err := manifestArtifactsAvailable(in.IO, manifest)
+		if err != nil {
+			return nil, fmt.Errorf("step60: inspect pass2 manifest artifacts for agent=%s: %w", agent, err)
+		}
+		if !available {
+			continue
+		}
 		outputPath, err := in.IO.ResolveRunRelative(manifest.DiffPath)
 		if err != nil {
 			return nil, fmt.Errorf("step60: resolve pass2 diff path for agent=%s: %w", agent, err)
@@ -394,6 +401,26 @@ func collectScorableAgentRuns(in Input, agents []contracts.AgentID) ([]scorableA
 	return runs, nil
 }
 
+func manifestArtifactsAvailable(runIO internalio.RunContext, manifest *contracts.ManifestSuccess) (bool, error) {
+	artifacts := []string{manifest.DiffPath, manifest.SessionPath, manifest.ChecklistPath}
+	for _, rel := range artifacts {
+		if rel == "" {
+			continue
+		}
+		path, err := runIO.ResolveRunRelative(rel)
+		if err != nil {
+			return false, err
+		}
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+	}
+	return true, nil
+}
+
 func truncateStep60Artifacts(paths step60Paths) error {
 	for _, path := range []string{
 		paths.ScoresRaw,
@@ -410,6 +437,9 @@ func truncateStep60Artifacts(paths step60Paths) error {
 }
 
 func scoreJudgeOutput(ctx context.Context, label string, judge judges.Judge, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return judges.JudgeOutput{}, fmt.Errorf("step60: %s judge score output for agent=%s: %w", label, input.Agent, err)
+	}
 	output, err := judge.ScoreOutput(ctx, input)
 	if err != nil {
 		return judges.JudgeOutput{}, fmt.Errorf("step60: %s judge score output for agent=%s: %w", label, input.Agent, err)
@@ -576,13 +606,9 @@ func emitCompliance(
 
 		var finalEntry contracts.ComplianceEntry
 		switch {
-		case primaryDecision.Verdict == secondaryDecision.Verdict:
+		case primaryOK && secondaryOK && primaryDecision.Verdict == secondaryDecision.Verdict:
 			finalEntry = finalizeCompliance(meta, preferredComplianceAgreementSource(primaryDecision, secondaryDecision, primaryOK, secondaryOK), contracts.VerdictPathAgreement)
-		case !primaryOK || !secondaryOK:
-			// Single-side rules finalize directly from the observed side so the final verdict
-			// remains fully traceable from compliance-B-raw.jsonl without synthetic arbiter input.
-			finalEntry = finalizeCompliance(meta, preferredComplianceSingleSource(primaryDecision, secondaryDecision, primaryOK, secondaryOK), contracts.VerdictPathSingle)
-		default:
+		case primaryOK && secondaryOK:
 			if !arbiterOK {
 				return nil, fmt.Errorf("step60: arbiter compliance missing rule=%s agent=%s", ruleID, agent)
 			}
@@ -601,6 +627,25 @@ func emitCompliance(
 				return nil, fmt.Errorf("step60: append arbiter raw compliance rule=%s agent=%s: %w", ruleID, agent, err)
 			}
 			finalEntry = finalizeCompliance(meta, arbiterEntry, complianceVerdictPath(primaryDecision, secondaryDecision, arbiterEntry))
+		case arbiterOK:
+			arbiterHash, err := complianceOutputHash(arbiterEntry)
+			if err != nil {
+				return nil, fmt.Errorf("step60: hash canonical compliance rule=%s agent=%s: %w", ruleID, agent, err)
+			}
+			// Arbiter-only compliance rows cannot be emitted with judge_role=arbiter because
+			// RawJudgeRef requires both refs. Persist the arbiter verdict as the canonical
+			// single-source raw row under the primary role so the final single verdict remains
+			// reconstructible from the append-only raw layer.
+			if err := internalio.AppendJSONL(paths.ComplianceRaw, makeRawComplianceEntry(arbiterEntry, contracts.JudgeRolePrimary, arbiterHash, nil, nil, meta.ResolvedAt)); err != nil {
+				return nil, fmt.Errorf("step60: append canonical raw compliance rule=%s agent=%s: %w", ruleID, agent, err)
+			}
+			finalEntry = finalizeCompliance(meta, arbiterEntry, contracts.VerdictPathSingle)
+		case !primaryOK || !secondaryOK:
+			// Single-side rules finalize directly from the observed side so the final verdict
+			// remains fully traceable from compliance-B-raw.jsonl without synthetic arbiter input.
+			finalEntry = finalizeCompliance(meta, preferredComplianceSingleSource(primaryDecision, secondaryDecision, primaryOK, secondaryOK), contracts.VerdictPathSingle)
+		default:
+			finalEntry = finalizeCompliance(meta, preferredComplianceSingleSource(primaryDecision, secondaryDecision, primaryOK, secondaryOK), contracts.VerdictPathSingle)
 		}
 
 		if err := internalio.AppendJSONL(paths.ComplianceFinal, finalEntry); err != nil {
