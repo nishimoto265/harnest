@@ -532,3 +532,21 @@ func indexOfCandidate(t *testing.T, candidates []contracts.Candidate, candidateI
 	t.Fatalf("candidate not found: %s", candidateID)
 	return -1
 }
+
+func TestBestDuplicateMatch_IgnoresTemplateBoilerplate(t *testing.T) {
+	candidateBody := candidateBodyMarkdown(contracts.Candidate{
+		CandidateID:  "cand-1",
+		Kind:         contracts.CandidateKindNew,
+		Title:        "Rule candidate for rule-a",
+		Problem:      "Pass1 recorded 3 violation(s) for rule rule-a.",
+		Rationale:    "Phase 0 deterministic classify generated one candidate from compliance-A.jsonl for rule-a.",
+		TargetRuleID: "",
+	})
+	activeRuleBodies := map[string]string{
+		"rule-b": "# Existing rule\n\n- source_rule_id: rule-b\n- classification: update\n\n## Problem\nPass1 recorded 3 violation(s) for rule rule-b.\n\n## Rationale\nPhase 0 deterministic classify generated one candidate from compliance-A.jsonl for rule-b.\n",
+	}
+
+	ruleID, score := bestDuplicateMatch(candidateBody, activeRuleBodies)
+	assert.Empty(t, ruleID)
+	assert.Zero(t, score)
+}

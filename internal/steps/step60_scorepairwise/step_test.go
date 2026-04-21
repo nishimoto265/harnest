@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -607,20 +609,92 @@ func TestRun_SkipsPass2AgentWhenDeclaredArtifactIsMissing(t *testing.T) {
 
 	require.NoError(t, os.Remove(mustResolve(t, runIO, "50-pass2/a2/diff.patch")))
 
-	require.NoError(t, Run(context.Background(), Input{
+	err := Run(context.Background(), Input{
 		IO:          runIO,
 		TaskPackage: &pkg,
 		Primary:     judges.NewPrimaryStub(),
 		Secondary:   judges.NewSecondaryStub(),
 		Arbiter:     judges.NewArbiterStub(),
 		Now:         func() time.Time { return time.Date(2026, 4, 21, 19, 0, 0, 0, time.UTC) },
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing declared pass2 diff artifact")
+	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
+}
+
+func TestRun_UsesPass1Pass2ScorableIntersection(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass1Agents: map[contracts.AgentID]bool{"a2": true},
+	})
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 19, 30, 0, 0, time.UTC) },
 	}))
 
 	marker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
 	assert.Equal(t, []contracts.AgentID{"a1", "a3"}, marker.CompletedAgents)
 	assert.EqualValues(t, 10, marker.ExpectedCounts.Scores)
-	assert.EqualValues(t, 2, marker.ExpectedCounts.Compliance)
 	assert.EqualValues(t, 2, marker.ExpectedCounts.Pairwise)
+}
+
+func TestRun_SerializesConcurrentWriters(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	primary := &blockingJudge{
+		delegate: scriptedJudge{
+			score:        80,
+			reasonPrefix: "primary",
+			compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant},
+		},
+		started: started,
+		release: release,
+	}
+
+	errCh := make(chan error, 2)
+	go func() {
+		errCh <- Run(context.Background(), Input{
+			IO:          runIO,
+			TaskPackage: &pkg,
+			Primary:     primary,
+			Secondary:   judges.NewSecondaryStub(),
+			Arbiter:     judges.NewArbiterStub(),
+		})
+	}()
+
+	<-started
+
+	go func() {
+		errCh <- Run(context.Background(), Input{
+			IO:          runIO,
+			TaskPackage: &pkg,
+			Primary:     primary,
+			Secondary:   judges.NewSecondaryStub(),
+			Arbiter:     judges.NewArbiterStub(),
+		})
+	}()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("Run returned before lock release: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	assert.EqualValues(t, 1, primary.callCount())
+
+	close(release)
+
+	require.NoError(t, <-errCh)
+	require.NoError(t, <-errCh)
+	assert.GreaterOrEqual(t, primary.callCount(), int32(3))
 }
 
 func TestRun_StopsBeforeSecondaryJudgeWhenContextIsCanceled(t *testing.T) {
@@ -657,6 +731,7 @@ type fixtureOptions struct {
 	agents                 []contracts.AgentID
 	writePass1Score        bool
 	missingPass2Agents     map[contracts.AgentID]bool
+	nonScorablePass1Agents map[contracts.AgentID]bool
 	nonScorablePass2Agents map[contracts.AgentID]bool
 }
 
@@ -753,6 +828,27 @@ func (j unexpectedCallJudge) ScoreOutput(ctx context.Context, input judges.Judge
 	return judges.JudgeOutput{}, errors.New("unexpected judge call")
 }
 
+type blockingJudge struct {
+	delegate scriptedJudge
+	started  chan struct{}
+	release  chan struct{}
+	once     sync.Once
+	calls    int32
+}
+
+func (j *blockingJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	atomic.AddInt32(&j.calls, 1)
+	j.once.Do(func() {
+		close(j.started)
+		<-j.release
+	})
+	return j.delegate.ScoreOutput(ctx, input)
+}
+
+func (j *blockingJudge) callCount() int32 {
+	return atomic.LoadInt32(&j.calls)
+}
+
 func seedStep60Fixture(t *testing.T, opts fixtureOptions) (internalio.RunContext, contracts.TaskPackage) {
 	t.Helper()
 
@@ -799,7 +895,12 @@ func seedStep60Fixture(t *testing.T, opts fixtureOptions) (internalio.RunContext
 	require.NoError(t, os.MkdirAll(runIO.RunDir(), 0o755))
 
 	for _, agent := range agents {
-		writeManifestSuccess(t, runIO, runID, 1, agent)
+		switch {
+		case opts.nonScorablePass1Agents[agent]:
+			writeManifestError(t, runIO, runID, 1, agent)
+		default:
+			writeManifestSuccess(t, runIO, runID, 1, agent)
+		}
 		switch {
 		case opts.missingPass2Agents[agent]:
 		case opts.nonScorablePass2Agents[agent]:

@@ -50,6 +50,12 @@ type Result struct {
 	SkippedOpIDs  []string
 }
 
+type sunsetMarker struct {
+	RecordedStartTime time.Time    `json:"recorded_start_time"`
+	SunsetRunID       string       `json:"sunset_run_id"`
+	Transitions       []Transition `json:"transitions"`
+}
+
 type registryLine = internalio.RegistryLine
 
 func RunSunset(ctx context.Context, opts Opts) (Result, error) {
@@ -96,6 +102,12 @@ func RunSunset(ctx context.Context, opts Opts) (Result, error) {
 
 func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 	opts = applyDefaults(opts)
+	if opts.RunsBase == "" {
+		return Result{}, errors.New("archive: runs_base is required")
+	}
+	if opts.SunsetRunID == "" {
+		return Result{}, errors.New("archive: sunset_run_id is required")
+	}
 	if blocked, err := sentinelExists(opts.RunsBase); err != nil {
 		return Result{}, err
 	} else if blocked {
@@ -303,25 +315,16 @@ func findByOpID(path, opID string) (contracts.RegistryAppendResult, bool, error)
 
 func reconcileStaleMarker(ctx context.Context, opts Opts) error {
 	path := filepath.Join(opts.RunsBase, markerFilename)
-	data, err := os.ReadFile(path)
+	marker, err := readMarker(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) < 2 {
-		return fmt.Errorf("archive: invalid stale marker contents")
-	}
-	recordedStart, err := time.Parse(time.RFC3339Nano, lines[0])
-	if err != nil {
-		return fmt.Errorf("archive: parse stale marker start time: %w", err)
-	}
-	staleRunID := lines[1]
-	missing := make([]Transition, 0, len(opts.Transitions))
-	for _, transition := range opts.Transitions {
-		opID := ComputeOpID(staleRunID, transition.RuleID, transitionKey(transition))
+	missing := make([]Transition, 0, len(marker.Transitions))
+	for _, transition := range marker.Transitions {
+		opID := ComputeOpID(marker.SunsetRunID, transition.RuleID, transitionKey(transition))
 		if _, ok, err := findByOpID(filepath.Join(opts.RunsBase, "rules-registry.jsonl"), opID); err != nil {
 			return err
 		} else if ok {
@@ -331,13 +334,14 @@ func reconcileStaleMarker(ctx context.Context, opts Opts) error {
 	}
 	if len(missing) > 0 {
 		retryOpts := opts
-		retryOpts.SunsetRunID = staleRunID
+		retryOpts.SunsetRunID = marker.SunsetRunID
 		retryOpts.Transitions = missing
+		retryOpts.Now = func() time.Time { return marker.RecordedStartTime }
 		if _, err := RunSunset(ctx, retryOpts); err != nil {
 			return err
 		}
 	}
-	if err := writeLastSunsetAt(opts.RunsBase, recordedStart); err != nil {
+	if err := writeLastSunsetAt(opts.RunsBase, marker.RecordedStartTime); err != nil {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -364,8 +368,11 @@ func gateAllows(opts Opts) (bool, error) {
 
 func writeMarker(opts Opts) error {
 	path := filepath.Join(opts.RunsBase, markerFilename)
-	body := []byte(opts.Now().Format(time.RFC3339Nano) + "\n" + opts.SunsetRunID + "\n")
-	return internalio.WriteAtomic(path, body)
+	return internalio.WriteJSONAtomic(path, sunsetMarker{
+		RecordedStartTime: opts.Now(),
+		SunsetRunID:       opts.SunsetRunID,
+		Transitions:       append([]Transition(nil), opts.Transitions...),
+	})
 }
 
 func writeLastSunsetAt(runsBase string, t time.Time) error {
@@ -427,6 +434,17 @@ func sentinelExists(runsBase string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func readMarker(path string) (sunsetMarker, error) {
+	marker, err := internalio.ReadJSON[sunsetMarker](path)
+	if err != nil {
+		return sunsetMarker{}, err
+	}
+	if marker.RecordedStartTime.IsZero() || marker.SunsetRunID == "" {
+		return sunsetMarker{}, fmt.Errorf("archive: invalid stale marker contents")
+	}
+	return marker, nil
 }
 
 func syncRegistryIndex(runsBase, registryPath string, entry contracts.RuleRegistryEntry, result contracts.RegistryAppendResult) error {

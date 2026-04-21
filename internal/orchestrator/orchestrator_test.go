@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,8 +14,11 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -183,6 +188,74 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs(t *testing.T) {
 	}
 }
 
+func TestRun_DefaultSteps_RealWiringWithFakeCLIs_AdoptFlow(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repo.Root = repoRootFromTestFile(t)
+	binDir := installFakeCLI(t)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
+
+	t.Setenv("AUTO_IMPROVE_TEST_BASE_SHA", strings.Repeat("a", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_TARGET_SHA", strings.Repeat("b", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_MERGE_SHA", strings.Repeat("c", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_BEST_SHA", strings.Repeat("d", 40))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps.Step40 = forcedCandidateStep{}
+	orch.steps.Step60 = scriptedStep60Step{decode: orch.decoders.Step60}
+
+	runID := contracts.RunID("2026-04-21-PR43-abcdeff")
+	require.NoError(t, orch.Run(context.Background(), 43, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(cfg.Paths.Runs, string(runID), "60", "done.marker"))
+
+	decisionPath := filepath.Join(cfg.Paths.Runs, string(runID), "70", "decision.json")
+	decision, err := internalio.ReadJSON[contracts.Decision](decisionPath)
+	require.NoError(t, err)
+	assert.Equal(t, contracts.DecisionActionAdopt, decision.Action)
+
+	lines, err := internalio.ReadJSONL[contracts.RuleRegistryEntry](runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	assert.Len(t, lines, 1)
+}
+
+func TestRun_DefaultSteps_RealWiringWithFakeCLIs_BlockedBySentinel(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repo.Root = repoRootFromTestFile(t)
+	binDir := installFakeCLI(t)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
+
+	t.Setenv("AUTO_IMPROVE_TEST_BASE_SHA", strings.Repeat("a", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_TARGET_SHA", strings.Repeat("b", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_MERGE_SHA", strings.Repeat("c", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_BEST_SHA", strings.Repeat("d", 40))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	blockedRunID := contracts.RunID("2026-04-21-PR99-deadbee")
+	blockedRunCtx, err := internalio.NewRunContext(blockedRunID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, ensureNeedsRecoverySentinel(blockedRunCtx, 99, blockedRunID, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70))
+
+	runID := contracts.RunID("2026-04-21-PR44-abcdeff")
+	require.NoError(t, orch.Run(context.Background(), 44, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	decisionPath := filepath.Join(cfg.Paths.Runs, string(runID), "70", "decision.json")
+	assert.NoFileExists(t, decisionPath)
+
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindInterrupted, events[len(events)-1].Kind)
+}
+
 func TestStubMarkerStep_SeedsPass1ScoresFromTaskPackageWorktrees(t *testing.T) {
 	cfg := testConfig(t)
 	agents := []contracts.AgentID{"a2", "a4", "a7"}
@@ -305,6 +378,158 @@ func TestRealArchiveStep_NoOpLeavesSunsetStateUntouched(t *testing.T) {
 type callRecorder struct {
 	mu    sync.Mutex
 	calls []string
+}
+
+type forcedCandidateStep struct{}
+
+func (forcedCandidateStep) Run(ctx context.Context, run *StepRunContext) error {
+	_ = ctx
+	body := "# Forced rule\n\nUse explicit resource cleanup.\n"
+	candidate := contracts.Candidate{
+		CandidateID:        "cand-forced-001",
+		Kind:               contracts.CandidateKindNew,
+		Title:              "Forced rule",
+		Problem:            "problem",
+		Rationale:          "rationale",
+		ProposedBodyPath:   "40/candidates/cand-forced-001.md",
+		ProposedBodySha256: sha256String(body),
+	}
+	if err := candidate.Validate(); err != nil {
+		return err
+	}
+	candidates := &contracts.Candidates{
+		SchemaVersion:  "1",
+		RunID:          run.IO.RunID,
+		Candidates:     []contracts.Candidate{candidate},
+		CandidatesHash: contracts.CanonicalCandidatesHash([]contracts.Candidate{candidate}),
+		CreatedAt:      time.Now().UTC(),
+	}
+	sidecarPath, err := run.IO.ResolveRunRelative(candidate.ProposedBodyPath)
+	if err != nil {
+		return err
+	}
+	if err := internalio.WriteAtomic(sidecarPath, []byte(body)); err != nil {
+		return err
+	}
+	candidatesPath, err := run.IO.ResolveRunRelative("40/candidates.json")
+	if err != nil {
+		return err
+	}
+	if err := internalio.WriteJSONAtomic(candidatesPath, candidates); err != nil {
+		return err
+	}
+	run.Candidates = candidates
+	return nil
+}
+
+type scriptedStep60Step struct {
+	decode func([]byte, any) (any, error)
+}
+
+func (s scriptedStep60Step) Run(ctx context.Context, run *StepRunContext) error {
+	if err := step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
+		IO:          run.IO,
+		TaskPackage: run.TaskPackage,
+		Primary:     orchestratorJudge{score: 95},
+		Secondary:   orchestratorJudge{score: 94},
+		Arbiter:     orchestratorJudge{score: 95},
+	}); err != nil {
+		return err
+	}
+	if s.decode == nil {
+		return nil
+	}
+	scorableAgents, err := step60ScorableAgents(run.IO, run.TaskPackage)
+	if err != nil {
+		return err
+	}
+	req := stepio.Step60Request{
+		TaskPackage:    *run.TaskPackage,
+		ScorableAgents: scorableAgents,
+		RubricVersion:  "default",
+		PromptVersion:  "phase0-stub",
+	}
+	markerPath, err := run.IO.ResolveRunRelative("60/done.marker")
+	if err != nil {
+		return err
+	}
+	marker, err := internalio.ReadJSON[contracts.Step60DoneMarker](markerPath)
+	if err != nil {
+		return err
+	}
+	resp := stepio.Step60Response{
+		RunID:           run.IO.RunID,
+		ScoresCount:     int(marker.ExpectedCounts.Scores),
+		ComplianceCount: int(marker.ExpectedCounts.Compliance),
+		PairwiseCount:   int(marker.ExpectedCounts.Pairwise),
+		ResolvedAt:      marker.ResolvedAt,
+	}
+	payload, err := contracts.MarshalStrict(resp)
+	if err != nil {
+		return err
+	}
+	_, err = s.decode(payload, req)
+	return err
+}
+
+type orchestratorJudge struct {
+	score int
+}
+
+func (j orchestratorJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	if err := input.Validate(); err != nil {
+		return judges.JudgeOutput{}, err
+	}
+	select {
+	case <-ctx.Done():
+		return judges.JudgeOutput{}, ctx.Err()
+	default:
+	}
+	scores := make([]contracts.ScoreEntry, 0, 5)
+	dimensions := []contracts.Dimension{
+		contracts.DimensionFidelity,
+		contracts.DimensionCorrectness,
+		contracts.DimensionMaintainability,
+		contracts.DimensionDiscipline,
+		contracts.DimensionCommunication,
+	}
+	for _, dimension := range dimensions {
+		scores = append(scores, contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         input.RunID,
+			Pass:          input.Pass,
+			Agent:         input.Agent,
+			Dimension:     dimension,
+			Score:         j.score,
+			Reasons:       "scripted adopt score",
+			VerdictPath:   contracts.VerdictPathSingle,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+		})
+	}
+	output := judges.JudgeOutput{
+		Scores: scores,
+		Compliance: []contracts.ComplianceEntry{{
+			SchemaVersion: "1",
+			RunID:         input.RunID,
+			Pass:          input.Pass,
+			Agent:         input.Agent,
+			RuleID:        "shared",
+			Verdict:       contracts.ComplianceVerdictCompliant,
+			Rationale:     "scripted adopt compliance",
+			VerdictPath:   contracts.VerdictPathSingle,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+		}},
+	}
+	return output, output.ValidateFor(input)
+}
+
+func sha256String(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func (r *callRecorder) add(call string) {

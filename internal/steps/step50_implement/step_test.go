@@ -275,6 +275,78 @@ func TestLoadRulePayloadsRejectsPathTraversal(t *testing.T) {
 	}
 }
 
+func TestLoadRulePayloads_SkipsDuplicateCandidates(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	candidateNew := writeCandidateSidecar(t, env.run.IO, contracts.Candidate{
+		CandidateID:      "cand-new",
+		Kind:             contracts.CandidateKindNew,
+		Title:            "New rule",
+		ProposedBodyPath: "40/candidates/cand-new.md",
+	}, "# cand-new\nnew body\n")
+	candidateDuplicate := writeCandidateSidecar(t, env.run.IO, contracts.Candidate{
+		CandidateID:        "cand-dup",
+		Kind:               contracts.CandidateKindDuplicate,
+		TargetRuleID:       "rule.v1",
+		Title:              "Duplicate rule",
+		ProposedBodyPath:   "40/candidates/cand-dup.md",
+	}, "# cand-dup\nduplicate body\n")
+	writeCandidatesFile(t, env.run.IO, []contracts.Candidate{candidateNew, candidateDuplicate})
+
+	candidatesPath, err := env.run.IO.ResolveRunRelative(filepath.Join("40", "candidates.json"))
+	require.NoError(t, err)
+	payloads, err := LoadRulePayloads(candidatesPath)
+	require.NoError(t, err)
+	require.Len(t, payloads, 1)
+	assert.Equal(t, "cand-new", payloads[0].ID)
+}
+
+func TestLoadRulePayloads_AllowsNonRegexRuleID(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	candidate := writeCandidateSidecar(t, env.run.IO, contracts.Candidate{
+		CandidateID:        "cand-1",
+		Kind:               contracts.CandidateKindUpdate,
+		TargetRuleID:       "rule.v1",
+		Title:              "Updated rule",
+		ProposedBodyPath:   "40/candidates/cand-1.md",
+	}, "# cand-1\nupdated body\n")
+	writeCandidatesFile(t, env.run.IO, []contracts.Candidate{candidate})
+
+	candidatesPath, err := env.run.IO.ResolveRunRelative(filepath.Join("40", "candidates.json"))
+	require.NoError(t, err)
+	payloads, err := LoadRulePayloads(candidatesPath)
+	require.NoError(t, err)
+	require.Len(t, payloads, 1)
+	assert.Equal(t, "rule.v1", payloads[0].TargetRuleID)
+}
+
+func TestCopyUntrackedFiles_SkipsSymlinksAndKeepsWhitespaceNames(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	worktree := env.run.TaskPackage.Worktrees[3].Path
+	secretPath := filepath.Join(t.TempDir(), "id_rsa")
+	require.NoError(t, os.WriteFile(secretPath, []byte("secret\n"), 0o600))
+	require.NoError(t, os.Symlink(secretPath, filepath.Join(worktree, "loot")))
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, "space name.txt"), []byte("hello\n"), 0o644))
+
+	rescueDir := filepath.Join(t.TempDir(), "rescue")
+	require.NoError(t, os.MkdirAll(filepath.Join(rescueDir, "untracked"), 0o755))
+
+	artifacts, err := copyUntrackedFiles(context.Background(), worktree, rescueDir)
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(rescueDir, "untracked", "loot"))
+	assert.FileExists(t, filepath.Join(rescueDir, "untracked", "space name.txt"))
+	assert.FileExists(t, filepath.Join(rescueDir, "untracked-symlinks.txt"))
+	symlinkLog, err := os.ReadFile(filepath.Join(rescueDir, "untracked-symlinks.txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(symlinkLog), "loot")
+
+	paths := make([]string, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		paths = append(paths, artifact.Path)
+	}
+	assert.Contains(t, paths, "untracked/space name.txt")
+	assert.Contains(t, paths, "untracked-symlinks.txt")
+}
+
 func TestShouldWriteTimeoutManifestRequiresRunError(t *testing.T) {
 	execCtx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
 	defer cancel()

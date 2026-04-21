@@ -51,7 +51,11 @@ func TestRunSunsetWithLock_ReconcilesCompletedMarker(t *testing.T) {
 	_, err = internalio.AppendRegistryEntry(registryPath, entry)
 	require.NoError(t, err)
 
-	require.NoError(t, os.WriteFile(filepath.Join(runsBase, markerFilename), []byte("2026-04-21T09:00:00Z\n"+staleRunID+"\n"), 0o644))
+	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runsBase, markerFilename), sunsetMarker{
+		RecordedStartTime: time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC),
+		SunsetRunID:       staleRunID,
+		Transitions:       []Transition{transition},
+	}))
 
 	now := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
 	result, err := RunSunsetWithLock(context.Background(), Opts{
@@ -80,7 +84,11 @@ func TestRunSunsetWithLock_ReconcilesInterruptedMarker(t *testing.T) {
 	_, err = internalio.AppendRegistryEntry(registryPath, entry)
 	require.NoError(t, err)
 
-	require.NoError(t, os.WriteFile(filepath.Join(runsBase, markerFilename), []byte("2026-04-21T09:00:00Z\n"+staleRunID+"\n"), 0o644))
+	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runsBase, markerFilename), sunsetMarker{
+		RecordedStartTime: time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC),
+		SunsetRunID:       staleRunID,
+		Transitions:       []Transition{first, second},
+	}))
 
 	result, err := RunSunsetWithLock(context.Background(), Opts{
 		RunsBase:    runsBase,
@@ -96,6 +104,38 @@ func TestRunSunsetWithLock_ReconcilesInterruptedMarker(t *testing.T) {
 	require.Len(t, lines, 2)
 	assert.Equal(t, ComputeOpID(staleRunID, first.RuleID, transitionKey(first)), opIDFromEntry(lines[0].Entry))
 	assert.Equal(t, ComputeOpID(staleRunID, second.RuleID, transitionKey(second)), opIDFromEntry(lines[1].Entry))
+}
+
+func TestRunSunsetWithLock_ReconcilesUsingPersistedTransitionPlan(t *testing.T) {
+	runsBase := t.TempDir()
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	staleRunID := "stale-run"
+	persisted := []Transition{deprecateTransition("rule-1")}
+	current := []Transition{
+		deprecateTransition("rule-1"),
+		archiveTransition("rule-1", contracts.RuleStatusDeprecated),
+	}
+
+	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runsBase, markerFilename), sunsetMarker{
+		RecordedStartTime: time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC),
+		SunsetRunID:       staleRunID,
+		Transitions:       persisted,
+	}))
+
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "current-run",
+		Transitions: current,
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.AppendedOpIDs)
+
+	lines := readRegistryLinesForTest(t, registryPath)
+	require.Len(t, lines, 1)
+	entry := lines[0].Entry.Value.(contracts.RuleRegistryStatusChanged)
+	assert.Equal(t, staleRunID, entry.BySunsetRunID)
+	assert.Equal(t, time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC), entry.At)
 }
 
 func TestRunSunset_PerOpIdempotency(t *testing.T) {

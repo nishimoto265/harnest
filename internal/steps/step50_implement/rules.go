@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
+	"strings"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 )
-
-var promptIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
 // RulePayload is the prompt-ready candidate rule body loaded from the run's 40/
 // sidecars.
@@ -38,6 +36,9 @@ func LoadRulePayloads(candidatesPath string) ([]RulePayload, error) {
 	runDir := filepath.Clean(filepath.Join(filepath.Dir(candidatesPath), ".."))
 	payloads := make([]RulePayload, 0, len(candidates.Candidates))
 	for _, candidate := range candidates.Candidates {
+		if candidate.Kind == contracts.CandidateKindDuplicate {
+			continue
+		}
 		if err := validatePromptIdentifier("candidate_id", candidate.CandidateID); err != nil {
 			return nil, err
 		}
@@ -71,7 +72,14 @@ func LoadRulePayloads(candidatesPath string) ([]RulePayload, error) {
 }
 
 func validatePromptIdentifier(field, value string) error {
-	if !promptIdentifierPattern.MatchString(value) {
+	switch {
+	case value == "":
+		return nil
+	case value == "." || value == "..":
+		return fmt.Errorf("invalid %s %q", field, value)
+	case filepath.Clean(value) != value:
+		return fmt.Errorf("invalid %s %q", field, value)
+	case strings.Contains(value, "/"), strings.Contains(value, `\`):
 		return fmt.Errorf("invalid %s %q", field, value)
 	}
 	return nil

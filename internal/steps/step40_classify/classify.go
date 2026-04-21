@@ -387,8 +387,16 @@ func latestRulePath(entries []contracts.RuleRegistryEntry, ruleID string) (strin
 func bestDuplicateMatch(candidateBody string, activeRuleBodies map[string]string) (string, float64) {
 	bestRuleID := ""
 	bestScore := 0.0
+	normalizedCandidate := normalizeRuleContent(candidateBody)
+	if strings.TrimSpace(normalizedCandidate) == "" {
+		return "", 0
+	}
 	for ruleID, body := range activeRuleBodies {
-		score := tokenSetSimilarity(candidateBody, body)
+		normalizedBody := normalizeRuleContent(body)
+		if strings.TrimSpace(normalizedBody) == "" {
+			continue
+		}
+		score := tokenSetSimilarity(normalizedCandidate, normalizedBody)
 		if score > bestScore {
 			bestRuleID = ruleID
 			bestScore = score
@@ -415,6 +423,39 @@ func tokenSetSimilarity(left, right string) float64 {
 		union[token] = struct{}{}
 	}
 	return float64(intersection) / float64(len(union))
+}
+
+func normalizeRuleContent(value string) string {
+	lines := strings.Split(value, "\n")
+	normalized := make([]string, 0, len(lines))
+	section := ""
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "":
+			continue
+		case strings.HasPrefix(trimmed, "# "):
+			continue
+		case strings.HasPrefix(trimmed, "- source_rule_id:"):
+			continue
+		case strings.HasPrefix(trimmed, "- classification:"):
+			continue
+		case trimmed == "## Problem":
+			section = "problem"
+			continue
+		case trimmed == "## Rationale":
+			section = "rationale"
+			continue
+		}
+		if section == "problem" && strings.HasPrefix(trimmed, "Pass1 recorded ") && strings.Contains(trimmed, " violation(s) for rule ") {
+			continue
+		}
+		if section == "rationale" && strings.HasPrefix(trimmed, "Phase 0 deterministic classify generated one candidate from compliance-A.jsonl for ") {
+			continue
+		}
+		normalized = append(normalized, trimmed)
+	}
+	return strings.Join(normalized, "\n")
 }
 
 func normalizedTokenSet(value string) map[string]struct{} {

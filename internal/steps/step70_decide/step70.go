@@ -123,7 +123,7 @@ func Run(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contrac
 		return err
 	}
 	if ok {
-		return finalizePersistedDecision(ctx, pr, runCtx, pkg, decision, store, writer, deps)
+		return finalizePersistedDecision(ctx, pr, runCtx, pkg, candidates, decision, store, writer, deps)
 	}
 
 	return startFresh(ctx, pr, runCtx, pkg, candidates, store, writer, deps)
@@ -161,6 +161,10 @@ func startFresh(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 		}
 		return writeReject(runCtx, pkg, "below_threshold", deps)
 	}
+	target, err = resolveBestShaBefore(ctx, pkg, target, deps)
+	if err != nil {
+		return err
+	}
 
 	registryHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
 	if err != nil {
@@ -197,6 +201,9 @@ func driveAdopt(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := abortOnOtherRunSentinel(runCtx, store); err != nil {
+		return err
+	}
 	if err := pushBranch(ctx, target, deps); err != nil {
 		return handleRollback(ctx, pr, runCtx, pkg, target, intention, store, writer, deps, classifyPushErr(err))
 	}
@@ -210,6 +217,11 @@ func driveAdopt(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 func driveRegistry(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if handled, err := rollbackOnOtherRunSentinel(ctx, pr, runCtx, pkg, intention, store, writer, deps); err != nil {
+		return err
+	} else if handled {
+		return nil
 	}
 	appendResult, err := appendRegistryEntries(runCtx, &intention, store, writer, deps, pr)
 	if err != nil {
@@ -228,6 +240,11 @@ func driveRegistry(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 }
 
 func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
+	if handled, err := rollbackOnOtherRunSentinel(ctx, pr, runCtx, pkg, intention, store, writer, deps); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
 	now := deps.Now()
 	decision := contracts.Decision{
 		Action: contracts.DecisionActionAdopt,
@@ -254,6 +271,9 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 }
 
 func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, store IntentionWriter, writer state.Writer, deps Deps) error {
+	if err := blockOnOtherRunSentinel(runCtx); err != nil {
+		return err
+	}
 	if err := cleanupWorktrees(ctx, pkg, deps.Git); err != nil {
 		return err
 	}
@@ -263,29 +283,18 @@ func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunCon
 	return appendStateOnce(runCtx, writer, contracts.StateKindPromoted, promotedEvent(pr, runCtx.RunID, deps.Now()))
 }
 
-func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, decision contracts.Decision, store IntentionWriter, writer state.Writer, deps Deps) error {
+func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, decision contracts.Decision, store IntentionWriter, writer state.Writer, deps Deps) error {
+	if err := validatePersistedDecision(runCtx, pkg, candidates, decision); err != nil {
+		return err
+	}
 	switch v := decision.Value.(type) {
 	case contracts.DecisionAdopt:
-		if err := cleanupWorktrees(ctx, pkg, deps.Git); err != nil {
-			return err
-		}
-		if err := appendStateOnce(runCtx, writer, contracts.StateKindPromoted, promotedEvent(pr, runCtx.RunID, deps.Now())); err != nil {
-			return err
-		}
-		_ = store.Delete()
-		return nil
+		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps)
 	case *contracts.DecisionAdopt:
 		if v == nil {
 			return nil
 		}
-		if err := cleanupWorktrees(ctx, pkg, deps.Git); err != nil {
-			return err
-		}
-		if err := appendStateOnce(runCtx, writer, contracts.StateKindPromoted, promotedEvent(pr, runCtx.RunID, deps.Now())); err != nil {
-			return err
-		}
-		_ = store.Delete()
-		return nil
+		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps)
 	case contracts.DecisionRollback:
 		if err := appendStateOnce(runCtx, writer, contracts.StateKindRollback, rollbackEvent(pr, runCtx.RunID, v.RollbackReason, v.FailedStep, deps.Now())); err != nil {
 			return err
@@ -453,14 +462,14 @@ func markManualRecovery(pr int, runCtx internalio.RunContext, intention contract
 	intention.Stage = contracts.IntentionStageNeedsManualRecovery
 	intention.RecoveryReason = reason
 	intention.FailedStep = contracts.FailedStep70
-	if err := writeSentinel(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, deps.Now()); err != nil {
-		return err
-	}
 	if err := store.Save(intention); err != nil {
 		return err
 	}
-	if err := appendStateOnce(runCtx, writer, contracts.StateKindNeedsManualRecovery, needsManualRecoveryEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, deps.Now())); err != nil {
+	if err := writeSentinel(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, deps.Now()); err != nil {
 		return err
+	}
+	if err := appendStateOnce(runCtx, writer, contracts.StateKindNeedsManualRecovery, needsManualRecoveryEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, deps.Now())); err != nil {
+		return ErrNeedsManualRecovery
 	}
 	return ErrNeedsManualRecovery
 }
@@ -1133,6 +1142,7 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 		if !hasTarget {
 			return markManualRecovery(pr, runCtx, *intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
 		}
+		target.BestShaBefore = intention.BestShaBefore
 		return planningDecision(ctx, pr, runCtx, pkg, candidates, target, *intention, store, writer, deps)
 	case contracts.IntentionStageBranchPushed:
 		return resumeBranchPushed(ctx, pr, runCtx, pkg, *intention, store, writer, deps)
@@ -1168,6 +1178,9 @@ func resumeBranchPushed(ctx context.Context, pr int, runCtx internalio.RunContex
 }
 
 func planningDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
+	if target.BestBranch == "" && pkg != nil {
+		target.BestBranch = pkg.BestBranch
+	}
 	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
 	if err != nil {
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
@@ -1285,6 +1298,92 @@ func appendStateOnce(runCtx internalio.RunContext, writer state.Writer, kind con
 		}
 	}
 	return writer.Append(entry)
+}
+
+func resolveBestShaBefore(ctx context.Context, pkg *contracts.TaskPackage, target Target, deps Deps) (Target, error) {
+	if target.BestBranch == "" && pkg != nil {
+		target.BestBranch = pkg.BestBranch
+	}
+	if target.BestBranch == "" || target.BestShaBefore != "" {
+		return target, nil
+	}
+	bestShaBefore, err := deps.Git.RemoteHead(ctx, target.BestBranch)
+	if err != nil {
+		return Target{}, err
+	}
+	target.BestShaBefore = bestShaBefore
+	return target, nil
+}
+
+func blockOnOtherRunSentinel(runCtx internalio.RunContext) error {
+	blocked, err := SentinelExistsExceptRun(runCtx.RunsBase, runCtx.RunID)
+	if err != nil {
+		return fmt.Errorf("step70: sentinel scan: %w", err)
+	}
+	if blocked {
+		return ErrBlockedBySentinel
+	}
+	return nil
+}
+
+func abortOnOtherRunSentinel(runCtx internalio.RunContext, store IntentionWriter) error {
+	if err := blockOnOtherRunSentinel(runCtx); err != nil {
+		if !errors.Is(err, ErrBlockedBySentinel) {
+			return err
+		}
+		if store != nil {
+			if deleteErr := store.Delete(); deleteErr != nil {
+				return deleteErr
+			}
+		}
+	}
+	return errOrNilFromBlockedSentinel(runCtx)
+}
+
+func errOrNilFromBlockedSentinel(runCtx internalio.RunContext) error {
+	blocked, err := SentinelExistsExceptRun(runCtx.RunsBase, runCtx.RunID)
+	if err != nil {
+		return fmt.Errorf("step70: sentinel scan: %w", err)
+	}
+	if blocked {
+		return ErrBlockedBySentinel
+	}
+	return nil
+}
+
+func rollbackOnOtherRunSentinel(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) (bool, error) {
+	if err := blockOnOtherRunSentinel(runCtx); err != nil {
+		if !errors.Is(err, ErrBlockedBySentinel) {
+			return false, err
+		}
+		return true, handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+	}
+	return false, nil
+}
+
+func validatePersistedDecision(runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, decision contracts.Decision) error {
+	if pkg == nil {
+		return errors.New("step70: task_package is required")
+	}
+	if candidates == nil {
+		return errors.New("step70: candidates are required")
+	}
+	req := stepio.Step70Request{
+		TaskPackage:  *pkg,
+		Candidates:   *candidates,
+		RegistryPath: runCtx.RulesRegistryPath(),
+	}
+	promoted := decision.Action == contracts.DecisionActionAdopt
+	resp, err := BuildResponse(runCtx.RunID, decision, promoted, req)
+	if err != nil {
+		return err
+	}
+	payload, err := contracts.MarshalStrict(resp)
+	if err != nil {
+		return err
+	}
+	_, err = stepio.DecodeAndValidateStep70Response(payload, req)
+	return err
 }
 
 // ---- stepio helpers for callers that operate against request/response ----

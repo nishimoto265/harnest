@@ -456,9 +456,11 @@ func (o *Orchestrator) resolveStartStep(run *StepRunContext) (contracts.FailedSt
 	if ok, err := hasRunRelative(run.IO, "60/done.marker"); err != nil {
 		return "", err
 	} else if ok {
-		return contracts.FailedStep70, nil
+		return contracts.FailedStep60, nil
 	}
-	if taskPackageHasAllManifests(run.IO, 2, run.TaskPackage) {
+	if done, err := taskPackageHasAllManifests(run.IO, 2, run.TaskPackage); err != nil {
+		return "", err
+	} else if done {
 		return contracts.FailedStep60, nil
 	}
 	if ok, err := hasRunRelative(run.IO, "40/candidates.json"); err != nil {
@@ -469,9 +471,11 @@ func (o *Orchestrator) resolveStartStep(run *StepRunContext) (contracts.FailedSt
 	if ok, err := hasRunRelative(run.IO, "30/done.marker"); err != nil {
 		return "", err
 	} else if ok {
-		return contracts.FailedStep40, nil
+		return contracts.FailedStep30, nil
 	}
-	if taskPackageHasAllManifests(run.IO, 1, run.TaskPackage) {
+	if done, err := taskPackageHasAllManifests(run.IO, 1, run.TaskPackage); err != nil {
+		return "", err
+	} else if done {
 		return contracts.FailedStep30, nil
 	}
 	if run.TaskPackage != nil {
@@ -665,14 +669,20 @@ func passAgents(pkg *contracts.TaskPackage, pass int) []contracts.AgentID {
 	return agents
 }
 
-func taskPackageHasAllManifests(runCtx internalio.RunContext, pass int, pkg *contracts.TaskPackage) bool {
+func taskPackageHasAllManifests(runCtx internalio.RunContext, pass int, pkg *contracts.TaskPackage) (bool, error) {
+	if pkg == nil {
+		return false, nil
+	}
 	for _, agent := range passAgents(pkg, pass) {
-		path, err := runCtx.ManifestPath(pass, agent)
-		if err != nil || !fileExists(path) {
-			return false
+		done, err := hasFinalizedManifest(runCtx, pass, agent)
+		if err != nil {
+			return false, err
+		}
+		if !done {
+			return false, nil
 		}
 	}
-	return pkg != nil
+	return true, nil
 }
 
 func hasRunRelative(runCtx internalio.RunContext, rel string) (bool, error) {
@@ -842,7 +852,7 @@ func hasFinalizedManifest(runIO internalio.RunContext, pass int, agent contracts
 	if os.IsNotExist(err) {
 		return false, nil
 	}
-	return false, nil
+	return false, err
 }
 
 func scorableAgentsForPass(runIO internalio.RunContext, pkg *contracts.TaskPackage, pass int) ([]contracts.AgentID, error) {

@@ -1,11 +1,13 @@
 package step20_implement
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
@@ -212,7 +214,7 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	if err != nil {
 		return err
 	}
-	diffBytes, err := gitOutputBytesContext(ctx, allocation.Path, "diff", allocation.BaseSHA+"..HEAD", "--binary")
+	diffBytes, err := successDiffBytes(ctx, allocation.Path, allocation.BaseSHA)
 	if err != nil {
 		return err
 	}
@@ -322,6 +324,55 @@ func artifactPath(runIO internalio.RunContext, pass int, agent contracts.AgentID
 
 func ensureDir(path string) error {
 	return os.MkdirAll(path, 0o755)
+}
+
+func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte, error) {
+	tracked, err := gitOutputBytesContext(ctx, worktreePath, "diff", baseSHA, "--binary")
+	if err != nil {
+		return nil, err
+	}
+
+	untrackedList, err := gitOutputContext(ctx, identity, worktreePath, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, err
+	}
+	var combined bytes.Buffer
+	if _, err := combined.Write(tracked); err != nil {
+		return nil, err
+	}
+	for _, entry := range strings.Split(untrackedList, "\x00") {
+		if entry == "" {
+			continue
+		}
+		if err := contracts.EnsureCleanRelativePath(entry); err != nil {
+			return nil, err
+		}
+		diff, err := gitNoIndexDiffContext(ctx, worktreePath, entry)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := combined.Write(diff); err != nil {
+			return nil, err
+		}
+	}
+	return combined.Bytes(), nil
+}
+
+func gitNoIndexDiffContext(ctx context.Context, worktreePath, relativePath string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", "diff", "--binary", "--no-index", "--", "/dev/null", relativePath)
+	cmd.Dir = worktreePath
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return output, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return output, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return nil, fmt.Errorf("step20: git diff --binary --no-index -- /dev/null %s: %w: %s", relativePath, err, strings.TrimSpace(string(output)))
 }
 
 func manifestPrefix(pass int, agent contracts.AgentID) string {

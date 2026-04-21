@@ -40,7 +40,7 @@ func defaultSteps(cfg *config.Config, decoders ContractDecoders) Steps {
 		Step30:  newStep30ScoreAdapter(step30_score.New(), decoders.Step30),
 		Step40:  stubStep40{},
 		Step50:  step50,
-		Step60:  step60Step{},
+		Step60:  step60Step{decode: decoders.Step60},
 		Step70:  realStep70{cfg: cfg},
 		Archive: realArchiveStep{},
 	}
@@ -315,16 +315,54 @@ func (s stubMarkerStep) Run(ctx context.Context, run *StepRunContext) error {
 	return internalio.WriteAtomic(path, []byte("stub\n"))
 }
 
-type step60Step struct{}
+type step60Step struct {
+	decode func([]byte, any) (any, error)
+}
 
-func (step60Step) Run(ctx context.Context, run *StepRunContext) error {
-	return step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
+func (s step60Step) Run(ctx context.Context, run *StepRunContext) error {
+	if err := step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
 		IO:          run.IO,
 		TaskPackage: run.TaskPackage,
 		Primary:     judges.NewPrimaryStub(),
 		Secondary:   judges.NewSecondaryStub(),
 		Arbiter:     judges.NewArbiterStub(),
-	})
+	}); err != nil {
+		return err
+	}
+	if s.decode == nil {
+		return nil
+	}
+	scorableAgents, err := step60ScorableAgents(run.IO, run.TaskPackage)
+	if err != nil {
+		return err
+	}
+	req := stepio.Step60Request{
+		TaskPackage:    *run.TaskPackage,
+		ScorableAgents: scorableAgents,
+		RubricVersion:  "default",
+		PromptVersion:  "phase0-stub",
+	}
+	markerPath, err := run.IO.ResolveRunRelative("60/done.marker")
+	if err != nil {
+		return err
+	}
+	marker, err := internalio.ReadJSON[contracts.Step60DoneMarker](markerPath)
+	if err != nil {
+		return err
+	}
+	resp := stepio.Step60Response{
+		RunID:           run.IO.RunID,
+		ScoresCount:     int(marker.ExpectedCounts.Scores),
+		ComplianceCount: int(marker.ExpectedCounts.Compliance),
+		PairwiseCount:   int(marker.ExpectedCounts.Pairwise),
+		ResolvedAt:      marker.ResolvedAt,
+	}
+	payload, err := contracts.MarshalStrict(resp)
+	if err != nil {
+		return err
+	}
+	_, err = s.decode(payload, req)
+	return err
 }
 
 func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {
@@ -436,6 +474,38 @@ func pass1Agents(pkg *contracts.TaskPackage) ([]contracts.AgentID, error) {
 	agents := make([]contracts.AgentID, 0, len(agentsSet))
 	for agent := range agentsSet {
 		agents = append(agents, agent)
+	}
+	sort.Slice(agents, func(i, j int) bool { return agents[i] < agents[j] })
+	return agents, nil
+}
+
+func step60ScorableAgents(runIO internalio.RunContext, pkg *contracts.TaskPackage) ([]contracts.AgentID, error) {
+	if pkg == nil {
+		return nil, errors.New("orchestrator: task package is required")
+	}
+	agents := make([]contracts.AgentID, 0, len(pkg.Worktrees))
+	seen := make(map[contracts.AgentID]struct{}, len(pkg.Worktrees))
+	for _, wt := range pkg.Worktrees {
+		if wt.Pass != 2 {
+			continue
+		}
+		if _, ok := seen[wt.Agent]; ok {
+			continue
+		}
+		if _, err := internalio.LoadScorableManifest(runIO, 1, wt.Agent); err != nil {
+			if shouldSkipScorableManifest(err) || os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("orchestrator: load step60 pass1 manifest for agent=%s: %w", wt.Agent, err)
+		}
+		if _, err := internalio.LoadScorableManifest(runIO, 2, wt.Agent); err != nil {
+			if shouldSkipScorableManifest(err) {
+				continue
+			}
+			return nil, fmt.Errorf("orchestrator: load step60 pass2 manifest for agent=%s: %w", wt.Agent, err)
+		}
+		seen[wt.Agent] = struct{}{}
+		agents = append(agents, wt.Agent)
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i] < agents[j] })
 	return agents, nil

@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -30,17 +28,9 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 	if len(candidates.Candidates) == 0 {
 		return Target{}, false, nil
 	}
-	if r.RepoDir == "" {
-		return Target{}, false, errors.New("step70: resolver repo_dir is required")
-	}
 	now := r.Now
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
-	}
-
-	bestShaBefore, err := resolveBestBranchSHA(r.RepoDir, pkg.BestBranch)
-	if err != nil {
-		return Target{}, false, err
 	}
 
 	winningAgent, ok, err := resolveWinningAgent(runCtx)
@@ -55,7 +45,7 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 	if err != nil {
 		return Target{}, false, err
 	}
-	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), manifest.HeadSHA, bestShaBefore, candidates.CandidatesHash)
+	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), manifest.HeadSHA, "", candidates.CandidatesHash)
 
 	registryLines, err := readRegistryLines(runCtx.RulesRegistryPath())
 	if err != nil {
@@ -82,7 +72,7 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 
 	return Target{
 		BestBranch:    pkg.BestBranch,
-		BestShaBefore: bestShaBefore,
+		BestShaBefore: "",
 		TargetSHA:     manifest.HeadSHA,
 		RulesToAppend: entries,
 	}, true, nil
@@ -142,21 +132,6 @@ func resolveWinningAgent(runCtx internalio.RunContext) (contracts.AgentID, bool,
 		return "", false, nil
 	}
 	return best.agent, true, nil
-}
-
-func resolveBestBranchSHA(repoDir, branch string) (string, error) {
-	candidates := []string{
-		"refs/remotes/origin/" + branch,
-		"refs/heads/" + branch,
-		branch,
-	}
-	for _, ref := range candidates {
-		out, err := exec.Command("git", "-C", repoDir, "rev-parse", "--verify", ref).Output()
-		if err == nil {
-			return strings.TrimSpace(string(out)), nil
-		}
-	}
-	return "", fmt.Errorf("step70: resolver could not resolve best branch %q in %s", branch, repoDir)
 }
 
 func (r FilesystemResolver) buildRegistryEntry(runCtx internalio.RunContext, candidate contracts.Candidate, registryLines []registryLine, idempotencyKey string, at time.Time) (contracts.RuleRegistryEntry, error) {

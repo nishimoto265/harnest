@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,7 +48,7 @@ func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation co
 	if err != nil {
 		return 0, err
 	}
-	if !stale || pidAlive(state.Pid) {
+	if !stale {
 		return 0, fmt.Errorf("%w: agent %s", ErrRescueAbortedLeaseActive, run.Agent)
 	}
 	if state.RetryCount >= rescueMaxRetries(run.Config, s.cfg) {
@@ -326,26 +327,39 @@ func writeGitOutputContext(ctx context.Context, dir, dest string, args ...string
 }
 
 func copyUntrackedFiles(ctx context.Context, repoPath, rescueDir string) ([]rescueArtifactDigest, error) {
-	output, err := gitOutputBytesContext(ctx, repoPath, "ls-files", "--others", "--exclude-standard")
+	output, err := gitOutputBytesContext(ctx, repoPath, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return nil, err
 	}
-	lines := strings.Fields(string(output))
-	artifacts := make([]rescueArtifactDigest, 0, len(lines))
-	for _, rel := range lines {
+	entries := strings.Split(string(output), "\x00")
+	rescueBase := filepath.Join(rescueDir, "untracked")
+	symlinkLog := make([]string, 0)
+	artifacts := make([]rescueArtifactDigest, 0, len(entries)+1)
+	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		src := filepath.Join(repoPath, rel)
-		dst := filepath.Join(rescueDir, "untracked", rel)
-		if err := ensureDir(filepath.Dir(dst)); err != nil {
-			return nil, err
+		if entry == "" {
+			continue
 		}
-		data, err := os.ReadFile(src)
+		cleaned := filepath.Clean(entry)
+		src := filepath.Join(repoPath, cleaned)
+		dst := filepath.Join(rescueBase, cleaned)
+		if !strings.HasPrefix(dst, rescueBase+string(os.PathSeparator)) && dst != rescueBase {
+			return nil, fmt.Errorf("step50: untracked file escapes rescue dir: %s", entry)
+		}
+		info, err := os.Lstat(src)
 		if err != nil {
 			return nil, err
 		}
-		if err := writeAtomicImpl(dst, data); err != nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			symlinkLog = append(symlinkLog, cleaned)
+			continue
+		}
+		if err := ensureDir(filepath.Dir(dst)); err != nil {
+			return nil, err
+		}
+		if err := copyFile(src, dst, info.Mode().Perm()); err != nil {
 			return nil, err
 		}
 		digest, err := fileDigest(dst)
@@ -353,10 +367,19 @@ func copyUntrackedFiles(ctx context.Context, repoPath, rescueDir string) ([]resc
 			return nil, err
 		}
 		artifacts = append(artifacts, rescueArtifactDigest{
-			Path:   filepath.ToSlash(filepath.Join("untracked", rel)),
+			Path:   filepath.ToSlash(filepath.Join("untracked", cleaned)),
 			SHA256: digest,
 		})
 	}
+	symlinkPath := filepath.Join(rescueDir, "untracked-symlinks.txt")
+	if err := writeAtomicImpl(symlinkPath, []byte(strings.Join(symlinkLog, "\n"))); err != nil {
+		return nil, err
+	}
+	digest, err := fileDigest(symlinkPath)
+	if err != nil {
+		return nil, err
+	}
+	artifacts = append(artifacts, rescueArtifactDigest{Path: "untracked-symlinks.txt", SHA256: digest})
 	return artifacts, nil
 }
 
@@ -369,12 +392,16 @@ func writeIgnoredList(ctx context.Context, repoPath, dest string) error {
 }
 
 func fileDigest(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	defer f.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func identity(s string) string {
@@ -383,4 +410,38 @@ func identity(s string) string {
 
 func stringsTrimSpace(s string) string {
 	return strings.TrimSpace(s)
+}
+
+func copyFile(src, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(dst))
+}
+
+func syncDir(path string) error {
+	dir, err := os.Open(filepath.Clean(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }

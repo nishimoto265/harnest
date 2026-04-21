@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/state"
 	"github.com/stretchr/testify/assert"
@@ -745,6 +746,120 @@ func TestRun_AdoptIgnoresIndexSyncFailureAfterRegistryCommit(t *testing.T) {
 	assert.Len(t, lines, 1500)
 }
 
+func TestRun_AbortsBeforePushWhenOtherRunSentinelAppears(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR16")
+	store := newHookStore(intentionPath(t, runCtx), func(record contracts.IntentionRecord) {
+		if record.Stage == contracts.IntentionStagePlanning {
+			require.NoError(t, writeSentinel(runCtx.RunsBase, "2026-04-21-PR99-deadbee", 99, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70, fixedNow()()))
+		}
+	})
+
+	git := &fakeGit{head: resolver.target.BestShaBefore}
+	err := Run(context.Background(), 16, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()})
+	require.ErrorIs(t, err, ErrBlockedBySentinel)
+	assert.Empty(t, git.pushCalls)
+	assert.NoFileExists(t, intentionPath(t, runCtx))
+
+	decisionPath, pathErr := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, pathErr)
+	assert.NoFileExists(t, decisionPath)
+}
+
+func TestRun_IgnoresSelfOwnedSentinelAtStageBoundary(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR17")
+	store := newHookStore(intentionPath(t, runCtx), func(record contracts.IntentionRecord) {
+		if record.Stage == contracts.IntentionStagePlanning {
+			require.NoError(t, writeSentinel(runCtx.RunsBase, runCtx.RunID, 17, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70, fixedNow()()))
+		}
+	})
+
+	git := &fakeGit{head: resolver.target.BestShaBefore}
+	require.NoError(t, Run(context.Background(), 17, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()}))
+	assert.Equal(t, contracts.DecisionActionAdopt, readDecision(t, runCtx).Action)
+	require.Len(t, git.pushCalls, 1)
+}
+
+func TestRun_RollsBackWhenOtherRunSentinelAppearsAfterPush(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR18")
+	git := &fakeGit{
+		head: resolver.target.TargetSHA,
+		onPush: func(call fakePushCall) {
+			if call.target == resolver.target.TargetSHA {
+				require.NoError(t, writeSentinel(runCtx.RunsBase, "2026-04-21-PR98-cafef00", 98, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70, fixedNow()()))
+			}
+		},
+	}
+
+	require.NoError(t, Run(context.Background(), 18, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()}))
+
+	rollback := mustDecisionRollback(t, readDecision(t, runCtx))
+	assert.Equal(t, contracts.RollbackReasonTransactionalFailure, rollback.RollbackReason)
+	require.Len(t, git.pushCalls, 2)
+}
+
+func TestRun_RollsBackWhenOtherRunSentinelAppearsAfterRegistryAppend(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR19")
+	original := appendRegistryEntry
+	appendRegistryEntry = func(path string, entry contracts.RuleRegistryEntry) (contracts.RegistryAppendResult, error) {
+		result, err := original(path, entry)
+		if err == nil && path == runCtx.RulesRegistryPath() {
+			switch entry.Kind {
+			case contracts.RegistryKindAdded, contracts.RegistryKindUpdated:
+				require.NoError(t, writeSentinel(runCtx.RunsBase, "2026-04-21-PR97-feedbee", 97, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70, fixedNow()()))
+			}
+		}
+		return result, err
+	}
+	t.Cleanup(func() {
+		appendRegistryEntry = original
+	})
+
+	git := &fakeGit{head: resolver.target.TargetSHA}
+	require.NoError(t, Run(context.Background(), 19, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()}))
+
+	rollback := mustDecisionRollback(t, readDecision(t, runCtx))
+	assert.Equal(t, contracts.RollbackReasonTransactionalFailure, rollback.RollbackReason)
+	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	require.Len(t, lines, 2)
+}
+
+func TestRun_FillsBestShaBeforeFromRemoteHeadAfterLock(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR20")
+	resolver.target.BestShaBefore = ""
+	git := &fakeGit{head: strings.Repeat("4", 40)}
+
+	require.NoError(t, Run(context.Background(), 20, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()}))
+
+	adopt := mustDecisionAdopt(t, readDecision(t, runCtx))
+	assert.Equal(t, strings.Repeat("4", 40), adopt.BestShaBefore)
+}
+
+func TestRun_RejectsPersistedDecisionThatFailsRequestBoundValidation(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR21")
+	appendResult, _ := seedRegistryAdd(t, runCtx.RulesRegistryPath(), resolver, runCtx.RunID, candidates.CandidatesHash)
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, contracts.Decision{
+		Action: contracts.DecisionActionAdopt,
+		Value: contracts.DecisionAdopt{
+			Action:               contracts.DecisionActionAdopt,
+			SchemaVersion:        "1",
+			RunID:                runCtx.RunID,
+			IdempotencyKey:       contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), resolver.target.TargetSHA, resolver.target.BestShaBefore, strings.Repeat("f", 64)),
+			BestShaBefore:        resolver.target.BestShaBefore,
+			TargetSha:            resolver.target.TargetSHA,
+			CandidatesHash:       strings.Repeat("f", 64),
+			RegistryAppendResult: appendResult,
+			DecidedAt:            fixedNow()(),
+		},
+	}))
+
+	err = Run(context.Background(), 21, runCtx, pkg, candidates, store, Deps{Git: &fakeGit{head: resolver.target.TargetSHA}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, stepio.ErrStep70AdoptCandidatesHashMismatch)
+}
+
 // ---- helpers ----
 
 type fixtureResolver struct {
@@ -798,6 +913,7 @@ type fakeGit struct {
 	head      string
 	pushErr   error
 	pushCalls []fakePushCall
+	onPush    func(fakePushCall)
 }
 
 func (g *fakeGit) RemoteHead(_ context.Context, _ string) (string, error) {
@@ -805,7 +921,11 @@ func (g *fakeGit) RemoteHead(_ context.Context, _ string) (string, error) {
 }
 
 func (g *fakeGit) PushForceWithLease(_ context.Context, branch, target, expected string) error {
-	g.pushCalls = append(g.pushCalls, fakePushCall{branch: branch, target: target, expected: expected})
+	call := fakePushCall{branch: branch, target: target, expected: expected}
+	g.pushCalls = append(g.pushCalls, call)
+	if g.onPush != nil {
+		g.onPush(call)
+	}
 	if g.pushErr != nil && len(g.pushCalls) == 1 {
 		return g.pushErr
 	}
@@ -1089,8 +1209,17 @@ type trackingStore struct {
 	saved []contracts.IntentionRecord
 }
 
+type hookStore struct {
+	*memStore
+	hook func(contracts.IntentionRecord)
+}
+
 func newTrackingStore(path string) *trackingStore {
 	return &trackingStore{memStore: newMemStore(path)}
+}
+
+func newHookStore(path string, hook func(contracts.IntentionRecord)) *hookStore {
+	return &hookStore{memStore: newMemStore(path), hook: hook}
 }
 
 func (m *memStore) Load() (*contracts.IntentionRecord, error) {
@@ -1131,6 +1260,16 @@ func (m *memStore) Delete() error {
 func (s *trackingStore) Save(r contracts.IntentionRecord) error {
 	s.saved = append(s.saved, r)
 	return s.memStore.Save(r)
+}
+
+func (s *hookStore) Save(r contracts.IntentionRecord) error {
+	if err := s.memStore.Save(r); err != nil {
+		return err
+	}
+	if s.hook != nil {
+		s.hook(r)
+	}
+	return nil
 }
 
 func readDecision(t *testing.T, runCtx internalio.RunContext) contracts.Decision {

@@ -51,6 +51,12 @@ case "$subcmd" in
   diff)
     exit 0
     ;;
+  ls-files)
+    exit 0
+    ;;
+  status)
+    exit 0
+    ;;
   branch)
     echo "stub-branch"
     ;;

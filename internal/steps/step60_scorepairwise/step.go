@@ -70,6 +70,7 @@ type rawComplianceKey struct {
 }
 
 type step60Paths struct {
+	Lock            string
 	Done            string
 	ScoresRaw       string
 	ScoresFinal     string
@@ -104,6 +105,13 @@ func Run(ctx context.Context, in Input) error {
 	if err != nil {
 		return err
 	}
+	lock, err := internalio.AcquireFileLock(paths.Lock)
+	if err != nil {
+		return fmt.Errorf("step60: acquire lock: %w", err)
+	}
+	defer func() {
+		_ = lock.Unlock()
+	}()
 	if _, err := os.Stat(paths.Done); err == nil {
 		matches, err := doneMarkerMatchesCurrentState(paths)
 		if err != nil {
@@ -119,21 +127,20 @@ func Run(ctx context.Context, in Input) error {
 		return fmt.Errorf("step60: stat done marker: %w", err)
 	}
 
+	scorableRuns, err := collectScorableAgentRuns(in, declaredScorableAgents(in))
+	if err != nil {
+		return err
+	}
 	request := stepio.Step60Request{
 		TaskPackage:    *in.TaskPackage,
-		ScorableAgents: deriveScorableAgents(in),
+		ScorableAgents: scorableAgentsFromRuns(scorableRuns),
 		RubricVersion:  in.RubricVersion,
 		PromptVersion:  in.PromptVersion,
 	}
 	if err := request.Validate(); err != nil {
 		return err
 	}
-
 	pass1ScoresByAgent, err := loadPass1Scores(in.IO)
-	if err != nil {
-		return err
-	}
-	scorableRuns, err := collectScorableAgentRuns(in, request.ScorableAgents)
 	if err != nil {
 		return err
 	}
@@ -323,6 +330,10 @@ func applyDefaults(in Input) (Input, error) {
 }
 
 func resolveStep60Paths(runIO internalio.RunContext) (step60Paths, error) {
+	lockPath, err := runIO.ResolveRunRelative("60/.step60.lock")
+	if err != nil {
+		return step60Paths{}, fmt.Errorf("step60: resolve lock path: %w", err)
+	}
 	donePath, err := runIO.ResolveRunRelative("60/done.marker")
 	if err != nil {
 		return step60Paths{}, fmt.Errorf("step60: resolve done marker path: %w", err)
@@ -348,6 +359,7 @@ func resolveStep60Paths(runIO internalio.RunContext) (step60Paths, error) {
 		return step60Paths{}, fmt.Errorf("step60: resolve pairwise path: %w", err)
 	}
 	return step60Paths{
+		Lock:            lockPath,
 		Done:            donePath,
 		ScoresRaw:       scoresRawPath,
 		ScoresFinal:     scoresFinalPath,
@@ -357,7 +369,7 @@ func resolveStep60Paths(runIO internalio.RunContext) (step60Paths, error) {
 	}, nil
 }
 
-func deriveScorableAgents(in Input) []contracts.AgentID {
+func declaredScorableAgents(in Input) []contracts.AgentID {
 	if len(in.ScorableAgents) > 0 {
 		agents := append([]contracts.AgentID(nil), in.ScorableAgents...)
 		sort.Slice(agents, func(i, j int) bool { return agents[i] < agents[j] })
@@ -374,6 +386,14 @@ func deriveScorableAgents(in Input) []contracts.AgentID {
 	return agents
 }
 
+func scorableAgentsFromRuns(runs []scorableAgentRun) []contracts.AgentID {
+	agents := make([]contracts.AgentID, 0, len(runs))
+	for _, run := range runs {
+		agents = append(agents, run.Agent)
+	}
+	return agents
+}
+
 func shouldSkipAgent(err error) bool {
 	return errors.Is(err, internalio.ErrNotScorable)
 }
@@ -381,11 +401,11 @@ func shouldSkipAgent(err error) bool {
 func collectScorableAgentRuns(in Input, agents []contracts.AgentID) ([]scorableAgentRun, error) {
 	runs := make([]scorableAgentRun, 0, len(agents))
 	for _, agent := range agents {
-		if _, err := internalio.LoadFinalizedManifest(in.IO, 1, agent); err != nil {
-			if os.IsNotExist(err) {
+		if _, err := internalio.LoadScorableManifest(in.IO, 1, agent); err != nil {
+			if shouldSkipAgent(err) || os.IsNotExist(err) {
 				continue
 			}
-			return nil, fmt.Errorf("step60: load pass1 manifest for agent=%s: %w", agent, err)
+			return nil, fmt.Errorf("step60: load pass1 scorable manifest for agent=%s: %w", agent, err)
 		}
 		manifest, err := internalio.LoadScorableManifest(in.IO, 2, agent)
 		if shouldSkipAgent(err) {
@@ -394,22 +414,15 @@ func collectScorableAgentRuns(in Input, agents []contracts.AgentID) ([]scorableA
 		if err != nil {
 			return nil, fmt.Errorf("step60: load pass2 manifest for agent=%s: %w", agent, err)
 		}
-		outputPath, ok, err := resolveExistingManifestArtifact(in.IO, manifest.DiffPath)
+		outputPath, err := requireExistingManifestArtifact(in.IO, agent, manifest.DiffPath, "diff")
 		if err != nil {
-			return nil, fmt.Errorf("step60: resolve pass2 diff path for agent=%s: %w", agent, err)
+			return nil, err
 		}
-		if !ok {
-			continue
+		if _, err := requireExistingManifestArtifact(in.IO, agent, manifest.SessionPath, "session"); err != nil {
+			return nil, err
 		}
-		if _, ok, err := resolveExistingManifestArtifact(in.IO, manifest.SessionPath); err != nil {
-			return nil, fmt.Errorf("step60: resolve pass2 session path for agent=%s: %w", agent, err)
-		} else if !ok {
-			continue
-		}
-		if _, ok, err := resolveExistingManifestArtifact(in.IO, manifest.ChecklistPath); err != nil {
-			return nil, fmt.Errorf("step60: resolve pass2 checklist path for agent=%s: %w", agent, err)
-		} else if !ok {
-			continue
+		if _, err := requireExistingManifestArtifact(in.IO, agent, manifest.ChecklistPath, "checklist"); err != nil {
+			return nil, err
 		}
 		runs = append(runs, scorableAgentRun{
 			Agent: agent,
@@ -426,6 +439,17 @@ func collectScorableAgentRuns(in Input, agents []contracts.AgentID) ([]scorableA
 		return nil, ErrNoScorablePass2Agents
 	}
 	return runs, nil
+}
+
+func requireExistingManifestArtifact(runIO internalio.RunContext, agent contracts.AgentID, relativePath, label string) (string, error) {
+	resolvedPath, ok, err := resolveExistingManifestArtifact(runIO, relativePath)
+	if err != nil {
+		return "", fmt.Errorf("step60: resolve pass2 %s path for agent=%s: %w", label, agent, err)
+	}
+	if !ok {
+		return "", fmt.Errorf("step60: missing declared pass2 %s artifact for agent=%s: %s", label, agent, relativePath)
+	}
+	return resolvedPath, nil
 }
 
 func resolveExistingManifestArtifact(runIO internalio.RunContext, relativePath string) (string, bool, error) {

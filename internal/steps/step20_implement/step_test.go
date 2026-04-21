@@ -401,6 +401,9 @@ fi
 if [[ "${FAKE_CLAUDE_CHECKLIST_JSON:-}" != "" ]]; then
   printf '%s' "${FAKE_CLAUDE_CHECKLIST_JSON}" > checklist-result.json
 fi
+if [[ "${FAKE_CLAUDE_WRITE_FILE:-}" != "" ]]; then
+  printf 'dirty worktree\n' > "${FAKE_CLAUDE_WRITE_FILE}"
+fi
 if [[ "${FAKE_CLAUDE_COMMIT:-}" == "1" ]]; then
   git commit --allow-empty -m test >/dev/null 2>&1
 fi
@@ -548,6 +551,24 @@ func TestWriteCommitBundleFallsBackToFullHeadWhenBaseIsUnreachable(t *testing.T)
 
 	verifyOut := runGit(t, repo, "bundle", "verify", filepath.Join(rescueDir, "commits.bundle"))
 	require.Contains(t, verifyOut, "is okay")
+}
+
+func TestWriteSuccessArtifacts_CapturesDirtyTrackedDiffWhenHeadIsUnchanged(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, "README.md"), []byte("dirty worktree\n"), 0o644))
+
+	err := fx.step.writeSuccessArtifacts(context.Background(), fx.run, fx.run.TaskPackage.Worktrees[0], runnerResult{
+		StartedAt:  time.Now().Add(-time.Second).UTC(),
+		FinishedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	manifest := fx.readManifest(t)
+	success := manifest.Value.(contracts.ManifestSuccess)
+	require.Equal(t, fx.baseSHA, success.HeadSHA)
+	diffBytes, readErr := os.ReadFile(fx.diffPath())
+	require.NoError(t, readErr)
+	require.Contains(t, string(diffBytes), "README.md")
 }
 
 func TestStepRunReturnsLeaseContendedDuringConcurrentStartup(t *testing.T) {

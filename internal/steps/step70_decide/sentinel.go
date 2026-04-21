@@ -18,6 +18,14 @@ const needsRecoveryDir = "needs-recovery"
 // present under <runs_base>/needs-recovery/. A single sentinel anywhere blocks
 // every step70/sunset run.
 func SentinelExists(runsBase string) (bool, error) {
+	return sentinelExistsExceptRun(runsBase, "")
+}
+
+func SentinelExistsExceptRun(runsBase string, runID contracts.RunID) (bool, error) {
+	return sentinelExistsExceptRun(runsBase, runID)
+}
+
+func sentinelExistsExceptRun(runsBase string, ignoreRunID contracts.RunID) (bool, error) {
 	dir := filepath.Join(runsBase, needsRecoveryDir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -31,6 +39,11 @@ func SentinelExists(runsBase string) (bool, error) {
 			continue
 		}
 		name := entry.Name()
+		if ignoreRunID != "" {
+			if name == string(ignoreRunID)+".json" || name == string(ignoreRunID)+".aborted.json" {
+				continue
+			}
+		}
 		if strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".aborted.json") {
 			return true, nil
 		}
