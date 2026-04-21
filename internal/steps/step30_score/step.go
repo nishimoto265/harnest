@@ -217,7 +217,7 @@ func (s *Step) Run(ctx context.Context, req Request) error {
 			}
 		}
 		if secondary != nil && disagree && arbiter != nil {
-			if !agentState.arbiterCompleteFor(primaryCompliance) {
+			if !agentState.arbiterCompleteFor(primaryCompliance, panelInput.OutputSha256) {
 				if err := s.runRole(ctx, paths, panelInput, agentState, contracts.JudgeRoleArbiter, arbiter); err != nil {
 					return fmt.Errorf("step30_score: resolve arbiter agent=%s: %w", agent.agent, err)
 				}
@@ -266,9 +266,6 @@ func (s *Step) Run(ctx context.Context, req Request) error {
 			marker.ExpectedCounts.Scores, expectedScores,
 		)
 	}
-	if !state.hasComplianceCoverage(agentIDs) {
-		return fmt.Errorf("%w: compliance coverage missing for one or more scorable agents", ErrCardinalityMismatch)
-	}
 
 	return scorecore.WriteStep30DoneMarker(req.RunContext, marker)
 }
@@ -281,7 +278,7 @@ func (s *Step) ensureRole(
 	role contracts.JudgeRole,
 	judge judges.Judge,
 ) error {
-	if agentState.roleComplete(role) {
+	if agentState.roleComplete(role) && agentState.roleMatchesOutputSha(role, panelInput.OutputSha256) {
 		return nil
 	}
 	return s.runRole(ctx, paths, panelInput, agentState, role, judge)
@@ -509,15 +506,6 @@ func (s *resumeState) agent(agent contracts.AgentID) *resumeAgentState {
 	return state
 }
 
-func (s *resumeState) hasComplianceCoverage(agentIDs []contracts.AgentID) bool {
-	for _, agentID := range agentIDs {
-		if len(s.agent(agentID).finalCompliance) == 0 {
-			return false
-		}
-	}
-	return true
-}
-
 func (s *resumeAgentState) upsertRawScores(rows []contracts.RawScoreEntry) {
 	for _, row := range rows {
 		s.rawScores[row.JudgeRole][row.Dimension] = row
@@ -548,7 +536,24 @@ func (s *resumeAgentState) clearArbiter() {
 }
 
 func (s *resumeAgentState) roleComplete(role contracts.JudgeRole) bool {
-	return hasAllDimensions(s.rawScores[role]) && len(s.rawCompliance[role]) > 0
+	return hasAllDimensions(s.rawScores[role])
+}
+
+func (s *resumeAgentState) roleMatchesOutputSha(role contracts.JudgeRole, outputSha string) bool {
+	if !hasAllDimensions(s.rawScores[role]) {
+		return false
+	}
+	for _, row := range s.rawScores[role] {
+		if row.OutputSha256 != outputSha {
+			return false
+		}
+	}
+	for _, row := range s.rawCompliance[role] {
+		if row.OutputSha256 != outputSha {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *resumeAgentState) rawScoreSlice(role contracts.JudgeRole) []contracts.RawScoreEntry {
@@ -575,8 +580,8 @@ func (s *resumeAgentState) rawComplianceSlice(role contracts.JudgeRole) []contra
 	return out
 }
 
-func (s *resumeAgentState) arbiterCompleteFor(primaryCompliance []contracts.RawComplianceEntry) bool {
-	if !hasAllDimensions(s.rawScores[contracts.JudgeRoleArbiter]) {
+func (s *resumeAgentState) arbiterCompleteFor(primaryCompliance []contracts.RawComplianceEntry, outputSha string) bool {
+	if !s.roleMatchesOutputSha(contracts.JudgeRoleArbiter, outputSha) {
 		return false
 	}
 	if len(s.rawCompliance[contracts.JudgeRoleArbiter]) != len(primaryCompliance) {
@@ -587,7 +592,7 @@ func (s *resumeAgentState) arbiterCompleteFor(primaryCompliance []contracts.RawC
 			return false
 		}
 	}
-	return len(primaryCompliance) > 0
+	return true
 }
 
 func appendExpectedFinal(paths stepPathsResult, state *resumeAgentState, result scorecore.PanelResult) error {

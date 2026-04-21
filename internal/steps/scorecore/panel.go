@@ -26,6 +26,7 @@ const (
 // Sentinel errors surfaced by panel resolution.
 var (
 	ErrPanelPrimaryRequired = errors.New("scorecore: primary judge is required")
+	ErrPanelArbiterRequired = errors.New("scorecore: arbiter judge is required for disagreement resolution")
 	ErrPanelOutputSha256    = errors.New("scorecore: output_sha256 is required and must be sha256 hex")
 	ErrPanelStepDir         = errors.New("scorecore: stepDir must be \"30\" or \"60\"")
 	ErrPanelThreshold       = errors.New("scorecore: disagreement threshold must be >= 0")
@@ -122,12 +123,12 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 	if err != nil {
 		return PanelResult{}, err
 	}
+	if disagree && in.Arbiter == nil {
+		return PanelResult{}, ErrPanelArbiterRequired
+	}
 
-	if !disagree || in.Arbiter == nil {
+	if !disagree {
 		verdict := contracts.VerdictPathAgreement
-		if !disagree && in.Arbiter == nil && in.Secondary == nil {
-			verdict = contracts.VerdictPathSingle
-		}
 		result := PanelResult{
 			RawScores:     append(append([]contracts.RawScoreEntry{}, primaryRaw...), secondaryRaw...),
 			RawCompliance: append(append([]contracts.RawComplianceEntry{}, primaryRawCompliance...), secondaryRawCompliance...),

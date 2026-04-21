@@ -154,6 +154,24 @@ func TestPanelResolver_Resolve(t *testing.T) {
 		assert.Len(t, result.RawScores, 5)
 		assert.Len(t, result.FinalScores, 5)
 	})
+
+	t.Run("disagreement requires arbiter", func(t *testing.T) {
+		primary := fakeJudge{out: baseScores(judges.RolePrimary, 80)}
+		secondary := fakeJudge{out: baseScores(judges.RoleSecondary, 60)}
+
+		r := NewPanelResolver()
+		_, err := r.Resolve(context.Background(), PanelInput{
+			Primary:               primary,
+			Secondary:             secondary,
+			JudgeInput:            input,
+			OutputSha256:          outputSha,
+			DisagreementThreshold: 5,
+			RunContext:            runCtx,
+			StepDir:               "30",
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrPanelArbiterRequired)
+	})
 }
 
 func TestWriteOverflowSidecar(t *testing.T) {

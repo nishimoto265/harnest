@@ -116,11 +116,26 @@ func BuildFinalResultFromRaw(
 	if err != nil {
 		return PanelResult{}, err
 	}
-	if !disagree || !arbiterPresent {
+	if disagree && !arbiterPresent {
+		return PanelResult{}, ErrPanelArbiterRequired
+	}
+	if !disagree {
 		return assembleFinalFromRaw(primaryScores, primaryCompliance, contracts.VerdictPathAgreement), nil
 	}
-	if len(arbiterScores) == 0 || len(arbiterCompliance) == 0 {
+	if len(arbiterScores) == 0 {
 		return PanelResult{}, ErrPanelArbiterRowsRequired
+	}
+	if len(arbiterCompliance) != len(primaryCompliance) {
+		return PanelResult{}, ErrPanelArbiterRowsRequired
+	}
+	arbiterComplianceByRule := make(map[string]struct{}, len(arbiterCompliance))
+	for _, row := range arbiterCompliance {
+		arbiterComplianceByRule[row.RuleID] = struct{}{}
+	}
+	for _, row := range primaryCompliance {
+		if _, ok := arbiterComplianceByRule[row.RuleID]; !ok {
+			return PanelResult{}, ErrPanelArbiterRowsRequired
+		}
 	}
 
 	verdict := classifyArbiterVerdict(primaryScores, secondaryScores, arbiterScores, threshold)
