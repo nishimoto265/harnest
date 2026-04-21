@@ -348,20 +348,20 @@ func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 
 	git := gitCLI{
 		stat: os.Stat,
-		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		run: func(ctx context.Context, name string, args ...string) (cmdResult, error) {
 			switch {
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
-				return []byte(testBaseSHA + "\n"), nil
+				return cmdResult{stdout: []byte(testBaseSHA + "\n")}, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", firstBranch, firstPath, testBaseSHA}):
-				return []byte("fatal: a branch named '" + firstBranch + "' already exists\n"), errors.New("exit status 128")
+				return cmdResult{stderr: []byte("fatal: a branch named '" + firstBranch + "' already exists\n")}, errors.New("exit status 128")
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", firstPath, firstBranch}):
-				return []byte("Preparing worktree\n"), nil
+				return cmdResult{stdout: []byte("Preparing worktree\n")}, nil
 			case slices.Equal(args, []string{"-C", firstPath, "rev-parse", "HEAD"}):
-				return []byte(testBaseRefOID + "\n"), nil
+				return cmdResult{stdout: []byte(testBaseRefOID + "\n")}, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "remove", "--force", firstPath}):
-				return []byte("Removed\n"), nil
+				return cmdResult{stdout: []byte("Removed\n")}, nil
 			default:
-				return nil, fmt.Errorf("unexpected git args: %v", args)
+				return cmdResult{}, fmt.Errorf("unexpected git args: %v", args)
 			}
 		},
 	}
@@ -390,16 +390,16 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 
 	git := gitCLI{
 		stat: os.Stat,
-		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		run: func(ctx context.Context, name string, args ...string) (cmdResult, error) {
 			switch {
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
-				return []byte(testBaseSHA + "\n"), nil
+				return cmdResult{stdout: []byte(testBaseSHA + "\n")}, nil
 			case slices.Equal(args, []string{"-C", firstPath, "rev-parse", "HEAD"}):
-				return []byte(testBaseSHA + "\n"), nil
+				return cmdResult{stdout: []byte(testBaseSHA + "\n")}, nil
 			case slices.Equal(args, []string{"-C", firstPath, "branch", "--show-current"}):
-				return []byte("wrong-branch\n"), nil
+				return cmdResult{stdout: []byte("wrong-branch\n")}, nil
 			default:
-				return nil, fmt.Errorf("unexpected git args: %v", args)
+				return cmdResult{}, fmt.Errorf("unexpected git args: %v", args)
 			}
 		},
 	}
@@ -427,18 +427,18 @@ func TestGitCLIWorktreeAdd_RetryBranchExisting_VerifiesHEAD(t *testing.T) {
 
 	git := gitCLI{
 		stat: os.Stat,
-		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		run: func(ctx context.Context, name string, args ...string) (cmdResult, error) {
 			switch {
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", branch, path, testBaseSHA}):
-				return []byte("fatal: a branch named '" + branch + "' already exists\n"), errors.New("exit status 128")
+				return cmdResult{stderr: []byte("fatal: a branch named '" + branch + "' already exists\n")}, errors.New("exit status 128")
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", path, branch}):
-				return []byte("Preparing worktree\n"), nil
+				return cmdResult{stdout: []byte("Preparing worktree\n")}, nil
 			case slices.Equal(args, []string{"-C", path, "rev-parse", "HEAD"}):
-				return []byte(testBaseRefOID + "\n"), nil
+				return cmdResult{stdout: []byte(testBaseRefOID + "\n")}, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "remove", "--force", path}):
-				return []byte("Removed\n"), nil
+				return cmdResult{stdout: []byte("Removed\n")}, nil
 			default:
-				return nil, fmt.Errorf("unexpected git args: %v", args)
+				return cmdResult{}, fmt.Errorf("unexpected git args: %v", args)
 			}
 		},
 	}
@@ -457,19 +457,19 @@ func TestGitCLIWorktreeAdd_RetryBranchExisting_DriftRemovesWorktree(t *testing.T
 
 	git := gitCLI{
 		stat: os.Stat,
-		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		run: func(ctx context.Context, name string, args ...string) (cmdResult, error) {
 			calls = append(calls, append([]string(nil), args...))
 			switch {
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", branch, path, testBaseSHA}):
-				return []byte("fatal: a branch named '" + branch + "' already exists\n"), errors.New("exit status 128")
+				return cmdResult{stderr: []byte("fatal: a branch named '" + branch + "' already exists\n")}, errors.New("exit status 128")
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", path, branch}):
-				return []byte("Preparing worktree\n"), nil
+				return cmdResult{stdout: []byte("Preparing worktree\n")}, nil
 			case slices.Equal(args, []string{"-C", path, "rev-parse", "HEAD"}):
-				return []byte(testBaseRefOID + "\n"), nil
+				return cmdResult{stdout: []byte(testBaseRefOID + "\n")}, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "remove", "--force", path}):
-				return []byte("Removed\n"), nil
+				return cmdResult{stdout: []byte("Removed\n")}, nil
 			default:
-				return nil, fmt.Errorf("unexpected git args: %v", args)
+				return cmdResult{}, fmt.Errorf("unexpected git args: %v", args)
 			}
 		},
 	}
@@ -495,14 +495,14 @@ func TestGitCLIWorktreeAdd_ExistingPath_VerifiesBranch(t *testing.T) {
 
 	git := gitCLI{
 		stat: os.Stat,
-		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		run: func(ctx context.Context, name string, args ...string) (cmdResult, error) {
 			switch {
 			case slices.Equal(args, []string{"-C", path, "rev-parse", "HEAD"}):
-				return []byte(testBaseSHA + "\n"), nil
+				return cmdResult{stdout: []byte(testBaseSHA + "\n")}, nil
 			case slices.Equal(args, []string{"-C", path, "branch", "--show-current"}):
-				return []byte("wrong-branch\n"), nil
+				return cmdResult{stdout: []byte("wrong-branch\n")}, nil
 			default:
-				return nil, fmt.Errorf("unexpected git args: %v", args)
+				return cmdResult{}, fmt.Errorf("unexpected git args: %v", args)
 			}
 		},
 	}

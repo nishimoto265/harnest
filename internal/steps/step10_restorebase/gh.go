@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
+	"strings"
 )
 
 // LinkedIssue describes a GitHub issue that is closed by the PR (via closing
@@ -35,7 +35,7 @@ type GHClient interface {
 
 // ghCLI shells out to the real `gh` binary.
 type ghCLI struct {
-	run func(ctx context.Context, name string, args ...string) ([]byte, error)
+	run cmdRunner
 }
 
 // NewGHClient returns a GHClient backed by the real `gh` CLI.
@@ -44,16 +44,11 @@ func NewGHClient() GHClient {
 }
 
 // NewGHClientWithRunner exposes the subprocess seam for tests.
-func NewGHClientWithRunner(runner func(ctx context.Context, name string, args ...string) ([]byte, error)) GHClient {
+func NewGHClientWithRunner(runner cmdRunner) GHClient {
 	if runner == nil {
 		runner = defaultCmdRunner
 	}
 	return ghCLI{run: runner}
-}
-
-func defaultCmdRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	return cmd.CombinedOutput()
 }
 
 type ghPRViewRaw struct {
@@ -93,10 +88,10 @@ func (c ghCLI) PRView(ctx context.Context, pr int, repo string) (PRInfo, error) 
 	}
 	out, err := c.run(ctx, "gh", prArgs...)
 	if err != nil {
-		return PRInfo{}, fmt.Errorf("step10: gh pr view #%d: %w: %s", pr, err, string(out))
+		return PRInfo{}, formatCmdError(fmt.Sprintf("step10: gh pr view #%d", pr), err, out)
 	}
 	var raw ghPRViewRaw
-	if err := json.Unmarshal(out, &raw); err != nil {
+	if err := json.Unmarshal(out.stdout, &raw); err != nil {
 		return PRInfo{}, fmt.Errorf("step10: gh pr view #%d: decode: %w", pr, err)
 	}
 
@@ -113,6 +108,9 @@ func (c ghCLI) PRView(ctx context.Context, pr int, repo string) (PRInfo, error) 
 	}
 	if raw.PotentialMergeCommit != nil {
 		info.PotentialMergeCommitOID = raw.PotentialMergeCommit.OID
+	}
+	if err := validatePRInfo(info); err != nil {
+		return PRInfo{}, fmt.Errorf("step10: gh pr view #%d: %w", pr, err)
 	}
 	for _, ref := range raw.ClosingIssuesReferences {
 		issue, err := c.issueView(ctx, ref.Number, repo)
@@ -138,11 +136,28 @@ func (c ghCLI) issueView(ctx context.Context, number int, repo string) (LinkedIs
 	}
 	out, err := c.run(ctx, "gh", args...)
 	if err != nil {
-		return LinkedIssue{}, fmt.Errorf("step10: gh issue view #%d: %w: %s", number, err, string(out))
+		return LinkedIssue{}, formatCmdError(fmt.Sprintf("step10: gh issue view #%d", number), err, out)
 	}
 	var raw ghIssueViewRaw
-	if err := json.Unmarshal(out, &raw); err != nil {
+	if err := json.Unmarshal(out.stdout, &raw); err != nil {
 		return LinkedIssue{}, fmt.Errorf("step10: gh issue view #%d: decode: %w", number, err)
 	}
 	return LinkedIssue{Number: raw.Number, Title: raw.Title, Body: raw.Body}, nil
+}
+
+func validatePRInfo(info PRInfo) error {
+	var missing []string
+	if info.Number <= 0 {
+		missing = append(missing, "number")
+	}
+	if info.Title == "" {
+		missing = append(missing, "title")
+	}
+	if info.State == "" {
+		missing = append(missing, "state")
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("invalid gh pr view response: missing required fields: %s", strings.Join(missing, ", "))
 }
