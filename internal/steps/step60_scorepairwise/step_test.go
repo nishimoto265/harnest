@@ -128,6 +128,69 @@ func TestRun_IdempotentWhenDoneMarkerExists(t *testing.T) {
 	assert.Equal(t, beforeScores, afterScores)
 }
 
+func TestRun_RebuildsWhenDoneMarkerVerificationFails(t *testing.T) {
+	now := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
+
+	freshIO, freshPkg := seedStep60Fixture(t, fixtureOptions{writePass1Score: true})
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          freshIO,
+		TaskPackage: &freshPkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+	freshArtifacts := readStep60Artifacts(t, freshIO)
+
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{writePass1Score: true})
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+
+	donePath := mustResolve(t, runIO, "60/done.marker")
+	marker := mustReadJSON[contracts.Step60DoneMarker](t, donePath)
+	marker.ContentHashes.ScoresFinal = mutateDigest(marker.ContentHashes.ScoresFinal)
+	require.NoError(t, internalio.WriteJSONAtomic(donePath, marker))
+	mutatedMarker := mustReadFile(t, donePath)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+
+	rebuiltMarker := mustReadFile(t, donePath)
+	assert.NotEqual(t, mutatedMarker, rebuiltMarker)
+	assert.Equal(t, freshArtifacts, readStep60Artifacts(t, runIO))
+
+	beforeStat, err := os.Stat(donePath)
+	require.NoError(t, err)
+	beforeMarker := mustReadFile(t, donePath)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now.Add(2 * time.Hour) },
+	}))
+
+	afterStat, err := os.Stat(donePath)
+	require.NoError(t, err)
+	afterMarker := mustReadFile(t, donePath)
+	assert.Equal(t, beforeMarker, afterMarker)
+	assert.Equal(t, beforeStat.ModTime(), afterStat.ModTime())
+}
+
 func TestRun_ErrorsWhenPass2ManifestMissing(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		agents:             []contracts.AgentID{"a1", "a2", "a3"},
@@ -352,8 +415,20 @@ func TestRun_ComplianceRuleUnionIncludesSecondaryOnlyRule(t *testing.T) {
 	}
 	assert.Equal(t, contracts.ComplianceVerdictCompliant, byRule["shared"].Verdict)
 	assert.Equal(t, contracts.VerdictPathArbitrated, byRule["shared"].VerdictPath)
-	assert.Equal(t, contracts.ComplianceVerdictValidException, byRule["secondary-only"].Verdict)
-	assert.Equal(t, contracts.VerdictPathArbiterOverruled, byRule["secondary-only"].VerdictPath)
+	assert.Equal(t, contracts.ComplianceVerdictViolated, byRule["secondary-only"].Verdict)
+	assert.Equal(t, contracts.VerdictPathSingle, byRule["secondary-only"].VerdictPath)
+
+	rawCompliance := mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl")
+	secondaryOnlyRaw := make([]contracts.RawComplianceEntry, 0, 1)
+	for _, entry := range rawCompliance {
+		if entry.RuleID == "secondary-only" {
+			secondaryOnlyRaw = append(secondaryOnlyRaw, entry)
+		}
+	}
+	require.Len(t, secondaryOnlyRaw, 1)
+	assert.Equal(t, contracts.JudgeRoleSecondary, secondaryOnlyRaw[0].JudgeRole)
+	assert.Equal(t, byRule["secondary-only"].Verdict, secondaryOnlyRaw[0].Verdict)
+	assert.Equal(t, byRule["secondary-only"].Rationale, secondaryOnlyRaw[0].Rationale)
 }
 
 func TestRun_GoldenHashes(t *testing.T) {
@@ -378,6 +453,69 @@ func TestRun_GoldenHashes(t *testing.T) {
 	assert.Equal(t, "00561b80430f4550eab3db53903ea32875834f0b43058a45d4bbc1d6acc2bce7", marker.ContentHashes.PairwiseFinal)
 }
 
+func TestRun_RawRowsUseRunResolvedAtSnapshot(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+
+	snapshot := time.Date(2026, 4, 21, 18, 0, 0, 0, time.UTC)
+	nowCalls := 0
+	nowFn := func() time.Time {
+		current := snapshot.Add(time.Duration(nowCalls) * time.Hour)
+		nowCalls++
+		return current
+	}
+
+	primary := scriptedJudge{
+		score:        80,
+		reasonPrefix: "primary",
+		compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant},
+		resolvedAt:   snapshot.Add(-24 * time.Hour),
+	}
+	secondary := scriptedJudge{
+		score:        70,
+		reasonPrefix: "secondary",
+		compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictViolated},
+		resolvedAt:   snapshot.Add(-23 * time.Hour),
+	}
+	arbiter := scriptedJudge{
+		score:        60,
+		reasonPrefix: "arbiter",
+		compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictNA},
+		resolvedAt:   snapshot.Add(-22 * time.Hour),
+	}
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     arbiter,
+		Now:         nowFn,
+	}))
+	assert.Equal(t, 1, nowCalls)
+
+	marker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
+	assert.Equal(t, snapshot, marker.ResolvedAt)
+
+	for _, score := range mustReadJSONL[contracts.ScoreEntry](t, runIO, "60/scores-B.jsonl") {
+		assert.Equal(t, snapshot, score.ResolvedAt)
+	}
+	for _, entry := range mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl") {
+		assert.Equal(t, snapshot, entry.ResolvedAt)
+	}
+	for _, entry := range mustReadJSONL[contracts.PairwiseEntry](t, runIO, "60/pairwise.jsonl") {
+		assert.Equal(t, snapshot, entry.ResolvedAt)
+	}
+	for _, entry := range mustReadJSONL[contracts.RawScoreEntry](t, runIO, "60/scores-B-raw.jsonl") {
+		assert.Equal(t, snapshot, entry.ResolvedAt)
+	}
+	for _, entry := range mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl") {
+		assert.Equal(t, snapshot, entry.ResolvedAt)
+	}
+}
+
 type fixtureOptions struct {
 	agents                 []contracts.AgentID
 	writePass1Score        bool
@@ -389,6 +527,7 @@ type scriptedJudge struct {
 	score        int
 	reasonPrefix string
 	compliance   map[string]contracts.ComplianceVerdict
+	resolvedAt   time.Time
 }
 
 func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
@@ -399,6 +538,11 @@ func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput)
 	case <-ctx.Done():
 		return judges.JudgeOutput{}, ctx.Err()
 	default:
+	}
+
+	resolvedAt := j.resolvedAt
+	if resolvedAt.IsZero() {
+		resolvedAt = time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC)
 	}
 
 	scores := make([]contracts.ScoreEntry, 0, len(canonicalDimensions))
@@ -414,7 +558,7 @@ func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput)
 			VerdictPath:   contracts.VerdictPathSingle,
 			RubricVersion: "scripted-rubric",
 			PromptVersion: "scripted-prompt",
-			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+			ResolvedAt:    resolvedAt,
 		})
 	}
 
@@ -438,7 +582,7 @@ func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput)
 			VerdictPath:   contracts.VerdictPathSingle,
 			RubricVersion: "scripted-rubric",
 			PromptVersion: "scripted-prompt",
-			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+			ResolvedAt:    resolvedAt,
 		})
 	}
 
@@ -670,4 +814,14 @@ func mustHashReducedRawCompliance(t *testing.T, runIO internalio.RunContext) str
 	hash, err := hashReducedRawComplianceFile(mustResolve(t, runIO, "60/compliance-B-raw.jsonl"))
 	require.NoError(t, err)
 	return hash
+}
+
+func mutateDigest(digest string) string {
+	if digest == "" {
+		return digest
+	}
+	if digest[0] == '0' {
+		return "1" + digest[1:]
+	}
+	return "0" + digest[1:]
 }

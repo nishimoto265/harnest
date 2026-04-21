@@ -100,10 +100,12 @@ func Run(ctx context.Context, in Input) error {
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(paths.Done); err == nil {
+	skip, err := verifyDoneMarker(paths)
+	if err != nil {
+		return err
+	}
+	if skip {
 		return nil
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("step60: stat done marker: %w", err)
 	}
 
 	request := stepio.Step60Request{
@@ -485,10 +487,10 @@ func emitScores(
 		if err != nil {
 			return nil, fmt.Errorf("step60: hash secondary score dimension=%s agent=%s: %w", dimension, agent, err)
 		}
-		if err := internalio.AppendJSONL(paths.ScoresRaw, makeRawScoreEntry(primaryScore, contracts.JudgeRolePrimary, primaryHash, nil, nil)); err != nil {
+		if err := internalio.AppendJSONL(paths.ScoresRaw, makeRawScoreEntry(primaryScore, contracts.JudgeRolePrimary, primaryHash, nil, nil, meta.ResolvedAt)); err != nil {
 			return nil, fmt.Errorf("step60: append primary raw score dimension=%s agent=%s: %w", dimension, agent, err)
 		}
-		if err := internalio.AppendJSONL(paths.ScoresRaw, makeRawScoreEntry(secondaryScore, contracts.JudgeRoleSecondary, secondaryHash, nil, nil)); err != nil {
+		if err := internalio.AppendJSONL(paths.ScoresRaw, makeRawScoreEntry(secondaryScore, contracts.JudgeRoleSecondary, secondaryHash, nil, nil, meta.ResolvedAt)); err != nil {
 			return nil, fmt.Errorf("step60: append secondary raw score dimension=%s agent=%s: %w", dimension, agent, err)
 		}
 
@@ -508,6 +510,7 @@ func emitScores(
 				arbiterHash,
 				&contracts.RawJudgeRef{Role: contracts.JudgeRolePrimary, Sha256: primaryHash},
 				&contracts.RawJudgeRef{Role: contracts.JudgeRoleSecondary, Sha256: secondaryHash},
+				meta.ResolvedAt,
 			)); err != nil {
 				return nil, fmt.Errorf("step60: append arbiter raw score dimension=%s agent=%s: %w", dimension, agent, err)
 			}
@@ -530,7 +533,7 @@ func emitCompliance(
 	secondary map[string]contracts.ComplianceEntry,
 	arbiter map[string]contracts.ComplianceEntry,
 ) ([]contracts.ComplianceEntry, error) {
-	ruleIDs := complianceRuleIDs(primary, secondary, arbiter)
+	ruleIDs := complianceRuleIDs(primary, secondary, nil)
 	finalEntries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
 	for _, ruleID := range ruleIDs {
 		primaryEntry, primaryOK := primary[ruleID]
@@ -544,7 +547,7 @@ func emitCompliance(
 			if err != nil {
 				return nil, fmt.Errorf("step60: hash primary compliance rule=%s agent=%s: %w", ruleID, agent, err)
 			}
-			if err := internalio.AppendJSONL(paths.ComplianceRaw, makeRawComplianceEntry(primaryEntry, contracts.JudgeRolePrimary, primaryHash, nil, nil)); err != nil {
+			if err := internalio.AppendJSONL(paths.ComplianceRaw, makeRawComplianceEntry(primaryEntry, contracts.JudgeRolePrimary, primaryHash, nil, nil, meta.ResolvedAt)); err != nil {
 				return nil, fmt.Errorf("step60: append primary raw compliance rule=%s agent=%s: %w", ruleID, agent, err)
 			}
 		}
@@ -555,7 +558,7 @@ func emitCompliance(
 			if err != nil {
 				return nil, fmt.Errorf("step60: hash secondary compliance rule=%s agent=%s: %w", ruleID, agent, err)
 			}
-			if err := internalio.AppendJSONL(paths.ComplianceRaw, makeRawComplianceEntry(secondaryEntry, contracts.JudgeRoleSecondary, secondaryHash, nil, nil)); err != nil {
+			if err := internalio.AppendJSONL(paths.ComplianceRaw, makeRawComplianceEntry(secondaryEntry, contracts.JudgeRoleSecondary, secondaryHash, nil, nil, meta.ResolvedAt)); err != nil {
 				return nil, fmt.Errorf("step60: append secondary raw compliance rule=%s agent=%s: %w", ruleID, agent, err)
 			}
 		}
@@ -581,13 +584,15 @@ func emitCompliance(
 				arbiterHash,
 				&contracts.RawJudgeRef{Role: contracts.JudgeRolePrimary, Sha256: primaryHash},
 				&contracts.RawJudgeRef{Role: contracts.JudgeRoleSecondary, Sha256: secondaryHash},
+				meta.ResolvedAt,
 			)); err != nil {
 				return nil, fmt.Errorf("step60: append arbiter raw compliance rule=%s agent=%s: %w", ruleID, agent, err)
 			}
 			finalEntry = finalizeCompliance(meta, arbiterEntry, complianceVerdictPath(primaryDecision, secondaryDecision, arbiterEntry))
-		case arbiterOK:
-			finalEntry = finalizeCompliance(meta, arbiterEntry, complianceVerdictPath(primaryDecision, secondaryDecision, arbiterEntry))
 		default:
+			// Single-sided rules finalize directly from the side that emitted them.
+			// Raw arbiter refs require both sides, so using arbiter output here would
+			// break provenance in compliance-B-raw.jsonl.
 			finalEntry = finalizeCompliance(meta, preferredComplianceSingleSource(primaryDecision, secondaryDecision, primaryOK, secondaryOK), contracts.VerdictPathSingle)
 		}
 
@@ -677,6 +682,7 @@ func makeRawScoreEntry(
 	outputHash string,
 	primaryRef *contracts.RawJudgeRef,
 	secondaryRef *contracts.RawJudgeRef,
+	resolvedAt time.Time,
 ) contracts.RawScoreEntry {
 	return contracts.RawScoreEntry{
 		SchemaVersion:      "1",
@@ -693,7 +699,7 @@ func makeRawScoreEntry(
 		SecondaryRef:       secondaryRef,
 		RubricVersion:      score.RubricVersion,
 		PromptVersion:      score.PromptVersion,
-		ResolvedAt:         score.ResolvedAt,
+		ResolvedAt:         resolvedAt,
 	}
 }
 
@@ -703,6 +709,7 @@ func makeRawComplianceEntry(
 	outputHash string,
 	primaryRef *contracts.RawJudgeRef,
 	secondaryRef *contracts.RawJudgeRef,
+	resolvedAt time.Time,
 ) contracts.RawComplianceEntry {
 	return contracts.RawComplianceEntry{
 		SchemaVersion:        "1",
@@ -719,8 +726,105 @@ func makeRawComplianceEntry(
 		SecondaryRef:         secondaryRef,
 		RubricVersion:        entry.RubricVersion,
 		PromptVersion:        entry.PromptVersion,
-		ResolvedAt:           entry.ResolvedAt,
+		ResolvedAt:           resolvedAt,
 	}
+}
+
+func verifyDoneMarker(paths step60Paths) (bool, error) {
+	if _, err := os.Stat(paths.Done); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("step60: stat done marker: %w", err)
+	}
+
+	marker, err := internalio.ReadJSON[contracts.Step60DoneMarker](paths.Done)
+	if err != nil {
+		if err := os.Remove(paths.Done); err != nil && !os.IsNotExist(err) {
+			return false, fmt.Errorf("step60: remove unreadable done marker: %w", err)
+		}
+		return false, nil
+	}
+	if err := marker.Validate(); err != nil {
+		if err := os.Remove(paths.Done); err != nil && !os.IsNotExist(err) {
+			return false, fmt.Errorf("step60: remove invalid done marker: %w", err)
+		}
+		return false, nil
+	}
+
+	current, err := currentStep60State(paths)
+	if err != nil {
+		return false, err
+	}
+	if marker.ExpectedCounts == current.ExpectedCounts &&
+		marker.ContentHashes == current.ContentHashes &&
+		marker.RawHashes == current.RawHashes {
+		return true, nil
+	}
+
+	if err := os.Remove(paths.Done); err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("step60: remove stale done marker: %w", err)
+	}
+	return false, nil
+}
+
+func currentStep60State(paths step60Paths) (contracts.Step60DoneMarker, error) {
+	scores, err := internalio.ReadJSONL[contracts.ScoreEntry](paths.ScoresFinal)
+	if err != nil {
+		return contracts.Step60DoneMarker{}, fmt.Errorf("step60: read scores final for marker verify: %w", err)
+	}
+	compliance, err := internalio.ReadJSONL[contracts.ComplianceEntry](paths.ComplianceFinal)
+	if err != nil {
+		return contracts.Step60DoneMarker{}, fmt.Errorf("step60: read compliance final for marker verify: %w", err)
+	}
+	pairwise, err := internalio.ReadJSONL[contracts.PairwiseEntry](paths.Pairwise)
+	if err != nil {
+		return contracts.Step60DoneMarker{}, fmt.Errorf("step60: read pairwise final for marker verify: %w", err)
+	}
+
+	scoresFinalHash, err := hashFinalScores(scores)
+	if err != nil {
+		return contracts.Step60DoneMarker{}, fmt.Errorf("step60: hash scores final for marker verify: %w", err)
+	}
+	complianceFinalHash, err := hashFinalCompliance(compliance)
+	if err != nil {
+		return contracts.Step60DoneMarker{}, fmt.Errorf("step60: hash compliance final for marker verify: %w", err)
+	}
+	pairwiseFinalHash, err := hashFinalPairwise(pairwise)
+	if err != nil {
+		return contracts.Step60DoneMarker{}, fmt.Errorf("step60: hash pairwise final for marker verify: %w", err)
+	}
+	scoresRawHash, err := hashReducedRawScoresFile(paths.ScoresRaw)
+	if err != nil {
+		return contracts.Step60DoneMarker{}, fmt.Errorf("step60: hash scores raw for marker verify: %w", err)
+	}
+	complianceRawHash, err := hashReducedRawComplianceFile(paths.ComplianceRaw)
+	if err != nil {
+		return contracts.Step60DoneMarker{}, fmt.Errorf("step60: hash compliance raw for marker verify: %w", err)
+	}
+
+	return contracts.Step60DoneMarker{
+		ExpectedCounts: contracts.Step60ExpectedCounts{
+			Scores: int64(len(internalio.CollapseByKey(scores, func(entry contracts.ScoreEntry) scoreKey {
+				return scoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
+			}))),
+			Compliance: int64(len(internalio.CollapseByKey(compliance, func(entry contracts.ComplianceEntry) complianceKey {
+				return complianceKey{Agent: entry.Agent, RuleID: entry.RuleID}
+			}))),
+			Pairwise: int64(len(internalio.CollapseByKey(pairwise, func(entry contracts.PairwiseEntry) complianceKey {
+				return complianceKey{Agent: entry.AgentA, RuleID: string(entry.AgentB)}
+			}))),
+		},
+		ContentHashes: contracts.Step60DoneContentHashes{
+			ScoresFinal:     scoresFinalHash,
+			ComplianceFinal: complianceFinalHash,
+			PairwiseFinal:   pairwiseFinalHash,
+		},
+		RawHashes: contracts.StepDoneRawHashes{
+			ScoresRaw:     scoresRawHash,
+			ComplianceRaw: complianceRawHash,
+		},
+	}, nil
 }
 
 func loadPass1Scores(runIO internalio.RunContext) (map[contracts.AgentID][]contracts.ScoreEntry, error) {
