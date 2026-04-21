@@ -140,6 +140,100 @@ func TestStep30Score_ResumeWithoutMarkerDoesNotRejudgeOrAppend(t *testing.T) {
 	assert.Zero(t, provider.calls[contracts.JudgeRoleArbiter])
 }
 
+func TestStep30Score_ResumeRerunsRolesWhenOutputSHAChanges(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			switch role {
+			case contracts.JudgeRoleSecondary:
+				score = 60
+			case contracts.JudgeRoleArbiter:
+				score = 75
+			}
+			return makeJudgeOutput(input, role, score, []ruleVerdict{
+				{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
+			})
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	manifest, err := internalio.LoadScorableManifest(runCtx, 1, contracts.AgentID("a1"))
+	require.NoError(t, err)
+	diffAbs, err := runCtx.ResolveRunRelative(manifest.DiffPath)
+	require.NoError(t, err)
+
+	originalSHA, err := fileSha256(diffAbs)
+	require.NoError(t, err)
+
+	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(markerPath))
+
+	writeRel(t, runCtx, manifest.DiffPath, "updated fixture diff for a1\n")
+	updatedSHA, err := fileSha256(diffAbs)
+	require.NoError(t, err)
+	require.NotEqual(t, originalSHA, updatedSHA)
+
+	provider.reset()
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	assert.Equal(t, 1, provider.calls[contracts.JudgeRolePrimary])
+	assert.Equal(t, 1, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Equal(t, 1, provider.calls[contracts.JudgeRoleArbiter])
+
+	scoreRawPath, err := runCtx.ResolveRunRelative("30/scores-A-raw.jsonl")
+	require.NoError(t, err)
+	scoreRaw, err := internalio.ReadJSONL[contracts.RawScoreEntry](scoreRawPath)
+	require.NoError(t, err)
+	assert.Len(t, scoreRaw, 60)
+	assert.Equal(t, 15, countRawScoresForAgentAndSHA(scoreRaw, contracts.AgentID("a1"), originalSHA))
+	assert.Equal(t, 15, countRawScoresForAgentAndSHA(scoreRaw, contracts.AgentID("a1"), updatedSHA))
+
+	complianceRawPath, err := runCtx.ResolveRunRelative("30/compliance-A-raw.jsonl")
+	require.NoError(t, err)
+	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](complianceRawPath)
+	require.NoError(t, err)
+	assert.Len(t, complianceRaw, 12)
+	assert.Equal(t, 3, countRawComplianceForAgentAndSHA(complianceRaw, contracts.AgentID("a1"), originalSHA))
+	assert.Equal(t, 3, countRawComplianceForAgentAndSHA(complianceRaw, contracts.AgentID("a1"), updatedSHA))
+}
+
+func TestStep30Score_AllowsEmptyComplianceAcrossPanel(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			switch role {
+			case contracts.JudgeRoleSecondary:
+				score = 60
+			case contracts.JudgeRoleArbiter:
+				score = 75
+			}
+			return makeJudgeOutput(input, role, score, nil)
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
+	require.NoError(t, err)
+	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
+	require.NoError(t, err)
+	assert.Equal(t, int64(15), marker.ExpectedCounts.Scores)
+	assert.Equal(t, int64(0), marker.ExpectedCounts.Compliance)
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleArbiter])
+
+	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
+	require.NoError(t, err)
+	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](complianceFinalPath)
+	require.NoError(t, err)
+	assert.Empty(t, complianceFinal)
+}
+
 // seedStep30Fixtures creates a minimal RunContext + TaskPackage with pass-1
 // manifests for every agent in `agents`. Pass-2 worktrees are included in the
 // package but without manifests so step30 ignores them.
@@ -337,4 +431,24 @@ func statStep30Files(t *testing.T, runCtx internalio.RunContext) map[string]int6
 		out[rel] = info.Size()
 	}
 	return out
+}
+
+func countRawScoresForAgentAndSHA(rows []contracts.RawScoreEntry, agent contracts.AgentID, sha string) int {
+	count := 0
+	for _, row := range rows {
+		if row.Agent == agent && row.OutputSha256 == sha {
+			count++
+		}
+	}
+	return count
+}
+
+func countRawComplianceForAgentAndSHA(rows []contracts.RawComplianceEntry, agent contracts.AgentID, sha string) int {
+	count := 0
+	for _, row := range rows {
+		if row.Agent == agent && row.OutputSha256 == sha {
+			count++
+		}
+	}
+	return count
 }

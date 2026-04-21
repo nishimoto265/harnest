@@ -156,6 +156,72 @@ func TestPanelResolver_Resolve(t *testing.T) {
 	})
 }
 
+func TestPanelResolver_Resolve_RequiresArbiterOnDisagreement(t *testing.T) {
+	runCtx := newTestRunContext(t)
+	input := testJudgeInput(runCtx.RunID)
+
+	r := NewPanelResolver()
+	_, err := r.Resolve(context.Background(), PanelInput{
+		Primary:               fakeJudge{out: judges.JudgeOutput{Scores: allDimScores(runCtx.RunID, judges.RolePrimary, 80), Compliance: []contracts.ComplianceEntry{complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant)}}},
+		Secondary:             fakeJudge{out: judges.JudgeOutput{Scores: allDimScores(runCtx.RunID, judges.RoleSecondary, 60), Compliance: []contracts.ComplianceEntry{complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant)}}},
+		JudgeInput:            input,
+		OutputSha256:          testSha256Hex,
+		DisagreementThreshold: 5,
+		RunContext:            runCtx,
+		StepDir:               "30",
+	})
+	require.ErrorIs(t, err, ErrPanelArbiterRequired)
+}
+
+func TestBuildFinalResultFromRaw_RequiresArbiterOnDisagreement(t *testing.T) {
+	runCtx := newTestRunContext(t)
+	resolver := NewPanelResolver()
+	panelInput := PanelInput{
+		JudgeInput:            testJudgeInput(runCtx.RunID),
+		OutputSha256:          testSha256Hex,
+		DisagreementThreshold: 5,
+		RunContext:            runCtx,
+		StepDir:               "30",
+	}
+
+	primary, err := resolver.ResolveRole(
+		context.Background(),
+		panelInput,
+		contracts.JudgeRolePrimary,
+		fakeJudge{out: judges.JudgeOutput{Scores: allDimScores(runCtx.RunID, judges.RolePrimary, 80), Compliance: []contracts.ComplianceEntry{complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant)}}},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	secondary, err := resolver.ResolveRole(
+		context.Background(),
+		panelInput,
+		contracts.JudgeRoleSecondary,
+		fakeJudge{out: judges.JudgeOutput{Scores: allDimScores(runCtx.RunID, judges.RoleSecondary, 60), Compliance: []contracts.ComplianceEntry{complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant)}}},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	_, err = BuildFinalResultFromRaw(
+		primary.RawScores,
+		secondary.RawScores,
+		nil,
+		primary.RawCompliance,
+		secondary.RawCompliance,
+		nil,
+		5,
+		true,
+		false,
+	)
+	require.ErrorIs(t, err, ErrPanelArbiterRequired)
+}
+
 func TestWriteOverflowSidecar(t *testing.T) {
 	runCtx := newTestRunContext(t)
 	longReason := strings.Repeat("Why-", 600) // 2400 chars > 1000
