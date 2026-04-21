@@ -235,7 +235,7 @@ func TestStep30Score_AllowsEmptyComplianceAcrossPanel(t *testing.T) {
 	assert.Empty(t, complianceFinal)
 }
 
-func TestStep30Score_RewritesComplianceAfterRuleShrink(t *testing.T) {
+func TestStep30Score_KeepsAppendOnlyComplianceAfterRuleShrink(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
 	currentVerdicts := []ruleVerdict{
 		{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
@@ -258,6 +258,10 @@ func TestStep30Score_RewritesComplianceAfterRuleShrink(t *testing.T) {
 	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
 	require.NoError(t, err)
 	require.NoError(t, os.Remove(markerPath))
+	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
+	require.NoError(t, err)
+	infoBefore, err := os.Stat(complianceFinalPath)
+	require.NoError(t, err)
 
 	currentVerdicts = []ruleVerdict{
 		{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
@@ -270,18 +274,20 @@ func TestStep30Score_RewritesComplianceAfterRuleShrink(t *testing.T) {
 
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
-	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
-	require.NoError(t, err)
 	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](complianceFinalPath)
 	require.NoError(t, err)
-	require.Len(t, complianceFinal, 3)
+	require.Len(t, complianceFinal, 6)
+	assert.Equal(t, infoBefore.Size(), statFileSize(t, complianceFinalPath))
+
+	ruleCount := make(map[string]int)
 	for _, row := range complianceFinal {
-		assert.Equal(t, "rule-a", row.RuleID)
+		ruleCount[row.RuleID]++
 	}
+	assert.Equal(t, map[string]int{"rule-a": 3, "rule-b": 3}, ruleCount)
 
 	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
 	require.NoError(t, err)
-	assert.Equal(t, int64(3), marker.ExpectedCounts.Compliance)
+	assert.Equal(t, int64(6), marker.ExpectedCounts.Compliance)
 }
 
 func TestStep30Score_RunSerializesConcurrentWriters(t *testing.T) {
@@ -556,6 +562,13 @@ func statStep30Files(t *testing.T, runCtx internalio.RunContext) map[string]int6
 		out[rel] = info.Size()
 	}
 	return out
+}
+
+func statFileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	return info.Size()
 }
 
 func countRawScoresForAgentAndSHA(rows []contracts.RawScoreEntry, agent contracts.AgentID, sha string) int {

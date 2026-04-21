@@ -41,7 +41,7 @@ func AppendJSONL(path string, record any) error {
 		return err
 	}
 	defer f.Close()
-	if err := appendJSONLPayload(f, payload); err != nil {
+	if err := appendJSONLPayload(f, filepath.Dir(path), payload); err != nil {
 		return err
 	}
 	return directorySync(filepath.Dir(path))
@@ -127,25 +127,36 @@ func marshalJSONLRecord(record any) ([]byte, error) {
 	return payload, nil
 }
 
-func appendJSONLPayload(f appendJSONLFile, payload []byte) error {
+func appendJSONLPayload(f appendJSONLFile, dir string, payload []byte) error {
 	originalSize, err := f.Seek(0, stdio.SeekEnd)
 	if err != nil {
 		return err
 	}
 
 	if err := writeAll(f, payload); err != nil {
-		_ = f.Truncate(originalSize)
-		return err
+		return errors.Join(err, rollbackAppendJSONL(f, dir, originalSize))
 	}
 	if err := writeAll(f, []byte{'\n'}); err != nil {
-		_ = f.Truncate(originalSize)
-		return err
+		return errors.Join(err, rollbackAppendJSONL(f, dir, originalSize))
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Truncate(originalSize)
-		return err
+		return errors.Join(err, rollbackAppendJSONL(f, dir, originalSize))
 	}
 	return nil
+}
+
+func rollbackAppendJSONL(f appendJSONLFile, dir string, originalSize int64) error {
+	var rollbackErr error
+	if err := f.Truncate(originalSize); err != nil {
+		rollbackErr = errors.Join(rollbackErr, err)
+	}
+	if err := f.Sync(); err != nil {
+		rollbackErr = errors.Join(rollbackErr, err)
+	}
+	if err := directorySync(dir); err != nil {
+		rollbackErr = errors.Join(rollbackErr, err)
+	}
+	return rollbackErr
 }
 
 func writeAll(w stdio.Writer, payload []byte) error {
