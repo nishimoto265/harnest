@@ -348,20 +348,20 @@ func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 
 	git := gitCLI{
 		stat: os.Stat,
-		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 			switch {
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
-				return []byte(testBaseSHA + "\n"), nil
+				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", firstBranch, firstPath, testBaseSHA}):
-				return []byte("fatal: a branch named '" + firstBranch + "' already exists\n"), errors.New("exit status 128")
+				return nil, []byte("fatal: a branch named '" + firstBranch + "' already exists\n"), errors.New("exit status 128")
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", firstPath, firstBranch}):
-				return []byte("Preparing worktree\n"), nil
+				return []byte("Preparing worktree\n"), nil, nil
 			case slices.Equal(args, []string{"-C", firstPath, "rev-parse", "HEAD"}):
-				return []byte(testBaseRefOID + "\n"), nil
+				return []byte(testBaseRefOID + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "remove", "--force", firstPath}):
-				return []byte("Removed\n"), nil
+				return []byte("Removed\n"), nil, nil
 			default:
-				return nil, fmt.Errorf("unexpected git args: %v", args)
+				return nil, nil, fmt.Errorf("unexpected git args: %v", args)
 			}
 		},
 	}
@@ -390,16 +390,16 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 
 	git := gitCLI{
 		stat: os.Stat,
-		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 			switch {
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
-				return []byte(testBaseSHA + "\n"), nil
+				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", firstPath, "rev-parse", "HEAD"}):
-				return []byte(testBaseSHA + "\n"), nil
+				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", firstPath, "branch", "--show-current"}):
-				return []byte("wrong-branch\n"), nil
+				return []byte("wrong-branch\n"), nil, nil
 			default:
-				return nil, fmt.Errorf("unexpected git args: %v", args)
+				return nil, nil, fmt.Errorf("unexpected git args: %v", args)
 			}
 		},
 	}
@@ -427,18 +427,18 @@ func TestGitCLIWorktreeAdd_RetryBranchExisting_VerifiesHEAD(t *testing.T) {
 
 	git := gitCLI{
 		stat: os.Stat,
-		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 			switch {
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", branch, path, testBaseSHA}):
-				return []byte("fatal: a branch named '" + branch + "' already exists\n"), errors.New("exit status 128")
+				return nil, []byte("fatal: a branch named '" + branch + "' already exists\n"), errors.New("exit status 128")
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", path, branch}):
-				return []byte("Preparing worktree\n"), nil
+				return []byte("Preparing worktree\n"), nil, nil
 			case slices.Equal(args, []string{"-C", path, "rev-parse", "HEAD"}):
-				return []byte(testBaseRefOID + "\n"), nil
+				return []byte(testBaseRefOID + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "remove", "--force", path}):
-				return []byte("Removed\n"), nil
+				return []byte("Removed\n"), nil, nil
 			default:
-				return nil, fmt.Errorf("unexpected git args: %v", args)
+				return nil, nil, fmt.Errorf("unexpected git args: %v", args)
 			}
 		},
 	}
@@ -457,19 +457,19 @@ func TestGitCLIWorktreeAdd_RetryBranchExisting_DriftRemovesWorktree(t *testing.T
 
 	git := gitCLI{
 		stat: os.Stat,
-		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 			calls = append(calls, append([]string(nil), args...))
 			switch {
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", branch, path, testBaseSHA}):
-				return []byte("fatal: a branch named '" + branch + "' already exists\n"), errors.New("exit status 128")
+				return nil, []byte("fatal: a branch named '" + branch + "' already exists\n"), errors.New("exit status 128")
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", path, branch}):
-				return []byte("Preparing worktree\n"), nil
+				return []byte("Preparing worktree\n"), nil, nil
 			case slices.Equal(args, []string{"-C", path, "rev-parse", "HEAD"}):
-				return []byte(testBaseRefOID + "\n"), nil
+				return []byte(testBaseRefOID + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "remove", "--force", path}):
-				return []byte("Removed\n"), nil
+				return []byte("Removed\n"), nil, nil
 			default:
-				return nil, fmt.Errorf("unexpected git args: %v", args)
+				return nil, nil, fmt.Errorf("unexpected git args: %v", args)
 			}
 		},
 	}
@@ -489,20 +489,67 @@ func TestGitCLIWorktreeAdd_RetryBranchExisting_DriftRemovesWorktree(t *testing.T
 	)
 }
 
+func TestGitCLIWorktreeAdd_RetryBranchExisting_CleanupFailurePreservesDrift(t *testing.T) {
+	repoRoot := t.TempDir()
+	path := filepath.Join(t.TempDir(), "worktree")
+	branch := "auto-improve/run/pass1/a1"
+
+	git := gitCLI{
+		stat: os.Stat,
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+			switch {
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", branch, path, testBaseSHA}):
+				return nil, []byte("fatal: a branch named '" + branch + "' already exists\n"), errors.New("exit status 128")
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", path, branch}):
+				return []byte("Preparing worktree\n"), nil, nil
+			case slices.Equal(args, []string{"-C", path, "rev-parse", "HEAD"}):
+				return []byte(testBaseRefOID + "\n"), nil, nil
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "remove", "--force", path}):
+				return nil, []byte("permission denied\n"), errors.New("exit status 1")
+			default:
+				return nil, nil, fmt.Errorf("unexpected git args: %v", args)
+			}
+		},
+	}
+
+	created, err := git.WorktreeAdd(context.Background(), repoRoot, path, branch, testBaseSHA)
+	require.Error(t, err)
+	assert.False(t, created)
+	assert.ErrorIs(t, err, ErrWorktreeDrift)
+	assert.Contains(t, err.Error(), "cleanup failed")
+	assert.Contains(t, err.Error(), "permission denied")
+}
+
+func TestGitCLIResolveRef_IgnoresStderrFromRunner(t *testing.T) {
+	repoRoot := t.TempDir()
+	git := gitCLI{
+		stat: os.Stat,
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+			require.Equal(t, "git", name)
+			require.Equal(t, []string{"-C", repoRoot, "rev-parse", "HEAD"}, args)
+			return []byte(testBaseSHA + "\n"), []byte("xcrun: warning: cache directory unavailable\n"), nil
+		},
+	}
+
+	sha, err := git.ResolveRef(context.Background(), repoRoot, "HEAD")
+	require.NoError(t, err)
+	assert.Equal(t, testBaseSHA, sha)
+}
+
 func TestGitCLIWorktreeAdd_ExistingPath_VerifiesBranch(t *testing.T) {
 	path := t.TempDir()
 	branch := "auto-improve/run/pass1/a1"
 
 	git := gitCLI{
 		stat: os.Stat,
-		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 			switch {
 			case slices.Equal(args, []string{"-C", path, "rev-parse", "HEAD"}):
-				return []byte(testBaseSHA + "\n"), nil
+				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", path, "branch", "--show-current"}):
-				return []byte("wrong-branch\n"), nil
+				return []byte("wrong-branch\n"), nil, nil
 			default:
-				return nil, fmt.Errorf("unexpected git args: %v", args)
+				return nil, nil, fmt.Errorf("unexpected git args: %v", args)
 			}
 		},
 	}
@@ -511,6 +558,36 @@ func TestGitCLIWorktreeAdd_ExistingPath_VerifiesBranch(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, created)
 	assert.ErrorIs(t, err, ErrWorktreeDrift)
+}
+
+func TestGHCLIPRView_EmptyObjectRejected(t *testing.T) {
+	gh := ghCLI{
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+			require.Equal(t, "gh", name)
+			return []byte(`{}`), nil, nil
+		},
+	}
+
+	_, err := gh.PRView(context.Background(), 42, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing required fields")
+	assert.Contains(t, err.Error(), "number")
+	assert.Contains(t, err.Error(), "title")
+	assert.Contains(t, err.Error(), "state")
+}
+
+func TestGHCLIPRView_EmptyTitleRejected(t *testing.T) {
+	gh := ghCLI{
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+			require.Equal(t, "gh", name)
+			return []byte(`{"number":42,"title":"","state":"MERGED"}`), nil, nil
+		},
+	}
+
+	_, err := gh.PRView(context.Background(), 42, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing required fields")
+	assert.Contains(t, err.Error(), "title")
 }
 
 func TestReconstructTaskPrompt_Variants(t *testing.T) {

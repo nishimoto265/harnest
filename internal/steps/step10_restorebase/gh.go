@@ -3,8 +3,10 @@ package step10restorebase
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 // LinkedIssue describes a GitHub issue that is closed by the PR (via closing
@@ -33,9 +35,11 @@ type GHClient interface {
 	PRView(ctx context.Context, pr int, repo string) (PRInfo, error)
 }
 
+type cmdRunner func(ctx context.Context, name string, args ...string) (stdout []byte, stderr []byte, err error)
+
 // ghCLI shells out to the real `gh` binary.
 type ghCLI struct {
-	run func(ctx context.Context, name string, args ...string) ([]byte, error)
+	run cmdRunner
 }
 
 // NewGHClient returns a GHClient backed by the real `gh` CLI.
@@ -44,16 +48,56 @@ func NewGHClient() GHClient {
 }
 
 // NewGHClientWithRunner exposes the subprocess seam for tests.
-func NewGHClientWithRunner(runner func(ctx context.Context, name string, args ...string) ([]byte, error)) GHClient {
+func NewGHClientWithRunner(runner cmdRunner) GHClient {
 	if runner == nil {
 		runner = defaultCmdRunner
 	}
 	return ghCLI{run: runner}
 }
 
-func defaultCmdRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
+func defaultCmdRunner(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
-	return cmd.CombinedOutput()
+	stdout, err := cmd.Output()
+	if err == nil {
+		return stdout, nil, nil
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return stdout, exitErr.Stderr, err
+	}
+	return stdout, nil, err
+}
+
+func formatCommandFailure(op string, err error, stdout, stderr []byte) error {
+	parts := make([]string, 0, 2)
+	if msg := strings.TrimSpace(string(stderr)); msg != "" {
+		parts = append(parts, "stderr="+msg)
+	}
+	if msg := strings.TrimSpace(string(stdout)); msg != "" {
+		parts = append(parts, "stdout="+msg)
+	}
+	if len(parts) == 0 {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	return fmt.Errorf("%s: %w: %s", op, err, strings.Join(parts, "; "))
+}
+
+func validatePRInfo(pr int, info PRInfo) error {
+	missing := make([]string, 0, 3)
+	if info.Number <= 0 {
+		missing = append(missing, "number")
+	}
+	if info.Title == "" {
+		missing = append(missing, "title")
+	}
+	if info.State == "" {
+		missing = append(missing, "state")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("step10: gh pr view #%d: missing required fields: %s", pr, strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 type ghPRViewRaw struct {
@@ -91,9 +135,9 @@ func (c ghCLI) PRView(ctx context.Context, pr int, repo string) (PRInfo, error) 
 	if repo != "" {
 		prArgs = append(prArgs, "--repo", repo)
 	}
-	out, err := c.run(ctx, "gh", prArgs...)
+	out, stderr, err := c.run(ctx, "gh", prArgs...)
 	if err != nil {
-		return PRInfo{}, fmt.Errorf("step10: gh pr view #%d: %w: %s", pr, err, string(out))
+		return PRInfo{}, formatCommandFailure(fmt.Sprintf("step10: gh pr view #%d", pr), err, out, stderr)
 	}
 	var raw ghPRViewRaw
 	if err := json.Unmarshal(out, &raw); err != nil {
@@ -113,6 +157,9 @@ func (c ghCLI) PRView(ctx context.Context, pr int, repo string) (PRInfo, error) 
 	}
 	if raw.PotentialMergeCommit != nil {
 		info.PotentialMergeCommitOID = raw.PotentialMergeCommit.OID
+	}
+	if err := validatePRInfo(pr, info); err != nil {
+		return PRInfo{}, err
 	}
 	for _, ref := range raw.ClosingIssuesReferences {
 		issue, err := c.issueView(ctx, ref.Number, repo)
@@ -136,9 +183,9 @@ func (c ghCLI) issueView(ctx context.Context, number int, repo string) (LinkedIs
 	if repo != "" {
 		args = append(args, "--repo", repo)
 	}
-	out, err := c.run(ctx, "gh", args...)
+	out, stderr, err := c.run(ctx, "gh", args...)
 	if err != nil {
-		return LinkedIssue{}, fmt.Errorf("step10: gh issue view #%d: %w: %s", number, err, string(out))
+		return LinkedIssue{}, formatCommandFailure(fmt.Sprintf("step10: gh issue view #%d", number), err, out, stderr)
 	}
 	var raw ghIssueViewRaw
 	if err := json.Unmarshal(out, &raw); err != nil {

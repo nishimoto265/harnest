@@ -26,7 +26,7 @@ type GitClient interface {
 }
 
 type gitCLI struct {
-	run  func(ctx context.Context, name string, args ...string) ([]byte, error)
+	run  cmdRunner
 	stat func(path string) (os.FileInfo, error)
 }
 
@@ -36,7 +36,7 @@ func NewGitClient() GitClient {
 }
 
 // NewGitClientWithRunner exposes the subprocess seam for tests.
-func NewGitClientWithRunner(runner func(ctx context.Context, name string, args ...string) ([]byte, error)) GitClient {
+func NewGitClientWithRunner(runner cmdRunner) GitClient {
 	if runner == nil {
 		runner = defaultCmdRunner
 	}
@@ -70,13 +70,14 @@ func (g gitCLI) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha str
 		return false, fmt.Errorf("step10: stat %s: %w", path, err)
 	}
 
-	out, err := g.run(ctx, "git", "-C", repoRoot, "worktree", "add", "-b", branch, path, sha)
+	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "worktree", "add", "-b", branch, path, sha)
 	if err != nil {
 		// If branch already exists, retry without -b.
-		if strings.Contains(string(out), "already exists") || strings.Contains(string(out), "is already checked out") {
-			out2, err2 := g.run(ctx, "git", "-C", repoRoot, "worktree", "add", path, branch)
+		details := string(out) + string(stderr)
+		if strings.Contains(details, "already exists") || strings.Contains(details, "is already checked out") {
+			out2, stderr2, err2 := g.run(ctx, "git", "-C", repoRoot, "worktree", "add", path, branch)
 			if err2 != nil {
-				return false, fmt.Errorf("step10: git worktree add %s: %w: %s", path, err2, string(out2))
+				return false, formatCommandFailure(fmt.Sprintf("step10: git worktree add %s", path), err2, out2, stderr2)
 			}
 			head, herr := g.ResolveRef(ctx, path, "HEAD")
 			if herr != nil {
@@ -85,37 +86,37 @@ func (g gitCLI) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha str
 			if head != sha {
 				driftErr := fmt.Errorf("%w: path=%s expected=%s actual=%s", ErrWorktreeDrift, path, sha, head)
 				if cleanupErr := g.removeWorktreeForce(ctx, repoRoot, path); cleanupErr != nil {
-					return false, fmt.Errorf("%v; cleanup failed: %w", driftErr, cleanupErr)
+					return false, errors.Join(driftErr, fmt.Errorf("cleanup failed: %w", cleanupErr))
 				}
 				return false, driftErr
 			}
 			return true, nil
 		}
-		return false, fmt.Errorf("step10: git worktree add %s: %w: %s", path, err, string(out))
+		return false, formatCommandFailure(fmt.Sprintf("step10: git worktree add %s", path), err, out, stderr)
 	}
 	return true, nil
 }
 
 func (g gitCLI) removeWorktreeForce(ctx context.Context, repoRoot, path string) error {
-	out, err := g.run(ctx, "git", "-C", repoRoot, "worktree", "remove", "--force", path)
+	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "worktree", "remove", "--force", path)
 	if err != nil {
-		return fmt.Errorf("step10: git worktree remove --force %s: %w: %s", path, err, string(out))
+		return formatCommandFailure(fmt.Sprintf("step10: git worktree remove --force %s", path), err, out, stderr)
 	}
 	return nil
 }
 
 func (g gitCLI) currentBranch(ctx context.Context, repoRoot string) (string, error) {
-	out, err := g.run(ctx, "git", "-C", repoRoot, "branch", "--show-current")
+	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "branch", "--show-current")
 	if err != nil {
-		return "", fmt.Errorf("step10: git branch --show-current (in %s): %w: %s", repoRoot, err, string(out))
+		return "", formatCommandFailure(fmt.Sprintf("step10: git branch --show-current (in %s)", repoRoot), err, out, stderr)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
 func (g gitCLI) ResolveRef(ctx context.Context, repoRoot, ref string) (string, error) {
-	out, err := g.run(ctx, "git", "-C", repoRoot, "rev-parse", ref)
+	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "rev-parse", ref)
 	if err != nil {
-		return "", fmt.Errorf("step10: git rev-parse %s (in %s): %w: %s", ref, repoRoot, err, string(out))
+		return "", formatCommandFailure(fmt.Sprintf("step10: git rev-parse %s (in %s)", ref, repoRoot), err, out, stderr)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
