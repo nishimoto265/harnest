@@ -1,7 +1,10 @@
 package step70_decide
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -66,18 +69,42 @@ func TestRun_SentinelBlocksExecution(t *testing.T) {
 
 func TestRun_ResumeFromBranchPushed(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR4")
+	appendResult, _ := seedRegistryAdd(t, runCtx.RulesRegistryPath(), resolver, runCtx.RunID, candidates.CandidatesHash)
 	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
 	intention.Stage = contracts.IntentionStageBranchPushed
 	require.NoError(t, store.Save(intention))
 
 	git := &fakeGit{head: resolver.target.TargetSHA}
-	deps := Deps{Git: git, Resolver: resolver, Now: fixedNow()}
+	deps := Deps{Git: git, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
 	require.NoError(t, Run(context.Background(), 4, runCtx, pkg, candidates, store, deps))
 
 	decision := readDecision(t, runCtx)
 	assert.Equal(t, contracts.DecisionActionAdopt, decision.Action)
+	adopt, ok := decision.Value.(contracts.DecisionAdopt)
+	require.True(t, ok)
+	assert.Equal(t, appendResult, adopt.RegistryAppendResult)
 	// No additional push from the resume path (branch already pushed).
 	assert.Empty(t, git.pushCalls)
+}
+
+func TestRun_ResumeFromRegistryAppended(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR41")
+	appendResult, _ := seedRegistryAdd(t, runCtx.RulesRegistryPath(), resolver, runCtx.RunID, candidates.CandidatesHash)
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageRegistryAppended
+	intention.RegistryAppendResult = &appendResult
+	require.NoError(t, store.Save(intention))
+
+	deps := Deps{Git: &fakeGit{head: resolver.target.TargetSHA}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 41, runCtx, pkg, candidates, store, deps))
+
+	decision := readDecision(t, runCtx)
+	assert.Equal(t, contracts.DecisionActionAdopt, decision.Action)
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindPromoted, events[len(events)-1].Kind)
+	assert.NoFileExists(t, intentionPath(t, runCtx))
 }
 
 func TestRun_ResumeFromDecisionWritten(t *testing.T) {
@@ -110,7 +137,7 @@ func TestRun_ResumeFromDecisionWritten(t *testing.T) {
 	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, d))
 
 	git := &fakeGit{head: resolver.target.TargetSHA}
-	deps := Deps{Git: git, Resolver: resolver, Now: fixedNow()}
+	deps := Deps{Git: git, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
 	require.NoError(t, Run(context.Background(), 5, runCtx, pkg, candidates, store, deps))
 
 	events := readStateEvents(t, runCtx)
@@ -277,12 +304,174 @@ func TestRun_ResumeFromRollingBackRegistryAppended(t *testing.T) {
 	intention.RegistryAppendResult = &rollbackResult
 	require.NoError(t, store.Save(intention))
 
-	deps := Deps{Git: &fakeGit{head: resolver.target.BestShaBefore}, Resolver: resolver, Now: fixedNow()}
+	deps := Deps{Git: &fakeGit{head: resolver.target.BestShaBefore}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
 	require.NoError(t, Run(context.Background(), 12, runCtx, pkg, candidates, store, deps))
 
 	events := readStateEvents(t, runCtx)
 	assert.Equal(t, contracts.StateKindRollback, events[len(events)-1].Kind)
 	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
+func TestRun_ResumeFromRollingBackBranchReverted(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR121")
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageRollingBackBranchReverted
+	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
+	intention.FailedStep = contracts.FailedStep70
+	require.NoError(t, store.Save(intention))
+
+	deps := Deps{Git: &fakeGit{head: resolver.target.BestShaBefore}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 121, runCtx, pkg, candidates, store, deps))
+
+	decision := readDecision(t, runCtx)
+	assert.Equal(t, contracts.DecisionActionRollback, decision.Action)
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindRollback, events[len(events)-1].Kind)
+	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
+func TestRun_ResumeFromRollingBackDecisionWritten(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR122")
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageRollingBackDecisionWritten
+	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
+	intention.FailedStep = contracts.FailedStep70
+	intention.RegistryAppendResult = &contracts.RegistryAppendResult{Offset: 123, Sha256: strings.Repeat("d", 64)}
+	require.NoError(t, store.Save(intention))
+
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, contracts.Decision{
+		Action: contracts.DecisionActionRollback,
+		Value: contracts.DecisionRollback{
+			Action:         contracts.DecisionActionRollback,
+			SchemaVersion:  "1",
+			RunID:          runCtx.RunID,
+			IdempotencyKey: intention.IdempotencyKey,
+			RollbackReason: contracts.RollbackReasonTransactionalFailure,
+			FailedStep:     contracts.FailedStep70,
+			BestShaBefore:  intention.BestShaBefore,
+			TargetSha:      intention.TargetSha,
+			DecidedAt:      fixedNow()(),
+		},
+	}))
+
+	deps := Deps{Git: &fakeGit{head: resolver.target.BestShaBefore}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 122, runCtx, pkg, candidates, store, deps))
+
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindRollback, events[len(events)-1].Kind)
+	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
+func TestRun_NeedsManualRecoveryStageRequiresExplicitCleanup(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR123")
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageNeedsManualRecovery
+	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
+	intention.FailedStep = contracts.FailedStep70
+	require.NoError(t, store.Save(intention))
+	require.NoError(t, writeSentinel(runCtx.RunsBase, runCtx.RunID, 123, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70, fixedNow()()))
+
+	deps := Deps{Git: &fakeGit{head: resolver.target.BestShaBefore}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 123, runCtx, pkg, candidates, store, deps))
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+
+	require.NoError(t, FinalizeCleanup(runCtx, store))
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+	assert.NoFileExists(t, intentionPath(t, runCtx))
+
+	deps = Deps{Git: &fakeGit{head: resolver.target.BestShaBefore}, Resolver: resolver, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 123, runCtx, pkg, candidates, store, deps))
+	assert.Equal(t, contracts.DecisionActionAdopt, readDecision(t, runCtx).Action)
+}
+
+func TestRun_PlanningRecoveryPrePushCrash_RegistryAdvancedRestartsFresh(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR13")
+	initialTarget := resolver.target
+	intention := planningIntention(runCtx.RunID, initialTarget, candidates.CandidatesHash)
+	firstResult, _ := seedRegistryUniqueAdd(t, runCtx.RulesRegistryPath(), "seed-0", strings.Repeat("0", 64), "2026-04-21-PR90-abcdef0")
+	intention.RegistryHeadBefore = firstResult.Sha256
+	require.NoError(t, store.Save(intention))
+	_, _ = seedRegistryUniqueAdd(t, runCtx.RulesRegistryPath(), "seed-1", strings.Repeat("1", 64), "2026-04-21-PR91-bcdef01")
+
+	secondTarget := Target{
+		BestBranch:    initialTarget.BestBranch,
+		BestShaBefore: initialTarget.BestShaBefore,
+		TargetSHA:     strings.Repeat("3", 40),
+		RulesToAppend: []contracts.RuleRegistryEntry{adoptAddedEntryWithTarget(runCtx.RunID, candidates.CandidatesHash, strings.Repeat("3", 40), "seed-1")},
+	}
+	seqResolver := &sequenceResolver{targets: []Target{initialTarget, secondTarget}}
+
+	deps := Deps{Git: &fakeGit{head: initialTarget.BestShaBefore}, Resolver: seqResolver, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 13, runCtx, pkg, candidates, store, deps))
+
+	events := readStateEvents(t, runCtx)
+	kinds := make([]contracts.StateKind, 0, len(events))
+	for _, event := range events {
+		kinds = append(kinds, event.Kind)
+	}
+	assert.Contains(t, kinds, contracts.StateKindInterrupted)
+	assert.Contains(t, kinds, contracts.StateKindPromoted)
+
+	decision := readDecision(t, runCtx)
+	adopt, ok := decision.Value.(contracts.DecisionAdopt)
+	require.True(t, ok)
+	assert.Equal(t, secondTarget.TargetSHA, adopt.TargetSha)
+	assert.Equal(t, contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), secondTarget.TargetSHA, secondTarget.BestShaBefore, candidates.CandidatesHash), adopt.IdempotencyKey)
+	assert.NotEqual(t, intention.IdempotencyKey, adopt.IdempotencyKey)
+	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
+func TestFindRegistryByIdempotencyKey_RebuildsMandatoryIndexBeforeLookup(t *testing.T) {
+	runCtx, _, candidates, _, _ := newFixture(t, "PR14")
+	targetKey := contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), strings.Repeat("2", 40), strings.Repeat("1", 40), candidates.CandidatesHash)
+	specs := make([]seedRegistrySpec, 0, registryMandatoryIndexAt)
+	for i := 0; i < registryMandatoryIndexAt; i++ {
+		key := fmt.Sprintf("%064x", i+1)
+		if i == registryMandatoryIndexAt/2 {
+			key = targetKey
+		}
+		specs = append(specs, seedRegistrySpec{
+			RuleID:         fmt.Sprintf("seed-%04d", i),
+			IdempotencyKey: key,
+			ByRunID:        contracts.RunID(fmt.Sprintf("2026-04-21-PR%02d-abcdef0", (i%90)+10)),
+		})
+	}
+	results := writeSeedRegistryAdds(t, runCtx.RulesRegistryPath(), specs)
+	targetResult := results[targetKey]
+
+	require.NoError(t, internalio.WriteAtomic(runCtx.RulesIdempotencyIndexPath(), []byte("{\"idempotency_key\":\""+strings.Repeat("f", 64)+"\",\"registry_offset\":0,\"registry_sha256\":\""+strings.Repeat("e", 64)+"\",\"kind\":\"added\",\"at\":\"2026-04-21T00:01:40Z\"}\n")))
+
+	found, ok, err := findRegistryByIdempotencyKey(runCtx, targetKey)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, targetResult, found)
+}
+
+func TestRun_AdoptIgnoresIndexSyncFailureAfterRegistryCommit(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR15")
+	resolver.target.RulesToAppend = []contracts.RuleRegistryEntry{adoptAddedEntryWithTarget(runCtx.RunID, candidates.CandidatesHash, resolver.target.TargetSHA, "seed-sync-1498")}
+	specs := make([]seedRegistrySpec, 0, 1499)
+	for i := 0; i < 1499; i++ {
+		specs = append(specs, seedRegistrySpec{
+			RuleID:         fmt.Sprintf("seed-sync-%04d", i),
+			IdempotencyKey: fmt.Sprintf("%064x", i+5000),
+			ByRunID:        contracts.RunID(fmt.Sprintf("2026-04-21-PR%02d-abcdef0", (i%90)+10)),
+		})
+	}
+	writeSeedRegistryAdds(t, runCtx.RulesRegistryPath(), specs)
+	require.NoError(t, os.MkdirAll(runCtx.RulesIdempotencyIndexPath(), 0o755))
+
+	deps := Deps{Git: &fakeGit{head: resolver.target.BestShaBefore}, Resolver: resolver, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 15, runCtx, pkg, candidates, store, deps))
+
+	assert.Equal(t, contracts.DecisionActionAdopt, readDecision(t, runCtx).Action)
+	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	assert.Len(t, lines, 1500)
 }
 
 // ---- helpers ----
@@ -291,8 +480,41 @@ type fixtureResolver struct {
 	target Target
 }
 
+type seedRegistrySpec struct {
+	RuleID         string
+	IdempotencyKey string
+	ByRunID        contracts.RunID
+}
+
 func (r *fixtureResolver) Resolve(internalio.RunContext, *contracts.TaskPackage, *contracts.Candidates) (Target, bool, error) {
 	return r.target, true, nil
+}
+
+type unexpectedResolver struct {
+	t *testing.T
+}
+
+func (r unexpectedResolver) Resolve(internalio.RunContext, *contracts.TaskPackage, *contracts.Candidates) (Target, bool, error) {
+	r.t.Helper()
+	r.t.Fatalf("unexpected resolver call")
+	return Target{}, false, nil
+}
+
+type sequenceResolver struct {
+	targets []Target
+	index   int
+}
+
+func (r *sequenceResolver) Resolve(internalio.RunContext, *contracts.TaskPackage, *contracts.Candidates) (Target, bool, error) {
+	if len(r.targets) == 0 {
+		return Target{}, false, nil
+	}
+	if r.index >= len(r.targets) {
+		return r.targets[len(r.targets)-1], true, nil
+	}
+	target := r.targets[r.index]
+	r.index++
+	return target, true, nil
 }
 
 type fakePushCall struct {
@@ -364,12 +586,16 @@ func newFixtureWithResolver(t *testing.T, prLabel string) (internalio.RunContext
 }
 
 func adoptAddedEntry(runID contracts.RunID, candidatesHash string) contracts.RuleRegistryEntry {
+	return adoptAddedEntryWithTarget(runID, candidatesHash, strings.Repeat("2", 40), "rule-seed")
+}
+
+func adoptAddedEntryWithTarget(runID contracts.RunID, candidatesHash, targetSHA, ruleID string) contracts.RuleRegistryEntry {
 	key := contracts.ComputeAdoptIdempotencyKey(string(runID), strings.Repeat("2", 40), strings.Repeat("1", 40), candidatesHash)
 	v := contracts.RuleRegistryAdded{
 		Kind:           contracts.RegistryKindAdded,
 		SchemaVersion:  "1",
-		RuleID:         "rule-seed",
-		RulePath:       "rules/rule-seed.md",
+		RuleID:         ruleID,
+		RulePath:       "rules/" + ruleID + ".md",
 		Sha256:         strings.Repeat("a", 64),
 		IdempotencyKey: key,
 		VersionSeq:     1,
@@ -377,6 +603,7 @@ func adoptAddedEntry(runID contracts.RunID, candidatesHash string) contracts.Rul
 		ByRunID:        runID,
 		At:             time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
 	}
+	v.IdempotencyKey = contracts.ComputeAdoptIdempotencyKey(string(runID), targetSHA, strings.Repeat("1", 40), candidatesHash)
 	return contracts.RuleRegistryEntry{Kind: v.Kind, Value: v}
 }
 
@@ -400,6 +627,81 @@ func seedRegistryAdd(t *testing.T, path string, resolver *fixtureResolver, runID
 	result, err := internalio.AppendRegistryEntry(path, entry)
 	require.NoError(t, err)
 	return result, entry
+}
+
+func seedRegistryUniqueAdd(t *testing.T, path, ruleID, idemKey, byRunID string) (contracts.RegistryAppendResult, contracts.RuleRegistryEntry) {
+	t.Helper()
+	prevHash, err := currentRegistryHead(path)
+	require.NoError(t, err)
+	versionSeq := int64(1)
+	lines, err := readRegistryLines(path)
+	require.NoError(t, err)
+	if len(lines) > 0 {
+		versionSeq = int64(len(lines) + 1)
+	}
+	entry := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         ruleID,
+			RulePath:       "rules/" + ruleID + ".md",
+			Sha256:         strings.Repeat("b", 64),
+			IdempotencyKey: idemKey,
+			VersionSeq:     versionSeq,
+			PrevHash:       prevHash,
+			ByRunID:        contracts.RunID(byRunID),
+			At:             time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+		},
+	}
+	result, err := internalio.AppendRegistryEntry(path, entry)
+	require.NoError(t, err)
+	return result, entry
+}
+
+func writeSeedRegistryAdds(t *testing.T, path string, specs []seedRegistrySpec) map[string]contracts.RegistryAppendResult {
+	t.Helper()
+
+	var (
+		buffer   bytes.Buffer
+		offset   int64
+		prevHash string
+	)
+	results := make(map[string]contracts.RegistryAppendResult, len(specs))
+	for i, spec := range specs {
+		entry := contracts.RuleRegistryEntry{
+			Kind: contracts.RegistryKindAdded,
+			Value: contracts.RuleRegistryAdded{
+				Kind:           contracts.RegistryKindAdded,
+				SchemaVersion:  "1",
+				RuleID:         spec.RuleID,
+				RulePath:       "rules/" + spec.RuleID + ".md",
+				Sha256:         fmt.Sprintf("%064x", i+10000),
+				IdempotencyKey: spec.IdempotencyKey,
+				VersionSeq:     int64(i + 1),
+				PrevHash:       prevHash,
+				ByRunID:        spec.ByRunID,
+				At:             time.Unix(100, 0).UTC(),
+			},
+		}
+		var line bytes.Buffer
+		require.NoError(t, contracts.EncodeStrict(&line, entry))
+		payload := bytes.TrimSuffix(line.Bytes(), []byte{'\n'})
+		_, err := buffer.Write(payload)
+		require.NoError(t, err)
+		require.NoError(t, buffer.WriteByte('\n'))
+
+		sum := sha256.Sum256(payload)
+		result := contracts.RegistryAppendResult{
+			Offset: offset,
+			Sha256: hex.EncodeToString(sum[:]),
+		}
+		results[spec.IdempotencyKey] = result
+		prevHash = result.Sha256
+		offset += int64(len(payload) + 1)
+	}
+	require.NoError(t, internalio.WriteAtomic(path, buffer.Bytes()))
+	return results
 }
 
 func validTaskPackage(runID contracts.RunID) contracts.TaskPackage {

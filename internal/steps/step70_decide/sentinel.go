@@ -57,3 +57,22 @@ func writeSentinel(runsBase string, runID contracts.RunID, pr int, reason contra
 	}
 	return internalio.WriteJSONAtomic(path, sentinel)
 }
+
+// FinalizeCleanup clears the durable manual-recovery block for a run after an
+// operator has explicitly reconciled branch/registry state out of band.
+func FinalizeCleanup(runCtx internalio.RunContext, store IntentionWriter) error {
+	if store != nil {
+		if err := store.Delete(); err != nil {
+			return err
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"),
+		filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".aborted.json"),
+	} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}

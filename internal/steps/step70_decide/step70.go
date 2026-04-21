@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -208,7 +209,11 @@ func driveRegistry(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 	}
 	appendResult, err := appendRegistryEntries(runCtx, intention, target, writer, deps, pr)
 	if err != nil {
-		return handleRollback(pr, runCtx, pkg, target, intention, store, writer, deps, contracts.RollbackReasonRegistryDivergence)
+		reason := contracts.RollbackReasonTransactionalFailure
+		if errors.Is(err, ErrRegistryDivergence) {
+			reason = contracts.RollbackReasonRegistryDivergence
+		}
+		return handleRollback(pr, runCtx, pkg, target, intention, store, writer, deps, reason)
 	}
 	intention.RegistryAppendResult = &appendResult
 	intention.Stage = contracts.IntentionStageRegistryAppended
@@ -552,9 +557,7 @@ func appendRegistryEntries(runCtx internalio.RunContext, intention contracts.Int
 			}
 		}
 
-		if err := syncRegistryIndex(runCtx, entry, appended); err != nil {
-			return contracts.RegistryAppendResult{}, err
-		}
+		syncRegistryIndex(runCtx, entry, appended)
 		result = appended
 	}
 
@@ -596,9 +599,7 @@ func appendRegistryRollback(runCtx internalio.RunContext, intention contracts.In
 	if err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
-	if err := syncRegistryIndex(runCtx, wrapper, result); err != nil {
-		return contracts.RegistryAppendResult{}, err
-	}
+	syncRegistryIndex(runCtx, wrapper, result)
 	return result, nil
 }
 
@@ -757,12 +758,14 @@ func registryLookupLines(runCtx internalio.RunContext) ([]registryLine, error) {
 		}
 		return lines[start:], nil
 	}
-	if err := ensureRegistryIndex(runCtx); err != nil {
-		return nil, err
-	}
-	indexEntries, err := internalio.ReadJSONL[contracts.RuleIdempotencyIndexEntry](runCtx.RulesIdempotencyIndexPath())
+	indexEntries, err := ensureRegistryIndex(runCtx)
 	if err != nil {
-		return nil, err
+		slog.Warn("step70: idempotency index unavailable; falling back to tail scan", slog.String("error", err.Error()))
+		start := 0
+		if len(lines) > internalio.RegistryTailScanN {
+			start = len(lines) - internalio.RegistryTailScanN
+		}
+		return lines[start:], nil
 	}
 	matches := make(map[int64]string, len(indexEntries))
 	for _, entry := range indexEntries {
@@ -777,44 +780,30 @@ func registryLookupLines(runCtx internalio.RunContext) ([]registryLine, error) {
 	return filtered, nil
 }
 
-func ensureRegistryIndex(runCtx internalio.RunContext) error {
+func ensureRegistryIndex(runCtx internalio.RunContext) ([]contracts.RuleIdempotencyIndexEntry, error) {
 	count, err := registryLineCount(runCtx.RulesRegistryPath())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if count < 1500 {
-		return nil
+		return nil, nil
 	}
-	if _, err := os.Stat(runCtx.RulesIdempotencyIndexPath()); err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-		_, err = internalio.RebuildIdempotencyIndex(runCtx.RulesRegistryPath(), runCtx.RulesIdempotencyIndexPath())
-		return err
-	}
-	return nil
+	indexEntries, _, err := internalio.EnsureVerifiedIdempotencyIndex(runCtx.RulesRegistryPath(), runCtx.RulesIdempotencyIndexPath())
+	return indexEntries, err
 }
 
-func syncRegistryIndex(runCtx internalio.RunContext, entry contracts.RuleRegistryEntry, result contracts.RegistryAppendResult) error {
+func syncRegistryIndex(runCtx internalio.RunContext, entry contracts.RuleRegistryEntry, result contracts.RegistryAppendResult) {
 	count, err := registryLineCount(runCtx.RulesRegistryPath())
 	if err != nil {
-		return err
+		slog.Warn("step70: failed to inspect registry size for index sync", slog.String("error", err.Error()))
+		return
 	}
 	if count < 1500 {
-		return nil
+		return
 	}
-	if _, err := os.Stat(runCtx.RulesIdempotencyIndexPath()); err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-		_, err = internalio.RebuildIdempotencyIndex(runCtx.RulesRegistryPath(), runCtx.RulesIdempotencyIndexPath())
-		return err
+	if err := internalio.SyncIdempotencyIndex(runCtx.RulesRegistryPath(), runCtx.RulesIdempotencyIndexPath(), entry, result); err != nil {
+		slog.Warn("step70: idempotency index sync failed; registry append remains committed", slog.String("error", err.Error()))
 	}
-	indexEntry, err := internalio.BuildRuleIdempotencyIndexEntry(entry, result)
-	if err != nil {
-		return err
-	}
-	return internalio.AppendIdempotencyIndexEntry(runCtx.RulesIdempotencyIndexPath(), indexEntry)
 }
 
 func readRegistryLines(path string) ([]registryLine, error) {
@@ -922,19 +911,18 @@ func emitRegistrySizeWarnings(runCtx internalio.RunContext, writer state.Writer,
 // ---- Resume from persisted intention ----
 
 func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, intention *contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
-	target, hasTarget, err := deps.Resolver.Resolve(runCtx, pkg, candidates)
-	if err != nil {
-		return err
-	}
-	if !hasTarget {
-		return markManualRecovery(pr, runCtx, *intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
-	}
-
 	switch intention.Stage {
 	case contracts.IntentionStagePlanning:
+		target, hasTarget, err := deps.Resolver.Resolve(runCtx, pkg, candidates)
+		if err != nil {
+			return err
+		}
+		if !hasTarget {
+			return markManualRecovery(pr, runCtx, *intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+		}
 		return planningDecision(ctx, pr, runCtx, pkg, candidates, target, *intention, store, writer, deps)
 	case contracts.IntentionStageBranchPushed:
-		return driveRegistry(ctx, pr, runCtx, pkg, candidates, target, *intention, store, writer, deps)
+		return resumeBranchPushed(pr, runCtx, pkg, *intention, store, writer, deps)
 	case contracts.IntentionStageRegistryAppended:
 		return driveDecision(pr, runCtx, pkg, *intention, store, writer, deps)
 	case contracts.IntentionStageDecisionWritten:
@@ -948,6 +936,32 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 	default:
 		return fmt.Errorf("step70: unknown intention stage=%q", intention.Stage)
 	}
+}
+
+func resumeBranchPushed(pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
+	if existing, ok, err := findRegistryByIdempotencyKey(runCtx, intention.IdempotencyKey); err != nil {
+		return err
+	} else if ok {
+		intention.RegistryAppendResult = &existing
+		intention.Stage = contracts.IntentionStageRegistryAppended
+		if err := store.Save(intention); err != nil {
+			return err
+		}
+		return driveDecision(pr, runCtx, pkg, intention, store, writer, deps)
+	}
+
+	currentHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
+	if err != nil {
+		return err
+	}
+	if currentHead != intention.RegistryHeadBefore {
+		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRegistryDivergence)
+	}
+
+	// branch_pushed recovery must not re-resolve step40/50/60 artifacts. Until
+	// the append payload is persisted in intention.json, an idempotency miss here
+	// cannot be completed automatically from durable state alone.
+	return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
 }
 
 func planningDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {

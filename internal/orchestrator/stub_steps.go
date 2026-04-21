@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/archive"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
@@ -238,43 +237,16 @@ func (realStep70) Run(ctx context.Context, run *StepRunContext) error {
 	return nil
 }
 
-// realArchiveStep performs the lightweight post-finalize worktree cleanup that
-// step70 delegated to the orchestrator prior to Phase 1-F. The heavy sunset
-// transitions are run by the sunset_tick / `auto-improve sunset` entry points
-// (both delegating to internal/archive.RunSunsetWithLock).
+// realArchiveStep is intentionally a no-op in the per-run step pipeline.
+// Sunset/archive is a separate cycle-level tick owned by sunset_tick / the
+// `auto-improve sunset` entry points, both of which delegate to
+// internal/archive.RunSunsetWithLock.
 type realArchiveStep struct{}
 
 func (realArchiveStep) Run(ctx context.Context, run *StepRunContext) error {
 	_ = ctx
-	// Opportunistically invoke archive with an empty transition list when a
-	// sunset_run_id is available; otherwise this is a no-op because the
-	// orchestrator only performs worktree cleanup after step70 finalizes. The
-	// empty-Transitions call still emits registry-size telemetry for operators.
-	if run == nil {
-		return nil
-	}
-	if run.IO.RunsBase == "" {
-		return nil
-	}
-	opts := archive.Opts{
-		RunsBase:    run.IO.RunsBase,
-		SunsetRunID: archiveRunIDFromRun(run.IO.RunID),
-	}
-	if run.Config != nil {
-		opts.RegistryHighAt = 1500
-		opts.RegistryCritAt = 2000
-	}
-	if _, err := archive.RunSunsetWithLock(ctx, opts); err != nil {
-		return err
-	}
+	_ = run
 	return nil
-}
-
-// archiveRunIDFromRun derives a short sunset-run fingerprint from a pipeline
-// run_id. This is a wiring detail — the full sunset scheduler (not in this
-// phase) provides its own sha256(date || fingerprint).
-func archiveRunIDFromRun(runID contracts.RunID) string {
-	return "orchestrator:" + string(runID)
 }
 
 func worktreeFor(pkg *contracts.TaskPackage, pass int, agent contracts.AgentID) (contracts.WorktreeAllocation, error) {

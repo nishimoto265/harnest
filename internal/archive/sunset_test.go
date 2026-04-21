@@ -1,7 +1,11 @@
 package archive
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -139,6 +143,25 @@ func TestRunSunset_RegistryChain(t *testing.T) {
 	assert.Equal(t, lines[0].Sha256, second.PrevHash)
 }
 
+func TestRunSunset_IndexSyncFailureDoesNotAbortCommittedRegistryAppend(t *testing.T) {
+	runsBase := t.TempDir()
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	writeArchiveSeedRegistryAdds(t, registryPath, 1499)
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, "rules-idempotency-index.jsonl"), 0o755))
+
+	result, err := RunSunset(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "sunset-final",
+		Transitions: []Transition{deprecateTransition("seed-1498")},
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+	})
+	require.NoError(t, err)
+	assert.Len(t, result.AppendedOpIDs, 1)
+
+	lines := readRegistryLinesForTest(t, registryPath)
+	assert.Len(t, lines, 1500)
+}
+
 func readRegistryLinesForTest(t *testing.T, path string) []registryLine {
 	t.Helper()
 	lines, err := readRegistryLines(path)
@@ -177,4 +200,40 @@ func opIDFromEntry(entry contracts.RuleRegistryEntry) string {
 	default:
 		return ""
 	}
+}
+
+func writeArchiveSeedRegistryAdds(t *testing.T, path string, count int) {
+	t.Helper()
+
+	var (
+		buffer   bytes.Buffer
+		prevHash string
+	)
+	for i := 0; i < count; i++ {
+		entry := contracts.RuleRegistryEntry{
+			Kind: contracts.RegistryKindAdded,
+			Value: contracts.RuleRegistryAdded{
+				Kind:           contracts.RegistryKindAdded,
+				SchemaVersion:  "1",
+				RuleID:         fmt.Sprintf("seed-%04d", i),
+				RulePath:       fmt.Sprintf("rules/seed-%04d.md", i),
+				Sha256:         fmt.Sprintf("%064x", i+1),
+				IdempotencyKey: fmt.Sprintf("%064x", i+1000),
+				VersionSeq:     int64(i + 1),
+				PrevHash:       prevHash,
+				ByRunID:        contracts.RunID(fmt.Sprintf("2026-04-21-PR%02d-abcdef0", (i%90)+10)),
+				At:             time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC),
+			},
+		}
+		var line bytes.Buffer
+		require.NoError(t, contracts.EncodeStrict(&line, entry))
+		payload := bytes.TrimSuffix(line.Bytes(), []byte{'\n'})
+		_, err := buffer.Write(payload)
+		require.NoError(t, err)
+		require.NoError(t, buffer.WriteByte('\n'))
+
+		sum := sha256.Sum256(payload)
+		prevHash = hex.EncodeToString(sum[:])
+	}
+	require.NoError(t, internalio.WriteAtomic(path, buffer.Bytes()))
 }

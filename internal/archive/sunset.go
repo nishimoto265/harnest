@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,9 +90,7 @@ func RunSunset(ctx context.Context, opts Opts) (Result, error) {
 		if err != nil {
 			return result, fmt.Errorf("archive: append registry entry: %w", err)
 		}
-		if err := syncRegistryIndex(opts.RunsBase, registryPath, entry, appended); err != nil {
-			return result, err
-		}
+		syncRegistryIndex(opts.RunsBase, registryPath, entry, appended)
 		result.AppendedOpIDs = append(result.AppendedOpIDs, opID)
 	}
 
@@ -431,24 +430,17 @@ func sentinelExists(runsBase string) (bool, error) {
 func syncRegistryIndex(runsBase, registryPath string, entry contracts.RuleRegistryEntry, result contracts.RegistryAppendResult) error {
 	count, err := registryLineCount(registryPath)
 	if err != nil {
-		return err
+		slog.Warn("archive: failed to inspect registry size for index sync", slog.String("error", err.Error()))
+		return nil
 	}
 	if count < 1500 {
 		return nil
 	}
 	indexPath := filepath.Join(runsBase, "rules-idempotency-index.jsonl")
-	if _, err := os.Stat(indexPath); err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-		_, err = internalio.RebuildIdempotencyIndex(registryPath, indexPath)
-		return err
+	if err := internalio.SyncIdempotencyIndex(registryPath, indexPath, entry, result); err != nil {
+		slog.Warn("archive: idempotency index sync failed; registry append remains committed", slog.String("error", err.Error()))
 	}
-	indexEntry, err := internalio.BuildRuleIdempotencyIndexEntry(entry, result)
-	if err != nil {
-		return err
-	}
-	return internalio.AppendIdempotencyIndexEntry(indexPath, indexEntry)
+	return nil
 }
 
 func registryLookupLines(path string) ([]registryLine, error) {
@@ -464,17 +456,14 @@ func registryLookupLines(path string) ([]registryLine, error) {
 		return lines[start:], nil
 	}
 	indexPath := filepath.Join(filepath.Dir(path), "rules-idempotency-index.jsonl")
-	if _, err := os.Stat(indexPath); err != nil {
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
-		if _, err := internalio.RebuildIdempotencyIndex(path, indexPath); err != nil {
-			return nil, err
-		}
-	}
-	indexEntries, err := internalio.ReadJSONL[contracts.RuleIdempotencyIndexEntry](indexPath)
+	indexEntries, _, err := internalio.EnsureVerifiedIdempotencyIndex(path, indexPath)
 	if err != nil {
-		return nil, err
+		slog.Warn("archive: idempotency index unavailable; falling back to tail scan", slog.String("error", err.Error()))
+		start := 0
+		if len(lines) > internalio.RegistryTailScanN {
+			start = len(lines) - internalio.RegistryTailScanN
+		}
+		return lines[start:], nil
 	}
 	allowed := make(map[int64]string, len(indexEntries))
 	for _, entry := range indexEntries {

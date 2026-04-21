@@ -322,6 +322,118 @@ func TestAppendRegistryEntryCASAndIndexRebuild(t *testing.T) {
 	assert.Equal(t, indexEntries, loadedIndex)
 }
 
+func TestEnsureVerifiedIdempotencyIndex_RebuildsCorruptIndex(t *testing.T) {
+	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	indexPath := filepath.Join(filepath.Dir(registryPath), "rules-idempotency-index.jsonl")
+
+	first := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("2", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        "2026-04-21-PR1-abcdef0",
+			At:             time.Unix(100, 0).UTC(),
+		},
+	}
+	firstResult, err := AppendRegistryEntry(registryPath, first)
+	require.NoError(t, err)
+
+	second := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindUpdated,
+		Value: contracts.RuleRegistryUpdated{
+			Kind:           contracts.RegistryKindUpdated,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("3", 64),
+			PrevSha256:     strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("4", 64),
+			VersionSeq:     2,
+			PrevHash:       firstResult.Sha256,
+			ByRunID:        "2026-04-21-PR2-bcdef01",
+			At:             time.Unix(200, 0).UTC(),
+		},
+	}
+	secondResult, err := AppendRegistryEntry(registryPath, second)
+	require.NoError(t, err)
+
+	require.NoError(t, AppendJSONL(indexPath, contracts.RuleIdempotencyIndexEntry{
+		IdempotencyKey: strings.Repeat("2", 64),
+		RegistryOffset: firstResult.Offset,
+		RegistrySha256: strings.Repeat("f", 64),
+		Kind:           contracts.RegistryKindAdded,
+		At:             time.Unix(100, 0).UTC(),
+	}))
+
+	indexEntries, rebuilt, err := EnsureVerifiedIdempotencyIndex(registryPath, indexPath)
+	require.NoError(t, err)
+	assert.True(t, rebuilt)
+	require.Len(t, indexEntries, 2)
+	assert.Equal(t, firstResult.Offset, indexEntries[0].RegistryOffset)
+	assert.Equal(t, secondResult.Offset, indexEntries[1].RegistryOffset)
+	loadedIndex, err := ReadJSONL[contracts.RuleIdempotencyIndexEntry](indexPath)
+	require.NoError(t, err)
+	assert.Equal(t, indexEntries, loadedIndex)
+}
+
+func TestSyncIdempotencyIndex_RebuildDoesNotDuplicateCurrentEntry(t *testing.T) {
+	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	indexPath := filepath.Join(filepath.Dir(registryPath), "rules-idempotency-index.jsonl")
+
+	first := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("2", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        "2026-04-21-PR1-abcdef0",
+			At:             time.Unix(100, 0).UTC(),
+		},
+	}
+	firstResult, err := AppendRegistryEntry(registryPath, first)
+	require.NoError(t, err)
+	_, err = RebuildIdempotencyIndex(registryPath, indexPath)
+	require.NoError(t, err)
+
+	second := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindUpdated,
+		Value: contracts.RuleRegistryUpdated{
+			Kind:           contracts.RegistryKindUpdated,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("3", 64),
+			PrevSha256:     strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("4", 64),
+			VersionSeq:     2,
+			PrevHash:       firstResult.Sha256,
+			ByRunID:        "2026-04-21-PR2-bcdef01",
+			At:             time.Unix(200, 0).UTC(),
+		},
+	}
+	secondResult, err := AppendRegistryEntry(registryPath, second)
+	require.NoError(t, err)
+
+	require.NoError(t, os.Remove(indexPath))
+	require.NoError(t, SyncIdempotencyIndex(registryPath, indexPath, second, secondResult))
+
+	loadedIndex, err := ReadJSONL[contracts.RuleIdempotencyIndexEntry](indexPath)
+	require.NoError(t, err)
+	require.Len(t, loadedIndex, 2)
+	assert.Equal(t, secondResult.Offset, loadedIndex[1].RegistryOffset)
+}
+
 func newTestRunContext(t *testing.T) RunContext {
 	t.Helper()
 
