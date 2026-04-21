@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -130,6 +131,11 @@ type stubMarkerStep struct {
 
 func (s stubMarkerStep) Run(ctx context.Context, run *StepRunContext) error {
 	_ = ctx
+	if s.path == "30/done.marker" {
+		if err := seedStubPass1Scores(ctx, run); err != nil {
+			return err
+		}
+	}
 	path, err := run.IO.ResolveRunRelative(s.path)
 	if err != nil {
 		return err
@@ -140,9 +146,6 @@ func (s stubMarkerStep) Run(ctx context.Context, run *StepRunContext) error {
 type step60Step struct{}
 
 func (step60Step) Run(ctx context.Context, run *StepRunContext) error {
-	if err := seedStubPass1Scores(ctx, run); err != nil {
-		return err
-	}
 	return step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
 		IO:          run.IO,
 		TaskPackage: run.TaskPackage,
@@ -153,6 +156,9 @@ func (step60Step) Run(ctx context.Context, run *StepRunContext) error {
 }
 
 func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {
+	if run.TaskPackage == nil {
+		return errors.New("orchestrator: task package is required to seed step30 stub scores")
+	}
 	scoresPath, err := run.IO.ResolveRunRelative("30/scores-A.jsonl")
 	if err != nil {
 		return fmt.Errorf("orchestrator: resolve step30 scores path: %w", err)
@@ -165,7 +171,21 @@ func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {
 
 	judge := judges.NewPrimaryStub()
 	rubricPath := filepath.Join(run.IO.RunDir(), "rubrics", "default.md")
-	for _, agent := range defaultAgents {
+	agents := make([]contracts.AgentID, 0, len(run.TaskPackage.Worktrees))
+	seen := make(map[contracts.AgentID]struct{}, len(run.TaskPackage.Worktrees))
+	for _, worktree := range run.TaskPackage.Worktrees {
+		if worktree.Pass != 1 {
+			continue
+		}
+		if _, ok := seen[worktree.Agent]; ok {
+			continue
+		}
+		seen[worktree.Agent] = struct{}{}
+		agents = append(agents, worktree.Agent)
+	}
+	sort.Slice(agents, func(i, j int) bool { return agents[i] < agents[j] })
+
+	for _, agent := range agents {
 		manifest, err := internalio.LoadScorableManifest(run.IO, 1, agent)
 		if err != nil {
 			return fmt.Errorf("orchestrator: load pass1 manifest for agent=%s: %w", agent, err)
