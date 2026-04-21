@@ -9,6 +9,7 @@ import (
 	"time"
 
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
 var killProcess = syscall.Kill
@@ -17,6 +18,7 @@ type resumeState struct {
 	ExpectedBaseSHA string    `json:"expected_base_sha" validate:"required,sha1_hex"`
 	StartedAt       time.Time `json:"started_at" validate:"required"`
 	Pid             int       `json:"pid" validate:"required,gt=0"`
+	Pgid            int       `json:"pgid" validate:"gte=0"`
 	RetryCount      int       `json:"retry_count" validate:"gte=0"`
 	LastHeartbeat   time.Time `json:"last_heartbeat" validate:"required"`
 }
@@ -131,4 +133,8 @@ func pidAlive(pid int) bool {
 	default:
 		return true
 	}
+}
+
+func shouldAttemptRescue(stale bool, pid int) bool {
+	return agentrunner.ShouldAttemptRescue(stale, pidAlive, pid)
 }

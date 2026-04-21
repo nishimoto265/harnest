@@ -202,15 +202,13 @@ func TestRunSunset_IndexSyncFailureDoesNotAbortCommittedRegistryAppend(t *testin
 	assert.Len(t, lines, 1500)
 }
 
-func TestReadMarker_AcceptsLegacyTwoLineFormat(t *testing.T) {
+func TestReadMarker_LegacyTwoLineFormatFailsClosed(t *testing.T) {
 	runsBase := t.TempDir()
 	path := filepath.Join(runsBase, markerFilename)
 	require.NoError(t, os.WriteFile(path, []byte("2026-04-21T09:00:00Z\nlegacy-run\n"), 0o644))
 
-	marker, err := readMarker(path)
-	require.NoError(t, err)
-	assert.Equal(t, "legacy-run", marker.SunsetRunID)
-	assert.Equal(t, time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC), marker.RecordedStartTime)
+	_, err := readMarker(path)
+	require.Error(t, err)
 }
 
 func TestRunSunsetWithLock_StopsMutatingWhenSentinelAppearsMidRun(t *testing.T) {

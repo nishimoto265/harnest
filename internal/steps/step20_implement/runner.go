@@ -13,6 +13,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/interruption"
+	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
 type runner interface {
@@ -26,6 +27,7 @@ type runnerRequest struct {
 	SessionPath string
 	Timeout     time.Duration
 	Env         []string
+	OnStart     func(agentrunner.ProcessLease, time.Time) error
 }
 
 type runnerResult struct {
@@ -35,6 +37,7 @@ type runnerResult struct {
 	StderrSnippet []byte
 	StartedAt     time.Time
 	FinishedAt    time.Time
+	Lease         agentrunner.ProcessLease
 }
 
 type commandRunner struct {
@@ -72,19 +75,33 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 	if err := cmd.Start(); err != nil {
 		return runnerResult{}, err
 	}
+	lease, err := agentrunner.ResolveProcessLease(cmd.Process.Pid)
+	if err != nil {
+		_ = agentrunner.KillProcessGroup(cmd.Process.Pid)
+		_ = cmd.Wait()
+		return runnerResult{}, err
+	}
+	result.Lease = lease
+	if req.OnStart != nil {
+		if err := req.OnStart(lease, result.StartedAt); err != nil {
+			_ = agentrunner.KillProcessGroup(lease.PGID)
+			_ = cmd.Wait()
+			return runnerResult{}, err
+		}
+	}
 
 	groupKillDone := make(chan struct{})
-	go func(pid int) {
+	go func(pgid int) {
 		select {
 		case <-timeoutCtx.Done():
-			_ = killProcessGroup(pid)
+			_ = killProcessGroup(pgid)
 		case <-groupKillDone:
 		}
-	}(cmd.Process.Pid)
+	}(lease.PGID)
 
 	waitErr := cmd.Wait()
 	close(groupKillDone)
-	_ = killProcessGroup(cmd.Process.Pid)
+	_ = killProcessGroup(lease.PGID)
 	result.FinishedAt = r.now().UTC()
 	result.StdoutSnippet = stdoutTail.Bytes()
 	result.StderrSnippet = stderrTail.Bytes()
@@ -107,14 +124,8 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 	return runnerResult{}, waitErr
 }
 
-func killProcessGroup(pid int) error {
-	if pid <= 0 {
-		return nil
-	}
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
-	}
-	return nil
+func killProcessGroup(pgid int) error {
+	return agentrunner.KillProcessGroup(pgid)
 }
 
 func exitCode(exitErr *exec.ExitError) int {

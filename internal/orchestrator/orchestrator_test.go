@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/auto-improve/internal/steps/step20_implement"
 	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
 	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 	"github.com/stretchr/testify/assert"
@@ -457,6 +460,139 @@ func TestRun_DuplicateOnlyCandidatesSkipPass2AndStep60(t *testing.T) {
 	assert.NotContains(t, recorder.snapshot(), "60")
 }
 
+func TestRun_RescueExhaustedDoesNotWriteGlobalSentinel(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	orch.steps.Step10 = stubStep10{}
+	orch.steps.Step20 = map[contracts.AgentID]Step{
+		"a1": rescueExhaustedStep{},
+		"a2": rescueExhaustedStep{},
+		"a3": rescueExhaustedStep{},
+	}
+
+	runID := contracts.RunID("2026-04-21-PR77-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 77, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(cfg.Paths.Runs, "needs-recovery", string(runID)+".json"))
+
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindNeedsManualRecovery, events[len(events)-1].Kind)
+}
+
+func TestRun_ResumeStep30WithNoScorableAgentsFailsImmediately(t *testing.T) {
+	cfg := testConfig(t)
+	runID := contracts.RunID("2026-04-21-PR78-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
+
+	pkg := stubTaskPackageForRun(runCtx, 78)
+	require.NoError(t, internalio.WriteJSONAtomic(runCtx.TaskPackagePath(), pkg))
+	for _, agent := range defaultAgents {
+		manifestPath, err := runCtx.ManifestPath(1, agent)
+		require.NoError(t, err)
+		require.NoError(t, internalio.WriteJSONAtomic(manifestPath, contracts.Manifest{
+			Kind: contracts.ManifestKindError,
+			Value: contracts.ManifestError{
+				Kind:          contracts.ManifestKindError,
+				SchemaVersion: "1",
+				RunID:         runID,
+				Pass:          1,
+				Agent:         agent,
+				ExitCode:      1,
+				Reason:        "unknown",
+				Detail:        "fixture non-scorable manifest",
+				StartedAt:     time.Now().UTC(),
+				FinishedAt:    time.Now().UTC(),
+			},
+		}))
+	}
+	require.NoError(t, writeRunText(runCtx, "30/done.marker", "stub\n"))
+	require.NoError(t, state.NewWriter(runCtx).Append(startedEntry(78, runID, time.Now().UTC())))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	recorder := &callRecorder{}
+	orch.steps.Step30 = recordingStep{label: "30", recorder: recorder}
+
+	require.NoError(t, orch.Run(context.Background(), 78, RunOptions{RunID: runID}))
+	assert.NotContains(t, recorder.snapshot(), "30")
+
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindFailed, last.Kind)
+	failed, ok := last.Value.(contracts.StateEntryFailed)
+	require.True(t, ok)
+	assert.Equal(t, "no_scorable_agents", failed.Reason)
+}
+
+func TestStubStep40_UsesRequestBoundDecoder(t *testing.T) {
+	cfg := testConfig(t)
+	runID := contracts.RunID("2026-04-21-PR79-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
+
+	pkg := stubTaskPackageForRun(runCtx, 79)
+	require.NoError(t, internalio.WriteJSONAtomic(runCtx.TaskPackagePath(), pkg))
+	require.NoError(t, appendJSONLForTest(runCtx, "30/scores-A.jsonl", contracts.ScoreEntry{
+		SchemaVersion: "1",
+		RunID:         runID,
+		Pass:          1,
+		Agent:         "a1",
+		Dimension:     contracts.DimensionFidelity,
+		Score:         80,
+		Reasons:       "Missing the guard lets regressions slip into the changed code path.",
+		VerdictPath:   contracts.VerdictPathSingle,
+		RubricVersion: "default",
+		PromptVersion: "phase0",
+		ResolvedAt:    time.Now().UTC(),
+	}))
+	require.NoError(t, appendJSONLForTest(runCtx, "30/compliance-A.jsonl", contracts.ComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         runID,
+		Pass:          1,
+		Agent:         "a1",
+		RuleID:        "rule-a",
+		Verdict:       contracts.ComplianceVerdictViolated,
+		Rationale:     "Rule rule-a was skipped when the implementation touched the guarded path.",
+		VerdictPath:   contracts.VerdictPathSingle,
+		RubricVersion: "default",
+		PromptVersion: "phase0",
+		ResolvedAt:    time.Now().UTC(),
+	}))
+	require.NoError(t, internalio.WriteAtomic(runCtx.RulesRegistryPath(), nil))
+
+	called := false
+	step := stubStep40{
+		decode: func(data []byte, req any) (any, error) {
+			called = true
+			return stepio.DecodeAndValidateStep40Response(data, req.(stepio.Step40Request))
+		},
+	}
+	run := &StepRunContext{
+		Config:      cfg,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PR:          79,
+		IO:          runCtx,
+		TaskPackage: &pkg,
+	}
+
+	require.NoError(t, step.Run(context.Background(), run))
+	assert.True(t, called)
+	require.NotNil(t, run.Candidates)
+	assert.Len(t, run.Candidates.Candidates, 1)
+}
+
 func TestRun_ResumeFromBranchPushed_EndToEnd(t *testing.T) {
 	cfg := testConfig(t)
 	runID := contracts.RunID("2026-04-21-PR47-abcdef0")
@@ -699,6 +835,18 @@ func (duplicateOnlyCandidateStep) Run(ctx context.Context, run *StepRunContext) 
 	return nil
 }
 
+type rescueExhaustedStep struct{}
+
+func (rescueExhaustedStep) Run(ctx context.Context, run *StepRunContext) error {
+	_ = ctx
+	return &step20_implement.RescueExhaustedError{
+		Rescue: stepio.RescueExhausted{
+			Agent:      run.Agent,
+			RetryCount: 3,
+		},
+	}
+}
+
 type scriptedStep60Step struct {
 	decode func([]byte, any) (any, error)
 }
@@ -906,13 +1054,21 @@ case "$subcmd" in
     case "${1:-}" in
       add)
         if [ "${2:-}" = "-b" ]; then
-          mkdir -p "$4"
+          path="$4"
         else
-          mkdir -p "$2"
+          path="$2"
         fi
+        mkdir -p "$path"
+        { grep -Fqx "$path" "$state_dir/worktrees.list" 2>/dev/null || printf '%s\n' "$path" >> "$state_dir/worktrees.list"; } || true
         ;;
       remove)
         rm -rf "$3"
+        ;;
+      list)
+        while IFS= read -r path; do
+          [ -n "$path" ] || continue
+          printf 'worktree %s\n\n' "$path"
+        done < "$state_dir/worktrees.list"
         ;;
     esac
     ;;
@@ -970,13 +1126,21 @@ case "$subcmd" in
     case "${1:-}" in
       add)
         if [ "${2:-}" = "-b" ]; then
-          mkdir -p "$4"
+          path="$4"
         else
-          mkdir -p "$2"
+          path="$2"
         fi
+        mkdir -p "$path"
+        { grep -Fqx "$path" "$state_dir/worktrees.list" 2>/dev/null || printf '%s\n' "$path" >> "$state_dir/worktrees.list"; } || true
         ;;
       remove)
         rm -rf "$3"
+        ;;
+      list)
+        while IFS= read -r path; do
+          [ -n "$path" ] || continue
+          printf 'worktree %s\n\n' "$path"
+        done < "$state_dir/worktrees.list"
         ;;
     esac
     ;;
@@ -1284,6 +1448,41 @@ func installFakeCLI(t *testing.T) string {
 		require.NoError(t, os.WriteFile(dst, data, 0o755))
 	}
 	return destDir
+}
+
+func stubTaskPackageForRun(runCtx internalio.RunContext, pr int) contracts.TaskPackage {
+	worktrees := make([]contracts.WorktreeAllocation, 0, len(defaultAgents)*2)
+	for pass := 1; pass <= 2; pass++ {
+		for _, agent := range defaultAgents {
+			worktrees = append(worktrees, contracts.WorktreeAllocation{
+				Agent:   agent,
+				Pass:    pass,
+				Path:    filepath.Join(runCtx.WorktreeBase, fmt.Sprintf("%s-pass%d-%s", runCtx.RunID, pass, agent)),
+				Branch:  fmt.Sprintf("stub/%s/pass%d/%s", runCtx.RunID, pass, agent),
+				BaseSHA: strings.Repeat("a", 40),
+				HeadSHA: strings.Repeat("a", 40),
+			})
+		}
+	}
+	return contracts.TaskPackage{
+		SchemaVersion:           "1",
+		RunID:                   runCtx.RunID,
+		PR:                      pr,
+		Title:                   "stub task",
+		BaseSHA:                 strings.Repeat("a", 40),
+		BestBranch:              "best",
+		ReconstructedTaskPrompt: "stub prompt",
+		Worktrees:               worktrees,
+		CreatedAt:               time.Now().UTC(),
+	}
+}
+
+func appendJSONLForTest(runCtx internalio.RunContext, rel string, record any) error {
+	path, err := runCtx.ResolveRunRelative(rel)
+	if err != nil {
+		return err
+	}
+	return internalio.AppendJSONL(path, record)
 }
 
 func seedResumeRun(t *testing.T, runCtx internalio.RunContext, pr int) error {

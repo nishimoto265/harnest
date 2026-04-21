@@ -116,6 +116,9 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	if err != nil {
 		return err
 	}
+	if err := run.IO.ValidateWorktreeAllocation(allocation); err != nil {
+		return err
+	}
 	timeout, err := stepTimeout(run.Config, "step50")
 	if err != nil {
 		return err
@@ -165,30 +168,12 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 		return fmt.Errorf("step50: render prompt: %w", err)
 	}
 
-	state := resumeState{
-		ExpectedBaseSHA: allocation.BaseSHA,
-		StartedAt:       stepStartedAt,
-		Pid:             os.Getpid(),
-		RetryCount:      retryCount,
-		LastHeartbeat:   stepStartedAt,
-	}
-	if err := touchHeartbeat(agentDir, state.LastHeartbeat); err != nil {
-		return err
-	}
-	if err := saveResumeState(agentDir, state); err != nil {
-		return err
-	}
-
-	heartbeat, err := startHeartbeat(ctx, heartbeatConfig{
-		agentDir:  agentDir,
-		interval:  s.heartbeatInterval,
-		now:       s.now,
-		baseState: state,
-	})
-	if err != nil {
-		return err
-	}
-	defer heartbeat.Stop()
+	var heartbeat *heartbeatHandle
+	defer func() {
+		if heartbeat != nil {
+			heartbeat.Stop()
+		}
+	}()
 
 	sessionPath, err := artifactPath(run.IO, run.Pass, run.Agent, sessionFileName)
 	if err != nil {
@@ -213,6 +198,33 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 			"AUTO_IMPROVE_RUN_ID=" + string(run.TaskPackage.RunID),
 			"AUTO_IMPROVE_OUTPUT_DIR=" + manifestPrefix(run.Pass, run.Agent),
 		},
+		OnStart: func(lease agentrunner.ProcessLease, startedAt time.Time) error {
+			state := resumeState{
+				ExpectedBaseSHA: allocation.BaseSHA,
+				StartedAt:       startedAt.UTC(),
+				Pid:             lease.PID,
+				Pgid:            lease.PGID,
+				RetryCount:      retryCount,
+				LastHeartbeat:   startedAt.UTC(),
+			}
+			if err := touchHeartbeat(agentDir, state.LastHeartbeat); err != nil {
+				return err
+			}
+			if err := saveResumeState(agentDir, state); err != nil {
+				return err
+			}
+			handle, err := startHeartbeat(ctx, heartbeatConfig{
+				agentDir:  agentDir,
+				interval:  s.heartbeatInterval,
+				now:       s.now,
+				baseState: state,
+			})
+			if err != nil {
+				return err
+			}
+			heartbeat = handle
+			return nil
+		},
 	})
 	if err != nil {
 		return err
@@ -228,6 +240,9 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 }
 
 func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, runResult runnerResult) error {
+	if err := run.IO.ValidateWorktreeAllocation(allocation); err != nil {
+		return err
+	}
 	headSHA, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
 		return err
@@ -378,10 +393,7 @@ func stepTimeout(cfg *config.Config, key string) (time.Duration, error) {
 }
 
 func loadChecklistArtifact(worktreePath string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {
-	_ = runID
-	_ = pass
-	_ = agent
-	return agentrunner.LoadChecklistArtifact(worktreePath, checklistFileName, "step50")
+	return agentrunner.LoadChecklistArtifact(worktreePath, checklistFileName, "step50", runID, pass, agent)
 }
 
 func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte, error) {

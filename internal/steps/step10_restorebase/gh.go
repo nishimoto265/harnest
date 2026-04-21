@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 )
@@ -18,6 +19,7 @@ type LinkedIssue struct {
 }
 
 const issueBodyMaxBytes = 8 * 1024
+const maxLinkedIssueFetches = 10
 
 // PRInfo is the subset of `gh pr view` output that step10 consumes.
 type PRInfo struct {
@@ -163,16 +165,30 @@ func (c ghCLI) PRView(ctx context.Context, pr int, repo string) (PRInfo, error) 
 	if err := validatePRInfo(pr, info); err != nil {
 		return PRInfo{}, err
 	}
-	for _, ref := range raw.ClosingIssuesReferences {
+	remainingPromptBudget := remainingLinkedIssuePromptBudget(pr, raw.Title, raw.Body)
+	for idx, ref := range raw.ClosingIssuesReferences {
+		if idx >= maxLinkedIssueFetches || remainingPromptBudget <= 0 {
+			break
+		}
 		issue, err := c.issueView(ctx, ref.Number, repo)
 		if err != nil {
-			continue
+			slog.Warn("step10: linked issue fetch degraded", "issue", ref.Number, "error", err.Error())
+			issue = LinkedIssue{
+				Number: ref.Number,
+				Title:  ref.Title,
+				Body:   fmt.Sprintf("[issue #%d: fetch failed]", ref.Number),
+			}
 		}
 		// Prefer the PR-side title if the issue view fails to populate it.
 		if issue.Title == "" {
 			issue.Title = ref.Title
 		}
+		issueCost := linkedIssuePromptBytes(issue)
+		if issueCost > remainingPromptBudget {
+			break
+		}
 		info.LinkedIssues = append(info.LinkedIssues, issue)
+		remainingPromptBudget -= issueCost
 	}
 	return info, nil
 }
@@ -198,4 +214,16 @@ func (c ghCLI) issueView(ctx context.Context, number int, repo string) (LinkedIs
 		Title:  raw.Title,
 		Body:   truncateUTF8Bytes(raw.Body, issueBodyMaxBytes),
 	}, nil
+}
+
+func remainingLinkedIssuePromptBudget(pr int, title, body string) int {
+	budget := reconstructedPromptMaxBytes - len(ReconstructTaskPrompt(pr, title, body, nil))
+	if budget < 0 {
+		return 0
+	}
+	return budget
+}
+
+func linkedIssuePromptBytes(issue LinkedIssue) int {
+	return len(ReconstructTaskPrompt(1, "placeholder", "", []LinkedIssue{issue})) - len(ReconstructTaskPrompt(1, "placeholder", "", nil))
 }

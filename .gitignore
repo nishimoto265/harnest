@@ -16,3 +16,4 @@ config.yaml
 # Archives (optional: may be re-enabled per-project)
 archives/removed/
 archives/rejected/
+.fake-git-state/

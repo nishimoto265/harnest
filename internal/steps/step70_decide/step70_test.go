@@ -32,6 +32,31 @@ func TestRun_NoopWhenNoTarget(t *testing.T) {
 	assert.NoFileExists(t, intentionPath(t, runCtx))
 }
 
+func TestRun_DuplicateOnlyCandidatesEmitNoop(t *testing.T) {
+	runCtx, pkg, _, store, _ := newFixture(t, "PR101")
+	body := "# Duplicate rule\n\n- source_rule_id: rule-existing\n- classification: duplicate\n"
+	candidate := contracts.Candidate{
+		CandidateID:        "cand-dup",
+		Kind:               contracts.CandidateKindDuplicate,
+		TargetRuleID:       "rule-existing",
+		Title:              "Duplicate rule",
+		Problem:            "problem",
+		Rationale:          "rationale",
+		ProposedBodyPath:   "40/candidates/cand-dup.md",
+		ProposedBodySha256: sha256String(body),
+	}
+	candidates := &contracts.Candidates{
+		SchemaVersion:  "1",
+		RunID:          runCtx.RunID,
+		Candidates:     []contracts.Candidate{candidate},
+		CandidatesHash: contracts.CanonicalCandidatesHash([]contracts.Candidate{candidate}),
+		CreatedAt:      time.Now().UTC(),
+	}
+
+	require.NoError(t, Run(context.Background(), 1, runCtx, pkg, candidates, store, Deps{Now: fixedNow()}))
+	assert.Equal(t, contracts.DecisionActionNoop, readDecision(t, runCtx).Action)
+}
+
 func TestRun_AdoptHappyPath(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR2")
 	git := &fakeGit{head: resolver.target.BestShaBefore}
@@ -946,6 +971,36 @@ func TestRun_RollsBackWhenOtherRunSentinelAppearsAfterRegistryAppend(t *testing.
 	require.Len(t, lines, 2)
 }
 
+func TestRun_RollsBackBeforeSecondRegistryAppendWhenSentinelAppearsMidLoop(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR191")
+	resolver.target.RulesToAppend = adoptAddedEntriesWithTarget(runCtx.RunID, candidates.CandidatesHash, resolver.target.TargetSHA, "rule-a", "rule-b")
+
+	original := appendRegistryEntry
+	appendCount := 0
+	appendRegistryEntry = func(path string, entry contracts.RuleRegistryEntry) (contracts.RegistryAppendResult, error) {
+		result, err := original(path, entry)
+		if err == nil && path == runCtx.RulesRegistryPath() && entry.Kind == contracts.RegistryKindAdded {
+			appendCount++
+			if appendCount == 1 {
+				require.NoError(t, writeSentinel(runCtx.RunsBase, "2026-04-21-PR97-feedbee", 97, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70, fixedNow()()))
+			}
+		}
+		return result, err
+	}
+	t.Cleanup(func() {
+		appendRegistryEntry = original
+	})
+
+	git := &fakeGit{head: resolver.target.TargetSHA}
+	require.NoError(t, Run(context.Background(), 19, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()}))
+
+	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	require.Len(t, lines, 2)
+	assert.Equal(t, contracts.RegistryKindAdded, lines[0].Entry.Kind)
+	assert.Equal(t, contracts.RegistryKindRolledBack, lines[1].Entry.Kind)
+}
+
 func TestRun_FillsBestShaBeforeFromRemoteHeadAfterLock(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR20")
 	resolver.target.BestShaBefore = ""
@@ -997,6 +1052,33 @@ func TestRun_RejectsPersistedDecisionThatFailsRequestBoundValidation(t *testing.
 	err = Run(context.Background(), 21, runCtx, pkg, candidates, store, Deps{Git: &fakeGit{head: resolver.target.TargetSHA}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, stepio.ErrStep70AdoptCandidatesHashMismatch)
+}
+
+func TestCleanupWorktrees_RejectsPathOutsideWorktreeBase(t *testing.T) {
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR999-abcdef0", t.TempDir(), t.TempDir())
+	require.NoError(t, err)
+	pkg := &contracts.TaskPackage{
+		SchemaVersion:           "1",
+		RunID:                   runCtx.RunID,
+		PR:                      999,
+		Title:                   "cleanup guard",
+		BaseSHA:                 strings.Repeat("a", 40),
+		BestBranch:              "best",
+		ReconstructedTaskPrompt: "cleanup guard",
+		CreatedAt:               time.Now().UTC(),
+		Worktrees: []contracts.WorktreeAllocation{
+			{Agent: "a1", Pass: 1, Path: filepath.Join(t.TempDir(), "escape"), Branch: "stub/pass1/a1", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},
+			{Agent: "a2", Pass: 1, Path: filepath.Join(runCtx.WorktreeBase, "pass1-a2"), Branch: "stub/pass1/a2", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},
+			{Agent: "a3", Pass: 1, Path: filepath.Join(runCtx.WorktreeBase, "pass1-a3"), Branch: "stub/pass1/a3", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},
+			{Agent: "a1", Pass: 2, Path: filepath.Join(runCtx.WorktreeBase, "pass2-a1"), Branch: "stub/pass2/a1", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},
+			{Agent: "a2", Pass: 2, Path: filepath.Join(runCtx.WorktreeBase, "pass2-a2"), Branch: "stub/pass2/a2", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},
+			{Agent: "a3", Pass: 2, Path: filepath.Join(runCtx.WorktreeBase, "pass2-a3"), Branch: "stub/pass2/a3", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},
+		},
+	}
+
+	err = cleanupWorktrees(context.Background(), runCtx, pkg, NoopGitOps{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, internalio.ErrWorktreePathEscapesBase)
 }
 
 // ---- helpers ----
@@ -1117,7 +1199,7 @@ func newFixture(t *testing.T, prLabel string) (internalio.RunContext, *contracts
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
 
-	pkg := validTaskPackage(runID)
+	pkg := validTaskPackage(runID, worktreeBase)
 	require.NoError(t, internalio.WriteJSONAtomic(runCtx.TaskPackagePath(), pkg))
 	// Rebuild runCtx with worktrees populated.
 	runCtx, err = internalio.RunContextFromTaskPackage(pkg, tempRuns, worktreeBase)
@@ -1287,7 +1369,7 @@ func writeSeedRegistryAdds(t *testing.T, path string, specs []seedRegistrySpec) 
 	return results
 }
 
-func validTaskPackage(runID contracts.RunID) contracts.TaskPackage {
+func validTaskPackage(runID contracts.RunID, worktreeBase string) contracts.TaskPackage {
 	base := strings.Repeat("a", 40)
 	worktrees := make([]contracts.WorktreeAllocation, 0, 6)
 	for pass := 1; pass <= 2; pass++ {
@@ -1295,7 +1377,7 @@ func validTaskPackage(runID contracts.RunID) contracts.TaskPackage {
 			worktrees = append(worktrees, contracts.WorktreeAllocation{
 				Agent:   agent,
 				Pass:    pass,
-				Path:    filepath.Join("/tmp/mai-cmux/step70-test", string(runID), string(agent), pad(pass)),
+				Path:    filepath.Join(worktreeBase, string(runID), string(agent), pad(pass)),
 				Branch:  "auto-improve/" + string(runID) + "/pass" + pad(pass) + "/" + string(agent),
 				BaseSHA: base,
 				HeadSHA: base,
@@ -1330,6 +1412,11 @@ func emptyCandidates(runID contracts.RunID) contracts.Candidates {
 		CandidatesHash: contracts.CanonicalCandidatesHash(nil),
 		CreatedAt:      time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
 	}
+}
+
+func sha256String(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func installAppendCASMismatchHook(t *testing.T, runCtx internalio.RunContext, mismatches int) {

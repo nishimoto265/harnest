@@ -237,6 +237,49 @@ func TestRun_RebuildsWhenDoneMarkerDimensionsAreNonCanonical(t *testing.T) {
 	assert.Equal(t, freshMarker.RawHashes, rebuiltMarker.RawHashes)
 }
 
+func TestRun_RebuildDropsStaleRowsForAgentsNoLongerScorable(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		agents:          []contracts.AgentID{"a1", "a2", "a3"},
+		writePass1Score: true,
+	})
+
+	now := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+
+	writeManifestError(t, runIO, pkg.RunID, 2, "a3")
+
+	donePath := mustResolve(t, runIO, "60/done.marker")
+	marker := mustReadJSON[contracts.Step60DoneMarker](t, donePath)
+	marker.ContentHashes.PairwiseFinal = flipHexChar(marker.ContentHashes.PairwiseFinal)
+	require.NoError(t, internalio.WriteJSONAtomic(donePath, marker))
+
+	later := now.Add(2 * time.Hour)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return later },
+	}))
+
+	rebuilt := mustReadJSON[contracts.Step60DoneMarker](t, donePath)
+	assert.Equal(t, []contracts.AgentID{"a1", "a2"}, rebuilt.CompletedAgents)
+
+	pairwise := mustReadJSONL[contracts.PairwiseEntry](t, runIO, "60/pairwise.jsonl")
+	require.Len(t, pairwise, 2)
+	for _, entry := range pairwise {
+		assert.NotEqual(t, contracts.AgentID("a3"), entry.AgentA)
+	}
+}
+
 func TestRun_ErrorsWhenPass2ManifestMissing(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		agents:             []contracts.AgentID{"a1", "a2", "a3"},

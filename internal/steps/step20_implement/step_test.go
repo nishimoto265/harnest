@@ -18,6 +18,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -768,6 +769,36 @@ func TestPidAliveTreatsEPERMAsAlive(t *testing.T) {
 	})
 
 	require.True(t, pidAlive(12345))
+}
+
+func TestStepRunResumeStatePersistsChildPIDAndPGID(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	t.Setenv("FAKE_CLAUDE_SLEEP_SECONDS", "1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fx.step.Run(ctx, fx.run)
+	}()
+
+	require.Eventually(t, func() bool {
+		state, ok, err := loadResumeState(fx.agentDir)
+		if err != nil || !ok {
+			return false
+		}
+		return state.Pid > 0 && state.Pgid > 0
+	}, time.Second, 10*time.Millisecond)
+
+	state, ok, err := loadResumeState(fx.agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.NotEqual(t, os.Getpid(), state.Pid)
+	assert.NotZero(t, state.Pgid)
+
+	cancel()
+	require.ErrorIs(t, <-errCh, context.Canceled)
 }
 
 func writeFakeGitWrapper(t *testing.T, dir string) {

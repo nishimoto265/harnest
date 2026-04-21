@@ -5,7 +5,10 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
+
+	"github.com/nishimoto265/auto-improve/internal/contracts"
 )
 
 // RealGitOps executes the production git commands against the source repo.
@@ -52,6 +55,13 @@ func (g RealGitOps) PushForceWithLease(ctx context.Context, branch, targetSHA, e
 }
 
 func (g RealGitOps) RemoveWorktree(ctx context.Context, path string) error {
+	ok, err := g.worktreeBelongsToRepo(ctx, path)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("step70: git worktree remove refused for unregistered path %s", path)
+	}
 	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "worktree", "remove", "--force", path)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -81,4 +91,45 @@ func (g RealGitOps) remoteName() string {
 		return g.Remote
 	}
 	return "origin"
+}
+
+func (g RealGitOps) worktreeBelongsToRepo(ctx context.Context, path string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "worktree", "list", "--porcelain")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		msgs := make([]string, 0, 2)
+		if out := strings.TrimSpace(stdout.String()); out != "" {
+			msgs = append(msgs, "stdout="+out)
+		}
+		if out := strings.TrimSpace(stderr.String()); out != "" {
+			msgs = append(msgs, "stderr="+out)
+		}
+		if len(msgs) == 0 {
+			return false, fmt.Errorf("step70: git worktree list --porcelain: %w", err)
+		}
+		return false, fmt.Errorf("step70: git worktree list --porcelain: %w: %s", err, strings.Join(msgs, "; "))
+	}
+	want, err := contracts.CanonicalizePathForUniqueness(filepath.Clean(path))
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		if !strings.HasPrefix(line, "worktree ") {
+			continue
+		}
+		have, err := contracts.CanonicalizePathForUniqueness(filepath.Clean(strings.TrimSpace(strings.TrimPrefix(line, "worktree "))))
+		if err != nil {
+			return false, err
+		}
+		if have == want {
+			return true, nil
+		}
+	}
+	return false, nil
 }

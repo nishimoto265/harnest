@@ -8,6 +8,10 @@ else
   repo_dir="$(pwd)"
 fi
 
+state_dir="${AUTO_IMPROVE_GIT_STATE_DIR:-$repo_dir/.fake-git-state}"
+mkdir -p "$state_dir"
+: >> "$state_dir/worktrees.list"
+
 subcmd="$1"
 shift
 
@@ -38,9 +42,16 @@ case "$subcmd" in
           path="$2"
         fi
         mkdir -p "$path"
+        { grep -Fqx "$path" "$state_dir/worktrees.list" 2>/dev/null || printf '%s\n' "$path" >> "$state_dir/worktrees.list"; } || true
         ;;
       remove)
         rm -rf "$3"
+        ;;
+      list)
+        while IFS= read -r path; do
+          [ -n "$path" ] || continue
+          printf 'worktree %s\n\n' "$path"
+        done < "$state_dir/worktrees.list"
         ;;
       *)
         echo "unsupported worktree args: $*" >&2

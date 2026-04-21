@@ -80,6 +80,7 @@ type StepRunContext struct {
 }
 
 var errStopPipeline = errors.New("orchestrator: stop pipeline")
+var errNoScorableAgentsResume = errors.New("orchestrator: resume selected step30 but pass1 has no scorable agents")
 
 type GlobalNeedsRecoveryError struct {
 	Sentinel contracts.NeedsRecoverySentinel
@@ -126,6 +127,13 @@ func NewOrchestrator(cfg *config.Config) (*Orchestrator, error) {
 				return nil, fmt.Errorf("orchestrator: step30 decoder expects Step30Request, got %T", req)
 			}
 			return stepio.DecodeAndValidateStep30Response(data, request)
+		},
+		Step40: func(data []byte, req any) (any, error) {
+			request, ok := req.(stepio.Step40Request)
+			if !ok {
+				return nil, fmt.Errorf("orchestrator: step40 decoder expects Step40Request, got %T", req)
+			}
+			return stepio.DecodeAndValidateStep40Response(data, request)
 		},
 		Step50: func(data []byte, req any) (any, error) {
 			request, ok := req.(stepio.Step50Request)
@@ -193,6 +201,9 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 		return err
 	}
 	if selection.fresh {
+		if err := o.ensureNoGlobalSentinel(run.IO); err != nil {
+			return err
+		}
 		if err := o.appendState(startedEntry(pr, selection.runContext.RunID, time.Now().UTC())); err != nil {
 			return err
 		}
@@ -204,6 +215,12 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 
 	start, err := o.resolveStartStep(run)
 	if err != nil {
+		if errors.Is(err, errNoScorableAgentsResume) {
+			if err := o.appendState(failedEntry(pr, run.IO.RunID, contracts.FailedStep30, "no_scorable_agents", "step30 resume selected without any scorable pass1 manifests", time.Now().UTC())); err != nil {
+				return err
+			}
+			return nil
+		}
 		return err
 	}
 
@@ -212,11 +229,14 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 		if preserveWorktrees {
 			return
 		}
-		_ = cleanupWorktrees(run.TaskPackage)
+		_ = cleanupWorktrees(run.IO, run.TaskPackage)
 	}()
 
 	for _, step := range pipelineFrom(start) {
 		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := o.ensureNoGlobalSentinel(run.IO); err != nil {
 			return err
 		}
 		switch step {
@@ -509,11 +529,25 @@ func (o *Orchestrator) resolveStartStep(run *StepRunContext) (contracts.FailedSt
 	if ok, err := hasRunRelative(run.IO, "30/done.marker"); err != nil {
 		return "", err
 	} else if ok {
+		scorableAgents, err := scorableAgentsForPass(run.IO, run.TaskPackage, 1)
+		if err != nil {
+			return "", err
+		}
+		if len(scorableAgents) == 0 {
+			return "", errNoScorableAgentsResume
+		}
 		return contracts.FailedStep30, nil
 	}
 	if done, err := taskPackageHasAllManifests(run.IO, 1, run.TaskPackage); err != nil {
 		return "", err
 	} else if done {
+		scorableAgents, err := scorableAgentsForPass(run.IO, run.TaskPackage, 1)
+		if err != nil {
+			return "", err
+		}
+		if len(scorableAgents) == 0 {
+			return "", errNoScorableAgentsResume
+		}
 		return contracts.FailedStep30, nil
 	}
 	if run.TaskPackage != nil {
@@ -575,6 +609,7 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 	}
 	errCh := make(chan parallelResult, len(agents))
 	var wg sync.WaitGroup
+	var blockedErr error
 	for _, agent := range agents {
 		done, err := hasFinalizedManifest(run.IO, pass, agent)
 		if err != nil {
@@ -586,6 +621,10 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 		runner, ok := runners[agent]
 		if !ok || runner == nil {
 			return fmt.Errorf("orchestrator: missing runner for step %s agent %s", step, agent)
+		}
+		if err := o.ensureNoGlobalSentinel(run.IO); err != nil {
+			blockedErr = err
+			break
 		}
 		agent := agent
 		wg.Add(1)
@@ -600,6 +639,9 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 	}
 	wg.Wait()
 	close(errCh)
+	if blockedErr != nil {
+		return blockedErr
+	}
 
 	rescueExhausted := make([]stepio.RescueExhausted, 0, len(agents))
 	for result := range errCh {
@@ -1065,12 +1107,6 @@ func (o *Orchestrator) handleRescueExhausted(run *StepRunContext, step contracts
 			return err
 		}
 	}
-	if err := o.appendInterrupted(run.PR, run.IO.RunID, step, contracts.InterruptedReasonUnknown, "worktree rescue exhausted"); err != nil {
-		return err
-	}
-	if err := ensureNeedsRecoverySentinel(run.IO, run.PR, run.IO.RunID, contracts.RollbackReasonWorktreeRescueLoop, step); err != nil {
-		return err
-	}
 	manual := contracts.StateEntryNeedsManualRecovery{
 		Kind:       contracts.StateKindNeedsManualRecovery,
 		PR:         run.PR,
@@ -1081,6 +1117,17 @@ func (o *Orchestrator) handleRescueExhausted(run *StepRunContext, step contracts
 		At:         now,
 	}
 	return o.appendState(contracts.StateEntry{Kind: manual.Kind, Value: manual})
+}
+
+func (o *Orchestrator) ensureNoGlobalSentinel(runCtx internalio.RunContext) error {
+	sentinel, blocked, err := firstNeedsRecoverySentinel(runCtx.RunsBase)
+	if err != nil {
+		return err
+	}
+	if !blocked {
+		return nil
+	}
+	return &GlobalNeedsRecoveryError{Sentinel: sentinel}
 }
 
 func (o *Orchestrator) ensureStep70NeedsManualRecoveryState(run *StepRunContext) error {

@@ -156,7 +156,7 @@ func startFresh(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 		return err
 	}
 	if !hasTarget {
-		if len(candidates.Candidates) == 0 {
+		if len(candidates.Candidates) == 0 || allCandidatesDuplicate(candidates) {
 			return writeNoop(runCtx, pkg, deps)
 		}
 		return writeReject(runCtx, pkg, "below_threshold", deps)
@@ -226,8 +226,11 @@ func driveRegistry(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 	} else if handled {
 		return nil
 	}
-	appendResult, err := appendRegistryEntries(runCtx, &intention, store, writer, deps, pr)
+	appendResult, err := appendRegistryEntries(ctx, runCtx, pkg, &intention, store, writer, deps, pr)
 	if err != nil {
+		if errors.Is(err, errSentinelRollbackHandled) {
+			return nil
+		}
 		reason := contracts.RollbackReasonTransactionalFailure
 		if errors.Is(err, ErrRegistryDivergence) {
 			reason = contracts.RollbackReasonRegistryDivergence
@@ -277,7 +280,7 @@ func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunCon
 	if err := blockOnOtherRunSentinel(runCtx); err != nil {
 		return err
 	}
-	if err := cleanupWorktrees(ctx, pkg, deps.Git); err != nil {
+	if err := cleanupWorktrees(ctx, runCtx, pkg, deps.Git); err != nil {
 		return err
 	}
 	if err := store.Delete(); err != nil {
@@ -314,7 +317,7 @@ func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.Ru
 		_ = store.Delete()
 		return nil
 	default:
-		return cleanupWorktrees(ctx, pkg, deps.Git)
+		return cleanupWorktrees(ctx, runCtx, pkg, deps.Git)
 	}
 }
 
@@ -505,7 +508,7 @@ func writeNoop(runCtx internalio.RunContext, pkg *contracts.TaskPackage, deps De
 	if err := writeDecision(runCtx, decision); err != nil {
 		return err
 	}
-	return cleanupWorktrees(context.Background(), pkg, deps.Git)
+	return cleanupWorktrees(context.Background(), runCtx, pkg, deps.Git)
 }
 
 func writeReject(runCtx internalio.RunContext, pkg *contracts.TaskPackage, reason string, deps Deps) error {
@@ -522,7 +525,7 @@ func writeReject(runCtx internalio.RunContext, pkg *contracts.TaskPackage, reaso
 	if err := writeDecision(runCtx, decision); err != nil {
 		return err
 	}
-	return cleanupWorktrees(context.Background(), pkg, deps.Git)
+	return cleanupWorktrees(context.Background(), runCtx, pkg, deps.Git)
 }
 
 func writeDecision(runCtx internalio.RunContext, decision contracts.Decision) error {
@@ -674,7 +677,7 @@ func committedPromotionEntries(runCtx internalio.RunContext, intention contracts
 	return committed, nil
 }
 
-func appendRegistryEntries(runCtx internalio.RunContext, intention *contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, pr int) (contracts.RegistryAppendResult, error) {
+func appendRegistryEntries(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention *contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, pr int) (contracts.RegistryAppendResult, error) {
 	matches, err := findPlannedRegistryMatches(runCtx, *intention)
 	if err != nil {
 		return contracts.RegistryAppendResult{}, err
@@ -694,7 +697,7 @@ func appendRegistryEntries(runCtx internalio.RunContext, intention *contracts.In
 	if err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
-	return appendPlannedRegistryEntries(runCtx, intention, store, writer, deps, pr, startIndex)
+	return appendPlannedRegistryEntries(ctx, runCtx, pkg, intention, store, writer, deps, pr, startIndex)
 }
 
 func appendRegistryRollbacks(runCtx internalio.RunContext, intention contracts.IntentionRecord, reason contracts.RollbackReason, at time.Time) (*contracts.RegistryAppendResult, error) {
@@ -865,7 +868,7 @@ func registryEntriesFromPlannedAdoption(intention contracts.IntentionRecord, at 
 	return entries, nil
 }
 
-func appendPlannedRegistryEntries(runCtx internalio.RunContext, intention *contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, pr int, startIndex int) (contracts.RegistryAppendResult, error) {
+func appendPlannedRegistryEntries(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention *contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, pr int, startIndex int) (contracts.RegistryAppendResult, error) {
 	rawEntries, err := registryEntriesFromPlannedAdoption(*intention, deps.Now())
 	if err != nil {
 		return contracts.RegistryAppendResult{}, err
@@ -876,6 +879,11 @@ func appendPlannedRegistryEntries(runCtx internalio.RunContext, intention *contr
 
 	var result contracts.RegistryAppendResult
 	for idx := startIndex; idx < len(rawEntries); idx++ {
+		if handled, err := rollbackOnOtherRunSentinel(ctx, pr, runCtx, pkg, *intention, store, writer, deps); err != nil {
+			return contracts.RegistryAppendResult{}, err
+		} else if handled {
+			return contracts.RegistryAppendResult{}, errSentinelRollbackHandled
+		}
 		rawEntry := rawEntries[idx]
 		entry, err := deriveRegistryChain(rawEntry, runCtx.RulesRegistryPath())
 		if err != nil {
@@ -900,6 +908,11 @@ func appendPlannedRegistryEntries(runCtx internalio.RunContext, intention *contr
 		syncRegistryIndex(runCtx, entry, appended)
 		result = appended
 		intention.AppendedEntryOpIDs = appendIfMissing(intention.AppendedEntryOpIDs, intention.PlannedAdoption.Entries[idx].OpID)
+		if handled, err := rollbackOnOtherRunSentinel(ctx, pr, runCtx, pkg, *intention, store, writer, deps); err != nil {
+			return contracts.RegistryAppendResult{}, err
+		} else if handled {
+			return contracts.RegistryAppendResult{}, errSentinelRollbackHandled
+		}
 		if err := store.Save(*intention); err != nil {
 			return contracts.RegistryAppendResult{}, err
 		}
@@ -1182,8 +1195,11 @@ func resumeBranchPushed(ctx context.Context, pr int, runCtx internalio.RunContex
 	} else if handled {
 		return nil
 	}
-	appendResult, err := appendRegistryEntries(runCtx, &intention, store, writer, deps, pr)
+	appendResult, err := appendRegistryEntries(ctx, runCtx, pkg, &intention, store, writer, deps, pr)
 	if err != nil {
+		if errors.Is(err, errSentinelRollbackHandled) {
+			return nil
+		}
 		if errors.Is(err, ErrRegistryDivergence) {
 			return handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonRegistryDivergence)
 		}
@@ -1240,11 +1256,14 @@ func planningDecision(ctx context.Context, pr int, runCtx internalio.RunContext,
 
 // ---- Cleanup ----
 
-func cleanupWorktrees(ctx context.Context, pkg *contracts.TaskPackage, git GitOps) error {
+func cleanupWorktrees(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.TaskPackage, git GitOps) error {
 	if pkg == nil {
 		return nil
 	}
 	for _, wt := range pkg.Worktrees {
+		if err := runCtx.ValidateWorktreeAllocation(wt); err != nil {
+			return err
+		}
 		if git != nil {
 			if err := git.RemoveWorktree(ctx, wt.Path); err != nil && !os.IsNotExist(err) {
 				return err
@@ -1257,6 +1276,18 @@ func cleanupWorktrees(ctx context.Context, pkg *contracts.TaskPackage, git GitOp
 		}
 	}
 	return nil
+}
+
+func allCandidatesDuplicate(candidates *contracts.Candidates) bool {
+	if candidates == nil || len(candidates.Candidates) == 0 {
+		return false
+	}
+	for _, candidate := range candidates.Candidates {
+		if candidate.Kind != contracts.CandidateKindDuplicate {
+			return false
+		}
+	}
+	return true
 }
 
 // ---- Event builders ----

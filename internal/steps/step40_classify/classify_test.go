@@ -22,8 +22,53 @@ func TestRun_EmptyInputsFailClosed(t *testing.T) {
 	cfg := newTestConfig(t)
 
 	got, err := Run(context.Background(), cfg)
-	require.ErrorContains(t, err, "missing or incomplete step30 inputs")
+	require.ErrorContains(t, err, "missing step30 artifact")
 	assert.Nil(t, got)
+}
+
+func TestRun_ValidEmptyComplianceArtifactEmitsZeroCandidates(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+	writeCompliance(t, cfg.IO)
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Empty(t, got.Candidates)
+}
+
+func TestRun_ScaffoldOnlyEvidenceEmitsZeroCandidates(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, contracts.ScoreEntry{
+		SchemaVersion: "1",
+		RunID:         cfg.IO.RunID,
+		Pass:          1,
+		Agent:         "a1",
+		Dimension:     contracts.DimensionFidelity,
+		Score:         80,
+		Reasons:       "stub score",
+		VerdictPath:   contracts.VerdictPathSingle,
+		RubricVersion: "default",
+		PromptVersion: "phase0",
+		ResolvedAt:    time.Now().UTC(),
+	})
+	writeCompliance(t, cfg.IO, contracts.ComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         cfg.IO.RunID,
+		Pass:          1,
+		Agent:         "a1",
+		RuleID:        "rule-a",
+		Verdict:       contracts.ComplianceVerdictViolated,
+		Rationale:     "stub compliance",
+		VerdictPath:   contracts.VerdictPathSingle,
+		RubricVersion: "default",
+		PromptVersion: "phase0",
+		ResolvedAt:    time.Now().UTC(),
+	})
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	assert.Empty(t, got.Candidates)
 }
 
 func TestRun_ComplianceViolationsOnlyProduceNewCandidates(t *testing.T) {
@@ -211,13 +256,16 @@ func TestRun_ClassifiesDuplicateWhenExistingRuleBodyMatchesCandidate(t *testing.
 
 	rulesDir := filepath.Join(filepath.Dir(cfg.registryPath()), "rules")
 	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
-	body := candidateBodyMarkdown(contracts.Candidate{
+	body := candidateBodyMarkdownWithEvidence(contracts.Candidate{
 		CandidateID:      "cand-existing",
 		Kind:             contracts.CandidateKindNew,
 		Title:            "Rule candidate for rule-dup",
 		Problem:          "Pass1 recorded 1 violation(s) for rule rule-dup.",
-		Rationale:        "Phase 0 deterministic classify generated one candidate from compliance-A.jsonl for rule-dup.",
+		Rationale:        "Derived from 1 compliance violation rationale(s) and 1 score reason(s) for rule-dup.",
 		ProposedBodyPath: "40/candidates/cand-existing.md",
+	}, candidateEvidence{
+		Compliance: []string{"Rule rule-dup was skipped when the implementation touched the guarded path."},
+		Scores:     []string{"a1/fidelity: Missing the guard lets regressions slip into the changed code path."},
 	})
 	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "rule-existing.md"), []byte(body), 0o644))
 	writeRegistry(t, cfg.registryPath(), contracts.RuleRegistryEntry{
@@ -426,7 +474,7 @@ func testScoreEntries(runID contracts.RunID) []contracts.ScoreEntry {
 			Agent:         "a1",
 			Dimension:     contracts.DimensionFidelity,
 			Score:         80,
-			Reasons:       "stub score",
+			Reasons:       "Missing the guard lets regressions slip into the changed code path.",
 			VerdictPath:   contracts.VerdictPathSingle,
 			RubricVersion: "default",
 			PromptVersion: "phase0",
@@ -443,7 +491,7 @@ func testComplianceEntry(runID contracts.RunID, ruleID string, verdict contracts
 		Agent:         "a1",
 		RuleID:        ruleID,
 		Verdict:       verdict,
-		Rationale:     "stub compliance",
+		Rationale:     fmt.Sprintf("Rule %s was skipped when the implementation touched the guarded path.", ruleID),
 		VerdictPath:   contracts.VerdictPathSingle,
 		RubricVersion: "default",
 		PromptVersion: "phase0",

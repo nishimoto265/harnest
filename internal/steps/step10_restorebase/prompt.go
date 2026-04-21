@@ -3,6 +3,7 @@ package step10restorebase
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 const reconstructedPromptMaxBytes = 64 * 1024
@@ -55,8 +56,12 @@ func truncateUTF8Bytes(value string, maxBytes int) string {
 		return value
 	}
 	truncated := value[:maxBytes]
-	for len(truncated) > 0 && (truncated[len(truncated)-1]&0xC0) == 0x80 {
-		truncated = truncated[:len(truncated)-1]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		_, size := utf8.DecodeLastRuneInString(truncated)
+		if size <= 0 || size > len(truncated) {
+			break
+		}
+		truncated = truncated[:len(truncated)-size]
 	}
 	return truncated
 }

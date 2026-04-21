@@ -38,7 +38,7 @@ func defaultSteps(cfg *config.Config, decoders ContractDecoders) Steps {
 		Step10:  step10Adapter{runner: step10restorebase.NewRunner(), decode: decoders.Step10},
 		Step20:  step20,
 		Step30:  newStep30ScoreAdapter(step30_score.New(), decoders.Step30),
-		Step40:  stubStep40{},
+		Step40:  stubStep40{decode: decoders.Step40},
 		Step50:  step50,
 		Step60:  step60Step{decode: decoders.Step60},
 		Step70:  realStep70{cfg: cfg},
@@ -564,10 +564,12 @@ func marshalComplianceJSONL(rows []contracts.ComplianceEntry) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-type stubStep40 struct{}
+type stubStep40 struct {
+	decode func([]byte, any) (any, error)
+}
 
-func (stubStep40) Run(ctx context.Context, run *StepRunContext) error {
-	candidates, err := step40_classify.Run(ctx, step40_classify.Config{
+func (s stubStep40) Run(ctx context.Context, run *StepRunContext) error {
+	_, err := step40_classify.Run(ctx, step40_classify.Config{
 		IO:           run.IO,
 		RegistryPath: run.IO.RulesRegistryPath(),
 		TaskPackage:  run.TaskPackage,
@@ -576,7 +578,40 @@ func (stubStep40) Run(ctx context.Context, run *StepRunContext) error {
 	if err != nil {
 		return err
 	}
-	run.Candidates = candidates
+	candidatesPath, err := run.IO.ResolveRunRelative("40/candidates.json")
+	if err != nil {
+		return err
+	}
+	candidates, err := internalio.ReadJSON[contracts.Candidates](candidatesPath)
+	if err != nil {
+		return err
+	}
+	if s.decode != nil {
+		req := stepio.Step40Request{
+			TaskPackage:  *run.TaskPackage,
+			RegistryPath: run.IO.RulesRegistryPath(),
+		}
+		resp := stepio.Step40Response{
+			RunID:           run.IO.RunID,
+			Candidates:      candidates,
+			CandidatesCount: len(candidates.Candidates),
+		}
+		payload, err := contracts.CanonicalMarshal(resp)
+		if err != nil {
+			return err
+		}
+		decoded, err := s.decode(payload, req)
+		if err != nil {
+			return err
+		}
+		validated, ok := decoded.(stepio.Step40Response)
+		if !ok {
+			return fmt.Errorf("orchestrator: step40 decoder returned %T", decoded)
+		}
+		run.Candidates = &validated.Candidates
+		return nil
+	}
+	run.Candidates = &candidates
 	return nil
 }
 

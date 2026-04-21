@@ -123,6 +123,9 @@ func Run(ctx context.Context, in Input) error {
 		if err := os.Remove(paths.Done); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("step60: remove stale done marker: %w", err)
 		}
+		if err := resetStep60Outputs(paths); err != nil {
+			return err
+		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("step60: stat done marker: %w", err)
 	}
@@ -745,6 +748,21 @@ func currentPairwiseState(path string) (int, string, error) {
 		return complianceKey{Agent: entry.AgentA, RuleID: string(entry.AgentB)}
 	})
 	return len(collapsed), hash, nil
+}
+
+func resetStep60Outputs(paths step60Paths) error {
+	for _, path := range []string{
+		paths.ScoresRaw,
+		paths.ScoresFinal,
+		paths.ComplianceRaw,
+		paths.ComplianceFinal,
+		paths.Pairwise,
+	} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("step60: reset output %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 func minInt(left, right int) int {

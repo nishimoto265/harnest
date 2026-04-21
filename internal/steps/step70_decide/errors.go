@@ -29,4 +29,6 @@ var (
 	// ErrNeedsManualRecovery signals the caller that a needs-recovery sentinel
 	// was written and the flow exited without completing.
 	ErrNeedsManualRecovery = errors.New("step70: needs_manual_recovery sentinel written")
+
+	errSentinelRollbackHandled = errors.New("step70: rollback completed after sentinel recheck")
 )

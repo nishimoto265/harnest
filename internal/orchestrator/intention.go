@@ -76,11 +76,14 @@ func (s *IntentionStore) Transition(stage contracts.IntentionStage, mutate func(
 	return s.Save(clone)
 }
 
-func cleanupWorktrees(pkg *contracts.TaskPackage) error {
+func cleanupWorktrees(runCtx internalio.RunContext, pkg *contracts.TaskPackage) error {
 	if pkg == nil {
 		return nil
 	}
 	for _, worktree := range pkg.Worktrees {
+		if err := runCtx.ValidateWorktreeAllocation(worktree); err != nil {
+			return err
+		}
 		if err := os.RemoveAll(filepath.Clean(worktree.Path)); err != nil {
 			return err
 		}

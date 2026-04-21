@@ -123,6 +123,66 @@ func TestStepRunTerminalVariants(t *testing.T) {
 	}
 }
 
+func TestStepRun_PersistsChildPIDAndPGIDInResumeState(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-timeout.sh", 30)
+	t.Setenv("FAKE_SLEEP_SECONDS", "1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Step{}).Run(ctx, env.run)
+	}()
+
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		state, ok, err := loadResumeState(agentDir)
+		if err != nil || !ok {
+			return false
+		}
+		return state.Pid > 0 && state.Pgid > 0
+	}, time.Second, 10*time.Millisecond)
+
+	state, ok, err := loadResumeState(agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.NotEqual(t, os.Getpid(), state.Pid)
+	assert.NotZero(t, state.Pgid)
+
+	cancel()
+	require.ErrorIs(t, <-errCh, context.Canceled)
+}
+
+func TestResumeIfNeeded_RequiresDeadPIDAsWellAsStaleHeartbeat(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+
+	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	require.NoError(t, saveResumeState(agentDir, resumeState{
+		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
+		StartedAt:       oldTime,
+		Pid:             os.Getpid(),
+		Pgid:            os.Getpid(),
+		RetryCount:      1,
+		LastHeartbeat:   oldTime,
+	}))
+	require.NoError(t, touchHeartbeat(agentDir, oldTime))
+
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+	step := newStep(env.run.Config, stepOptions{
+		now:        func() time.Time { return oldTime.Add(3 * time.Hour) },
+		staleAfter: time.Second,
+	})
+
+	_, err = step.resumeIfNeeded(context.Background(), env.run, allocation, agentDir)
+	require.ErrorIs(t, err, ErrRescueAbortedLeaseActive)
+}
+
 func TestStepRunIncludesRulePayloadsInPrompt(t *testing.T) {
 	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
 	t.Setenv("FAKE_AGENT", "a1")

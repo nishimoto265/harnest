@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/validation"
@@ -57,6 +58,9 @@ func RunContextFromTaskPackage(pkg contracts.TaskPackage, runsBase, worktreeBase
 	}
 	ctx.worktrees = make(map[int]map[contracts.AgentID]contracts.WorktreeAllocation, 2)
 	for _, worktree := range pkg.Worktrees {
+		if err := ctx.ValidateWorktreeAllocation(worktree); err != nil {
+			return RunContext{}, err
+		}
 		if _, ok := ctx.worktrees[worktree.Pass]; !ok {
 			ctx.worktrees[worktree.Pass] = make(map[contracts.AgentID]contracts.WorktreeAllocation)
 		}
@@ -127,9 +131,44 @@ func (ctx RunContext) worktreePath(pass int, agent contracts.AgentID) (string, e
 		return "", ErrWorktreePathUnavailable
 	}
 	if allocation, ok := ctx.worktrees[pass][agent]; ok {
+		if err := ctx.ValidateWorktreeAllocation(allocation); err != nil {
+			return "", err
+		}
 		return allocation.Path, nil
 	}
 	return "", ErrWorktreePathUnavailable
+}
+
+func (ctx RunContext) ValidateWorktreeAllocation(allocation contracts.WorktreeAllocation) error {
+	if err := allocation.Validate(); err != nil {
+		return err
+	}
+	return ctx.ValidateWorktreePath(allocation.Path)
+}
+
+func (ctx RunContext) ValidateWorktreePath(path string) error {
+	if err := contracts.EnsureCleanAbsolutePath(ctx.WorktreeBase); err != nil {
+		return err
+	}
+	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
+		return err
+	}
+	baseKey, err := contracts.CanonicalizePathForUniqueness(ctx.WorktreeBase)
+	if err != nil {
+		return err
+	}
+	pathKey, err := contracts.CanonicalizePathForUniqueness(path)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(baseKey, pathKey)
+	if err != nil {
+		return err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%w: worktree_base=%q path=%q rel=%q", ErrWorktreePathEscapesBase, ctx.WorktreeBase, path, rel)
+	}
+	return nil
 }
 
 func (ctx RunContext) passDir(pass int) (string, error) {

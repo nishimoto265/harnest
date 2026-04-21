@@ -48,7 +48,7 @@ func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation co
 	if err != nil {
 		return 0, err
 	}
-	if !stale {
+	if !shouldAttemptRescue(stale, state.Pid) {
 		return 0, fmt.Errorf("%w: agent %s", ErrRescueAbortedLeaseActive, run.Agent)
 	}
 	if state.RetryCount >= rescueMaxRetries(run.Config, s.cfg) {
@@ -88,6 +88,9 @@ func rescueMaxRetries(runCfg, defaultCfg *config.Config) int {
 
 func (s *Step) performRescue(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, agentDir string, state resumeState) (int, error) {
 	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := run.IO.ValidateWorktreeAllocation(allocation); err != nil {
 		return 0, err
 	}
 	rescueID := fmt.Sprintf("%s-%s-rescue-%d-%d", filepath.Base(run.IO.RunDir()), run.Agent, state.RetryCount+1, s.now().UTC().Unix())
@@ -189,7 +192,6 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	}
 
 	state.RetryCount = nextRetry
-	state.Pid = os.Getpid()
 	state.StartedAt = s.now().UTC()
 	state.LastHeartbeat = state.StartedAt
 	if err := touchHeartbeat(agentDir, state.LastHeartbeat); err != nil {

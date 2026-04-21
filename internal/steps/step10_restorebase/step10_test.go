@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
@@ -44,6 +45,7 @@ type stubGit struct {
 	createdBy  []string
 	resolvedBy map[string]string
 	mergeBase  map[string]string
+	fetched    []string
 }
 
 func newStubGit() *stubGit {
@@ -90,6 +92,13 @@ func (s *stubGit) MergeBase(ctx context.Context, repoRoot, left, right string) (
 		return sha, nil
 	}
 	return "", errors.New("merge-base unavailable")
+}
+
+func (s *stubGit) FetchCommit(ctx context.Context, repoRoot, sha string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fetched = append(s.fetched, repoRoot+"::"+sha)
+	return nil
 }
 
 func newRunCtx(t *testing.T) internalio.RunContext {
@@ -287,6 +296,8 @@ func TestRun_RebaseMergedPR_UsesGitMergeBase(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, testBaseSHA, res.Response.BaseSHA)
 	assert.Equal(t, 6, res.Response.WorktreesCreated)
+	assert.Contains(t, git.fetched, in.RepoRoot+"::"+testBaseSHA)
+	assert.Contains(t, git.fetched, in.RepoRoot+"::"+testBaseRefOID)
 }
 
 func TestRun_RebaseMergedPR_WithoutImmutableBaseFailsClosed(t *testing.T) {
@@ -434,6 +445,8 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 			switch {
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "list", "--porcelain"}):
+				return []byte("worktree " + firstPath + "\n\n"), nil, nil
 			case slices.Equal(args, []string{"-C", firstPath, "rev-parse", "HEAD"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", firstPath, "branch", "--show-current"}):
@@ -579,11 +592,14 @@ func TestGitCLIResolveRef_IgnoresStderrFromRunner(t *testing.T) {
 func TestGitCLIWorktreeAdd_ExistingPath_VerifiesBranch(t *testing.T) {
 	path := t.TempDir()
 	branch := "auto-improve/run/pass1/a1"
+	repoRoot := t.TempDir()
 
 	git := gitCLI{
 		stat: os.Stat,
 		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 			switch {
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "list", "--porcelain"}):
+				return []byte("worktree " + path + "\n\n"), nil, nil
 			case slices.Equal(args, []string{"-C", path, "rev-parse", "HEAD"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", path, "branch", "--show-current"}):
@@ -594,7 +610,31 @@ func TestGitCLIWorktreeAdd_ExistingPath_VerifiesBranch(t *testing.T) {
 		},
 	}
 
-	created, err := git.WorktreeAdd(context.Background(), t.TempDir(), path, branch, testBaseSHA)
+	created, err := git.WorktreeAdd(context.Background(), repoRoot, path, branch, testBaseSHA)
+	require.Error(t, err)
+	assert.False(t, created)
+	assert.ErrorIs(t, err, ErrWorktreeDrift)
+}
+
+func TestGitCLIWorktreeAdd_ExistingPathRequiresRegisteredWorktree(t *testing.T) {
+	path := t.TempDir()
+	repoRoot := t.TempDir()
+
+	git := gitCLI{
+		stat: os.Stat,
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+			require.Equal(t, "git", name)
+			switch {
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "list", "--porcelain"}):
+				return []byte(""), nil, nil
+			default:
+				t.Fatalf("unexpected git args: %v", args)
+				return nil, nil, nil
+			}
+		},
+	}
+
+	created, err := git.WorktreeAdd(context.Background(), repoRoot, path, "auto-improve/run/pass1/a1", testBaseSHA)
 	require.Error(t, err)
 	assert.False(t, created)
 	assert.ErrorIs(t, err, ErrWorktreeDrift)
@@ -648,7 +688,10 @@ func TestGHCLIPRView_IssueViewFailureIsBestEffort(t *testing.T) {
 
 	info, err := gh.PRView(context.Background(), 42, "")
 	require.NoError(t, err)
-	assert.Empty(t, info.LinkedIssues)
+	require.Len(t, info.LinkedIssues, 1)
+	assert.Equal(t, 7, info.LinkedIssues[0].Number)
+	assert.Equal(t, "Issue title", info.LinkedIssues[0].Title)
+	assert.Equal(t, "[issue #7: fetch failed]", info.LinkedIssues[0].Body)
 }
 
 func TestGHCLIPRView_CapsIssueBodySize(t *testing.T) {
@@ -672,6 +715,58 @@ func TestGHCLIPRView_CapsIssueBodySize(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, info.LinkedIssues, 1)
 	assert.LessOrEqual(t, len(info.LinkedIssues[0].Body), issueBodyMaxBytes)
+}
+
+func TestGHCLIPRView_CapsLinkedIssueFetchesAtTen(t *testing.T) {
+	var issueCalls int
+	refs := make([]string, 0, 12)
+	for i := 1; i <= 12; i++ {
+		refs = append(refs, fmt.Sprintf(`{"number":%d,"title":"Issue %d"}`, i, i))
+	}
+	gh := ghCLI{
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+			require.Equal(t, "gh", name)
+			switch {
+			case slices.Equal(args[:2], []string{"pr", "view"}):
+				return []byte(fmt.Sprintf(`{"number":42,"title":"PR","body":"body","state":"MERGED","closingIssuesReferences":[%s]}`, strings.Join(refs, ","))), nil, nil
+			case slices.Equal(args[:2], []string{"issue", "view"}):
+				issueCalls++
+				return []byte(`{"number":7,"title":"Issue","body":"body"}`), nil, nil
+			default:
+				t.Fatalf("unexpected gh args: %v", args)
+				return nil, nil, nil
+			}
+		},
+	}
+
+	info, err := gh.PRView(context.Background(), 42, "")
+	require.NoError(t, err)
+	assert.Len(t, info.LinkedIssues, 10)
+	assert.Equal(t, 10, issueCalls)
+}
+
+func TestGHCLIPRView_StopsFetchingWhenPromptBudgetIsExhausted(t *testing.T) {
+	var issueCalls int
+	gh := ghCLI{
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+			require.Equal(t, "gh", name)
+			switch {
+			case slices.Equal(args[:2], []string{"pr", "view"}):
+				return []byte(fmt.Sprintf(`{"number":42,"title":"PR","body":"%s","state":"MERGED","closingIssuesReferences":[{"number":7,"title":"Issue title"}]}`, strings.Repeat("x", reconstructedPromptMaxBytes))), nil, nil
+			case slices.Equal(args[:2], []string{"issue", "view"}):
+				issueCalls++
+				return []byte(`{"number":7,"title":"Issue","body":"body"}`), nil, nil
+			default:
+				t.Fatalf("unexpected gh args: %v", args)
+				return nil, nil, nil
+			}
+		},
+	}
+
+	info, err := gh.PRView(context.Background(), 42, "")
+	require.NoError(t, err)
+	assert.Empty(t, info.LinkedIssues)
+	assert.Zero(t, issueCalls)
 }
 
 func TestReconstructTaskPrompt_Variants(t *testing.T) {
@@ -739,4 +834,11 @@ func TestReconstructTaskPrompt_CapsTotalSize(t *testing.T) {
 	got := ReconstructTaskPrompt(42, "hello", body, issues)
 	assert.LessOrEqual(t, len(got), reconstructedPromptMaxBytes)
 	assert.True(t, strings.HasSuffix(got, "\n"))
+}
+
+func TestTruncateUTF8Bytes_PreservesRuneBoundaries(t *testing.T) {
+	value := "abcあ"
+	truncated := truncateUTF8Bytes(value, len("abc")+1)
+	assert.Equal(t, "abc", truncated)
+	assert.True(t, utf8.ValidString(truncated))
 }

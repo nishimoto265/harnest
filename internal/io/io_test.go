@@ -261,6 +261,17 @@ func TestRunContextResolveAndWorktreePaths(t *testing.T) {
 	assert.Equal(t, pkg.Worktrees[3].Path, pass2Path)
 }
 
+func TestRunContextFromTaskPackage_RejectsWorktreeOutsideConfiguredBase(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	pkg := testTaskPackage(t, runsBase, worktreeBase)
+	pkg.Worktrees[0].Path = filepath.Join(t.TempDir(), "escaped-pass1-a1")
+
+	_, err := RunContextFromTaskPackage(pkg, runsBase, worktreeBase)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWorktreePathEscapesBase)
+}
+
 func TestWriteAndReadSidecar(t *testing.T) {
 	ctx := newTestRunContext(t)
 	content := strings.Repeat("x", JSONLMaxLineBytes+32)

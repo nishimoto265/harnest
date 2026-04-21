@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"github.com/nishimoto265/auto-improve/internal/contracts"
 )
 
 // GitClient abstracts the subset of `git` commands step10 needs so tests can
@@ -26,6 +29,9 @@ type GitClient interface {
 
 	// MergeBase resolves the immutable merge base between two commits.
 	MergeBase(ctx context.Context, repoRoot, left, right string) (string, error)
+
+	// FetchCommit ensures the given object ID is available in the local clone.
+	FetchCommit(ctx context.Context, repoRoot, sha string) error
 }
 
 type gitCLI struct {
@@ -53,6 +59,13 @@ var ErrWorktreeDrift = errors.New("step10: worktree drift")
 
 func (g gitCLI) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha string) (bool, error) {
 	if _, err := g.stat(path); err == nil {
+		ok, werr := g.worktreeBelongsToRepo(ctx, repoRoot, path)
+		if werr != nil {
+			return false, fmt.Errorf("%w: path=%s: cannot verify worktree membership: %v", ErrWorktreeDrift, path, werr)
+		}
+		if !ok {
+			return false, fmt.Errorf("%w: path=%s is not registered under repo_root=%s", ErrWorktreeDrift, path, repoRoot)
+		}
 		// Path exists. Verify it's a worktree at the expected sha and branch.
 		head, herr := g.ResolveRef(ctx, path, "HEAD")
 		if herr != nil {
@@ -130,4 +143,37 @@ func (g gitCLI) MergeBase(ctx context.Context, repoRoot, left, right string) (st
 		return "", formatCommandFailure(fmt.Sprintf("step10: git merge-base %s %s (in %s)", left, right, repoRoot), err, out, stderr)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func (g gitCLI) FetchCommit(ctx context.Context, repoRoot, sha string) error {
+	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "fetch", "--no-tags", "origin", sha)
+	if err != nil {
+		return formatCommandFailure(fmt.Sprintf("step10: git fetch origin %s (in %s)", sha, repoRoot), err, out, stderr)
+	}
+	return nil
+}
+
+func (g gitCLI) worktreeBelongsToRepo(ctx context.Context, repoRoot, path string) (bool, error) {
+	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, formatCommandFailure(fmt.Sprintf("step10: git worktree list --porcelain (in %s)", repoRoot), err, out, stderr)
+	}
+	want, err := contracts.CanonicalizePathForUniqueness(filepath.Clean(path))
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.HasPrefix(line, "worktree ") {
+			continue
+		}
+		candidate := strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+		have, err := contracts.CanonicalizePathForUniqueness(filepath.Clean(candidate))
+		if err != nil {
+			return false, err
+		}
+		if have == want {
+			return true, nil
+		}
+	}
+	return false, nil
 }

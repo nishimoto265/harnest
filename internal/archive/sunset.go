@@ -95,6 +95,11 @@ func RunSunset(ctx context.Context, opts Opts) (Result, error) {
 		if err != nil {
 			return result, err
 		}
+		if blocked, err := sentinelExists(opts.RunsBase); err != nil {
+			return result, err
+		} else if blocked {
+			return result, errBlockedBySentinel
+		}
 		appended, err := appendRegistryEntry(registryPath, entry)
 		if err != nil {
 			return result, fmt.Errorf("archive: append registry entry: %w", err)
@@ -461,21 +466,6 @@ func sentinelExists(runsBase string) (bool, error) {
 func readMarker(path string) (sunsetMarker, error) {
 	marker, err := internalio.ReadJSON[sunsetMarker](path)
 	if err != nil {
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return sunsetMarker{}, readErr
-		}
-		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-		if len(lines) == 2 {
-			recordedAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(lines[0]))
-			if parseErr != nil {
-				return sunsetMarker{}, err
-			}
-			return sunsetMarker{
-				RecordedStartTime: recordedAt,
-				SunsetRunID:       strings.TrimSpace(lines[1]),
-			}, nil
-		}
 		return sunsetMarker{}, err
 	}
 	if marker.RecordedStartTime.IsZero() || marker.SunsetRunID == "" {

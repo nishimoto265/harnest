@@ -181,6 +181,12 @@ func (r *Runner) deriveBaseSHA(ctx context.Context, repoRoot string, pr PRInfo, 
 		if err := validation.Instance().Var(pr.BaseRefOid, "required,sha1_hex"); err != nil {
 			return "", fmt.Errorf("step10: base_ref_oid is not a 40-hex sha: %q: %w", pr.BaseRefOid, err)
 		}
+		if err := r.Git.FetchCommit(ctx, repoRoot, pr.HeadRefOid); err != nil {
+			return "", fmt.Errorf("step10: fetch head_ref_oid=%s: %w", pr.HeadRefOid, err)
+		}
+		if err := r.Git.FetchCommit(ctx, repoRoot, pr.BaseRefOid); err != nil {
+			return "", fmt.Errorf("step10: fetch base_ref_oid=%s: %w", pr.BaseRefOid, err)
+		}
 		baseSHA, err := r.Git.MergeBase(ctx, repoRoot, pr.HeadRefOid, pr.BaseRefOid)
 		if err != nil {
 			return "", fmt.Errorf("step10: recover immutable base from head=%s base_tip=%s: %w", pr.HeadRefOid, pr.BaseRefOid, err)
