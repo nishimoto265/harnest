@@ -146,6 +146,9 @@ func (s stubMarkerStep) Run(ctx context.Context, run *StepRunContext) error {
 type step60Step struct{}
 
 func (step60Step) Run(ctx context.Context, run *StepRunContext) error {
+	if err := seedStubPass1Scores(ctx, run); err != nil {
+		return err
+	}
 	return step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
 		IO:          run.IO,
 		TaskPackage: run.TaskPackage,
@@ -160,15 +163,17 @@ func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {
 	if err != nil {
 		return fmt.Errorf("orchestrator: resolve step30 scores path: %w", err)
 	}
-	if _, err := os.Stat(scoresPath); err == nil {
-		return nil
-	} else if !os.IsNotExist(err) {
+	if _, err := os.Stat(scoresPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("orchestrator: stat step30 scores path: %w", err)
 	}
 
 	agents, err := pass1Agents(run.TaskPackage)
 	if err != nil {
 		return err
+	}
+	complete, err := stubPass1ScoresComplete(scoresPath, agents)
+	if err == nil && complete {
+		return nil
 	}
 
 	judge := judges.NewPrimaryStub()
@@ -200,6 +205,53 @@ func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {
 		return err
 	}
 	return internalio.WriteAtomic(scoresPath, payload)
+}
+
+type stubScoreKey struct {
+	Agent     contracts.AgentID
+	Dimension contracts.Dimension
+}
+
+var stubPass1Dimensions = []contracts.Dimension{
+	contracts.DimensionFidelity,
+	contracts.DimensionCorrectness,
+	contracts.DimensionMaintainability,
+	contracts.DimensionDiscipline,
+	contracts.DimensionCommunication,
+}
+
+func stubPass1ScoresComplete(path string, agents []contracts.AgentID) (bool, error) {
+	rows, err := internalio.ReadJSONL[contracts.ScoreEntry](path)
+	if err != nil {
+		return false, nil
+	}
+	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ScoreEntry) stubScoreKey {
+		return stubScoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
+	})
+	expectedAgents := make(map[contracts.AgentID]struct{}, len(agents))
+	perAgentDimensions := make(map[contracts.AgentID]map[contracts.Dimension]struct{}, len(agents))
+	for _, agent := range agents {
+		expectedAgents[agent] = struct{}{}
+		perAgentDimensions[agent] = make(map[contracts.Dimension]struct{}, len(stubPass1Dimensions))
+	}
+	if len(collapsed) != len(agents)*len(stubPass1Dimensions) {
+		return false, nil
+	}
+	for _, entry := range collapsed {
+		if _, ok := expectedAgents[entry.Agent]; !ok {
+			return false, nil
+		}
+		if entry.Pass != 1 {
+			return false, nil
+		}
+		perAgentDimensions[entry.Agent][entry.Dimension] = struct{}{}
+	}
+	for _, agent := range agents {
+		if len(perAgentDimensions[agent]) != len(stubPass1Dimensions) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func pass1Agents(pkg *contracts.TaskPackage) ([]contracts.AgentID, error) {
