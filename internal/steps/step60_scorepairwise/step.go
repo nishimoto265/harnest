@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -666,6 +667,9 @@ func doneMarkerMatchesCurrentState(paths step60Paths) (bool, error) {
 		return false, fmt.Errorf("step60: read done marker: %w", err)
 	}
 	if err := marker.Validate(); err != nil {
+		return false, nil
+	}
+	if !slices.Equal(marker.Dimensions, canonicalDimensions) {
 		return false, nil
 	}
 
