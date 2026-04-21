@@ -136,6 +136,71 @@ func TestRun_DefaultStub_EndToEnd(t *testing.T) {
 	assert.Equal(t, contracts.StateKindCompleted, events[len(events)-1].Kind)
 }
 
+func TestStubMarkerStep_SeedsPass1ScoresFromTaskPackageWorktrees(t *testing.T) {
+	cfg := testConfig(t)
+	agents := []contracts.AgentID{"a2", "a4", "a7"}
+	runID := contracts.RunID("2026-04-21-PR66-abcdef0")
+
+	worktrees := make([]contracts.WorktreeAllocation, 0, len(agents)*2)
+	for pass := 1; pass <= 2; pass++ {
+		for _, agent := range agents {
+			worktrees = append(worktrees, contracts.WorktreeAllocation{
+				Agent:   agent,
+				Pass:    pass,
+				Path:    filepath.Join(cfg.Worktree.Base, string(runID), fmt.Sprintf("pass%d", pass), string(agent)),
+				Branch:  fmt.Sprintf("stub/%s/pass%d/%s", runID, pass, agent),
+				BaseSHA: strings.Repeat("a", 40),
+				HeadSHA: strings.Repeat("b", 40),
+			})
+		}
+	}
+	pkg := contracts.TaskPackage{
+		SchemaVersion:           "1",
+		RunID:                   runID,
+		PR:                      66,
+		Title:                   "stub seed",
+		BaseSHA:                 strings.Repeat("a", 40),
+		BestBranch:              "best",
+		ReconstructedTaskPrompt: "stub seed prompt",
+		Worktrees:               worktrees,
+		CreatedAt:               time.Now().UTC(),
+	}
+	require.NoError(t, pkg.Validate())
+
+	runCtx, err := internalio.RunContextFromTaskPackage(pkg, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
+
+	stepRun := &StepRunContext{Config: cfg, IO: runCtx, TaskPackage: &pkg}
+	for _, agent := range agents {
+		require.NoError(t, stubImplementStep{}.Run(context.Background(), &StepRunContext{
+			Config:      cfg,
+			IO:          runCtx,
+			TaskPackage: &pkg,
+			Pass:        1,
+			Agent:       agent,
+		}))
+	}
+
+	require.NoError(t, stubMarkerStep{path: "30/done.marker"}.Run(context.Background(), stepRun))
+
+	scoresPath, err := runCtx.ResolveRunRelative("30/scores-A.jsonl")
+	require.NoError(t, err)
+	scores, err := internalio.ReadJSONL[contracts.ScoreEntry](scoresPath)
+	require.NoError(t, err)
+	require.Len(t, scores, len(agents)*5)
+
+	seenAgents := make(map[contracts.AgentID]int, len(agents))
+	for _, score := range scores {
+		seenAgents[score.Agent]++
+	}
+	assert.Equal(t, map[contracts.AgentID]int{"a2": 5, "a4": 5, "a7": 5}, seenAgents)
+
+	before := mustReadFile(t, scoresPath)
+	require.NoError(t, stubMarkerStep{path: "30/done.marker"}.Run(context.Background(), stepRun))
+	assert.Equal(t, before, mustReadFile(t, scoresPath))
+}
+
 func TestIntentionStore_RoundTrip(t *testing.T) {
 	cfg := testConfig(t)
 	runCtx, err := internalio.NewRunContext("2026-04-21-PR88-abcdef0", cfg.Paths.Runs, cfg.Worktree.Base)
@@ -361,4 +426,11 @@ func validPlanningIntention(runID contracts.RunID) contracts.IntentionRecord {
 		RegistryHeadBefore: "",
 		StartedAt:          time.Now().UTC(),
 	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return data
 }

@@ -1,20 +1,24 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/nishimoto265/auto-improve/internal/steps/step20_implement"
 	"github.com/nishimoto265/auto-improve/internal/steps/step30_score"
 	"github.com/nishimoto265/auto-improve/internal/steps/step40_classify"
+	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
 )
 
 func defaultSteps(cfg *config.Config) Steps {
@@ -31,7 +35,7 @@ func defaultSteps(cfg *config.Config) Steps {
 		Step30:  newStep30ScoreAdapter(step30_score.New()),
 		Step40:  stubStep40{},
 		Step50:  step50,
-		Step60:  stubMarkerStep{path: "60/done.marker"},
+		Step60:  step60Step{},
 		Step70:  stubStep70{},
 		Archive: stubArchiveStep{},
 	}
@@ -171,12 +175,162 @@ type stubMarkerStep struct {
 }
 
 func (s stubMarkerStep) Run(ctx context.Context, run *StepRunContext) error {
-	_ = ctx
+	if s.path == "30/done.marker" {
+		if err := seedStubPass1Scores(ctx, run); err != nil {
+			return err
+		}
+	}
 	path, err := run.IO.ResolveRunRelative(s.path)
 	if err != nil {
 		return err
 	}
 	return internalio.WriteAtomic(path, []byte("stub\n"))
+}
+
+type step60Step struct{}
+
+func (step60Step) Run(ctx context.Context, run *StepRunContext) error {
+	return step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
+		IO:          run.IO,
+		TaskPackage: run.TaskPackage,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+	})
+}
+
+func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {
+	scoresPath, err := run.IO.ResolveRunRelative("30/scores-A.jsonl")
+	if err != nil {
+		return fmt.Errorf("orchestrator: resolve step30 scores path: %w", err)
+	}
+	if _, err := os.Stat(scoresPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("orchestrator: stat step30 scores path: %w", err)
+	}
+
+	agents, err := pass1Agents(run.TaskPackage)
+	if err != nil {
+		return err
+	}
+	complete, err := stubPass1ScoresComplete(scoresPath, agents)
+	if err == nil && complete {
+		return nil
+	}
+
+	judge := judges.NewPrimaryStub()
+	rubricPath := filepath.Join(run.IO.RunDir(), "rubrics", "default.md")
+	rows := make([]contracts.ScoreEntry, 0, len(agents)*5)
+	for _, agent := range agents {
+		manifest, err := internalio.LoadScorableManifest(run.IO, 1, agent)
+		if err != nil {
+			return fmt.Errorf("orchestrator: load pass1 manifest for agent=%s: %w", agent, err)
+		}
+		outputPath, err := run.IO.ResolveRunRelative(manifest.DiffPath)
+		if err != nil {
+			return fmt.Errorf("orchestrator: resolve pass1 diff path for agent=%s: %w", agent, err)
+		}
+		output, err := judge.ScoreOutput(ctx, judges.JudgeInput{
+			RunID:      run.IO.RunID,
+			Pass:       1,
+			Agent:      agent,
+			OutputPath: outputPath,
+			RubricPath: rubricPath,
+		})
+		if err != nil {
+			return fmt.Errorf("orchestrator: score pass1 stub output for agent=%s: %w", agent, err)
+		}
+		rows = append(rows, output.Scores...)
+	}
+	payload, err := marshalScoreJSONL(rows)
+	if err != nil {
+		return err
+	}
+	return internalio.WriteAtomic(scoresPath, payload)
+}
+
+type stubScoreKey struct {
+	Agent     contracts.AgentID
+	Dimension contracts.Dimension
+}
+
+var stubPass1Dimensions = []contracts.Dimension{
+	contracts.DimensionFidelity,
+	contracts.DimensionCorrectness,
+	contracts.DimensionMaintainability,
+	contracts.DimensionDiscipline,
+	contracts.DimensionCommunication,
+}
+
+func stubPass1ScoresComplete(path string, agents []contracts.AgentID) (bool, error) {
+	rows, err := internalio.ReadJSONL[contracts.ScoreEntry](path)
+	if err != nil {
+		return false, nil
+	}
+	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ScoreEntry) stubScoreKey {
+		return stubScoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
+	})
+	expectedAgents := make(map[contracts.AgentID]struct{}, len(agents))
+	perAgentDimensions := make(map[contracts.AgentID]map[contracts.Dimension]struct{}, len(agents))
+	for _, agent := range agents {
+		expectedAgents[agent] = struct{}{}
+		perAgentDimensions[agent] = make(map[contracts.Dimension]struct{}, len(stubPass1Dimensions))
+	}
+	if len(collapsed) != len(agents)*len(stubPass1Dimensions) {
+		return false, nil
+	}
+	for _, entry := range collapsed {
+		if _, ok := expectedAgents[entry.Agent]; !ok {
+			return false, nil
+		}
+		if entry.Pass != 1 {
+			return false, nil
+		}
+		perAgentDimensions[entry.Agent][entry.Dimension] = struct{}{}
+	}
+	for _, agent := range agents {
+		if len(perAgentDimensions[agent]) != len(stubPass1Dimensions) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func pass1Agents(pkg *contracts.TaskPackage) ([]contracts.AgentID, error) {
+	if pkg == nil {
+		return nil, errors.New("orchestrator: task package is required")
+	}
+	agentsSet := make(map[contracts.AgentID]struct{}, len(pkg.Worktrees))
+	for _, worktree := range pkg.Worktrees {
+		if worktree.Pass == 1 {
+			agentsSet[worktree.Agent] = struct{}{}
+		}
+	}
+	agents := make([]contracts.AgentID, 0, len(agentsSet))
+	for agent := range agentsSet {
+		agents = append(agents, agent)
+	}
+	sort.Slice(agents, func(i, j int) bool { return agents[i] < agents[j] })
+	return agents, nil
+}
+
+func marshalScoreJSONL(rows []contracts.ScoreEntry) ([]byte, error) {
+	var buf bytes.Buffer
+	for _, row := range rows {
+		if _, err := contracts.MarshalStrict(row); err != nil {
+			return nil, err
+		}
+		payload, err := contracts.CanonicalMarshal(row)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := buf.Write(payload); err != nil {
+			return nil, err
+		}
+		if err := buf.WriteByte('\n'); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), nil
 }
 
 type stubStep40 struct{}
