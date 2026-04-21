@@ -86,6 +86,31 @@ func TestRun_HappyPath(t *testing.T) {
 	assert.Equal(t, marker.RawHashes.ComplianceRaw, mustHashReducedRawCompliance(t, runIO))
 }
 
+func TestAppendJSONLWithParentSync_ReturnsAppendErrorForInvalidPath(t *testing.T) {
+	parentFile, err := os.CreateTemp(t.TempDir(), "step60-parent")
+	require.NoError(t, err)
+	require.NoError(t, parentFile.Close())
+
+	err = appendJSONLWithParentSync(filepath.Join(parentFile.Name(), "scores.jsonl"), contracts.ScoreEntry{
+		SchemaVersion: "1",
+		RunID:         contracts.RunID("2026-04-21-PR42-abcdef0"),
+		Pass:          2,
+		Agent:         "a1",
+		Dimension:     contracts.DimensionFidelity,
+		Score:         84,
+		Reasons:       "fixture",
+		VerdictPath:   contracts.VerdictPathAgreement,
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "append jsonl")
+
+	var pathErr *os.PathError
+	require.ErrorAs(t, err, &pathErr)
+}
+
 func TestRun_IdempotentWhenDoneMarkerExists(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		agents:          []contracts.AgentID{"a1", "a2", "a3"},
