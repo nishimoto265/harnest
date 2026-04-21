@@ -21,7 +21,7 @@ func defaultSteps() Steps {
 		step50[agent] = stubImplementStep{}
 	}
 	return Steps{
-		Step10:  stubStep10{},
+		Step10:  liveStep10{},
 		Step20:  step20,
 		Step30:  stubMarkerStep{path: "30/done.marker"},
 		Step40:  stubStep40{},

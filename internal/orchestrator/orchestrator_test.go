@@ -110,6 +110,7 @@ func TestRun_DefaultStub_EndToEnd(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
 	require.NoError(t, err)
+	orch.steps.Step10 = stubStep10{}
 
 	err = orch.Run(context.Background(), 77, RunOptions{
 		RunID: "2026-04-21-PR77-abcdef0",
