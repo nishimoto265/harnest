@@ -20,6 +20,7 @@ type PRInfo struct {
 	Number                  int
 	Title                   string
 	Body                    string
+	State                   string
 	BaseRefOid              string // debug: current tip of the base branch
 	HeadRefOid              string // debug: current tip of the head branch
 	MergeCommitOID          string
@@ -59,6 +60,7 @@ type ghPRViewRaw struct {
 	Number      int    `json:"number"`
 	Title       string `json:"title"`
 	Body        string `json:"body"`
+	State       string `json:"state"`
 	BaseRefOid  string `json:"baseRefOid"`
 	HeadRefOid  string `json:"headRefOid"`
 	MergeCommit *struct {
@@ -84,7 +86,7 @@ type ghIssueViewRaw struct {
 func (c ghCLI) PRView(ctx context.Context, pr int, repo string) (PRInfo, error) {
 	prArgs := []string{
 		"pr", "view", fmt.Sprintf("%d", pr),
-		"--json", "number,title,body,baseRefOid,headRefOid,mergeCommit,potentialMergeCommit,closingIssuesReferences",
+		"--json", "number,title,body,state,baseRefOid,headRefOid,mergeCommit,potentialMergeCommit,closingIssuesReferences",
 	}
 	if repo != "" {
 		prArgs = append(prArgs, "--repo", repo)
@@ -102,6 +104,7 @@ func (c ghCLI) PRView(ctx context.Context, pr int, repo string) (PRInfo, error) 
 		Number:     raw.Number,
 		Title:      raw.Title,
 		Body:       raw.Body,
+		State:      raw.State,
 		BaseRefOid: raw.BaseRefOid,
 		HeadRefOid: raw.HeadRefOid,
 	}
