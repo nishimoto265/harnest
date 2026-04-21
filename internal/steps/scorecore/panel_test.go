@@ -117,6 +117,45 @@ func TestPanelResolver_Resolve(t *testing.T) {
 		assert.Equal(t, contracts.ComplianceVerdictCompliant, result.FinalCompliance[0].Verdict)
 	})
 
+	t.Run("panel input versions override judge output", func(t *testing.T) {
+		primaryOut := baseScores(judges.RolePrimary, 80)
+		for i := range primaryOut.Scores {
+			primaryOut.Scores[i].RubricVersion = "judge-rubric"
+			primaryOut.Scores[i].PromptVersion = "judge-prompt"
+		}
+		primaryOut.Compliance[0].RubricVersion = "judge-rubric"
+		primaryOut.Compliance[0].PromptVersion = "judge-prompt"
+
+		r := NewPanelResolver()
+		result, err := r.Resolve(context.Background(), PanelInput{
+			Primary:               fakeJudge{out: primaryOut},
+			JudgeInput:            input,
+			OutputSha256:          outputSha,
+			RubricVersion:         "step-rubric",
+			PromptVersion:         "step-prompt",
+			DisagreementThreshold: 5,
+			RunContext:            runCtx,
+			StepDir:               "30",
+		})
+		require.NoError(t, err)
+		require.Len(t, result.RawScores, 5)
+		require.Len(t, result.FinalScores, 5)
+		for _, row := range result.RawScores {
+			assert.Equal(t, "step-rubric", row.RubricVersion)
+			assert.Equal(t, "step-prompt", row.PromptVersion)
+		}
+		for _, row := range result.FinalScores {
+			assert.Equal(t, "step-rubric", row.RubricVersion)
+			assert.Equal(t, "step-prompt", row.PromptVersion)
+		}
+		require.Len(t, result.RawCompliance, 1)
+		require.Len(t, result.FinalCompliance, 1)
+		assert.Equal(t, "step-rubric", result.RawCompliance[0].RubricVersion)
+		assert.Equal(t, "step-prompt", result.RawCompliance[0].PromptVersion)
+		assert.Equal(t, "step-rubric", result.FinalCompliance[0].RubricVersion)
+		assert.Equal(t, "step-prompt", result.FinalCompliance[0].PromptVersion)
+	})
+
 	t.Run("arbiter_overruled", func(t *testing.T) {
 		primary := fakeJudge{out: baseScores(judges.RolePrimary, 20)}
 		secondary := fakeJudge{out: baseScores(judges.RoleSecondary, 25)}

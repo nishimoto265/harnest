@@ -104,19 +104,29 @@ func TestAppendJSONL_RollsBackPartialWrite(t *testing.T) {
 	require.NoError(t, AppendJSONL(path, testJSONLRecord{Name: "alpha"}))
 
 	originalOpen := appendJSONLOpenFile
+	failFile := &failingAppendFile{
+		remaining: 2,
+		err:       errors.New("injected write failure"),
+	}
 	appendJSONLOpenFile = func(path string) (appendJSONLFile, error) {
 		file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, defaultFilePerm)
 		if err != nil {
 			return nil, err
 		}
-		return &failingAppendFile{
-			File:      file,
-			remaining: 2,
-			err:       errors.New("injected write failure"),
-		}, nil
+		failFile.File = file
+		return failFile, nil
 	}
 	t.Cleanup(func() {
 		appendJSONLOpenFile = originalOpen
+	})
+	originalDirectorySync := directorySync
+	var synced []string
+	directorySync = func(path string) error {
+		synced = append(synced, path)
+		return nil
+	}
+	t.Cleanup(func() {
+		directorySync = originalDirectorySync
 	})
 
 	infoBefore, err := os.Stat(path)
@@ -129,6 +139,9 @@ func TestAppendJSONL_RollsBackPartialWrite(t *testing.T) {
 	infoAfter, statErr := os.Stat(path)
 	require.NoError(t, statErr)
 	assert.Equal(t, infoBefore.Size(), infoAfter.Size())
+	assert.Equal(t, 1, failFile.truncateCalls)
+	assert.Equal(t, 1, failFile.syncCalls)
+	assert.Equal(t, []string{filepath.Dir(path)}, synced)
 
 	records, readErr := ReadJSONL[testJSONLRecord](path)
 	require.NoError(t, readErr)
@@ -423,8 +436,10 @@ func testTaskPackage(t *testing.T, runsBase, worktreeBase string) contracts.Task
 
 type failingAppendFile struct {
 	*os.File
-	remaining int
-	err       error
+	remaining     int
+	err           error
+	syncCalls     int
+	truncateCalls int
 }
 
 func (f *failingAppendFile) Write(p []byte) (int, error) {
@@ -451,10 +466,13 @@ func (f *failingAppendFile) Write(p []byte) (int, error) {
 }
 
 func (f *failingAppendFile) Sync() error {
-	if f.err == nil {
-		return f.File.Sync()
-	}
+	f.syncCalls++
 	return f.File.Sync()
+}
+
+func (f *failingAppendFile) Truncate(size int64) error {
+	f.truncateCalls++
+	return f.File.Truncate(size)
 }
 
 var _ appendJSONLFile = (*failingAppendFile)(nil)

@@ -39,8 +39,10 @@ type PanelInput struct {
 	Secondary judges.Judge
 	Arbiter   judges.Judge
 
-	JudgeInput   judges.JudgeInput
-	OutputSha256 string
+	JudgeInput    judges.JudgeInput
+	OutputSha256  string
+	RubricVersion string
+	PromptVersion string
 
 	// DisagreementThreshold is the per-dimension |primary - secondary| tolerance.
 	// If any dimension exceeds the threshold the arbiter fires (when set).
