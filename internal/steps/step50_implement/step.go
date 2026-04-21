@@ -93,6 +93,11 @@ func (Step) Run(ctx context.Context, run *orchestrator.StepRunContext) error {
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {
 		return fmt.Errorf("create agent dir: %w", err)
 	}
+	// Pre-clean: guarantee no stale artifacts from an earlier partial Run
+	// contaminate the terminal manifest, regardless of outcome variant.
+	if err := removeStepArtifacts(run.IO, agentPrefix); err != nil {
+		return fmt.Errorf("pre-clean stale artifacts: %w", err)
+	}
 
 	manifestPath, err := run.IO.ManifestPath(passNumber, run.Agent)
 	if err != nil {
