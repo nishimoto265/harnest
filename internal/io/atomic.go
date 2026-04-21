@@ -7,7 +7,6 @@ import (
 	stdio "io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -21,18 +20,15 @@ var (
 )
 
 // WriteAtomic writes data to `<path>.tmp-<pid>-<ms>-<rand>` and renames it into
-// place. Any pre-existing tmp siblings are removed before the write begins.
+// place.
 func WriteAtomic(path string, data []byte) error {
 	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
 		return err
 	}
+	if err := ensureWritableParentDir(path); err != nil {
+		return err
+	}
 	parent := filepath.Dir(path)
-	if err := os.MkdirAll(parent, defaultDirectoryPerm); err != nil {
-		return err
-	}
-	if err := cleanupAtomicTmpSiblings(path); err != nil {
-		return err
-	}
 
 	tmpPath, err := newAtomicTempPath(path)
 	if err != nil {
@@ -69,32 +65,6 @@ func WriteAtomic(path string, data []byte) error {
 	}
 	if err := directorySync(parent); err != nil {
 		return err
-	}
-	return nil
-}
-
-func cleanupAtomicTmpSiblings(path string) error {
-	parent := filepath.Dir(path)
-	base := filepath.Base(path)
-
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	prefix := base + ".tmp-"
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		if !strings.HasPrefix(entry.Name(), prefix) {
-			continue
-		}
-		if err := os.Remove(filepath.Join(parent, entry.Name())); err != nil && !os.IsNotExist(err) {
-			return err
-		}
 	}
 	return nil
 }

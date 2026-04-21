@@ -130,7 +130,7 @@ func (m *ManifestError) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*m = ManifestError(a)
-	return nil
+	return m.Validate()
 }
 
 func (m ManifestError) Validate() error {
@@ -184,7 +184,7 @@ func (m *Manifest) UnmarshalJSON(data []byte) error {
 		if err := decodeStrict(data, &v); err != nil {
 			return err
 		}
-		if err := validateStruct(v); err != nil {
+		if err := v.Validate(); err != nil {
 			return err
 		}
 		m.Kind = kind
@@ -194,7 +194,7 @@ func (m *Manifest) UnmarshalJSON(data []byte) error {
 		if err := decodeStrict(data, &v); err != nil {
 			return err
 		}
-		if err := validateStruct(v); err != nil {
+		if err := v.Validate(); err != nil {
 			return err
 		}
 		m.Kind = kind
@@ -204,7 +204,7 @@ func (m *Manifest) UnmarshalJSON(data []byte) error {
 		if err := decodeStrict(data, &v); err != nil {
 			return err
 		}
-		if err := validateStruct(v); err != nil {
+		if err := v.Validate(); err != nil {
 			return err
 		}
 		m.Kind = kind

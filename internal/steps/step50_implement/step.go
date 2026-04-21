@@ -210,6 +210,7 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 				StartedAt:       startedAt.UTC(),
 				Pid:             lease.PID,
 				Pgid:            lease.PGID,
+				LeaderStartTime: lease.StartTime,
 				RetryCount:      retryCount,
 				LastHeartbeat:   startedAt.UTC(),
 			}

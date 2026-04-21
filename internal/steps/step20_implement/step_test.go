@@ -130,6 +130,7 @@ func TestStepRun(t *testing.T) {
 			},
 			prepare: func(t *testing.T, fx *testFixture) {
 				t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "rescued.txt"))
+				stubQuiescentRescueWorktree(t)
 				fx.seedResumeState(t, 0)
 			},
 			assertion: func(t *testing.T, fx *testFixture, err error) {
@@ -143,12 +144,9 @@ func TestStepRun(t *testing.T) {
 				require.True(t, ok)
 				require.Equal(t, 1, state.RetryCount)
 
-				rescuedEntries, readDirErr := os.ReadDir(filepath.Join(fx.agentDir, rescuedDirName))
-				if readDirErr == nil {
-					require.NotEmpty(t, rescuedEntries)
-				} else {
-					require.True(t, os.IsNotExist(readDirErr))
-				}
+				rescueDir := latestRescueDir(t, fx.agentDir)
+				require.FileExists(t, filepath.Join(rescueDir, "commits.bundle"))
+				require.FileExists(t, filepath.Join(rescueDir, "state.json"))
 			},
 		},
 		{
@@ -159,6 +157,7 @@ func TestStepRun(t *testing.T) {
 			},
 			prepare: func(t *testing.T, fx *testFixture) {
 				t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "missing-heartbeat.txt"))
+				stubQuiescentRescueWorktree(t)
 				fx.seedResumeStateWithoutHeartbeat(t, 0)
 			},
 			assertion: func(t *testing.T, fx *testFixture, err error) {
@@ -172,12 +171,9 @@ func TestStepRun(t *testing.T) {
 				require.True(t, ok)
 				require.Equal(t, 1, state.RetryCount)
 
-				rescuedEntries, readDirErr := os.ReadDir(filepath.Join(fx.agentDir, rescuedDirName))
-				if readDirErr == nil {
-					require.NotEmpty(t, rescuedEntries)
-				} else {
-					require.True(t, os.IsNotExist(readDirErr))
-				}
+				rescueDir := latestRescueDir(t, fx.agentDir)
+				require.FileExists(t, filepath.Join(rescueDir, "commits.bundle"))
+				require.FileExists(t, filepath.Join(rescueDir, "state.json"))
 			},
 		},
 		{
@@ -229,6 +225,147 @@ func TestStepRun(t *testing.T) {
 			tc.assertion(t, fx, err)
 		})
 	}
+}
+
+func TestStepRun_BranchDriftRequiresManualRecoveryAndPreservesWorktree(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	fx.seedResumeState(t, 0)
+	runGit(t, fx.worktree, "checkout", "-b", "manual-recovery-drift")
+	driftedPath := filepath.Join(fx.worktree, "branch-drift.txt")
+	require.NoError(t, os.WriteFile(driftedPath, []byte("preserve me\n"), 0o644))
+
+	err := fx.step.Run(context.Background(), fx.run)
+	var manual *agentrunner.ManualRecoveryRequiredError
+	require.ErrorAs(t, err, &manual)
+	assert.Equal(t, contracts.RollbackReasonLeaseFailure, manual.Reason)
+	assert.FileExists(t, driftedPath)
+	assert.Equal(t, "manual-recovery-drift", strings.TrimSpace(runGit(t, fx.worktree, "branch", "--show-current")))
+
+	state, ok, readErr := loadResumeState(fx.agentDir)
+	require.NoError(t, readErr)
+	require.True(t, ok)
+	assert.Equal(t, 999999, state.Pid)
+
+	_, statErr := os.Stat(fx.manifestPath())
+	require.Error(t, statErr)
+	assert.True(t, os.IsNotExist(statErr))
+	_, rescueErr := os.Stat(filepath.Join(fx.agentDir, rescuedDirName))
+	require.Error(t, rescueErr)
+	assert.True(t, os.IsNotExist(rescueErr))
+}
+
+func TestStepRun_QuiesceTimeoutRequiresManualRecoveryWithoutReset(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	fx.seedResumeState(t, 0)
+	busyPath := filepath.Join(fx.worktree, "busy.txt")
+	require.NoError(t, os.WriteFile(busyPath, []byte("still busy\n"), 0o644))
+
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	originalKillPID := rescueKillPID
+	originalSleep := rescueSleep
+	originalMaxWait := rescueQuiesceMaxWait
+	originalInterval := rescueQuiesceInterval
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) {
+		return []int{424242}, nil
+	}
+	rescueKillPID = func(int, syscall.Signal) error { return nil }
+	rescueSleep = func(time.Duration) {}
+	rescueQuiesceMaxWait = time.Nanosecond
+	rescueQuiesceInterval = 0
+	t.Cleanup(func() {
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+		rescueKillPID = originalKillPID
+		rescueSleep = originalSleep
+		rescueQuiesceMaxWait = originalMaxWait
+		rescueQuiesceInterval = originalInterval
+	})
+
+	err := fx.step.Run(context.Background(), fx.run)
+	var manual *agentrunner.ManualRecoveryRequiredError
+	require.ErrorAs(t, err, &manual)
+	assert.Equal(t, contracts.RollbackReasonLeaseFailure, manual.Reason)
+	assert.FileExists(t, busyPath)
+
+	state, ok, readErr := loadResumeState(fx.agentDir)
+	require.NoError(t, readErr)
+	require.True(t, ok)
+	assert.Equal(t, 999999, state.Pid)
+
+	_, statErr := os.Stat(fx.manifestPath())
+	require.Error(t, statErr)
+	assert.True(t, os.IsNotExist(statErr))
+	_, rescueErr := os.Stat(filepath.Join(fx.agentDir, rescuedDirName))
+	require.Error(t, rescueErr)
+	assert.True(t, os.IsNotExist(rescueErr))
+}
+
+func TestEnsureRescueLeaseQuiesced_SkipsRecycledProcessGroup(t *testing.T) {
+	originalKillProcess := killProcess
+	originalLookupStartTime := lookupLeaseStartTime
+	originalGroupKill := rescueKillProcessGroupUntilGone
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	killProcess = func(int, syscall.Signal) error { return nil }
+	lookupLeaseStartTime = func(int) (string, error) { return "recycled-start", nil }
+	groupKillCalls := 0
+	rescueKillProcessGroupUntilGone = func(int, time.Duration, time.Duration) error {
+		groupKillCalls++
+		return nil
+	}
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) { return nil, nil }
+	t.Cleanup(func() {
+		killProcess = originalKillProcess
+		lookupLeaseStartTime = originalLookupStartTime
+		rescueKillProcessGroupUntilGone = originalGroupKill
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+	})
+
+	err := ensureRescueLeaseQuiesced(context.Background(), t.TempDir(), resumeState{
+		Pid:             1234,
+		Pgid:            1234,
+		LeaderStartTime: "original-start",
+	})
+	require.NoError(t, err)
+	assert.Zero(t, groupKillCalls)
+}
+
+func TestWorktreeProcessIDs_RequiresLsof(t *testing.T) {
+	originalLookPath := rescueExecLookPath
+	rescueExecLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	t.Cleanup(func() {
+		rescueExecLookPath = originalLookPath
+	})
+
+	_, err := worktreeProcessIDs(context.Background(), t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lsof is required")
+}
+
+func TestWorktreeProcessIDs_DoesNotMatchArgvOnlyReferences(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	fx := newTestFixture(t, 5)
+	fakeLsof := filepath.Join(t.TempDir(), "fake-lsof.sh")
+	require.NoError(t, os.WriteFile(fakeLsof, []byte("#!/bin/sh\nexit 1\n"), 0o755))
+
+	originalLookPath := rescueExecLookPath
+	rescueExecLookPath = func(string) (string, error) { return fakeLsof, nil }
+	t.Cleanup(func() {
+		rescueExecLookPath = originalLookPath
+	})
+
+	cmd := exec.Command(python, "-c", "import time; time.sleep(60)", fx.worktree)
+	require.NoError(t, cmd.Start())
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	pids, err := worktreeProcessIDs(context.Background(), fx.worktree)
+	require.NoError(t, err)
+	assert.Empty(t, pids)
+	assert.True(t, pidAlive(cmd.Process.Pid))
 }
 
 type testFixture struct {
@@ -341,6 +478,23 @@ func (fx *testFixture) sessionPath() string {
 
 func (fx *testFixture) statePath() string {
 	return resumeStatePath(fx.agentDir)
+}
+
+func latestRescueDir(t *testing.T, agentDir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(agentDir, rescuedDirName))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	return filepath.Join(agentDir, rescuedDirName, entries[0].Name())
+}
+
+func stubQuiescentRescueWorktree(t *testing.T) {
+	t.Helper()
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) { return nil, nil }
+	t.Cleanup(func() {
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+	})
 }
 
 func (fx *testFixture) heartbeatLeasePath() string {
@@ -905,7 +1059,7 @@ func TestStepRun_FailsWhenSuccessDiffOverflows(t *testing.T) {
 	assert.NoFileExists(t, fx.manifestPath())
 }
 
-func TestPerformRescue_RecreatesAllocationBranchInsteadOfResettingMain(t *testing.T) {
+func TestPerformRescue_BranchDriftRequiresManualRecoveryInsteadOfResettingMain(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	allocation, err := worktreeFor(fx.run.TaskPackage, 1, "a1")
 	require.NoError(t, err)
@@ -922,14 +1076,14 @@ func TestPerformRescue_RecreatesAllocationBranchInsteadOfResettingMain(t *testin
 		RetryCount:      0,
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	})
-	require.NoError(t, err)
+	var manual *agentrunner.ManualRecoveryRequiredError
+	require.ErrorAs(t, err, &manual)
 
-	assert.Equal(t, allocation.Branch, strings.TrimSpace(runGit(t, fx.worktree, "branch", "--show-current")))
-	assert.Equal(t, fx.baseSHA, strings.TrimSpace(runGit(t, fx.worktree, "rev-parse", "HEAD")))
+	assert.Equal(t, "main", strings.TrimSpace(runGit(t, fx.worktree, "branch", "--show-current")))
 	assert.Equal(t, foreignSHA, strings.TrimSpace(runGit(t, fx.worktree, "rev-parse", "main")))
 }
 
-func TestPerformRescue_CleansIgnoredFilesWithCleanX(t *testing.T) {
+func TestPerformRescue_PreservesIgnoredFiles(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	allocation, err := worktreeFor(fx.run.TaskPackage, 1, "a1")
 	require.NoError(t, err)
@@ -944,7 +1098,7 @@ func TestPerformRescue_CleansIgnoredFilesWithCleanX(t *testing.T) {
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	})
 	require.NoError(t, err)
-	assert.NoFileExists(t, filepath.Join(fx.worktree, ".env.local"))
+	assert.FileExists(t, filepath.Join(fx.worktree, ".env.local"))
 }
 
 func TestPerformRescue_KillsDetachedWorktreeWriterBeforeCapture(t *testing.T) {
@@ -967,6 +1121,17 @@ func TestPerformRescue_KillsDetachedWorktreeWriterBeforeCapture(t *testing.T) {
 	require.NoError(t, err)
 	childPID, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 	require.NoError(t, err)
+
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) {
+		if pidAlive(childPID) {
+			return []int{childPID}, nil
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+	})
 
 	_, err = fx.step.performRescue(context.Background(), fx.run, allocation, fx.agentDir, resumeState{
 		ExpectedBaseSHA: fx.baseSHA,
@@ -1146,8 +1311,8 @@ func TestShouldAttemptRescue_RequiresMatchingPGID(t *testing.T) {
 		getProcessGroupID = originalGetpgid
 	})
 
-	assert.False(t, shouldAttemptRescue(true, 12345, 12346))
-	assert.True(t, shouldAttemptRescue(true, 12345, 12345))
+	assert.False(t, shouldAttemptRescue(true, 12345, 12346, ""))
+	assert.True(t, shouldAttemptRescue(true, 12345, 12345, ""))
 }
 
 func TestStepRunResumeStatePersistsChildPIDAndPGID(t *testing.T) {

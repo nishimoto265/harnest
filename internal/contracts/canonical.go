@@ -105,6 +105,9 @@ func rejectForbiddenCanonicalKinds(v reflect.Value, tree any, path string) error
 		}
 		return nil
 	case reflect.Map:
+		if keyType := v.Type().Key(); keyType.Kind() != reflect.String || keyType != reflect.TypeOf("") {
+			return fmt.Errorf("%w: %s", ErrCanonicalUnsupportedMapKey, v.Type().Key())
+		}
 		obj, ok := tree.(map[string]any)
 		if !ok {
 			return nil

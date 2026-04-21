@@ -780,6 +780,55 @@ func TestRun_ComplianceSingleSideRuleKeepsRawProvenance(t *testing.T) {
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
+func TestRun_ComplianceArbiterMayCoverOnlyDisputedRules(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+
+	primary := scriptedJudge{
+		score:        80,
+		reasonPrefix: "primary",
+		compliance: map[string]contracts.ComplianceVerdict{
+			"agreed":   contracts.ComplianceVerdictCompliant,
+			"disputed": contracts.ComplianceVerdictViolated,
+		},
+	}
+	secondary := scriptedJudge{
+		score:        80,
+		reasonPrefix: "secondary",
+		compliance: map[string]contracts.ComplianceVerdict{
+			"agreed":   contracts.ComplianceVerdictCompliant,
+			"disputed": contracts.ComplianceVerdictValidException,
+		},
+	}
+	arbiter := scriptedJudge{
+		score:        80,
+		reasonPrefix: "arbiter",
+		compliance: map[string]contracts.ComplianceVerdict{
+			"disputed": contracts.ComplianceVerdictCompliant,
+		},
+	}
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     arbiter,
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 16, 15, 0, 0, time.UTC) },
+	}))
+
+	rows := mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl")
+	var arbiterRuleIDs []string
+	for _, row := range rows {
+		if row.JudgeRole == contracts.JudgeRoleArbiter {
+			arbiterRuleIDs = append(arbiterRuleIDs, row.RuleID)
+		}
+	}
+	assert.Equal(t, []string{"disputed"}, arbiterRuleIDs)
+}
+
 func TestRun_ComplianceArbiterOnlyRuleFinalizesAsSingleSource(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score:        true,

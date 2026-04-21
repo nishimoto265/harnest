@@ -3,6 +3,7 @@ package agentrunner
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,14 +90,50 @@ func TestWriteSuccessDiff_RejectsOversizedUntrackedFileBeforeSnapshotCopy(t *tes
 
 	destDir := t.TempDir()
 	destPath := filepath.Join(destDir, "diff.patch")
-	start := time.Now()
+	originalSnapshotCopy := snapshotCopyOpenFile
+	copyCalls := 0
+	snapshotCopyOpenFile = func(ctx context.Context, dst io.Writer, src *os.File, sizeLimit int64) (int64, error) {
+		copyCalls++
+		return originalSnapshotCopy(ctx, dst, src, sizeLimit)
+	}
+	t.Cleanup(func() {
+		snapshotCopyOpenFile = originalSnapshotCopy
+	})
+
 	err = WriteSuccessDiff(context.Background(), repoDir, baseSHA, "test", destPath)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrSuccessDiffOverflow)
-	assert.Less(t, time.Since(start), 2*time.Second)
+	assert.Zero(t, copyCalls)
 	entries, readErr := os.ReadDir(destDir)
 	require.NoError(t, readErr)
 	assert.Empty(t, entries)
+}
+
+func TestSnapshotDiffableArtifact_RejectsGrowthBeyondLimitDuringCopy(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+
+	originalOpen := snapshotOpenValidatedRegularFile
+	snapshotOpenValidatedRegularFile = func(string) (*os.File, os.FileMode, int64, error) {
+		return reader, 0o644, 1, nil
+	}
+	t.Cleanup(func() {
+		snapshotOpenValidatedRegularFile = originalOpen
+	})
+
+	go func() {
+		_, _ = writer.Write([]byte(strings.Repeat("x", maxSuccessDiffBytes+1)))
+		_ = writer.Close()
+	}()
+
+	_, diffable, err := snapshotDiffableArtifact(context.Background(), "/tmp/virtual-source", t.TempDir(), "growing.txt")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrSuccessDiffOverflow)
+	assert.False(t, diffable)
 }
 
 func TestWriteSuccessDiff_SkipsSymlinkedUntrackedFile(t *testing.T) {

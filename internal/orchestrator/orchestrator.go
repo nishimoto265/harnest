@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	ilog "github.com/nishimoto265/auto-improve/internal/logger"
 	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 	"github.com/nishimoto265/auto-improve/internal/steps/step20_implement"
 	"github.com/nishimoto265/auto-improve/internal/steps/step50_implement"
 	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
@@ -84,8 +86,11 @@ type StepRunContext struct {
 var errStopPipeline = errors.New("orchestrator: stop pipeline")
 var errNoScorableAgentsResume = errors.New("orchestrator: resume selected step30 but pass1 has no scorable agents")
 var errConcurrentRun = errors.New("orchestrator: concurrent Run() on the same instance is not allowed")
+var errConcurrentPRRun = errors.New("orchestrator: another process is already running this PR")
 
 var beforeFreshRunGateHook = func(*StepRunContext) error { return nil }
+var beforeRunScaffoldHook = func(*StepRunContext) error { return nil }
+var beforeStartedAppendHook = func(*StepRunContext) error { return nil }
 
 type GlobalNeedsRecoveryError struct {
 	Sentinel contracts.NeedsRecoverySentinel
@@ -190,6 +195,13 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 	if blocked {
 		return &GlobalNeedsRecoveryError{Sentinel: sentinel}
 	}
+	prLock, err := acquirePRRunLock(ctx, runsBase, pr)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = prLock.Unlock()
+	}()
 
 	selection, err := o.selectRun(pr, opts)
 	if err != nil {
@@ -211,14 +223,23 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 		if err := beforeFreshRunGateHook(run); err != nil {
 			return err
 		}
-		if err := o.ensureNoGlobalSentinel(run.IO); err != nil {
-			return err
-		}
+	}
+	if err := beforeRunScaffoldHook(run); err != nil {
+		return err
+	}
+	if err := o.ensureNoGlobalSentinel(run.IO); err != nil {
+		return err
 	}
 	if err := o.ensureRunScaffold(run); err != nil {
 		return err
 	}
 	if selection.fresh {
+		if err := beforeStartedAppendHook(run); err != nil {
+			return err
+		}
+		if err := o.ensureNoGlobalSentinel(run.IO); err != nil {
+			return err
+		}
 		if err := o.appendState(startedEntry(pr, selection.runContext.RunID, time.Now().UTC())); err != nil {
 			return err
 		}
@@ -392,6 +413,17 @@ func (o *Orchestrator) leaveRun() {
 	o.running = false
 }
 
+func acquirePRRunLock(ctx context.Context, runsBase string, pr int) (*internalio.FileLock, error) {
+	lockCtx, cancel := context.WithTimeout(ctx, 25*time.Millisecond)
+	defer cancel()
+	lockPath := filepath.Join(runsBase, "pr-locks", fmt.Sprintf("pr-%d.lock", pr))
+	lock, err := internalio.AcquireFileLockContext(lockCtx, lockPath)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, errConcurrentPRRun
+	}
+	return lock, err
+}
+
 func (o *Orchestrator) selectRun(pr int, opts RunOptions) (runSelection, error) {
 	runsBase, err := o.cfg.RunsBase()
 	if err != nil {
@@ -452,10 +484,44 @@ func newFreshSelection(pr int, opts RunOptions, runsBase, worktreeBase string) (
 	runID := opts.RunID
 	if runID == "" {
 		runID = internalio.NewRunID(pr)
+	} else {
+		runPR, err := runIDPR(runID)
+		if err != nil {
+			return runSelection{}, err
+		}
+		if runPR != pr {
+			return runSelection{}, fmt.Errorf("orchestrator: run_id PR mismatch: run_id=%s pr=%d", runID, pr)
+		}
 	}
 	runCtx, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
 	if err != nil {
 		return runSelection{}, err
+	}
+	if err := internalio.EnsureNoSymlinkPathComponents(runCtx.RunDir()); err != nil {
+		return runSelection{}, err
+	}
+	if info, err := os.Stat(runCtx.RunDir()); err == nil {
+		if !info.IsDir() {
+			return runSelection{}, fmt.Errorf("orchestrator: fresh run path is not a directory: %s", runCtx.RunDir())
+		}
+		entries, err := os.ReadDir(runCtx.RunDir())
+		if err != nil {
+			return runSelection{}, err
+		}
+		if len(entries) > 0 {
+			return runSelection{}, fmt.Errorf("orchestrator: fresh run requires an empty run dir: %s", runCtx.RunDir())
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return runSelection{}, err
+	}
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	if err != nil {
+		return runSelection{}, err
+	}
+	for _, entry := range events {
+		if entry.Kind.IsTerminal() {
+			return runSelection{}, fmt.Errorf("orchestrator: fresh run_id already has terminal state: %s", runID)
+		}
 	}
 	return runSelection{
 		runContext: runCtx,
@@ -463,9 +529,30 @@ func newFreshSelection(pr int, opts RunOptions, runsBase, worktreeBase string) (
 	}, nil
 }
 
+func runIDPR(runID contracts.RunID) (int, error) {
+	raw := string(runID)
+	start := strings.Index(raw, "-PR")
+	if start < 0 {
+		return 0, fmt.Errorf("orchestrator: invalid run_id PR segment: %s", runID)
+	}
+	rest := raw[start+3:]
+	end := strings.Index(rest, "-")
+	if end < 0 {
+		return 0, fmt.Errorf("orchestrator: invalid run_id suffix: %s", runID)
+	}
+	pr, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return 0, fmt.Errorf("orchestrator: parse run_id PR %q: %w", runID, err)
+	}
+	return pr, nil
+}
+
 func loadRunContext(runID contracts.RunID, runsBase, worktreeBase string) (internalio.RunContext, error) {
 	runCtx, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
 	if err != nil {
+		return internalio.RunContext{}, err
+	}
+	if err := internalio.EnsureNoSymlinkPathComponents(runCtx.RunDir()); err != nil {
 		return internalio.RunContext{}, err
 	}
 	taskPackagePath := runCtx.TaskPackagePath()
@@ -493,6 +580,20 @@ func loadRunContext(runID contracts.RunID, runsBase, worktreeBase string) (inter
 }
 
 func (o *Orchestrator) ensureRunScaffold(run *StepRunContext) error {
+	for _, path := range []string{
+		run.IO.RunDir(),
+		filepath.Join(run.IO.RunDir(), "20-pass1"),
+		filepath.Join(run.IO.RunDir(), "30"),
+		filepath.Join(run.IO.RunDir(), "40"),
+		filepath.Join(run.IO.RunDir(), "50-pass2"),
+		filepath.Join(run.IO.RunDir(), "60"),
+		filepath.Join(run.IO.RunDir(), "70"),
+		filepath.Join(run.IO.RunDir(), "processed-details"),
+	} {
+		if err := internalio.EnsureNoSymlinkPathComponents(path); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(run.IO.RunDir(), 0o755); err != nil {
 		return err
 	}
@@ -722,6 +823,8 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 
 	rescueExhausted := make([]stepio.RescueExhausted, 0, len(agents))
 	var interruptedDetail string
+	var manualRecoveryErr *agentrunner.ManualRecoveryRequiredError
+	var manualRecoveryAgent contracts.AgentID
 	for result := range errCh {
 		if result.err == nil {
 			continue
@@ -736,6 +839,14 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 			rescueExhausted = append(rescueExhausted, exhausted50.Result())
 			continue
 		}
+		var manualRecovery *agentrunner.ManualRecoveryRequiredError
+		if errors.As(result.err, &manualRecovery) {
+			if manualRecoveryErr == nil {
+				manualRecoveryErr = manualRecovery
+				manualRecoveryAgent = result.agent
+			}
+			continue
+		}
 		switch {
 		case errors.Is(result.err, step20_implement.ErrAgentLeaseContended),
 			errors.Is(result.err, step20_implement.ErrRescueAbortedLeaseActive),
@@ -747,6 +858,12 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 			continue
 		}
 		return result.err
+	}
+	if manualRecoveryErr != nil {
+		if err := o.handleManualRecovery(run, step, manualRecoveryErr.Reason, manualRecoveryAgent, manualRecoveryErr.Detail); err != nil {
+			return err
+		}
+		return errStopPipeline
 	}
 	if len(rescueExhausted) > 0 {
 		if err := o.handleRescueExhausted(run, step, rescueExhausted); err != nil {
@@ -775,7 +892,7 @@ func (o *Orchestrator) appendTerminalDecision(run *StepRunContext) error {
 		if !fileExists(decisionPath) {
 			return nil
 		}
-		decision, err := internalio.ReadJSON[contracts.Decision](decisionPath)
+		decision, err := readDecisionForRun(decisionPath, run.IO.RunID)
 		if err != nil {
 			return err
 		}
@@ -984,7 +1101,7 @@ func interruptedReasonFromContext(err error) contracts.InterruptedReason {
 	case errors.Is(err, context.DeadlineExceeded):
 		return contracts.InterruptedReasonContext
 	case errors.Is(err, context.Canceled):
-		return contracts.InterruptedReasonSignal
+		return contracts.InterruptedReasonContext
 	default:
 		return contracts.InterruptedReasonUnknown
 	}
@@ -1225,6 +1342,40 @@ func (o *Orchestrator) handleRescueExhausted(run *StepRunContext, step contracts
 		}
 	}
 	return nil
+}
+
+func (o *Orchestrator) handleManualRecovery(
+	run *StepRunContext,
+	step contracts.FailedStep,
+	reason contracts.RollbackReason,
+	agent contracts.AgentID,
+	detail string,
+) error {
+	entries, err := state.ScanEventsForRun(run.IO, run.IO.RunID)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Kind == contracts.StateKindNeedsManualRecovery {
+			return nil
+		}
+	}
+	if detail != "" {
+		run.Logger.Warn("orchestrator: implementation rescue requires manual recovery", slog.String("agent", string(agent)), slog.String("detail", detail))
+	}
+	if step != contracts.FailedStep70 && reason != contracts.RollbackReasonWorktreeRescueLoop {
+		reason = contracts.RollbackReasonWorktreeRescueLoop
+	}
+	value := contracts.StateEntryNeedsManualRecovery{
+		Kind:       contracts.StateKindNeedsManualRecovery,
+		PR:         run.PR,
+		RunID:      run.IO.RunID,
+		Step:       step,
+		Reason:     reason,
+		FailedStep: step,
+		At:         time.Now().UTC(),
+	}
+	return o.appendState(contracts.StateEntry{Kind: value.Kind, Value: value})
 }
 
 func (o *Orchestrator) ensureNoGlobalSentinel(runCtx internalio.RunContext) error {

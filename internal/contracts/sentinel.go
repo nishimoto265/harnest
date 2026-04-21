@@ -19,7 +19,7 @@ func (s *NeedsRecoverySentinel) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*s = NeedsRecoverySentinel(a)
-	return nil
+	return s.Validate()
 }
 
 func (s NeedsRecoverySentinel) Validate() error {

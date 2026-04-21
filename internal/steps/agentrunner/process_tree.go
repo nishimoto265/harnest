@@ -474,3 +474,7 @@ func processStartTime(pid int) (string, error) {
 	}
 	return startTime, nil
 }
+
+func LookupProcessStartTime(pid int) (string, error) {
+	return lookupProcessStartTime(pid)
+}

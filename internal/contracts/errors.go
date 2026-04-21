@@ -55,6 +55,10 @@ var (
 	// encoding/json has a chance to erase the original type information.
 	ErrCanonicalForbiddenKind = errors.New("contracts: canonical marshal: forbidden Go numeric kind")
 
+	// ErrCanonicalUnsupportedMapKey is returned when canonical JSON encounters a
+	// map whose keys are not plain JSON strings.
+	ErrCanonicalUnsupportedMapKey = errors.New("contracts: canonical marshal: unsupported map key type")
+
 	// ErrNilValidationValue is returned when runValidation receives a typed nil
 	// pointer/interface that would otherwise panic when calling Validate().
 	ErrNilValidationValue = errors.New("contracts: nil validation target")

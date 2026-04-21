@@ -2,10 +2,15 @@ package io
 
 import (
 	"fmt"
+	stdio "io"
 	"os"
+	"path/filepath"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 )
+
+var idempotencyIndexBeforeAppendHook = func() error { return nil }
+var idempotencyIndexBeforeRewriteHook = func() error { return nil }
 
 // EnsureVerifiedIdempotencyIndex loads rules-idempotency-index.jsonl, verifies
 // every entry against the registry source of truth, and rebuilds the file when
@@ -48,7 +53,20 @@ func SyncIdempotencyIndex(registryPath, indexPath string, entry contracts.RuleRe
 		_ = lock.Unlock()
 	}()
 
-	_, rebuilt, err := EnsureVerifiedIdempotencyIndex(registryPath, indexPath)
+	registryLines, err := readRegistryLines(registryPath)
+	if err != nil {
+		return err
+	}
+	if err := ensureWritableParentDir(indexPath); err != nil {
+		return err
+	}
+	indexFile, identity, err := openTrackedFileNoFollow(indexPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, defaultFilePerm)
+	if err != nil {
+		return err
+	}
+	defer indexFile.Close()
+
+	existingEntries, rebuilt, err := ensureVerifiedIdempotencyIndexHandle(registryLines, indexPath, indexFile, identity)
 	if err != nil {
 		return err
 	}
@@ -60,16 +78,115 @@ func SyncIdempotencyIndex(registryPath, indexPath string, entry contracts.RuleRe
 	if err != nil {
 		return err
 	}
-	existingEntries, err := ReadJSONL[contracts.RuleIdempotencyIndexEntry](indexPath)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
 	for _, existing := range existingEntries {
 		if existing.RegistryOffset == indexEntry.RegistryOffset && existing.IdempotencyKey == indexEntry.IdempotencyKey {
 			return nil
 		}
 	}
-	return AppendIdempotencyIndexEntry(indexPath, indexEntry)
+	if err := idempotencyIndexBeforeAppendHook(); err != nil {
+		return err
+	}
+	if err := ensurePathMatchesIdentity(indexPath, identity); err != nil {
+		return err
+	}
+	payload, err := marshalJSONLRecord(indexEntry)
+	if err != nil {
+		return err
+	}
+	if err := appendJSONLPayload(indexPath, indexFile, payload); err != nil {
+		return err
+	}
+	return ensurePathMatchesIdentity(indexPath, identity)
+}
+
+func ensureVerifiedIdempotencyIndexHandle(
+	registryLines []RegistryLine,
+	indexPath string,
+	indexFile *os.File,
+	identity fileIdentity,
+) ([]contracts.RuleIdempotencyIndexEntry, bool, error) {
+	indexEntries, err := readJSONLHandle[contracts.RuleIdempotencyIndexEntry](indexFile)
+	if err == nil {
+		if err := verifyIdempotencyIndex(registryLines, indexEntries); err == nil {
+			return indexEntries, false, nil
+		}
+	} else if !os.IsNotExist(err) {
+		// Treat invalid or unreadable indexes the same as a missing cache.
+	}
+
+	rebuilt, err := rebuildIdempotencyIndexHandle(registryLines, indexPath, indexFile, identity)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := verifyIdempotencyIndex(registryLines, rebuilt); err != nil {
+		return nil, false, err
+	}
+	return rebuilt, true, nil
+}
+
+func rebuildIdempotencyIndexHandle(
+	registryLines []RegistryLine,
+	indexPath string,
+	indexFile *os.File,
+	identity fileIdentity,
+) ([]contracts.RuleIdempotencyIndexEntry, error) {
+	entries, buffer, err := buildIdempotencyIndexBuffer(registryLines)
+	if err != nil {
+		return nil, err
+	}
+	if err := idempotencyIndexBeforeRewriteHook(); err != nil {
+		return nil, err
+	}
+	if err := writeJSONLBufferHandle(indexPath, indexFile, identity, buffer); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func buildIdempotencyIndexBuffer(registryLines []RegistryLine) ([]contracts.RuleIdempotencyIndexEntry, []byte, error) {
+	entries := make([]contracts.RuleIdempotencyIndexEntry, 0, len(registryLines))
+	for _, line := range registryLines {
+		index, err := BuildRuleIdempotencyIndexEntry(line.Entry, contracts.RegistryAppendResult{
+			Offset: line.Offset,
+			Sha256: line.Sha256,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		entries = append(entries, index)
+	}
+	buffer := make([]byte, 0, len(entries)*128)
+	for _, entry := range entries {
+		payload, err := marshalJSONLRecord(entry)
+		if err != nil {
+			return nil, nil, err
+		}
+		buffer = append(buffer, payload...)
+		buffer = append(buffer, '\n')
+	}
+	return entries, buffer, nil
+}
+
+func writeJSONLBufferHandle(path string, file *os.File, identity fileIdentity, buffer []byte) error {
+	if err := ensurePathMatchesIdentity(path, identity); err != nil {
+		return err
+	}
+	if err := file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := file.Seek(0, stdio.SeekStart); err != nil {
+		return err
+	}
+	if _, err := file.Write(buffer); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := ensurePathMatchesIdentity(path, identity); err != nil {
+		return err
+	}
+	return directorySync(filepath.Dir(path))
 }
 
 func verifyIdempotencyIndex(registryLines []RegistryLine, indexEntries []contracts.RuleIdempotencyIndexEntry) error {

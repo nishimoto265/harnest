@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 	"unicode/utf8"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -430,6 +432,23 @@ func readProcessedLines(path string) ([]processedLine, error) {
 	}
 	if len(data) == 0 {
 		return nil, nil
+	}
+	if data[len(data)-1] != '\n' {
+		time.Sleep(10 * time.Millisecond)
+		retried, retryErr := os.ReadFile(path)
+		if retryErr == nil && len(retried) > 0 {
+			data = retried
+		}
+		if len(data) > 0 && data[len(data)-1] != '\n' {
+			lastNewline := bytes.LastIndexByte(data, '\n')
+			if lastNewline < 0 {
+				return nil, nil
+			}
+			data = data[:lastNewline+1]
+		}
+		if len(data) == 0 {
+			return nil, nil
+		}
 	}
 	lines := make([]processedLine, 0, 8)
 	start := 0

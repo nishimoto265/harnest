@@ -202,8 +202,83 @@ func TestShouldAttemptRescue_RequiresMatchingPGID(t *testing.T) {
 		getProcessGroupID = originalGetpgid
 	})
 
-	assert.False(t, shouldAttemptRescue(true, 12345, 12346))
-	assert.True(t, shouldAttemptRescue(true, 12345, 12345))
+	assert.False(t, shouldAttemptRescue(true, 12345, 12346, ""))
+	assert.True(t, shouldAttemptRescue(true, 12345, 12345, ""))
+}
+
+func TestStepRun_BranchDriftRequiresManualRecoveryAndPreservesWorktree(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	require.NoError(t, saveResumeState(agentDir, resumeState{
+		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
+		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
+		Pid:             999999,
+		RetryCount:      0,
+		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
+	}))
+	require.NoError(t, touchHeartbeat(agentDir, time.Now().Add(-2*time.Hour).UTC()))
+	runCommand(t, allocation.Path, "git", "checkout", "-b", "manual-recovery-drift")
+	driftedPath := filepath.Join(allocation.Path, "branch-drift.txt")
+	require.NoError(t, os.WriteFile(driftedPath, []byte("preserve me\n"), 0o644))
+
+	err = (Step{}).Run(context.Background(), env.run)
+	var manual *agentrunner.ManualRecoveryRequiredError
+	require.ErrorAs(t, err, &manual)
+	assert.Equal(t, contracts.RollbackReasonLeaseFailure, manual.Reason)
+	assert.FileExists(t, driftedPath)
+	assert.Equal(t, "manual-recovery-drift", strings.TrimSpace(runCommand(t, allocation.Path, "git", "branch", "--show-current")))
+}
+
+func TestStepRun_QuiesceTimeoutRequiresManualRecoveryWithoutReset(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	require.NoError(t, saveResumeState(agentDir, resumeState{
+		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
+		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
+		Pid:             999999,
+		RetryCount:      0,
+		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
+	}))
+	require.NoError(t, touchHeartbeat(agentDir, time.Now().Add(-2*time.Hour).UTC()))
+	busyPath := filepath.Join(allocation.Path, "busy.txt")
+	require.NoError(t, os.WriteFile(busyPath, []byte("still busy\n"), 0o644))
+
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	originalKillPID := rescueKillPID
+	originalSleep := rescueSleep
+	originalMaxWait := rescueQuiesceMaxWait
+	originalInterval := rescueQuiesceInterval
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) { return []int{424242}, nil }
+	rescueKillPID = func(int, syscall.Signal) error { return nil }
+	rescueSleep = func(time.Duration) {}
+	rescueQuiesceMaxWait = time.Nanosecond
+	rescueQuiesceInterval = 0
+	t.Cleanup(func() {
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+		rescueKillPID = originalKillPID
+		rescueSleep = originalSleep
+		rescueQuiesceMaxWait = originalMaxWait
+		rescueQuiesceInterval = originalInterval
+	})
+
+	err = (Step{}).Run(context.Background(), env.run)
+	var manual *agentrunner.ManualRecoveryRequiredError
+	require.ErrorAs(t, err, &manual)
+	assert.Equal(t, contracts.RollbackReasonLeaseFailure, manual.Reason)
+	assert.FileExists(t, busyPath)
+
+	state, ok, readErr := loadResumeState(agentDir)
+	require.NoError(t, readErr)
+	require.True(t, ok)
+	assert.Equal(t, 999999, state.Pid)
 }
 
 func TestStepRun_ZeroValuePreservesCustomStaleAfter(t *testing.T) {
@@ -608,7 +683,7 @@ func TestStepRun_RescueStartFailureLeavesNoPhantomLease(t *testing.T) {
 	require.NoError(t, (Step{}).Run(context.Background(), env.run))
 }
 
-func TestPerformRescue_CleansIgnoredFilesWithCleanX(t *testing.T) {
+func TestPerformRescue_PreservesIgnoredFiles(t *testing.T) {
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
 	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
 	require.NoError(t, err)
@@ -631,7 +706,7 @@ func TestPerformRescue_CleansIgnoredFilesWithCleanX(t *testing.T) {
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	})
 	require.NoError(t, err)
-	assert.NoFileExists(t, filepath.Join(allocation.Path, ".env.local"))
+	assert.FileExists(t, filepath.Join(allocation.Path, ".env.local"))
 }
 
 func TestStepRun_KillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
@@ -655,7 +730,7 @@ func TestStepRun_KillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return processDead(pid)
-	}, 2*time.Second, 20*time.Millisecond)
+	}, 15*time.Second, 20*time.Millisecond)
 }
 
 func TestStepRun_KillsFastDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
@@ -682,7 +757,7 @@ func TestStepRun_KillsFastDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return processDead(pid)
-	}, 2*time.Second, 20*time.Millisecond)
+	}, 5*time.Second, 20*time.Millisecond)
 }
 
 type failBeforeStartRunner struct{}

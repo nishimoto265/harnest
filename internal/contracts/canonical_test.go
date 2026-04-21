@@ -22,6 +22,12 @@ func (floatEmitter) MarshalJSON() ([]byte, error) {
 	return []byte(`{"score":1.5}`), nil
 }
 
+type collidingTextKey string
+
+func (k collidingTextKey) MarshalText() ([]byte, error) {
+	return []byte("shared"), nil
+}
+
 func TestCanonicalMarshal_FieldOrderInvariant(t *testing.T) {
 	type orderedA struct {
 		Z string `json:"z"`
@@ -190,6 +196,15 @@ func TestCanonicalMarshal_NormalizesNegativeZero(t *testing.T) {
 	data, err := CanonicalMarshal(json.Number("-0"))
 	require.NoError(t, err)
 	assert.Equal(t, "0", string(data))
+}
+
+func TestCanonicalMarshal_RejectsNonStringMapKeysEvenWhenTextMatches(t *testing.T) {
+	_, err := CanonicalMarshal(map[collidingTextKey]int{
+		"left":  1,
+		"right": 2,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCanonicalUnsupportedMapKey)
 }
 
 func TestCanonicalMarshal_RejectsForbiddenKindsInAnonymousEmbeddedStructs(t *testing.T) {

@@ -165,7 +165,7 @@ func TestRun_SunsetMarkerBlocksExecution(t *testing.T) {
 	assert.NoFileExists(t, decisionPath)
 }
 
-func TestRun_DivergedSunsetMarkerDoesNotBlockExecution(t *testing.T) {
+func TestRun_DivergedSunsetMarkerBlocksExecution(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR304")
 	require.NoError(t, os.WriteFile(filepath.Join(runCtx.RunsBase, sunsetMarkerFile+".diverged"), []byte("{}"), 0o644))
 

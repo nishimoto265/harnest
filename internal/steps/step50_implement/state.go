@@ -13,12 +13,14 @@ import (
 
 var killProcess = syscall.Kill
 var getProcessGroupID = syscall.Getpgid
+var lookupLeaseStartTime = agentrunner.LookupProcessStartTime
 
 type resumeState struct {
 	ExpectedBaseSHA string    `json:"expected_base_sha" validate:"required,sha1_hex"`
 	StartedAt       time.Time `json:"started_at,omitempty"`
 	Pid             int       `json:"pid,omitempty" validate:"gte=0"`
 	Pgid            int       `json:"pgid" validate:"gte=0"`
+	LeaderStartTime string    `json:"leader_start_time,omitempty"`
 	RetryCount      int       `json:"retry_count" validate:"gte=0"`
 	LastHeartbeat   time.Time `json:"last_heartbeat,omitempty"`
 }
@@ -135,23 +137,40 @@ func pidAlive(pid int) bool {
 	}
 }
 
-func processLeaseAlive(pid, expectedPGID int) bool {
+func processLeaseAlive(pid, expectedPGID int, expectedStartTime string) bool {
 	if !pidAlive(pid) {
 		return false
 	}
 	if expectedPGID <= 0 {
-		return true
+		if expectedStartTime == "" {
+			return true
+		}
+		actualStartTime, err := lookupLeaseStartTime(pid)
+		if err != nil {
+			return !errors.Is(err, syscall.ESRCH)
+		}
+		return actualStartTime == expectedStartTime
 	}
 	actualPGID, err := getProcessGroupID(pid)
 	if err != nil {
 		return !errors.Is(err, syscall.ESRCH)
 	}
-	return actualPGID == expectedPGID
+	if actualPGID != expectedPGID {
+		return false
+	}
+	if expectedStartTime == "" {
+		return true
+	}
+	actualStartTime, err := lookupLeaseStartTime(pid)
+	if err != nil {
+		return !errors.Is(err, syscall.ESRCH)
+	}
+	return actualStartTime == expectedStartTime
 }
 
-func shouldAttemptRescue(stale bool, pid, pgid int) bool {
+func shouldAttemptRescue(stale bool, pid, pgid int, leaderStartTime string) bool {
 	return agentrunner.ShouldAttemptRescue(stale, func(pid int) bool {
-		return processLeaseAlive(pid, pgid)
+		return processLeaseAlive(pid, pgid, leaderStartTime)
 	}, pid)
 }
 
@@ -162,6 +181,9 @@ func (s resumeState) Validate() error {
 	if s.Pid == 0 {
 		if s.Pgid != 0 {
 			return errors.New("step50: resume state: pgid requires pid")
+		}
+		if s.LeaderStartTime != "" {
+			return errors.New("step50: resume state: inactive lease must not persist leader_start_time")
 		}
 		if !s.StartedAt.IsZero() || !s.LastHeartbeat.IsZero() {
 			return errors.New("step50: resume state: inactive lease must not persist heartbeat timestamps")

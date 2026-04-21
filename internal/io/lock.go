@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -27,10 +26,10 @@ func AcquireFileLockContext(ctx context.Context, path string) (*FileLock, error)
 }
 
 func acquireFileLock(path string, nonBlocking bool, ctx context.Context) (*FileLock, error) {
-	if err := os.MkdirAll(filepath.Dir(path), defaultDirectoryPerm); err != nil {
+	if err := ensureWritableParentDir(path); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, defaultFilePerm)
+	f, err := openFileNoFollow(path, os.O_CREATE|os.O_RDWR, defaultFilePerm)
 	if err != nil {
 		return nil, err
 	}

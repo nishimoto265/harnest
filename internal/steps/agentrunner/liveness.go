@@ -6,8 +6,9 @@ import (
 )
 
 type ProcessLease struct {
-	PID  int `json:"pid" validate:"required,gt=0"`
-	PGID int `json:"pgid" validate:"gte=0"`
+	PID       int    `json:"pid" validate:"required,gt=0"`
+	PGID      int    `json:"pgid" validate:"gte=0"`
+	StartTime string `json:"start_time,omitempty"`
 }
 
 func ResolveProcessLease(pid int) (ProcessLease, error) {
@@ -18,9 +19,14 @@ func ResolveProcessLease(pid int) (ProcessLease, error) {
 	if err != nil {
 		return ProcessLease{}, err
 	}
+	startTime, err := processStartTime(pid)
+	if err != nil {
+		return ProcessLease{}, err
+	}
 	return ProcessLease{
-		PID:  pid,
-		PGID: pgid,
+		PID:       pid,
+		PGID:      pgid,
+		StartTime: startTime,
 	}, nil
 }
 

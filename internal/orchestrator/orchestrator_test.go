@@ -20,6 +20,7 @@ import (
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 	"github.com/nishimoto265/auto-improve/internal/steps/step20_implement"
 	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
@@ -734,6 +735,16 @@ func TestRealStep70_RejectsTamperedFreshDecision(t *testing.T) {
 	require.ErrorContains(t, err, "run_id")
 }
 
+func TestRun_FreshDecisionRunIDMismatchRejectedOnTerminalAppend(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps = stubPipelineSteps(nil, tamperedDecisionStep70{runID: "2026-04-21-PR999-deadbee"})
+
+	err = orch.Run(context.Background(), 82, RunOptions{RunID: "2026-04-21-PR82-abcdef0"})
+	require.ErrorContains(t, err, "decision run_id mismatch")
+}
+
 func TestLoadRunContext_RejectsTaskPackageRunIDMismatch(t *testing.T) {
 	runsBase := t.TempDir()
 	worktreeBase := t.TempDir()
@@ -789,6 +800,58 @@ func TestLoadRunContext_RejectsIntentionRunIDMismatch(t *testing.T) {
 	loaded, loadErr := store.Load()
 	require.ErrorContains(t, loadErr, "run_id mismatch")
 	assert.Nil(t, loaded)
+}
+
+func TestNewFreshSelection_RejectsRunIDPRMismatch(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+
+	_, err := newFreshSelection(105, RunOptions{RunID: "2026-04-21-PR104-abcdef0"}, runsBase, worktreeBase)
+	require.ErrorContains(t, err, "run_id PR mismatch")
+}
+
+func TestNewFreshSelection_RejectsCompletedRunIDReuse(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR105-abcdef0", runsBase, worktreeBase)
+	require.NoError(t, err)
+	require.NoError(t, state.Append(runCtx, completedEntry(105, runCtx.RunID, contracts.FailedStep70, time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC))))
+
+	_, err = newFreshSelection(105, RunOptions{RunID: runCtx.RunID}, runsBase, worktreeBase)
+	require.ErrorContains(t, err, "terminal state")
+}
+
+func TestNewFreshSelection_RejectsNonEmptyRunDir(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR110-abcdef0", runsBase, worktreeBase)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runCtx.RunDir(), "stale.txt"), []byte("stale\n"), 0o644))
+
+	_, err = newFreshSelection(110, RunOptions{RunID: runCtx.RunID}, runsBase, worktreeBase)
+	require.ErrorContains(t, err, "empty run dir")
+}
+
+func TestRun_RejectsSymlinkedRunStepDir(t *testing.T) {
+	cfg := testConfig(t)
+	runID := contracts.RunID("2026-04-21-PR111-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, seedResumeRun(t, runCtx, 111))
+
+	escapeDir := filepath.Join(t.TempDir(), "escape")
+	require.NoError(t, os.MkdirAll(escapeDir, 0o755))
+	require.NoError(t, os.RemoveAll(filepath.Join(runCtx.RunDir(), "70")))
+	require.NoError(t, os.Symlink(escapeDir, filepath.Join(runCtx.RunDir(), "70")))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps = stubPipelineSteps(nil, nil)
+
+	err = orch.Run(context.Background(), 111, RunOptions{RunID: runID})
+	require.Error(t, err)
+	assert.NoFileExists(t, filepath.Join(escapeDir, "decision.json"))
 }
 
 func TestFirstNeedsRecoverySentinel_MalformedJSONMaintainsBlockedState(t *testing.T) {
@@ -945,6 +1008,69 @@ func TestRun_FreshSecondSentinelGatePreventsScaffoldWrites(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(runCtx.RunDir(), "config.snapshot.yaml"))
 }
 
+func TestRun_ResumeSecondSentinelGatePreventsResumeExecution(t *testing.T) {
+	cfg := testConfig(t)
+	runID := contracts.RunID("2026-04-21-PR107-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, seedResumeRun(t, runCtx, 107))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps = stubPipelineSteps(nil, nil)
+
+	originalHook := beforeRunScaffoldHook
+	beforeRunScaffoldHook = func(run *StepRunContext) error {
+		blockedRunCtx, err := internalio.NewRunContext("2026-04-21-PR999-deadbee", run.IO.RunsBase, run.IO.WorktreeBase)
+		if err != nil {
+			return err
+		}
+		return ensureNeedsRecoverySentinel(blockedRunCtx, 999, blockedRunCtx.RunID, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70)
+	}
+	t.Cleanup(func() {
+		beforeRunScaffoldHook = originalHook
+	})
+
+	err = orch.Run(context.Background(), 107, RunOptions{RunID: runID})
+	var blockedErr *GlobalNeedsRecoveryError
+	require.ErrorAs(t, err, &blockedErr)
+
+	events, scanErr := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, scanErr)
+	assert.NotContains(t, eventKinds(events), contracts.StateKindCompleted)
+}
+
+func TestRun_FreshStartedAppendGateRechecksSentinel(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps = stubPipelineSteps(nil, nil)
+
+	originalHook := beforeStartedAppendHook
+	beforeStartedAppendHook = func(run *StepRunContext) error {
+		blockedRunCtx, err := internalio.NewRunContext("2026-04-21-PR108-deadbee", run.IO.RunsBase, run.IO.WorktreeBase)
+		if err != nil {
+			return err
+		}
+		return ensureNeedsRecoverySentinel(blockedRunCtx, 108, blockedRunCtx.RunID, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70)
+	}
+	t.Cleanup(func() {
+		beforeStartedAppendHook = originalHook
+	})
+
+	runID := contracts.RunID("2026-04-21-PR109-abcdef0")
+	err = orch.Run(context.Background(), 109, RunOptions{RunID: runID})
+	var blockedErr *GlobalNeedsRecoveryError
+	require.ErrorAs(t, err, &blockedErr)
+
+	runCtx, ctxErr := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, ctxErr)
+	assert.FileExists(t, filepath.Join(runCtx.RunDir(), "config.snapshot.yaml"))
+	events, scanErr := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, scanErr)
+	assert.NotContains(t, eventKinds(events), contracts.StateKindStarted)
+}
+
 func TestRun_RejectsConcurrentUseOnSameInstance(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
@@ -964,6 +1090,52 @@ func TestRun_RejectsConcurrentUseOnSameInstance(t *testing.T) {
 
 	close(blocker.release)
 	require.NoError(t, <-firstErrCh)
+}
+
+func TestRun_RejectsConcurrentUseAcrossInstancesForSamePR(t *testing.T) {
+	cfg := testConfig(t)
+	blocker := newBlockingStartStep()
+
+	orchA, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orchA.steps = stubPipelineSteps(blocker, nil)
+
+	orchB, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orchB.steps = stubPipelineSteps(nil, nil)
+
+	firstErrCh := make(chan error, 1)
+	go func() {
+		firstErrCh <- orchA.Run(context.Background(), 106, RunOptions{RunID: "2026-04-21-PR106-abcdef0"})
+	}()
+
+	<-blocker.started
+	err = orchB.Run(context.Background(), 106, RunOptions{RunID: "2026-04-21-PR106-bcdef01"})
+	require.ErrorIs(t, err, errConcurrentPRRun)
+
+	close(blocker.release)
+	require.NoError(t, <-firstErrCh)
+}
+
+func TestRun_Step20ManualRecoveryAppendsNeedsManualRecovery(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps = stubPipelineSteps(nil, nil)
+	orch.steps.Step20["a1"] = manualRecoveryStep{
+		reason: contracts.RollbackReasonLeaseFailure,
+		detail: "quiesce timed out",
+	}
+
+	runID := contracts.RunID("2026-04-21-PR112-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 112, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindNeedsManualRecovery, events[len(events)-1].Kind)
 }
 
 func TestRun_ResumeFromBranchPushed_EndToEnd(t *testing.T) {
@@ -1144,6 +1316,39 @@ type blockingStartStep struct {
 	started chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type manualRecoveryStep struct {
+	reason contracts.RollbackReason
+	detail string
+}
+
+func (s manualRecoveryStep) Run(context.Context, *StepRunContext) error {
+	return &agentrunner.ManualRecoveryRequiredError{
+		Reason: s.reason,
+		Detail: s.detail,
+	}
+}
+
+type tamperedDecisionStep70 struct {
+	runID contracts.RunID
+}
+
+func (s tamperedDecisionStep70) Run(_ context.Context, run *StepRunContext) error {
+	path, err := run.IO.ResolveRunRelative("70/decision.json")
+	if err != nil {
+		return err
+	}
+	return internalio.WriteJSONAtomic(path, contracts.Decision{
+		Action: contracts.DecisionActionNoop,
+		Value: contracts.DecisionNoop{
+			Action:        contracts.DecisionActionNoop,
+			SchemaVersion: "1",
+			RunID:         s.runID,
+			Reason:        "tampered",
+			DecidedAt:     time.Now().UTC(),
+		},
+	})
 }
 
 func newBlockingStartStep() *blockingStartStep {
@@ -2258,7 +2463,10 @@ func seedResumeRun(t *testing.T, runCtx internalio.RunContext, pr int) error {
 	if err := internalio.WriteJSONAtomic(candidatesPath, candidates); err != nil {
 		return err
 	}
-	return writeRunText(runCtx, "60/done.marker", "stub\n")
+	if err := writeRunText(runCtx, "60/done.marker", "stub\n"); err != nil {
+		return err
+	}
+	return state.Append(runCtx, startedEntry(pr, runCtx.RunID, time.Now().UTC()))
 }
 
 func validPlanningIntention(runID contracts.RunID) contracts.IntentionRecord {

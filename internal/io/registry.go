@@ -5,8 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	stdio "io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -17,6 +17,8 @@ type RegistryLine struct {
 	Sha256 string
 	Entry  contracts.RuleRegistryEntry
 }
+
+var registryBeforeAppendHook = func() error { return nil }
 
 func RegistryLines(path string) ([]RegistryLine, error) {
 	return readRegistryLines(path)
@@ -33,7 +35,21 @@ func AppendRegistryEntry(path string, entry contracts.RuleRegistryEntry) (contra
 	defer func() {
 		_ = lock.Unlock()
 	}()
-	lines, err := readRegistryLines(path)
+
+	payload, err := marshalJSONLRecord(entry)
+	if err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	if err := ensureWritableParentDir(path); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	f, identity, err := openTrackedFileNoFollow(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, defaultFilePerm)
+	if err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	defer f.Close()
+
+	lines, err := readRegistryLinesHandle(f)
 	if err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
@@ -48,21 +64,14 @@ func AppendRegistryEntry(path string, entry contracts.RuleRegistryEntry) (contra
 	if expectedPrevHash != actualPrevHash {
 		return contracts.RegistryAppendResult{}, fmt.Errorf("%w: expected_prev_hash=%q actual_prev_hash=%q", ErrRegistryCASMismatch, expectedPrevHash, actualPrevHash)
 	}
+	if err := registryBeforeAppendHook(); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	if err := ensurePathMatchesIdentity(path, identity); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
 
-	payload, err := marshalJSONLRecord(entry)
-	if err != nil {
-		return contracts.RegistryAppendResult{}, err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), defaultDirectoryPerm); err != nil {
-		return contracts.RegistryAppendResult{}, err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, defaultFilePerm)
-	if err != nil {
-		return contracts.RegistryAppendResult{}, err
-	}
-	defer f.Close()
-
-	offset, err := f.Seek(0, os.SEEK_END)
+	offset, err := f.Seek(0, stdio.SeekEnd)
 	if err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
@@ -73,6 +82,9 @@ func AppendRegistryEntry(path string, entry contracts.RuleRegistryEntry) (contra
 		return contracts.RegistryAppendResult{}, err
 	}
 	if err := f.Sync(); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	if err := ensurePathMatchesIdentity(path, identity); err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
 
@@ -114,35 +126,29 @@ func RebuildIdempotencyIndex(registryPath, indexPath string) ([]contracts.RuleId
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]contracts.RuleIdempotencyIndexEntry, 0, len(lines))
-	for _, line := range lines {
-		index, err := BuildRuleIdempotencyIndexEntry(line.Entry, contracts.RegistryAppendResult{
-			Offset: line.Offset,
-			Sha256: line.Sha256,
-		})
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, index)
+	entries, buffer, err := buildIdempotencyIndexBuffer(lines)
+	if err != nil {
+		return nil, err
 	}
-
-	buffer := make([]byte, 0, len(entries)*128)
-	for _, entry := range entries {
-		payload, err := marshalJSONLRecord(entry)
-		if err != nil {
-			return nil, err
-		}
-		buffer = append(buffer, payload...)
-		buffer = append(buffer, '\n')
+	if err := ensureWritableParentDir(indexPath); err != nil {
+		return nil, err
 	}
-	if err := WriteAtomic(indexPath, buffer); err != nil {
+	indexFile, identity, err := openTrackedFileNoFollow(indexPath, os.O_CREATE|os.O_RDWR, defaultFilePerm)
+	if err != nil {
+		return nil, err
+	}
+	defer indexFile.Close()
+	if err := writeJSONLBufferHandle(indexPath, indexFile, identity, buffer); err != nil {
 		return nil, err
 	}
 	return entries, nil
 }
 
 func readRegistryLines(path string) ([]RegistryLine, error) {
-	f, err := os.Open(path)
+	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
+		return nil, err
+	}
+	f, err := openFileNoFollow(path, os.O_RDONLY, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -150,7 +156,13 @@ func readRegistryLines(path string) ([]RegistryLine, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return readRegistryLinesHandle(f)
+}
 
+func readRegistryLinesHandle(f *os.File) ([]RegistryLine, error) {
+	if _, err := f.Seek(0, stdio.SeekStart); err != nil {
+		return nil, err
+	}
 	reader := bufio.NewReader(f)
 	var (
 		lines  []RegistryLine

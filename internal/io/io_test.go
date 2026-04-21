@@ -1,6 +1,7 @@
 package io
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -22,7 +23,7 @@ type testJSONLRecord struct {
 	Name string `json:"name"`
 }
 
-func TestWriteAtomic_RemovesStaleTempsAndWritesFile(t *testing.T) {
+func TestWriteAtomic_PreservesSiblingTempsAndWritesFile(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "manifest.json")
 	staleA := target + ".tmp-1-1-aaaa"
@@ -35,12 +36,8 @@ func TestWriteAtomic_RemovesStaleTempsAndWritesFile(t *testing.T) {
 	data, err := os.ReadFile(target)
 	require.NoError(t, err)
 	assert.Equal(t, `{"ok":true}`, string(data))
-	_, err = os.Stat(staleA)
-	assert.Error(t, err)
-	assert.True(t, os.IsNotExist(err))
-	_, err = os.Stat(staleB)
-	assert.Error(t, err)
-	assert.True(t, os.IsNotExist(err))
+	assert.FileExists(t, staleA)
+	assert.FileExists(t, staleB)
 }
 
 func TestWriteAtomic_RenameFailureCleansTemp(t *testing.T) {
@@ -62,6 +59,46 @@ func TestWriteAtomic_RenameFailureCleansTemp(t *testing.T) {
 	entries, readErr := os.ReadDir(dir)
 	require.NoError(t, readErr)
 	assert.Empty(t, entries)
+}
+
+func TestWriteAtomic_ConcurrentWritersDoNotDeletePeerTemps(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "manifest.json")
+
+	originalRename := atomicRename
+	enteredRename := make(chan struct{}, 2)
+	releaseRename := make(chan struct{})
+	atomicRename = func(oldPath, newPath string) error {
+		enteredRename <- struct{}{}
+		<-releaseRename
+		return originalRename(oldPath, newPath)
+	}
+	t.Cleanup(func() {
+		atomicRename = originalRename
+	})
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	go func() {
+		<-start
+		errs <- WriteAtomic(target, []byte(`{"writer":"one"}`))
+	}()
+	go func() {
+		<-start
+		errs <- WriteAtomic(target, []byte(`{"writer":"two"}`))
+	}()
+	close(start)
+
+	<-enteredRename
+	<-enteredRename
+	close(releaseRename)
+
+	require.NoError(t, <-errs)
+	require.NoError(t, <-errs)
+
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Contains(t, []string{`{"writer":"one"}`, `{"writer":"two"}`}, string(data))
 }
 
 func TestAppendJSONLAndReadJSONL(t *testing.T) {
@@ -408,6 +445,26 @@ func TestAcquirePromotionLock(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestAcquireFileLock_RejectsSymlinkSwapWhileAnotherHolderOwnsLock(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "promotion.lock")
+	firstLock, err := AcquireFileLock(lockPath)
+	require.NoError(t, err)
+	defer func() {
+		_ = firstLock.Unlock()
+	}()
+
+	replacement := filepath.Join(t.TempDir(), "replacement.lock")
+	require.NoError(t, os.WriteFile(replacement, []byte("replacement\n"), defaultFilePerm))
+	require.NoError(t, os.Remove(lockPath))
+	require.NoError(t, os.Symlink(replacement, lockPath))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = AcquireFileLockContext(ctx, lockPath)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, context.DeadlineExceeded))
+}
+
 func TestAppendRegistryEntryCASAndIndexRebuild(t *testing.T) {
 	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
 	first := contracts.RuleRegistryEntry{
@@ -645,6 +702,62 @@ func TestAppendRegistryEntry_ConcurrentCASAllowsSingleWinner(t *testing.T) {
 	require.Len(t, lines, 1)
 }
 
+func TestAppendRegistryEntry_FailsClosedWhenRegistryPathIdentityChanges(t *testing.T) {
+	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	first := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("2", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        "2026-04-21-PR1-abcdef0",
+			At:             time.Unix(100, 0).UTC(),
+		},
+	}
+	firstResult, err := AppendRegistryEntry(registryPath, first)
+	require.NoError(t, err)
+
+	replacement := filepath.Join(t.TempDir(), "replacement-registry.jsonl")
+	require.NoError(t, os.WriteFile(replacement, nil, defaultFilePerm))
+	originalHook := registryBeforeAppendHook
+	registryBeforeAppendHook = func() error {
+		return os.Rename(replacement, registryPath)
+	}
+	t.Cleanup(func() {
+		registryBeforeAppendHook = originalHook
+	})
+
+	second := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindUpdated,
+		Value: contracts.RuleRegistryUpdated{
+			Kind:           contracts.RegistryKindUpdated,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("3", 64),
+			PrevSha256:     strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("4", 64),
+			VersionSeq:     2,
+			PrevHash:       firstResult.Sha256,
+			ByRunID:        "2026-04-21-PR2-bcdef01",
+			At:             time.Unix(200, 0).UTC(),
+		},
+	}
+
+	_, err = AppendRegistryEntry(registryPath, second)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPathIdentityChanged)
+
+	lines, readErr := readRegistryLines(registryPath)
+	require.NoError(t, readErr)
+	assert.Empty(t, lines)
+}
+
 func TestSyncIdempotencyIndex_ConcurrentAppendDeduplicatesOffset(t *testing.T) {
 	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
 	indexPath := filepath.Join(filepath.Dir(registryPath), "rules-idempotency-index.jsonl")
@@ -688,6 +801,92 @@ func TestSyncIdempotencyIndex_ConcurrentAppendDeduplicatesOffset(t *testing.T) {
 	rows, err := ReadJSONL[contracts.RuleIdempotencyIndexEntry](indexPath)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
+}
+
+func TestSyncIdempotencyIndex_FailsClosedWhenIndexPathIdentityChanges(t *testing.T) {
+	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	indexPath := filepath.Join(filepath.Dir(registryPath), "rules-idempotency-index.jsonl")
+	first := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("2", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        "2026-04-21-PR1-abcdef0",
+			At:             time.Unix(100, 0).UTC(),
+		},
+	}
+	firstResult, err := AppendRegistryEntry(registryPath, first)
+	require.NoError(t, err)
+	_, err = RebuildIdempotencyIndex(registryPath, indexPath)
+	require.NoError(t, err)
+
+	second := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindUpdated,
+		Value: contracts.RuleRegistryUpdated{
+			Kind:           contracts.RegistryKindUpdated,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("3", 64),
+			PrevSha256:     strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("4", 64),
+			VersionSeq:     2,
+			PrevHash:       firstResult.Sha256,
+			ByRunID:        "2026-04-21-PR2-bcdef01",
+			At:             time.Unix(200, 0).UTC(),
+		},
+	}
+	secondResult, err := AppendRegistryEntry(registryPath, second)
+	require.NoError(t, err)
+	require.NoError(t, SyncIdempotencyIndex(registryPath, indexPath, second, secondResult))
+
+	third := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindUpdated,
+		Value: contracts.RuleRegistryUpdated{
+			Kind:           contracts.RegistryKindUpdated,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("5", 64),
+			PrevSha256:     strings.Repeat("3", 64),
+			IdempotencyKey: strings.Repeat("6", 64),
+			VersionSeq:     3,
+			PrevHash:       secondResult.Sha256,
+			ByRunID:        "2026-04-21-PR3-cdef012",
+			At:             time.Unix(300, 0).UTC(),
+		},
+	}
+	thirdResult, err := AppendRegistryEntry(registryPath, third)
+	require.NoError(t, err)
+
+	replacement := filepath.Join(t.TempDir(), "replacement-index.jsonl")
+	require.NoError(t, os.WriteFile(replacement, nil, defaultFilePerm))
+	originalAppendHook := idempotencyIndexBeforeAppendHook
+	originalRewriteHook := idempotencyIndexBeforeRewriteHook
+	idempotencyIndexBeforeRewriteHook = func() error {
+		if err := os.Remove(indexPath); err != nil {
+			return err
+		}
+		return os.Rename(replacement, indexPath)
+	}
+	t.Cleanup(func() {
+		idempotencyIndexBeforeAppendHook = originalAppendHook
+		idempotencyIndexBeforeRewriteHook = originalRewriteHook
+	})
+
+	err = SyncIdempotencyIndex(registryPath, indexPath, third, thirdResult)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPathIdentityChanged)
+
+	rows, readErr := ReadJSONL[contracts.RuleIdempotencyIndexEntry](indexPath)
+	require.NoError(t, readErr)
+	assert.Empty(t, rows)
 }
 
 func newTestRunContext(t *testing.T) RunContext {

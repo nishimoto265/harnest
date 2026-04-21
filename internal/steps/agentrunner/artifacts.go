@@ -25,6 +25,9 @@ var (
 	ErrArtifactTooLarge      = errors.New("agentrunner: artifact exceeds size limit")
 )
 
+var snapshotOpenValidatedRegularFile = OpenValidatedRegularFile
+var snapshotCopyOpenFile = copySnapshotOpenFile
+
 func SuccessDiffBytes(ctx context.Context, worktreePath, baseSHA, errPrefix string) ([]byte, error) {
 	tempDir, err := os.MkdirTemp("", "auto-improve-diff-*")
 	if err != nil {
@@ -313,7 +316,7 @@ func loadChecklistArtifactFileContext(ctx context.Context, path string) (contrac
 }
 
 func snapshotDiffableArtifact(ctx context.Context, sourcePath, tempDir, relativePath string) (string, bool, error) {
-	file, perm, size, err := OpenValidatedRegularFile(sourcePath)
+	file, perm, size, err := snapshotOpenValidatedRegularFile(sourcePath)
 	if err != nil {
 		if errors.Is(err, ErrArtifactNotRegular) {
 			return "", false, nil
@@ -347,13 +350,25 @@ func snapshotDiffableArtifact(ctx context.Context, sourcePath, tempDir, relative
 	if err := tempFile.Chmod(perm); err != nil {
 		return cleanup(err)
 	}
-	if _, err := io.Copy(tempFile, &contextReader{ctx: ctx, reader: file}); err != nil {
+	written, err := snapshotCopyOpenFile(ctx, tempFile, file, maxSuccessDiffBytes)
+	if err != nil {
 		return cleanup(err)
+	}
+	if written > maxSuccessDiffBytes {
+		return cleanup(fmt.Errorf("%w: path=%s size=%d limit=%d", ErrSuccessDiffOverflow, sourcePath, written, maxSuccessDiffBytes))
 	}
 	if err := tempFile.Close(); err != nil {
 		return cleanup(err)
 	}
 	return snapshotRoot, true, nil
+}
+
+func copySnapshotOpenFile(ctx context.Context, dst io.Writer, src *os.File, sizeLimit int64) (int64, error) {
+	return io.CopyBuffer(
+		dst,
+		io.LimitReader(&contextReader{ctx: ctx, reader: src}, sizeLimit+1),
+		make([]byte, 32<<10),
+	)
 }
 
 type contextReader struct {

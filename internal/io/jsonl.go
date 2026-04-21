@@ -20,7 +20,7 @@ type appendJSONLFile interface {
 }
 
 var appendJSONLOpenFile = func(path string) (appendJSONLFile, error) {
-	return os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, defaultFilePerm)
+	return openFileNoFollow(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, defaultFilePerm)
 }
 
 // AppendJSONL validates record, canonicalizes it, enforces the 4KB line limit,
@@ -33,7 +33,7 @@ func AppendJSONL(path string, record any) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), defaultDirectoryPerm); err != nil {
+	if err := ensureWritableParentDir(path); err != nil {
 		return err
 	}
 	f, err := appendJSONLOpenFile(path)
@@ -49,7 +49,7 @@ func AppendJSONL(path string, record any) error {
 
 // ReadJSONL strict-decodes each JSONL row via contracts.DecodeStrictJSON.
 func ReadJSONL[T any](path string) ([]T, error) {
-	f, err := os.Open(path)
+	f, err := openFileNoFollow(path, os.O_RDONLY, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -57,7 +57,13 @@ func ReadJSONL[T any](path string) ([]T, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return readJSONLHandle[T](f)
+}
 
+func readJSONLHandle[T any](f *os.File) ([]T, error) {
+	if _, err := f.Seek(0, stdio.SeekStart); err != nil {
+		return nil, err
+	}
 	var records []T
 	reader := bufio.NewReader(f)
 	lineNo := 0

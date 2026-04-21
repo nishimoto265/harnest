@@ -123,6 +123,48 @@ func TestReaderLastEventForPR_CorruptLineReturnsTypedError(t *testing.T) {
 	assert.True(t, errors.Is(err, contracts.ErrDuplicateJSONKey) || errors.Is(err, contracts.ErrUnknownStateKind))
 }
 
+func TestLatestRunForPR_IgnoresPartialTrailingLineDuringConcurrentAppend(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	ctx := testRunContext(t, "2026-04-21-PR42-abcdef0", runsBase, worktreeBase)
+	path := ctx.ProcessedPath()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+
+	entry := startedEntry(42, ctx.RunID, time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC))
+	payload, err := contracts.MarshalStrict(entry)
+	require.NoError(t, err)
+	fullLine := append(append([]byte{}, payload...), '\n')
+	require.NoError(t, os.WriteFile(path, fullLine, 0o644))
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	require.NoError(t, err)
+	defer f.Close()
+	stepDone := stepDoneEntry(42, ctx.RunID, contracts.FailedStep20, time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC))
+	stepPayload, err := contracts.MarshalStrict(stepDone)
+	require.NoError(t, err)
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for i := 0; i < 200; i++ {
+			half := len(stepPayload) / 2
+			_, _ = f.Write(stepPayload[:half])
+			_ = f.Sync()
+			time.Sleep(1 * time.Millisecond)
+			_, _ = f.Write(stepPayload[half:])
+			_, _ = f.Write([]byte{'\n'})
+			_ = f.Sync()
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		latest, err := LatestRunForPR(ctx, 42)
+		require.NoError(t, err)
+		require.NotNil(t, latest.LastEvent)
+	}
+	<-writerDone
+}
+
 func TestClassifyNextAction_CoversAllStateKinds(t *testing.T) {
 	tests := map[contracts.StateKind]NextAction{
 		contracts.StateKindStarted:                     NextActionResume,

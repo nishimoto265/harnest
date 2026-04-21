@@ -64,7 +64,7 @@ func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation co
 	if err != nil {
 		return 0, err
 	}
-	if !shouldAttemptRescue(stale, state.Pid, state.Pgid) {
+	if !shouldAttemptRescue(stale, state.Pid, state.Pgid, state.LeaderStartTime) {
 		return 0, fmt.Errorf("%w: agent %s", ErrRescueAbortedLeaseActive, run.Agent)
 	}
 	if state.RetryCount >= rescueMaxRetries(run.Config, s.cfg) {
@@ -109,25 +109,18 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := run.IO.ValidateWorktreeAllocation(allocation); err != nil {
 		return 0, err
 	}
-	if quiesced, err := ensureRescueLeaseQuiesced(ctx, allocation.Path, state); err != nil {
+	if err := ensureRescueLeaseQuiesced(ctx, allocation.Path, state); err != nil {
 		return 0, err
-	} else if !quiesced {
-		nextRetry := state.RetryCount + 1
-		if err := restoreAllocationWorktree(ctx, allocation, state.ExpectedBaseSHA); err != nil {
-			return 0, err
-		}
-		return finishRescueState(agentDir, state, nextRetry)
 	}
 	currentBranch, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "branch", "--show-current")
 	if err != nil {
 		return 0, err
 	}
 	if currentBranch == "" || currentBranch != allocation.Branch {
-		nextRetry := state.RetryCount + 1
-		if err := restoreAllocationWorktree(ctx, allocation, state.ExpectedBaseSHA); err != nil {
-			return 0, err
+		return 0, &agentrunner.ManualRecoveryRequiredError{
+			Reason: contracts.RollbackReasonLeaseFailure,
+			Detail: fmt.Sprintf("step20: rescue aborted because worktree branch drifted: got=%q want=%q", currentBranch, allocation.Branch),
 		}
-		return finishRescueState(agentDir, state, nextRetry)
 	}
 	rescueID := fmt.Sprintf("%s-%s-rescue-%d-%d", run.IO.RunID, run.Agent, state.RetryCount+1, s.now().UTC().Unix())
 	rescueDir := filepath.Join(agentDir, rescuedDirName, rescueID)
@@ -223,7 +216,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-ffdx"); err != nil {
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-fd"); err != nil {
 		return 0, err
 	}
 
@@ -268,6 +261,15 @@ func (l *rescueLock) Unlock() error {
 type rescueStateFile = agentrunner.RescueStateFile
 
 type rescueArtifactDigest = agentrunner.RescueArtifactDigest
+
+var rescueKillProcessGroupUntilGone = agentrunner.KillProcessGroupUntilGone
+var rescueWorktreeProcessIDs = worktreeProcessIDs
+var rescueKillPID = syscall.Kill
+var rescueQuiesceMaxWait = 750 * time.Millisecond
+var rescueQuiesceInterval = 25 * time.Millisecond
+var rescueSleep = time.Sleep
+var rescueExecLookPath = exec.LookPath
+var rescueCommandContext = exec.CommandContext
 
 func writeCommitBundle(ctx context.Context, worktreePath, rescueDir, baseSHA string) (int, string, error) {
 	bundlePath := filepath.Join(rescueDir, "commits.bundle")
@@ -523,7 +525,7 @@ func restoreAllocationWorktree(ctx context.Context, allocation contracts.Worktre
 	if _, err := gitOutputContext(ctx, identity, allocation.Path, "reset", "--hard", expectedBaseSHA); err != nil {
 		return err
 	}
-	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-ffdx"); err != nil {
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-fd"); err != nil {
 		return err
 	}
 	return nil
@@ -535,6 +537,7 @@ func finishRescueState(agentDir string, state resumeState, nextRetry int) (int, 
 	state.LastHeartbeat = time.Time{}
 	state.Pid = 0
 	state.Pgid = 0
+	state.LeaderStartTime = ""
 	if err := os.Remove(heartbeatPath(agentDir)); err != nil && !os.IsNotExist(err) {
 		return 0, err
 	}
@@ -544,107 +547,86 @@ func finishRescueState(agentDir string, state resumeState, nextRetry int) (int, 
 	return nextRetry, nil
 }
 
-func ensureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state resumeState) (bool, error) {
+func ensureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state resumeState) error {
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return err
 	}
-	if state.Pgid > 0 {
-		_ = agentrunner.KillProcessGroupUntilGone(state.Pgid, 500*time.Millisecond, 25*time.Millisecond)
+	if shouldKillSavedProcessGroup(state) {
+		_ = rescueKillProcessGroupUntilGone(state.Pgid, 500*time.Millisecond, 25*time.Millisecond)
 	}
-	deadline := time.Now().Add(750 * time.Millisecond)
+	deadline := time.Now().Add(rescueQuiesceMaxWait)
 	emptyChecks := 0
 	for {
 		if err := ctx.Err(); err != nil {
-			return false, err
+			return err
 		}
-		pids, err := worktreeProcessIDs(ctx, worktreePath)
+		pids, err := rescueWorktreeProcessIDs(ctx, worktreePath)
 		if err != nil {
-			return false, nil
+			return &agentrunner.ManualRecoveryRequiredError{
+				Reason: contracts.RollbackReasonLeaseFailure,
+				Detail: fmt.Sprintf("step20: rescue lease quiesce failed to enumerate worktree processes: %v", err),
+			}
 		}
-		if len(pids) == 0 {
+		activePIDs := make([]int, 0, len(pids))
+		for _, pid := range pids {
+			if pid <= 0 || pid == os.Getpid() {
+				continue
+			}
+			activePIDs = append(activePIDs, pid)
+		}
+		if len(activePIDs) == 0 {
 			emptyChecks++
 			if emptyChecks >= 2 {
-				return true, nil
+				return nil
 			}
 		} else {
 			emptyChecks = 0
-			for _, pid := range pids {
-				if pid <= 0 || pid == os.Getpid() {
-					continue
-				}
-				_ = syscall.Kill(pid, syscall.SIGKILL)
+			for _, pid := range activePIDs {
+				_ = rescueKillPID(pid, syscall.SIGKILL)
 			}
 		}
 		if !time.Now().Before(deadline) {
-			return false, nil
+			return &agentrunner.ManualRecoveryRequiredError{
+				Reason: contracts.RollbackReasonLeaseFailure,
+				Detail: "step20: rescue lease quiesce timed out while worktree remained busy",
+			}
 		}
-		time.Sleep(25 * time.Millisecond)
+		rescueSleep(rescueQuiesceInterval)
 	}
 }
 
 func worktreeProcessIDs(ctx context.Context, worktreePath string) ([]int, error) {
-	pids, err := worktreeProcessIDsFromPS(ctx, worktreePath)
+	lsofPath, err := rescueExecLookPath("lsof")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("step20: lsof is required for rescue quiesce: %w", err)
 	}
-	if lsofPath, err := exec.LookPath("lsof"); err == nil {
-		cmd := exec.CommandContext(ctx, lsofPath, "-t", "+D", worktreePath)
-		output, err := cmd.Output()
-		if err == nil {
-			return appendUniquePIDs(pids, parsePIDList(string(output))...), nil
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return pids, nil
-		}
-		return pids, nil
-	}
-	return pids, nil
-}
-
-func worktreeProcessIDsFromPS(ctx context.Context, worktreePath string) ([]int, error) {
-	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,command=")
+	cmd := rescueCommandContext(ctx, lsofPath, "-t", "+D", worktreePath)
 	output, err := cmd.Output()
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, err
+	if err == nil {
+		return parsePIDList(string(output)), nil
 	}
-	pids := make([]int, 0)
-	for _, line := range strings.Split(string(output), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil || pid <= 0 || pid == os.Getpid() {
-			continue
-		}
-		if strings.Contains(line, worktreePath) {
-			pids = append(pids, pid)
-		}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
-	return pids, nil
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("step20: enumerate worktree processes with lsof: %w", err)
 }
 
-func appendUniquePIDs(base []int, extra ...int) []int {
-	seen := make(map[int]struct{}, len(base)+len(extra))
-	out := make([]int, 0, len(base)+len(extra))
-	for _, pid := range append(base, extra...) {
-		if pid <= 0 {
-			continue
-		}
-		if _, ok := seen[pid]; ok {
-			continue
-		}
-		seen[pid] = struct{}{}
-		out = append(out, pid)
+func shouldKillSavedProcessGroup(state resumeState) bool {
+	if state.Pgid <= 0 || state.Pid <= 0 || state.LeaderStartTime == "" {
+		return false
 	}
-	return out
+	if !pidAlive(state.Pid) {
+		return false
+	}
+	startTime, err := lookupLeaseStartTime(state.Pid)
+	if err != nil {
+		return false
+	}
+	return startTime == state.LeaderStartTime
 }
 
 func parsePIDList(output string) []int {

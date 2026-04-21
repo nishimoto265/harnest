@@ -49,6 +49,14 @@ func TestNeedsRecoverySentinel_RejectsBadCreatedAt(t *testing.T) {
 	assert.Error(t, json.Unmarshal(data, &s))
 }
 
+func TestNeedsRecoverySentinel_UnmarshalJSON_RejectsReasonFailedStepMismatch(t *testing.T) {
+	data := []byte(`{"run_id":"2026-04-20-PR42-abcdef0","pr":42,"reason":"worktree_rescue_loop","failed_step":"70","created_at":"2026-04-20T12:00:00Z"}`)
+	var s NeedsRecoverySentinel
+	err := json.Unmarshal(data, &s)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrReasonFailedStepMismatch)
+}
+
 func TestNeedsRecoverySentinel_Validate_RejectsReasonFailedStepMismatch(t *testing.T) {
 	s := validNeedsRecoverySentinel()
 	s.Reason = RollbackReasonWorktreeRescueLoop

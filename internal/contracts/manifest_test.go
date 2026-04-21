@@ -138,6 +138,24 @@ func TestManifest_Error_RejectsMissingExitCodeField(t *testing.T) {
 	assert.ErrorIs(t, err, ErrManifestErrorMissingExitCode)
 }
 
+func TestManifestError_UnmarshalJSON_RejectsFinishedBeforeStarted(t *testing.T) {
+	data := []byte(`{
+  "kind": "error",
+  "schema_version": "1",
+  "run_id": "2026-04-20-PR42-abcdef0",
+  "pass": 1,
+  "agent": "a2",
+  "exit_code": 1,
+  "reason": "unknown",
+  "started_at": "2026-04-20T10:01:00Z",
+  "finished_at": "2026-04-20T10:00:00Z"
+}`)
+	var m ManifestError
+	err := json.Unmarshal(data, &m)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrManifestFinishedBeforeStarted)
+}
+
 func TestManifest_Reject_WrongKind(t *testing.T) {
 	data := `{"kind": "bogus_variant"}`
 	var m Manifest
