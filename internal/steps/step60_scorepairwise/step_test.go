@@ -300,6 +300,29 @@ func TestRun_ErrorsWhenPass2ManifestMissing(t *testing.T) {
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
+func TestRun_DeclaredScorableAgentsFailClosedWhenPass1ManifestMissing(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		agents:          []contracts.AgentID{"a1", "a2", "a3"},
+		writePass1Score: true,
+	})
+	manifestPath, err := runIO.ManifestPath(1, "a1")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(manifestPath))
+
+	err = Run(context.Background(), Input{
+		IO:             runIO,
+		TaskPackage:    &pkg,
+		ScorableAgents: []contracts.AgentID{"a1", "a2", "a3"},
+		Primary:        judges.NewPrimaryStub(),
+		Secondary:      judges.NewSecondaryStub(),
+		Arbiter:        judges.NewArbiterStub(),
+		Now:            func() time.Time { return time.Date(2026, 4, 21, 12, 30, 0, 0, time.UTC) },
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "declared scorable agent missing pass1 scorable manifest")
+	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
+}
+
 func TestRun_SkipsNonScorablePass2Agent(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		agents:                 []contracts.AgentID{"a1", "a2", "a3"},
@@ -417,9 +440,50 @@ func TestRun_RerunWithoutMarker_RebuildsFromRawWithoutRejudging(t *testing.T) {
 	require.True(t, ok)
 	outputHash, err := fileSHA256(outputPath)
 	require.NoError(t, err)
-	_, reusable, err := tryReuseRawPanelResult(rawState, "a1", outputHash, "default", "phase0-stub")
+	_, reusable, err := tryReuseRawPanelResult(runIO, rawState, "a1", outputHash, "default", "phase0-stub")
 	require.NoError(t, err)
 	require.True(t, reusable)
+
+	var called bool
+	noJudge := unexpectedCallJudge{called: &called}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     noJudge,
+		Secondary:   noJudge,
+		Arbiter:     noJudge,
+		Now:         func() time.Time { return now },
+	}))
+	assert.False(t, called)
+}
+
+func TestRun_RerunWithoutMarker_IgnoresStaleFinalComplianceRows(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+	now := time.Date(2026, 4, 21, 11, 45, 0, 0, time.UTC)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
+	require.NoError(t, internalio.AppendJSONL(mustResolve(t, runIO, "60/compliance-B.jsonl"), contracts.ComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         pkg.RunID,
+		Pass:          2,
+		Agent:         "a1",
+		RuleID:        "stale-only",
+		Verdict:       contracts.ComplianceVerdictViolated,
+		VerdictPath:   contracts.VerdictPathSingle,
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    now,
+	}))
 
 	var called bool
 	noJudge := unexpectedCallJudge{called: &called}
@@ -488,24 +552,17 @@ func TestRun_RerunsWhenRawComplianceCoverageIsMissing(t *testing.T) {
 	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/compliance-B-raw.jsonl")))
 	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
 
-	counter := &blockingJudge{
-		delegate: primary,
-		started:  make(chan struct{}),
-		release:  make(chan struct{}),
-	}
-	go func() {
-		<-counter.started
-		close(counter.release)
-	}()
+	var called bool
+	noJudge := unexpectedCallJudge{called: &called}
 	require.NoError(t, Run(context.Background(), Input{
 		IO:          runIO,
 		TaskPackage: &pkg,
-		Primary:     counter,
-		Secondary:   counter,
-		Arbiter:     counter,
+		Primary:     noJudge,
+		Secondary:   noJudge,
+		Arbiter:     noJudge,
 		Now:         func() time.Time { return now },
 	}))
-	assert.Greater(t, counter.callCount(), int32(0))
+	assert.False(t, called)
 }
 
 func TestRun_NoScorableAgentsReturnsTypedError(t *testing.T) {
@@ -607,36 +664,16 @@ func TestRun_ComplianceSingleSideRuleKeepsRawProvenance(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, Run(context.Background(), Input{
+	err := Run(context.Background(), Input{
 		IO:          runIO,
 		TaskPackage: &pkg,
 		Primary:     primary,
 		Secondary:   secondary,
 		Arbiter:     arbiter,
 		Now:         func() time.Time { return time.Date(2026, 4, 21, 16, 0, 0, 0, time.UTC) },
-	}))
-
-	compliance := mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl")
-	require.Len(t, compliance, 2)
-	byRule := make(map[string]contracts.ComplianceEntry, len(compliance))
-	for _, entry := range compliance {
-		byRule[entry.RuleID] = entry
-	}
-	assert.Equal(t, contracts.ComplianceVerdictCompliant, byRule["shared"].Verdict)
-	assert.Equal(t, contracts.VerdictPathArbitrated, byRule["shared"].VerdictPath)
-	assert.Equal(t, contracts.ComplianceVerdictViolated, byRule["secondary-only"].Verdict)
-	assert.Equal(t, contracts.VerdictPathSingle, byRule["secondary-only"].VerdictPath)
-
-	rawCompliance := mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl")
-	var secondaryOnly []contracts.RawComplianceEntry
-	for _, entry := range rawCompliance {
-		if entry.RuleID == "secondary-only" {
-			secondaryOnly = append(secondaryOnly, entry)
-		}
-	}
-	require.Len(t, secondaryOnly, 1)
-	assert.Equal(t, contracts.JudgeRoleSecondary, secondaryOnly[0].JudgeRole)
-	assert.Equal(t, contracts.ComplianceVerdictViolated, secondaryOnly[0].Verdict)
+	})
+	require.ErrorContains(t, err, "rule-set mismatch")
+	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
 func TestRun_ComplianceArbiterOnlyRuleFinalizesAsSingleSource(t *testing.T) {
@@ -667,41 +704,149 @@ func TestRun_ComplianceArbiterOnlyRuleFinalizesAsSingleSource(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, Run(context.Background(), Input{
+	err := Run(context.Background(), Input{
 		IO:          runIO,
 		TaskPackage: &pkg,
 		Primary:     primary,
 		Secondary:   secondary,
 		Arbiter:     arbiter,
 		Now:         func() time.Time { return time.Date(2026, 4, 21, 16, 30, 0, 0, time.UTC) },
+	})
+	require.ErrorContains(t, err, "rule-set mismatch")
+	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
+}
+
+func TestRun_RegeneratesOverflowSidecarsInsteadOfTrustingJudgeRefs(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	judge := overflowRefJudge{}
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judge,
+		Secondary:   judge,
+		Arbiter:     judge,
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 16, 45, 0, 0, time.UTC) },
 	}))
 
-	compliance := mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl")
-	require.Len(t, compliance, 3)
-	byRule := make(map[string]contracts.ComplianceEntry, len(compliance))
-	for _, entry := range compliance {
-		byRule[entry.RuleID] = entry
+	for _, row := range mustReadJSONL[contracts.RawScoreEntry](t, runIO, "60/scores-B-raw.jsonl") {
+		assert.Nil(t, row.ReasonsOverflowRef)
 	}
-	assert.Equal(t, contracts.ComplianceVerdictValidException, byRule["only-arbiter"].Verdict)
-	assert.Equal(t, contracts.VerdictPathSingle, byRule["only-arbiter"].VerdictPath)
-	assert.Equal(t, contracts.ComplianceVerdictViolated, byRule["only-primary"].Verdict)
-	assert.Equal(t, contracts.VerdictPathSingle, byRule["only-primary"].VerdictPath)
-	assert.Equal(t, contracts.ComplianceVerdictCompliant, byRule["only-secondary"].Verdict)
-	assert.Equal(t, contracts.VerdictPathSingle, byRule["only-secondary"].VerdictPath)
+	for _, row := range mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl") {
+		assert.Nil(t, row.RationaleOverflowRef)
+	}
+}
 
-	rawCompliance := mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl")
-	byRawRule := make(map[string][]contracts.RawComplianceEntry, len(rawCompliance))
-	for _, entry := range rawCompliance {
-		byRawRule[entry.RuleID] = append(byRawRule[entry.RuleID], entry)
-	}
-	require.Len(t, byRawRule["only-arbiter"], 1)
-	assert.Equal(t, contracts.JudgeRolePrimary, byRawRule["only-arbiter"][0].JudgeRole)
-	assert.Nil(t, byRawRule["only-arbiter"][0].PrimaryRef)
-	assert.Nil(t, byRawRule["only-arbiter"][0].SecondaryRef)
-	require.Len(t, byRawRule["only-primary"], 1)
-	assert.Equal(t, contracts.JudgeRolePrimary, byRawRule["only-primary"][0].JudgeRole)
-	require.Len(t, byRawRule["only-secondary"], 1)
-	assert.Equal(t, contracts.JudgeRoleSecondary, byRawRule["only-secondary"][0].JudgeRole)
+func TestRun_CorruptOverflowSidecarInvalidatesRawReuse(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	now := time.Date(2026, 4, 21, 17, 15, 0, 0, time.UTC)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
+
+	rawScoresPath := mustResolve(t, runIO, "60/scores-B-raw.jsonl")
+	rawScores := mustReadJSONL[contracts.RawScoreEntry](t, runIO, "60/scores-B-raw.jsonl")
+	require.NotEmpty(t, rawScores)
+	ref, sidecarPath := writeStep60ReasonsSidecar(t, runIO, "overflow sidecar contents\n")
+	rawScores[0].Reasons = ""
+	rawScores[0].ReasonsOverflowRef = &ref
+	rewriteRawScores(t, rawScoresPath, rawScores)
+	require.NoError(t, os.WriteFile(sidecarPath, []byte("corrupt"), 0o644))
+
+	counter := &countingJudge{delegate: judges.NewPrimaryStub()}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     counter,
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+	assert.Greater(t, counter.callCount(), int32(0))
+}
+
+func TestRun_CorruptOverflowSidecarInvalidatesDoneMarker(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+	now := time.Date(2026, 4, 21, 17, 30, 0, 0, time.UTC)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+
+	rawScoresPath := mustResolve(t, runIO, "60/scores-B-raw.jsonl")
+	rawScores := mustReadJSONL[contracts.RawScoreEntry](t, runIO, "60/scores-B-raw.jsonl")
+	ref, sidecarPath := writeStep60ReasonsSidecar(t, runIO, "overflow sidecar contents\n")
+	rawScores[0].Reasons = ""
+	rawScores[0].ReasonsOverflowRef = &ref
+	rewriteRawScores(t, rawScoresPath, rawScores)
+
+	markerPath := mustResolve(t, runIO, "60/done.marker")
+	marker := mustReadJSON[contracts.Step60DoneMarker](t, markerPath)
+	marker.RawHashes.ScoresRaw = mustHashReducedRawScores(t, runIO)
+	require.NoError(t, internalio.WriteJSONAtomic(markerPath, marker))
+	require.NoError(t, os.WriteFile(sidecarPath, []byte("corrupt"), 0o644))
+
+	counter := &countingJudge{delegate: judges.NewPrimaryStub()}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     counter,
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+	assert.Greater(t, counter.callCount(), int32(0))
+}
+
+func TestRun_FailsClosedOnComplianceRuleSetMismatch(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+
+	err := Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary: scriptedJudge{
+			score:        80,
+			reasonPrefix: "primary",
+			compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictViolated},
+		},
+		Secondary: scriptedJudge{
+			score:        80,
+			reasonPrefix: "secondary",
+			compliance:   map[string]contracts.ComplianceVerdict{},
+		},
+		Arbiter: scriptedJudge{
+			score:        80,
+			reasonPrefix: "arbiter",
+			compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant},
+		},
+		Now: func() time.Time { return time.Date(2026, 4, 21, 17, 45, 0, 0, time.UTC) },
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rule-set mismatch")
+	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
 func TestRun_NormalizesRawResolvedAtToRunSnapshot(t *testing.T) {
@@ -940,8 +1085,16 @@ func TestRun_SerializesConcurrentWriters(t *testing.T) {
 			IO:          runIO,
 			TaskPackage: &pkg,
 			Primary:     primary,
-			Secondary:   judges.NewSecondaryStub(),
-			Arbiter:     judges.NewArbiterStub(),
+			Secondary: scriptedJudge{
+				score:        80,
+				reasonPrefix: "secondary",
+				compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant},
+			},
+			Arbiter: scriptedJudge{
+				score:        80,
+				reasonPrefix: "arbiter",
+				compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant},
+			},
 		})
 	}()
 
@@ -952,8 +1105,16 @@ func TestRun_SerializesConcurrentWriters(t *testing.T) {
 			IO:          runIO,
 			TaskPackage: &pkg,
 			Primary:     primary,
-			Secondary:   judges.NewSecondaryStub(),
-			Arbiter:     judges.NewArbiterStub(),
+			Secondary: scriptedJudge{
+				score:        80,
+				reasonPrefix: "secondary",
+				compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant},
+			},
+			Arbiter: scriptedJudge{
+				score:        80,
+				reasonPrefix: "arbiter",
+				compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant},
+			},
 		})
 	}()
 
@@ -1017,6 +1178,8 @@ type scriptedJudge struct {
 	resolvedAt   time.Time
 }
 
+type overflowRefJudge struct{}
+
 func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
 	if err := input.Validate(); err != nil {
 		return judges.JudgeOutput{}, err
@@ -1079,6 +1242,53 @@ func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput)
 	return output, output.ValidateFor(input)
 }
 
+func (overflowRefJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	if err := input.Validate(); err != nil {
+		return judges.JudgeOutput{}, err
+	}
+	select {
+	case <-ctx.Done():
+		return judges.JudgeOutput{}, ctx.Err()
+	default:
+	}
+
+	inlineText := "judge supplied inline text"
+	bogus := &contracts.OverflowRef{Path: "60/reasons/bogus.txt", Sha256: strings.Repeat("f", 64)}
+	scores := make([]contracts.ScoreEntry, 0, len(canonicalDimensions))
+	for _, dimension := range canonicalDimensions {
+		scores = append(scores, contracts.ScoreEntry{
+			SchemaVersion:      "1",
+			RunID:              input.RunID,
+			Pass:               input.Pass,
+			Agent:              input.Agent,
+			Dimension:          dimension,
+			Score:              80,
+			Reasons:            inlineText,
+			ReasonsOverflowRef: bogus,
+			VerdictPath:        contracts.VerdictPathSingle,
+			RubricVersion:      "overflow-rubric",
+			PromptVersion:      "overflow-prompt",
+			ResolvedAt:         time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+		})
+	}
+	compliance := []contracts.ComplianceEntry{{
+		SchemaVersion:        "1",
+		RunID:                input.RunID,
+		Pass:                 input.Pass,
+		Agent:                input.Agent,
+		RuleID:               "shared",
+		Verdict:              contracts.ComplianceVerdictCompliant,
+		Rationale:            inlineText,
+		RationaleOverflowRef: bogus,
+		VerdictPath:          contracts.VerdictPathSingle,
+		RubricVersion:        "overflow-rubric",
+		PromptVersion:        "overflow-prompt",
+		ResolvedAt:           time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+	}}
+	output := judges.JudgeOutput{Scores: scores, Compliance: compliance}
+	return output, output.ValidateFor(input)
+}
+
 type cancelingJudge struct {
 	delegate scriptedJudge
 	cancel   context.CancelFunc
@@ -1121,6 +1331,20 @@ func (j *blockingJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput
 }
 
 func (j *blockingJudge) callCount() int32 {
+	return atomic.LoadInt32(&j.calls)
+}
+
+type countingJudge struct {
+	delegate judges.Judge
+	calls    int32
+}
+
+func (j *countingJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	atomic.AddInt32(&j.calls, 1)
+	return j.delegate.ScoreOutput(ctx, input)
+}
+
+func (j *countingJudge) callCount() int32 {
 	return atomic.LoadInt32(&j.calls)
 }
 
@@ -1316,6 +1540,25 @@ func mustReadFile(t *testing.T, path string) []byte {
 	return data
 }
 
+func writeStep60ReasonsSidecar(t *testing.T, runIO internalio.RunContext, content string) (contracts.OverflowRef, string) {
+	t.Helper()
+	reasonsDir := mustResolve(t, runIO, "60/reasons")
+	sum := sha256Hex([]byte(content))
+	sidecarPath, err := internalio.WriteSidecar(reasonsDir, sum, content)
+	require.NoError(t, err)
+	refPath, err := internalio.SidecarRefPath(runIO.RunDir(), sidecarPath)
+	require.NoError(t, err)
+	return contracts.OverflowRef{Path: refPath, Sha256: sum}, sidecarPath
+}
+
+func rewriteRawScores(t *testing.T, path string, rows []contracts.RawScoreEntry) {
+	t.Helper()
+	require.NoError(t, os.Remove(path))
+	for _, row := range rows {
+		require.NoError(t, internalio.AppendJSONL(path, row))
+	}
+}
+
 func mustHashFinalScores(t *testing.T, entries []contracts.ScoreEntry) string {
 	t.Helper()
 	hash, err := hashFinalScores(entries)
@@ -1339,14 +1582,14 @@ func mustHashFinalPairwise(t *testing.T, entries []contracts.PairwiseEntry) stri
 
 func mustHashReducedRawScores(t *testing.T, runIO internalio.RunContext) string {
 	t.Helper()
-	hash, err := hashReducedRawScoresFile(mustResolve(t, runIO, "60/scores-B-raw.jsonl"))
+	hash, err := hashReducedRawScoresFile(runIO, mustResolve(t, runIO, "60/scores-B-raw.jsonl"))
 	require.NoError(t, err)
 	return hash
 }
 
 func mustHashReducedRawCompliance(t *testing.T, runIO internalio.RunContext) string {
 	t.Helper()
-	hash, err := hashReducedRawComplianceFile(mustResolve(t, runIO, "60/compliance-B-raw.jsonl"))
+	hash, err := hashReducedRawComplianceFile(runIO, mustResolve(t, runIO, "60/compliance-B-raw.jsonl"))
 	require.NoError(t, err)
 	return hash
 }

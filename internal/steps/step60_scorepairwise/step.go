@@ -112,12 +112,9 @@ func Run(ctx context.Context, in Input) error {
 	defer func() {
 		_ = lock.Unlock()
 	}()
-	rawState, err := loadStep60RawState(paths)
-	if err != nil {
-		return err
-	}
+	resetOutputs := false
 	if _, err := os.Stat(paths.Done); err == nil {
-		matches, err := doneMarkerMatchesCurrentState(paths)
+		matches, err := doneMarkerMatchesCurrentState(in.IO, paths)
 		if err != nil {
 			return err
 		}
@@ -131,16 +128,23 @@ func Run(ctx context.Context, in Input) error {
 		if err := os.Remove(paths.Done); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("step60: remove stale done marker: %w", err)
 		}
+		resetOutputs = true
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("step60: stat done marker: %w", err)
+	} else {
+		resetOutputs = true
+	}
+	if resetOutputs {
 		if err := resetStep60Outputs(paths); err != nil {
 			return err
 		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("step60: stat done marker: %w", err)
-	} else if err := resetStep60Outputs(paths); err != nil {
+	}
+	rawState, err := loadStep60RawState(paths)
+	if err != nil {
 		return err
 	}
 
-	scorableRuns, err := collectScorableAgentRuns(in, declaredScorableAgents(in))
+	scorableRuns, err := collectScorableAgentRuns(in, declaredScorableAgents(in), len(in.ScorableAgents) > 0)
 	if err != nil {
 		return err
 	}
@@ -177,7 +181,7 @@ func Run(ctx context.Context, in Input) error {
 		if err != nil {
 			return fmt.Errorf("step60: hash pass2 output for agent=%s: %w", run.Agent, err)
 		}
-		if result, ok, err := tryReuseRawPanelResult(rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion); err != nil {
+		if result, ok, err := tryReuseRawPanelResult(in.IO, rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion); err != nil {
 			return err
 		} else if ok {
 			agentScores, agentCompliance, err := appendPanelFinals(paths, meta, result)
@@ -200,10 +204,22 @@ func Run(ctx context.Context, in Input) error {
 			return err
 		}
 
-		primaryScores := normalizeScores(primaryOutput.Scores, in.RubricVersion, in.PromptVersion)
-		secondaryScores := normalizeScores(secondaryOutput.Scores, in.RubricVersion, in.PromptVersion)
-		primaryCompliance := normalizeCompliance(primaryOutput.Compliance, in.RubricVersion, in.PromptVersion)
-		secondaryCompliance := normalizeCompliance(secondaryOutput.Compliance, in.RubricVersion, in.PromptVersion)
+		primaryScores, err := normalizeScores(in.IO, primaryOutput.Scores, in.RubricVersion, in.PromptVersion)
+		if err != nil {
+			return err
+		}
+		secondaryScores, err := normalizeScores(in.IO, secondaryOutput.Scores, in.RubricVersion, in.PromptVersion)
+		if err != nil {
+			return err
+		}
+		primaryCompliance, err := normalizeCompliance(in.IO, primaryOutput.Compliance, in.RubricVersion, in.PromptVersion)
+		if err != nil {
+			return err
+		}
+		secondaryCompliance, err := normalizeCompliance(in.IO, secondaryOutput.Compliance, in.RubricVersion, in.PromptVersion)
+		if err != nil {
+			return err
+		}
 
 		complianceDisagreements := complianceDisagreementRuleIDs(primaryCompliance, secondaryCompliance)
 		primaryRawScores, primaryScoreRefs, err := buildRawScores(primaryScores, outputHash, contracts.JudgeRolePrimary, nil, nil, meta.ResolvedAt)
@@ -226,8 +242,14 @@ func Run(ctx context.Context, in Input) error {
 			if err != nil {
 				return err
 			}
-			arbiterScores = normalizeScores(arbiterOutput.Scores, in.RubricVersion, in.PromptVersion)
-			arbiterCompliance = normalizeCompliance(arbiterOutput.Compliance, in.RubricVersion, in.PromptVersion)
+			arbiterScores, err = normalizeScores(in.IO, arbiterOutput.Scores, in.RubricVersion, in.PromptVersion)
+			if err != nil {
+				return err
+			}
+			arbiterCompliance, err = normalizeCompliance(in.IO, arbiterOutput.Compliance, in.RubricVersion, in.PromptVersion)
+			if err != nil {
+				return err
+			}
 		}
 
 		agentScores, err := emitScores(paths, meta, run.Agent, outputHash, primaryScores, secondaryScores, arbiterScores, primaryRawScores, secondaryRawScores, primaryScoreRefs, secondaryScoreRefs)
@@ -285,11 +307,11 @@ func Run(ctx context.Context, in Input) error {
 	if err != nil {
 		return fmt.Errorf("step60: hash pairwise final: %w", err)
 	}
-	scoresRawHash, err := hashReducedRawScoresFile(paths.ScoresRaw)
+	scoresRawHash, err := hashReducedRawScoresFile(in.IO, paths.ScoresRaw)
 	if err != nil {
 		return fmt.Errorf("step60: hash scores raw: %w", err)
 	}
-	complianceRawHash, err := hashReducedRawComplianceFile(paths.ComplianceRaw)
+	complianceRawHash, err := hashReducedRawComplianceFile(in.IO, paths.ComplianceRaw)
 	if err != nil {
 		return fmt.Errorf("step60: hash compliance raw: %w", err)
 	}
@@ -425,20 +447,29 @@ func shouldSkipAgent(err error) bool {
 	return errors.Is(err, internalio.ErrNotScorable)
 }
 
-func collectScorableAgentRuns(in Input, agents []contracts.AgentID) ([]scorableAgentRun, error) {
+func collectScorableAgentRuns(in Input, agents []contracts.AgentID, explicit bool) ([]scorableAgentRun, error) {
 	runs := make([]scorableAgentRun, 0, len(agents))
 	for _, agent := range agents {
 		if _, err := internalio.LoadScorableManifest(in.IO, 1, agent); err != nil {
+			if explicit && (shouldSkipAgent(err) || os.IsNotExist(err)) {
+				return nil, fmt.Errorf("step60: declared scorable agent missing pass1 scorable manifest: agent=%s: %w", agent, err)
+			}
 			if shouldSkipAgent(err) || os.IsNotExist(err) {
 				continue
 			}
 			return nil, fmt.Errorf("step60: load pass1 scorable manifest for agent=%s: %w", agent, err)
 		}
 		manifest, err := internalio.LoadScorableManifest(in.IO, 2, agent)
+		if explicit && shouldSkipAgent(err) {
+			return nil, fmt.Errorf("step60: declared scorable agent missing pass2 scorable manifest: agent=%s: %w", agent, err)
+		}
 		if shouldSkipAgent(err) {
 			continue
 		}
 		if err != nil {
+			if explicit && os.IsNotExist(err) {
+				return nil, fmt.Errorf("step60: declared scorable agent missing pass2 manifest: agent=%s: %w", agent, err)
+			}
 			return nil, fmt.Errorf("step60: load pass2 manifest for agent=%s: %w", agent, err)
 		}
 		outputPath, err := requireExistingManifestArtifact(in.IO, agent, manifest.DiffPath, "diff")
@@ -507,24 +538,62 @@ func scoreJudgeOutput(ctx context.Context, label string, judge judges.Judge, inp
 	return output, nil
 }
 
-func normalizeScores(scores []contracts.ScoreEntry, rubricVersion, promptVersion string) map[contracts.Dimension]contracts.ScoreEntry {
+func normalizeScores(runIO internalio.RunContext, scores []contracts.ScoreEntry, rubricVersion, promptVersion string) (map[contracts.Dimension]contracts.ScoreEntry, error) {
 	out := make(map[contracts.Dimension]contracts.ScoreEntry, len(scores))
 	for _, score := range scores {
 		score.RubricVersion = rubricVersion
 		score.PromptVersion = promptVersion
+		var err error
+		score, err = canonicalizeScoreOverflow(runIO, score)
+		if err != nil {
+			return nil, err
+		}
 		out[score.Dimension] = score
 	}
-	return out
+	return out, nil
 }
 
-func normalizeCompliance(entries []contracts.ComplianceEntry, rubricVersion, promptVersion string) map[string]contracts.ComplianceEntry {
+func normalizeCompliance(runIO internalio.RunContext, entries []contracts.ComplianceEntry, rubricVersion, promptVersion string) (map[string]contracts.ComplianceEntry, error) {
 	out := make(map[string]contracts.ComplianceEntry, len(entries))
 	for _, entry := range entries {
 		entry.RubricVersion = rubricVersion
 		entry.PromptVersion = promptVersion
+		var err error
+		entry, err = canonicalizeComplianceOverflow(runIO, entry)
+		if err != nil {
+			return nil, err
+		}
 		out[entry.RuleID] = entry
 	}
-	return out
+	return out, nil
+}
+
+func canonicalizeScoreOverflow(runIO internalio.RunContext, score contracts.ScoreEntry) (contracts.ScoreEntry, error) {
+	score.ReasonsOverflowRef = nil
+	if len([]rune(score.Reasons)) <= scorecore.ReasonsMaxChars {
+		return score, nil
+	}
+	ref, err := scorecore.WriteOverflowSidecar(runIO, "60", score.Reasons)
+	if err != nil {
+		return contracts.ScoreEntry{}, err
+	}
+	score.Reasons = ""
+	score.ReasonsOverflowRef = &ref
+	return score, nil
+}
+
+func canonicalizeComplianceOverflow(runIO internalio.RunContext, entry contracts.ComplianceEntry) (contracts.ComplianceEntry, error) {
+	entry.RationaleOverflowRef = nil
+	if len([]rune(entry.Rationale)) <= scorecore.RationaleMaxChars {
+		return entry, nil
+	}
+	ref, err := scorecore.WriteOverflowSidecar(runIO, "60", entry.Rationale)
+	if err != nil {
+		return contracts.ComplianceEntry{}, err
+	}
+	entry.Rationale = ""
+	entry.RationaleOverflowRef = &ref
+	return entry, nil
 }
 
 func complianceDisagreementRuleIDs(primary, secondary map[string]contracts.ComplianceEntry) []string {
@@ -537,6 +606,18 @@ func complianceDisagreementRuleIDs(primary, secondary map[string]contracts.Compl
 	}
 	sort.Strings(disagreements)
 	return disagreements
+}
+
+func complianceRuleSetsMatch(primary, secondary map[string]contracts.ComplianceEntry) bool {
+	if len(primary) != len(secondary) {
+		return false
+	}
+	for ruleID := range primary {
+		if _, ok := secondary[ruleID]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func emitScores(
@@ -603,6 +684,9 @@ func emitCompliance(
 	secondary map[string]contracts.ComplianceEntry,
 	arbiter map[string]contracts.ComplianceEntry,
 ) ([]contracts.ComplianceEntry, error) {
+	if !complianceRuleSetsMatch(primary, secondary) {
+		return nil, fmt.Errorf("step60: compliance rule-set mismatch agent=%s", agent)
+	}
 	ruleIDs := complianceRuleIDs(primary, secondary, arbiter)
 	finalEntries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
 	for _, ruleID := range ruleIDs {
@@ -686,7 +770,7 @@ func emitCompliance(
 	return finalEntries, nil
 }
 
-func doneMarkerMatchesCurrentState(paths step60Paths) (bool, error) {
+func doneMarkerMatchesCurrentState(runIO internalio.RunContext, paths step60Paths) (bool, error) {
 	marker, err := internalio.ReadJSON[contracts.Step60DoneMarker](paths.Done)
 	if err != nil {
 		return false, fmt.Errorf("step60: read done marker: %w", err)
@@ -698,24 +782,36 @@ func doneMarkerMatchesCurrentState(paths step60Paths) (bool, error) {
 		return false, nil
 	}
 
-	scoresFinalCount, scoresFinalHash, err := currentFinalScoresState(paths.ScoresFinal)
+	scoresFinalCount, scoresFinalHash, err := currentFinalScoresState(runIO, paths.ScoresFinal)
 	if err != nil {
+		if overflowValidationFailure(err) {
+			return false, nil
+		}
 		return false, fmt.Errorf("step60: inspect scores final: %w", err)
 	}
-	complianceFinalCount, complianceFinalHash, err := currentFinalComplianceState(paths.ComplianceFinal)
+	complianceFinalCount, complianceFinalHash, err := currentFinalComplianceState(runIO, paths.ComplianceFinal)
 	if err != nil {
+		if overflowValidationFailure(err) {
+			return false, nil
+		}
 		return false, fmt.Errorf("step60: inspect compliance final: %w", err)
 	}
 	pairwiseCount, pairwiseHash, err := currentPairwiseState(paths.Pairwise)
 	if err != nil {
 		return false, fmt.Errorf("step60: inspect pairwise final: %w", err)
 	}
-	scoresRawHash, err := hashReducedRawScoresFile(paths.ScoresRaw)
+	scoresRawHash, err := hashReducedRawScoresFile(runIO, paths.ScoresRaw)
 	if err != nil {
+		if overflowValidationFailure(err) {
+			return false, nil
+		}
 		return false, fmt.Errorf("step60: hash scores raw: %w", err)
 	}
-	complianceRawHash, err := hashReducedRawComplianceFile(paths.ComplianceRaw)
+	complianceRawHash, err := hashReducedRawComplianceFile(runIO, paths.ComplianceRaw)
 	if err != nil {
+		if overflowValidationFailure(err) {
+			return false, nil
+		}
 		return false, fmt.Errorf("step60: hash compliance raw: %w", err)
 	}
 
@@ -729,33 +825,43 @@ func doneMarkerMatchesCurrentState(paths step60Paths) (bool, error) {
 		marker.RawHashes.ComplianceRaw == complianceRawHash, nil
 }
 
-func currentFinalScoresState(path string) (int, string, error) {
+func overflowValidationFailure(err error) bool {
+	return errors.Is(err, internalio.ErrSidecarDigestMismatch) || os.IsNotExist(err)
+}
+
+func currentFinalScoresState(runIO internalio.RunContext, path string) (int, string, error) {
 	rows, err := internalio.ReadJSONL[contracts.ScoreEntry](path)
-	if err != nil {
-		return 0, "", err
-	}
-	hash, err := hashFinalScores(rows)
 	if err != nil {
 		return 0, "", err
 	}
 	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ScoreEntry) scoreKey {
 		return scoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
 	})
-	return len(collapsed), hash, nil
-}
-
-func currentFinalComplianceState(path string) (int, string, error) {
-	rows, err := internalio.ReadJSONL[contracts.ComplianceEntry](path)
+	if err := validateScoreOverflowRefs(runIO, collapsed); err != nil {
+		return 0, "", err
+	}
+	hash, err := hashFinalScores(collapsed)
 	if err != nil {
 		return 0, "", err
 	}
-	hash, err := hashFinalCompliance(rows)
+	return len(collapsed), hash, nil
+}
+
+func currentFinalComplianceState(runIO internalio.RunContext, path string) (int, string, error) {
+	rows, err := internalio.ReadJSONL[contracts.ComplianceEntry](path)
 	if err != nil {
 		return 0, "", err
 	}
 	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ComplianceEntry) complianceKey {
 		return complianceKey{Agent: entry.Agent, RuleID: entry.RuleID}
 	})
+	if err := validateComplianceOverflowRefs(runIO, collapsed); err != nil {
+		return 0, "", err
+	}
+	hash, err := hashFinalCompliance(collapsed)
+	if err != nil {
+		return 0, "", err
+	}
 	return len(collapsed), hash, nil
 }
 
@@ -873,7 +979,7 @@ func (s step60RawState) complianceRows(agent contracts.AgentID, role contracts.J
 	return out
 }
 
-func tryReuseRawPanelResult(state step60RawState, agent contracts.AgentID, outputHash, rubricVersion, promptVersion string) (scorecore.PanelResult, bool, error) {
+func tryReuseRawPanelResult(runIO internalio.RunContext, state step60RawState, agent contracts.AgentID, outputHash, rubricVersion, promptVersion string) (scorecore.PanelResult, bool, error) {
 	primaryScores := state.scoreRows(agent, contracts.JudgeRolePrimary)
 	secondaryScores := state.scoreRows(agent, contracts.JudgeRoleSecondary)
 	primaryCompliance := state.complianceRows(agent, contracts.JudgeRolePrimary)
@@ -885,12 +991,30 @@ func tryReuseRawPanelResult(state step60RawState, agent contracts.AgentID, outpu
 	if !rawComplianceUsable(primaryCompliance, expectedCompliance, outputHash, rubricVersion, promptVersion) || !rawComplianceUsable(secondaryCompliance, expectedCompliance, outputHash, rubricVersion, promptVersion) {
 		return scorecore.PanelResult{}, false, nil
 	}
+	if err := validateRawScoreOverflowRefs(runIO, primaryScores); err != nil {
+		return scorecore.PanelResult{}, false, nil
+	}
+	if err := validateRawScoreOverflowRefs(runIO, secondaryScores); err != nil {
+		return scorecore.PanelResult{}, false, nil
+	}
+	if err := validateRawComplianceOverflowRefs(runIO, primaryCompliance); err != nil {
+		return scorecore.PanelResult{}, false, nil
+	}
+	if err := validateRawComplianceOverflowRefs(runIO, secondaryCompliance); err != nil {
+		return scorecore.PanelResult{}, false, nil
+	}
 	arbiterScores := state.scoreRows(agent, contracts.JudgeRoleArbiter)
 	arbiterCompliance := state.complianceRows(agent, contracts.JudgeRoleArbiter)
 	if !rawRoleUsable(arbiterScores, outputHash, rubricVersion, promptVersion) {
 		arbiterScores = nil
 	}
 	if !rawArbiterComplianceUsable(arbiterCompliance, outputHash, rubricVersion, promptVersion) {
+		arbiterCompliance = nil
+	}
+	if err := validateRawScoreOverflowRefs(runIO, arbiterScores); err != nil {
+		arbiterScores = nil
+	}
+	if err := validateRawComplianceOverflowRefs(runIO, arbiterCompliance); err != nil {
 		arbiterCompliance = nil
 	}
 	result, err := scorecore.BuildFinalResultFromRaw(
@@ -1373,20 +1497,76 @@ func hashFinalPairwise(entries []contracts.PairwiseEntry) (string, error) {
 	return hashCanonicalRows(collapsed)
 }
 
-func hashReducedRawScoresFile(path string) (string, error) {
+func hashReducedRawScoresFile(runIO internalio.RunContext, path string) (string, error) {
 	rows, err := internalio.ReadJSONL[contracts.RawScoreEntry](path)
 	if err != nil {
 		return "", fmt.Errorf("read raw scores: %w", err)
 	}
-	return hashCanonicalRows(reduceRawScores(rows))
+	reduced := reduceRawScores(rows)
+	if err := validateRawScoreOverflowRefs(runIO, reduced); err != nil {
+		return "", err
+	}
+	return hashCanonicalRows(reduced)
 }
 
-func hashReducedRawComplianceFile(path string) (string, error) {
+func hashReducedRawComplianceFile(runIO internalio.RunContext, path string) (string, error) {
 	rows, err := internalio.ReadJSONL[contracts.RawComplianceEntry](path)
 	if err != nil {
 		return "", fmt.Errorf("read raw compliance: %w", err)
 	}
-	return hashCanonicalRows(reduceRawCompliance(rows))
+	reduced := reduceRawCompliance(rows)
+	if err := validateRawComplianceOverflowRefs(runIO, reduced); err != nil {
+		return "", err
+	}
+	return hashCanonicalRows(reduced)
+}
+
+func validateScoreOverflowRefs(runIO internalio.RunContext, rows []contracts.ScoreEntry) error {
+	for _, row := range rows {
+		if row.ReasonsOverflowRef == nil {
+			continue
+		}
+		if _, err := internalio.ReadSidecar(runIO, *row.ReasonsOverflowRef); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateComplianceOverflowRefs(runIO internalio.RunContext, rows []contracts.ComplianceEntry) error {
+	for _, row := range rows {
+		if row.RationaleOverflowRef == nil {
+			continue
+		}
+		if _, err := internalio.ReadSidecar(runIO, *row.RationaleOverflowRef); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRawScoreOverflowRefs(runIO internalio.RunContext, rows []contracts.RawScoreEntry) error {
+	for _, row := range rows {
+		if row.ReasonsOverflowRef == nil {
+			continue
+		}
+		if _, err := internalio.ReadSidecar(runIO, *row.ReasonsOverflowRef); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRawComplianceOverflowRefs(runIO internalio.RunContext, rows []contracts.RawComplianceEntry) error {
+	for _, row := range rows {
+		if row.RationaleOverflowRef == nil {
+			continue
+		}
+		if _, err := internalio.ReadSidecar(runIO, *row.RationaleOverflowRef); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func buildRawScores(

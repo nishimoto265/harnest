@@ -93,7 +93,12 @@ func newStep(cfg *config.Config, opts stepOptions) *Step {
 func (s Step) Run(ctx context.Context, run RunContext) error {
 	step := s
 	if step.now == nil {
-		impl := newStep(step.cfg, stepOptions{})
+		impl := newStep(step.cfg, stepOptions{
+			now:               step.now,
+			heartbeatInterval: step.heartbeatInterval,
+			staleAfter:        step.staleAfter,
+			runner:            step.runner,
+		})
 		step = *impl
 	}
 	return step.run(ctx, run)

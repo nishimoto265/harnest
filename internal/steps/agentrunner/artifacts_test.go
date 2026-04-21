@@ -71,6 +71,23 @@ func TestWriteSuccessDiff_CapsHugeUntrackedPatch(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr))
 }
 
+func TestWriteSuccessDiff_SkipsSymlinkedUntrackedFile(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, "", "git", "init", "-b", "main", repoDir)
+	runGit(t, repoDir, "git", "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "git", "config", "user.name", "Agent Runner Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repoDir, "git", "add", "README.md")
+	runGit(t, repoDir, "git", "commit", "-m", "base")
+
+	baseSHA := strings.TrimSpace(runGit(t, repoDir, "git", "rev-parse", "HEAD"))
+	require.NoError(t, os.Symlink("/etc/hosts", filepath.Join(repoDir, "loot")))
+
+	diff, err := SuccessDiffBytes(context.Background(), repoDir, baseSHA, "test")
+	require.NoError(t, err)
+	assert.NotContains(t, string(diff), "loot")
+}
+
 func TestLoadChecklistArtifact_RejectsFIFO(t *testing.T) {
 	worktreePath := t.TempDir()
 	checklistPath := filepath.Join(worktreePath, "checklist-result.json")
@@ -82,6 +99,37 @@ func TestLoadChecklistArtifact_RejectsFIFO(t *testing.T) {
 	_, err := LoadChecklistArtifactContext(ctx, worktreePath, "checklist-result.json", "step20", "2026-04-21-PR42-abcdef0", 1, "a1")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrArtifactNotRegular))
+}
+
+func TestLoadChecklistArtifact_RejectsOversizedFile(t *testing.T) {
+	worktreePath := t.TempDir()
+	checklistPath := filepath.Join(worktreePath, "checklist-result.json")
+	file, err := os.Create(checklistPath)
+	require.NoError(t, err)
+	require.NoError(t, file.Truncate(50<<20))
+	require.NoError(t, file.Close())
+
+	_, err = LoadChecklistArtifact(worktreePath, "checklist-result.json", "step20", "2026-04-21-PR42-abcdef0", 1, "a1")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrArtifactTooLarge)
+}
+
+func TestLoadChecklistArtifactContext_RejectsHugeFileWithinTTL(t *testing.T) {
+	worktreePath := t.TempDir()
+	checklistPath := filepath.Join(worktreePath, "checklist-result.json")
+	file, err := os.Create(checklistPath)
+	require.NoError(t, err)
+	require.NoError(t, file.Truncate(100<<20))
+	require.NoError(t, file.Close())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err = LoadChecklistArtifactContext(ctx, worktreePath, "checklist-result.json", "step20", "2026-04-21-PR42-abcdef0", 1, "a1")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrArtifactTooLarge)
+	assert.Less(t, time.Since(start), 10*time.Second)
 }
 
 func runGit(t *testing.T, dir string, name string, args ...string) string {

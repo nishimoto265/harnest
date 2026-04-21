@@ -1357,7 +1357,30 @@ case "$subcmd" in
         ;;
     esac
     ;;
-  diff|ls-files|status)
+  diff)
+    for file in "$repo_dir"/generated-*; do
+      [ -e "$file" ] || continue
+      name="$(basename "$file")"
+      printf 'diff --git a/%s b/%s\n' "$name" "$name"
+      printf 'new file mode 100644\n'
+      printf 'index 0000000..1111111\n'
+      printf -- '--- /dev/null\n'
+      printf '+++ b/%s\n' "$name"
+      printf '@@ -0,0 +1 @@\n'
+      printf '+generated change\n'
+      exit 0
+    done
+    exit 0
+    ;;
+  ls-files)
+    for file in "$repo_dir"/generated-*; do
+      [ -e "$file" ] || continue
+      printf '%s\0' "$(basename "$file")"
+      exit 0
+    done
+    exit 0
+    ;;
+  status)
     exit 0
     ;;
   branch)
@@ -1449,7 +1472,30 @@ case "$subcmd" in
         ;;
     esac
     ;;
-  diff|ls-files|status)
+  diff)
+    for file in "$repo_dir"/generated-*; do
+      [ -e "$file" ] || continue
+      name="$(basename "$file")"
+      printf 'diff --git a/%s b/%s\n' "$name" "$name"
+      printf 'new file mode 100644\n'
+      printf 'index 0000000..1111111\n'
+      printf -- '--- /dev/null\n'
+      printf '+++ b/%s\n' "$name"
+      printf '@@ -0,0 +1 @@\n'
+      printf '+generated change\n'
+      exit 0
+    done
+    exit 0
+    ;;
+  ls-files)
+    for file in "$repo_dir"/generated-*; do
+      [ -e "$file" ] || continue
+      printf '%s\0' "$(basename "$file")"
+      exit 0
+    done
+    exit 0
+    ;;
+  status)
     exit 0
     ;;
   branch)

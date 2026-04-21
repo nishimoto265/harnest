@@ -186,6 +186,57 @@ func TestResumeIfNeeded_RequiresDeadPIDAsWellAsStaleHeartbeat(t *testing.T) {
 	require.ErrorIs(t, err, ErrRescueAbortedLeaseActive)
 }
 
+func TestStepRun_ZeroValuePreservesCustomStaleAfter(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+
+	oldTime := time.Now().Add(-2 * time.Second).UTC()
+	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	require.NoError(t, saveResumeState(agentDir, resumeState{
+		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
+		StartedAt:       oldTime,
+		Pid:             os.Getpid(),
+		Pgid:            os.Getpid(),
+		RetryCount:      1,
+		LastHeartbeat:   oldTime,
+	}))
+	require.NoError(t, touchHeartbeat(agentDir, oldTime))
+
+	err = (Step{
+		cfg:               env.run.Config,
+		heartbeatInterval: 10 * time.Millisecond,
+		staleAfter:        time.Second,
+	}).Run(context.Background(), env.run)
+	require.ErrorIs(t, err, ErrRescueAbortedLeaseActive)
+}
+
+func TestStep50GitHelpers_ReturnContextCancellation(t *testing.T) {
+	wrapperDir := t.TempDir()
+	wrapperPath := filepath.Join(wrapperDir, "git")
+	wrapper := "#!/bin/sh\nsleep 5\nexit 1\n"
+	require.NoError(t, os.WriteFile(wrapperPath, []byte(wrapper), 0o755))
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := gitOutputBytesContext(ctx, t.TempDir(), "rev-list", "HEAD")
+	require.ErrorIs(t, err, context.Canceled)
+
+	ctx, cancel = context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	err = runGitCommand(ctx, t.TempDir(), "rev-list", "HEAD")
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestStepRunIncludesRulePayloadsInPrompt(t *testing.T) {
 	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
 	t.Setenv("FAKE_AGENT", "a1")
@@ -542,9 +593,37 @@ func TestStepRun_KillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
 	helperPath := writeDetachedSleepHelper(t, t.TempDir())
 	pidPath := filepath.Join(t.TempDir(), "detached-child.pid")
+	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(env.run.TaskPackage.Worktrees[3].Path, "detached.txt"))
 	t.Setenv("FAKE_DETACH_HELPER", helperPath)
 	t.Setenv("FAKE_DETACHED_PID_PATH", pidPath)
 	t.Setenv("FAKE_DETACH_DELAY", "250ms")
+
+	require.NoError(t, (Step{}).Run(context.Background(), env.run))
+
+	pidBytes, err := os.ReadFile(pidPath)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return processDead(pid)
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestStepRun_KillsFastDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
+	if raceBuild {
+		t.Skip("timing-sensitive detached-child regression is covered in non-race mode")
+	}
+	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
+	t.Setenv("FAKE_AGENT", "a1")
+
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	helperPath := writeDetachedSleepHelper(t, t.TempDir())
+	pidPath := filepath.Join(t.TempDir(), "fast-detached-child.pid")
+	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(env.run.TaskPackage.Worktrees[3].Path, "fast-detached.txt"))
+	t.Setenv("FAKE_DETACH_HELPER", helperPath)
+	t.Setenv("FAKE_DETACHED_PID_PATH", pidPath)
+	t.Setenv("FAKE_DETACH_DELAY", "20ms")
 
 	require.NoError(t, (Step{}).Run(context.Background(), env.run))
 

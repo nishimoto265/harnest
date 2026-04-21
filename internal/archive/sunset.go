@@ -387,10 +387,16 @@ func reconcileStaleMarker(ctx context.Context, opts Opts) error {
 		return err
 	}
 	missing := make([]Transition, 0, len(marker.Transitions))
-	if ok, err := markerSnapshotMatches(opts.RunsBase, marker); err != nil {
+	prefixLen, err := markerTailProgressPrefixLen(opts.RunsBase, marker)
+	if err != nil {
 		return err
-	} else if !ok {
-		return ErrStaleMarkerDiverged
+	}
+	if prefixLen == 0 {
+		if ok, err := markerSnapshotMatches(opts.RunsBase, marker); err != nil {
+			return err
+		} else if !ok {
+			return ErrStaleMarkerDiverged
+		}
 	}
 	for _, transition := range marker.Transitions {
 		opID := ComputeOpID(marker.SunsetRunID, transition.RuleID, transitionKey(transition))
@@ -417,6 +423,62 @@ func reconcileStaleMarker(ctx context.Context, opts Opts) error {
 		return err
 	}
 	return nil
+}
+
+func markerTailProgressPrefixLen(runsBase string, marker sunsetMarker) (int, error) {
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	lines, err := readRegistryLines(registryPath)
+	if err != nil {
+		return 0, err
+	}
+	if len(lines) == 0 || len(marker.Transitions) == 0 {
+		return 0, nil
+	}
+	planned := make([]string, 0, len(marker.Transitions))
+	for _, transition := range marker.Transitions {
+		planned = append(planned, ComputeOpID(marker.SunsetRunID, transition.RuleID, transitionKey(transition)))
+	}
+	maxPrefix := len(planned)
+	if len(lines) < maxPrefix {
+		maxPrefix = len(lines)
+	}
+	for prefix := maxPrefix; prefix > 0; prefix-- {
+		matched := true
+		for idx := 0; idx < prefix; idx++ {
+			if registryOpID(lines[len(lines)-prefix+idx].Entry) != planned[idx] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return prefix, nil
+		}
+	}
+	return 0, nil
+}
+
+func registryOpID(entry contracts.RuleRegistryEntry) string {
+	switch v := entry.Value.(type) {
+	case contracts.RuleRegistryStatusChanged:
+		return v.OpID
+	case contracts.RuleRegistryArchived:
+		return v.OpID
+	case contracts.RuleRegistryRestored:
+		return v.OpID
+	case *contracts.RuleRegistryStatusChanged:
+		if v != nil {
+			return v.OpID
+		}
+	case *contracts.RuleRegistryArchived:
+		if v != nil {
+			return v.OpID
+		}
+	case *contracts.RuleRegistryRestored:
+		if v != nil {
+			return v.OpID
+		}
+	}
+	return ""
 }
 
 func gateAllows(opts Opts) (bool, error) {

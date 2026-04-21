@@ -30,6 +30,7 @@ import (
 const registryMandatoryIndexAt = 1800
 
 var appendRegistryEntry = internalio.AppendRegistryEntry
+var promoteRuleSidecarFn = promoteRuleSidecar
 
 // TargetResolver is injected by the caller (orchestrator) to derive the
 // promotion target (best candidate head) from candidates + manifests.
@@ -117,6 +118,15 @@ func Run(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contrac
 		return err
 	}
 	if intention != nil {
+		if persistedDecisionCanOverride(intention.Stage) {
+			decision, ok, err := loadDecisionIfExists(runCtx)
+			if err != nil {
+				return err
+			}
+			if ok {
+				return finalizePersistedDecision(ctx, pr, runCtx, pkg, candidates, decision, store, writer, deps)
+			}
+		}
 		return resume(ctx, pr, runCtx, pkg, candidates, intention, store, writer, deps)
 	}
 
@@ -252,6 +262,9 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 		return err
 	} else if handled {
 		return nil
+	}
+	if err := promoteStagedRuleSidecars(runCtx, &intention); err != nil {
+		return err
 	}
 	now := deps.Now()
 	decision := contracts.Decision{
@@ -727,7 +740,7 @@ func appendRegistryRollbacks(runCtx internalio.RunContext, intention contracts.I
 
 	var result *contracts.RegistryAppendResult
 	for _, committedEntry := range committed {
-		if existing, ok, err := findRollbackByTargetOpID(runCtx, committedEntry.OpID); err != nil {
+		if existing, ok, err := findRollbackByTarget(runCtx, committedEntry.OpID, committedEntry.Result); err != nil {
 			return nil, err
 		} else if ok {
 			existingCopy := existing
@@ -969,7 +982,7 @@ func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contract
 			return err
 		}
 		dstPath := filepath.Join(runCtx.RunsBase, filepath.FromSlash(entry.RulePath))
-		if err := promoteRuleSidecar(stagedPath, dstPath, entry.Sha256); err != nil {
+		if err := promoteRuleSidecarFn(stagedPath, dstPath, entry.Sha256); err != nil {
 			return err
 		}
 	}
@@ -1005,7 +1018,13 @@ func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 		return err
 	}
-	return os.Rename(stagedPath, dstPath)
+	if err := internalio.WriteAtomic(dstPath, data); err != nil {
+		return err
+	}
+	if err := os.Remove(stagedPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func cleanupStagedRuleSidecars(runCtx internalio.RunContext) error {
@@ -1078,13 +1097,16 @@ func findRegistryByIdempotencyKey(runCtx internalio.RunContext, key string) (con
 	return contracts.RegistryAppendResult{}, false, nil
 }
 
-func findRollbackByTargetOpID(runCtx internalio.RunContext, targetOpID string) (contracts.RegistryAppendResult, bool, error) {
+func findRollbackByTarget(runCtx internalio.RunContext, targetOpID string, target contracts.RegistryAppendResult) (contracts.RegistryAppendResult, bool, error) {
 	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
 	if err != nil {
 		return contracts.RegistryAppendResult{}, false, err
 	}
 	for i := len(lines) - 1; i >= 0; i-- {
-		if v, ok := lines[i].Entry.Value.(contracts.RuleRegistryRolledBack); ok && v.TargetOpID == targetOpID {
+		if v, ok := lines[i].Entry.Value.(contracts.RuleRegistryRolledBack); ok &&
+			v.TargetOpID == targetOpID &&
+			v.TargetOffset == target.Offset &&
+			v.TargetSha256 == target.Sha256 {
 			return contracts.RegistryAppendResult{Offset: lines[i].Offset, Sha256: lines[i].Sha256}, true, nil
 		}
 	}
@@ -1119,6 +1141,37 @@ func matchesIdempotency(line registryLine, key string) (bool, int64, string) {
 		}
 	}
 	return false, 0, ""
+}
+
+func planningResumeNeedsRefresh(intention contracts.IntentionRecord, fresh Target, hasTarget bool) (bool, error) {
+	if !hasTarget {
+		return true, nil
+	}
+	if fresh.TargetSHA != intention.TargetSha {
+		return true, nil
+	}
+	if intention.PlannedAdoption == nil {
+		return false, contracts.ErrIntentionMissingPlannedAdoption
+	}
+	if len(fresh.RulesToAppend) != len(intention.PlannedAdoption.Entries) {
+		return true, nil
+	}
+	for idx, entry := range fresh.RulesToAppend {
+		planned := intention.PlannedAdoption.Entries[idx]
+		switch v := entry.Value.(type) {
+		case contracts.RuleRegistryAdded:
+			if planned.Kind != contracts.RegistryKindAdded || planned.RuleID != v.RuleID || planned.RulePath != v.RulePath || planned.Sha256 != v.Sha256 {
+				return true, nil
+			}
+		case contracts.RuleRegistryUpdated:
+			if planned.Kind != contracts.RegistryKindUpdated || planned.RuleID != v.RuleID || planned.RulePath != v.RulePath || planned.Sha256 != v.Sha256 || planned.PrevSha256 != v.PrevSha256 {
+				return true, nil
+			}
+		default:
+			return false, fmt.Errorf("step70: unsupported planned adoption registry kind=%q", entry.Kind)
+		}
+	}
+	return false, nil
 }
 
 func registryLookupLines(runCtx internalio.RunContext) ([]registryLine, error) {
@@ -1250,11 +1303,25 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 		if err != nil {
 			return err
 		}
-		if !hasTarget {
-			return markManualRecovery(pr, runCtx, *intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+		if restart, err := planningResumeNeedsRefresh(*intention, target, hasTarget); err != nil {
+			return err
+		} else if restart {
+			if err := cleanupStagedRuleSidecars(runCtx); err != nil {
+				return err
+			}
+			if err := store.Delete(); err != nil {
+				return err
+			}
+			if err := appendStateOnce(runCtx, writer, contracts.StateKindInterrupted, interruptedEvent(pr, runCtx.RunID, contracts.InterruptedReasonPrePushCrash, "planning target changed during resume, snapshot refresh required", deps.Now())); err != nil {
+				return err
+			}
+			return startFresh(ctx, pr, runCtx, pkg, candidates, store, writer, deps)
 		}
-		target.BestShaBefore = intention.BestShaBefore
-		return planningDecision(ctx, pr, runCtx, pkg, candidates, target, *intention, store, writer, deps)
+		persistedTarget := targetFromIntention(pkg, *intention)
+		if target.BestBranch != "" {
+			persistedTarget.BestBranch = target.BestBranch
+		}
+		return planningDecision(ctx, pr, runCtx, pkg, candidates, persistedTarget, *intention, store, writer, deps)
 	case contracts.IntentionStageBranchPushed:
 		return resumeBranchPushed(ctx, pr, runCtx, pkg, *intention, store, writer, deps)
 	case contracts.IntentionStageRegistryAppended:
@@ -1456,6 +1523,19 @@ func remoteHeadMatchesRollbackBase(remoteHead, bestShaBefore string) bool {
 	return remoteHead == bestShaBefore || (remoteHead == "" && bestShaBefore == "")
 }
 
+func persistedDecisionCanOverride(stage contracts.IntentionStage) bool {
+	switch stage {
+	case contracts.IntentionStageRegistryAppended,
+		contracts.IntentionStageDecisionWritten,
+		contracts.IntentionStageRollingBackBranchReverted,
+		contracts.IntentionStageRollingBackRegistryAppended,
+		contracts.IntentionStageRollingBackDecisionWritten:
+		return true
+	default:
+		return false
+	}
+}
+
 func blockOnOtherRunSentinel(runCtx internalio.RunContext) error {
 	blocked, err := SentinelExistsExceptRun(runCtx.RunsBase, runCtx.RunID)
 	if err != nil {
@@ -1467,17 +1547,7 @@ func blockOnOtherRunSentinel(runCtx internalio.RunContext) error {
 	return nil
 }
 
-func abortOnOtherRunSentinel(runCtx internalio.RunContext, store IntentionWriter) error {
-	if err := blockOnOtherRunSentinel(runCtx); err != nil {
-		if !errors.Is(err, ErrBlockedBySentinel) {
-			return err
-		}
-		if store != nil {
-			if deleteErr := store.Delete(); deleteErr != nil {
-				return deleteErr
-			}
-		}
-	}
+func abortOnOtherRunSentinel(runCtx internalio.RunContext, _ IntentionWriter) error {
 	return errOrNilFromBlockedSentinel(runCtx)
 }
 

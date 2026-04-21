@@ -26,6 +26,13 @@ func AppendRegistryEntry(path string, entry contracts.RuleRegistryEntry) (contra
 	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
+	lock, err := AcquireFileLock(registryLockPath(path))
+	if err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	defer func() {
+		_ = lock.Unlock()
+	}()
 	lines, err := readRegistryLines(path)
 	if err != nil {
 		return contracts.RegistryAppendResult{}, err
@@ -74,6 +81,10 @@ func AppendRegistryEntry(path string, entry contracts.RuleRegistryEntry) (contra
 		Offset: offset,
 		Sha256: hex.EncodeToString(sum[:]),
 	}, nil
+}
+
+func registryLockPath(path string) string {
+	return path + ".lock"
 }
 
 func BuildRuleIdempotencyIndexEntry(entry contracts.RuleRegistryEntry, result contracts.RegistryAppendResult) (contracts.RuleIdempotencyIndexEntry, error) {

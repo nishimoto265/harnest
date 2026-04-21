@@ -107,6 +107,45 @@ func TestRunSunsetWithLock_ReconcilesInterruptedMarker(t *testing.T) {
 	assert.Equal(t, ComputeOpID(staleRunID, second.RuleID, transitionKey(second)), opIDFromEntry(lines[1].Entry))
 }
 
+func TestRunSunsetWithLock_ReconcilesOwnPartialTailProgress(t *testing.T) {
+	runsBase := t.TempDir()
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	staleRunID := "stale-run"
+	transitions := []Transition{
+		deprecateTransition("rule-1"),
+		archiveTransition("rule-1", contracts.RuleStatusDeprecated),
+		restoreTransition("rule-1"),
+	}
+
+	require.NoError(t, writeMarker(Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: staleRunID,
+		Transitions: transitions,
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC) },
+	}))
+
+	for _, transition := range transitions[:2] {
+		entry, err := buildRegistryEntry(registryPath, transition, staleRunID, ComputeOpID(staleRunID, transition.RuleID, transitionKey(transition)), time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC))
+		require.NoError(t, err)
+		_, err = internalio.AppendRegistryEntry(registryPath, entry)
+		require.NoError(t, err)
+	}
+
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "current-run",
+		Transitions: transitions,
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.AppendedOpIDs)
+	assert.NoFileExists(t, filepath.Join(runsBase, markerFilename))
+
+	lines := readRegistryLinesForTest(t, registryPath)
+	require.Len(t, lines, 3)
+	assert.Equal(t, ComputeOpID(staleRunID, transitions[2].RuleID, transitionKey(transitions[2])), opIDFromEntry(lines[2].Entry))
+}
+
 func TestRunSunsetWithLock_DetectsStaleMarkerRegistryDivergence(t *testing.T) {
 	runsBase := t.TempDir()
 	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
@@ -401,6 +440,16 @@ func archiveTransition(ruleID string, prev contracts.RuleStatus) Transition {
 		NewStatus:  contracts.RuleStatusArchived,
 		Kind:       contracts.RegistryKindArchived,
 		Transition: contracts.SunsetTransitionArchive,
+	}
+}
+
+func restoreTransition(ruleID string) Transition {
+	return Transition{
+		RuleID:     ruleID,
+		PrevStatus: contracts.RuleStatusArchived,
+		NewStatus:  contracts.RuleStatusActive,
+		Kind:       contracts.RegistryKindRestored,
+		Transition: contracts.SunsetTransitionActivate,
 	}
 }
 

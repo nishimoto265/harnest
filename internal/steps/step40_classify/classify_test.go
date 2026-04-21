@@ -246,18 +246,22 @@ func TestRun_RegistryVariantsProduceExpectedCandidateKinds(t *testing.T) {
 		testComplianceEntry(cfg.IO.RunID, "rule-status-active", contracts.ComplianceVerdictMissed),
 		testComplianceEntry(cfg.IO.RunID, "rule-rolled-back", contracts.ComplianceVerdictInvalidException),
 	)
+	updated := registryUpdated("rule-updated", strings.Repeat("7", 64))
+	statusAdded := registryAdded("rule-status-active", strings.Repeat("6", 64))
+	statusDeprecated := registryStatusChanged(
+		"rule-status-active",
+		contracts.RuleStatusActive,
+		contracts.RuleStatusDeprecated,
+		contracts.SunsetTransitionDeprecate,
+		strings.Repeat("8", 64),
+	)
+	rolledBack := registryAdded("rule-rolled-back", strings.Repeat("9", 64))
 	writeRegistry(t, cfg.registryPath(),
-		registryUpdated("rule-updated", strings.Repeat("7", 64)),
-		registryAdded("rule-status-active", strings.Repeat("6", 64)),
-		registryStatusChanged(
-			"rule-status-active",
-			contracts.RuleStatusActive,
-			contracts.RuleStatusDeprecated,
-			contracts.SunsetTransitionDeprecate,
-			strings.Repeat("8", 64),
-		),
-		registryAdded("rule-rolled-back", strings.Repeat("9", 64)),
-		registryRolledBack(strings.Repeat("9", 64)),
+		updated,
+		statusAdded,
+		statusDeprecated,
+		rolledBack,
+		registryRolledBackForEntries(t, cfg.registryPath(), []contracts.RuleRegistryEntry{updated, statusAdded, statusDeprecated, rolledBack}, strings.Repeat("9", 64)),
 	)
 
 	got, err := Run(context.Background(), cfg)
@@ -358,9 +362,10 @@ func TestRun_DuplicateClassifierIgnoresRolledBackRuleBody(t *testing.T) {
 		ProposedBodyPath: "40/candidates/cand-existing.md",
 	}, candidateEvidence{})
 	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "rule-dup.md"), []byte(body), 0o644))
+	added := registryAdded("rule-dup", strings.Repeat("9", 64))
 	writeRegistry(t, cfg.registryPath(),
-		registryAdded("rule-dup", strings.Repeat("9", 64)),
-		registryRolledBack(strings.Repeat("9", 64)),
+		added,
+		registryRolledBackForEntries(t, cfg.registryPath(), []contracts.RuleRegistryEntry{added}, strings.Repeat("9", 64)),
 	)
 
 	got, err := Run(context.Background(), cfg)
@@ -381,13 +386,7 @@ func TestActiveRulesFromRegistry_Variants(t *testing.T) {
 
 	t.Run("status_changed follows archived state", func(t *testing.T) {
 		active, err := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
-			registryStatusChanged(
-				"rule-status-archived",
-				contracts.RuleStatusActive,
-				contracts.RuleStatusArchived,
-				contracts.SunsetTransitionArchive,
-				strings.Repeat("b", 64),
-			),
+			registryArchived("rule-status-archived", strings.Repeat("b", 64)),
 			registryStatusChanged(
 				"rule-status-deprecated",
 				contracts.RuleStatusActive,
@@ -403,9 +402,10 @@ func TestActiveRulesFromRegistry_Variants(t *testing.T) {
 	})
 
 	t.Run("rolled_back added entry restores previous inactive state", func(t *testing.T) {
+		added := registryAdded("rule-rolled-back", strings.Repeat("d", 64))
 		active, err := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
-			registryAdded("rule-rolled-back", strings.Repeat("d", 64)),
-			registryRolledBack(strings.Repeat("d", 64)),
+			added,
+			registryRolledBackForEntries(t, "", []contracts.RuleRegistryEntry{added}, strings.Repeat("d", 64)),
 		})
 		require.NoError(t, err)
 
@@ -414,11 +414,14 @@ func TestActiveRulesFromRegistry_Variants(t *testing.T) {
 
 	t.Run("shared rollback target only reverts the latest matching rule", func(t *testing.T) {
 		shared := strings.Repeat("f", 64)
+		entryA := registryAdded("rule-a", shared)
+		entryB := registryAdded("rule-b", shared)
+		entryC := registryAdded("rule-c", shared)
 		active, err := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
-			registryAdded("rule-a", shared),
-			registryAdded("rule-b", shared),
-			registryAdded("rule-c", shared),
-			registryRolledBack(shared),
+			entryA,
+			entryB,
+			entryC,
+			registryRolledBackForEntries(t, "", []contracts.RuleRegistryEntry{entryA, entryB, entryC}, shared),
 		})
 		require.NoError(t, err)
 
@@ -781,15 +784,72 @@ func registryArchived(ruleID, opID string) contracts.RuleRegistryEntry {
 	}
 }
 
-func registryRolledBack(targetOpID string) contracts.RuleRegistryEntry {
+func registryRolledBackForEntries(t *testing.T, registryPath string, entries []contracts.RuleRegistryEntry, targetOpID string) contracts.RuleRegistryEntry {
+	t.Helper()
+	normalized := append([]contracts.RuleRegistryEntry(nil), entries...)
+	if registryPath != "" {
+		lastSha := make(map[string]string)
+		registryBase := filepath.Dir(registryPath)
+		for idx, entry := range normalized {
+			switch value := entry.Value.(type) {
+			case contracts.RuleRegistryAdded:
+				absPath := filepath.Join(registryBase, value.RulePath)
+				if _, err := os.Stat(absPath); os.IsNotExist(err) {
+					body := fmt.Sprintf("# %s added\n", value.RuleID)
+					value.Sha256 = sha256String(body)
+				}
+				lastSha[value.RuleID] = value.Sha256
+				normalized[idx] = contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
+			case contracts.RuleRegistryUpdated:
+				absPath := filepath.Join(registryBase, value.RulePath)
+				if _, err := os.Stat(absPath); os.IsNotExist(err) {
+					body := fmt.Sprintf("# %s updated\n", value.RuleID)
+					if prev, ok := lastSha[value.RuleID]; ok {
+						value.PrevSha256 = prev
+					}
+					value.Sha256 = sha256String(body)
+				}
+				lastSha[value.RuleID] = value.Sha256
+				normalized[idx] = contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
+			}
+		}
+	}
+	var (
+		offset      int64
+		targetFound bool
+		targetHash  string
+		targetOff   int64
+	)
+	for _, entry := range normalized {
+		payload, err := contracts.CanonicalMarshal(entry)
+		require.NoError(t, err)
+		sum := sha256.Sum256(payload)
+		hash := hex.EncodeToString(sum[:])
+		switch v := entry.Value.(type) {
+		case contracts.RuleRegistryAdded:
+			if v.IdempotencyKey == targetOpID {
+				targetFound = true
+				targetHash = hash
+				targetOff = offset
+			}
+		case contracts.RuleRegistryUpdated:
+			if v.IdempotencyKey == targetOpID {
+				targetFound = true
+				targetHash = hash
+				targetOff = offset
+			}
+		}
+		offset += int64(len(payload) + 1)
+	}
+	require.True(t, targetFound)
 	return contracts.RuleRegistryEntry{
 		Kind: contracts.RegistryKindRolledBack,
 		Value: contracts.RuleRegistryRolledBack{
 			Kind:           contracts.RegistryKindRolledBack,
 			SchemaVersion:  "1",
 			TargetOpID:     targetOpID,
-			TargetOffset:   0,
-			TargetSha256:   strings.Repeat("e", 64),
+			TargetOffset:   targetOff,
+			TargetSha256:   targetHash,
 			ByRunID:        "2026-04-20-PR3-ccccccc",
 			RollbackReason: contracts.RollbackReasonTransactionalFailure,
 			FailedStep:     contracts.FailedStep70,

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -365,6 +366,38 @@ func TestReadSidecar_RejectsDigestMismatch(t *testing.T) {
 	assert.ErrorIs(t, err, ErrSidecarDigestMismatch)
 }
 
+func TestWriteSidecar_RejectsSymlinkedDirectory(t *testing.T) {
+	ctx := newTestRunContext(t)
+	escapeDir := filepath.Join(t.TempDir(), "escape")
+	require.NoError(t, os.MkdirAll(escapeDir, 0o755))
+
+	sidecarDir, err := ctx.ResolveRunRelative("30/reasons")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(sidecarDir), 0o755))
+	require.NoError(t, os.Symlink(escapeDir, sidecarDir))
+
+	sum := sha256.Sum256([]byte("hello"))
+	_, err = WriteSidecar(sidecarDir, hex.EncodeToString(sum[:]), "hello")
+	require.Error(t, err)
+	assert.NoFileExists(t, filepath.Join(escapeDir, hex.EncodeToString(sum[:])+".txt"))
+}
+
+func TestSidecarRefPath_RejectsSymlinkEscapes(t *testing.T) {
+	ctx := newTestRunContext(t)
+	escapeDir := filepath.Join(t.TempDir(), "escape")
+	require.NoError(t, os.MkdirAll(escapeDir, 0o755))
+	targetPath := filepath.Join(escapeDir, "sidecar.txt")
+	require.NoError(t, os.WriteFile(targetPath, []byte("hello"), 0o644))
+
+	linkPath, err := ctx.ResolveRunRelative("30/reasons/linked.txt")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(linkPath), 0o755))
+	require.NoError(t, os.Symlink(targetPath, linkPath))
+
+	_, err = SidecarRefPath(ctx.RunDir(), linkPath)
+	require.Error(t, err)
+}
+
 func TestAcquirePromotionLock(t *testing.T) {
 	ctx := newTestRunContext(t)
 	lock, err := AcquirePromotionLock(ctx)
@@ -563,6 +596,98 @@ func TestSyncIdempotencyIndex_RebuildDoesNotDuplicateCurrentEntry(t *testing.T) 
 	require.NoError(t, err)
 	require.Len(t, loadedIndex, 2)
 	assert.Equal(t, secondResult.Offset, loadedIndex[1].RegistryOffset)
+}
+
+func TestAppendRegistryEntry_ConcurrentCASAllowsSingleWinner(t *testing.T) {
+	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	entry := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("2", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        "2026-04-21-PR1-abcdef0",
+			At:             time.Unix(100, 0).UTC(),
+		},
+	}
+
+	start := make(chan struct{})
+	results := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			_, results[idx] = AppendRegistryEntry(registryPath, entry)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	successes := 0
+	for _, err := range results {
+		if err == nil {
+			successes++
+			continue
+		}
+		assert.ErrorIs(t, err, ErrRegistryCASMismatch)
+	}
+	assert.Equal(t, 1, successes)
+
+	lines, err := readRegistryLines(registryPath)
+	require.NoError(t, err)
+	require.Len(t, lines, 1)
+}
+
+func TestSyncIdempotencyIndex_ConcurrentAppendDeduplicatesOffset(t *testing.T) {
+	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	indexPath := filepath.Join(filepath.Dir(registryPath), "rules-idempotency-index.jsonl")
+	entry := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("2", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        "2026-04-21-PR1-abcdef0",
+			At:             time.Unix(100, 0).UTC(),
+		},
+	}
+	result, err := AppendRegistryEntry(registryPath, entry)
+	require.NoError(t, err)
+	_, err = RebuildIdempotencyIndex(registryPath, indexPath)
+	require.NoError(t, err)
+
+	start := make(chan struct{})
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			errs[idx] = SyncIdempotencyIndex(registryPath, indexPath, entry, result)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+
+	rows, err := ReadJSONL[contracts.RuleIdempotencyIndexEntry](indexPath)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
 }
 
 func newTestRunContext(t *testing.T) RunContext {

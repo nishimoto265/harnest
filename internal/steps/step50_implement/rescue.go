@@ -296,6 +296,9 @@ func runGitCommand(ctx context.Context, dir string, args ...string) error {
 	cmd.Env = processenv.Sanitize()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("step50: git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
 	return nil
@@ -308,6 +311,9 @@ func gitOutputBytesContext(ctx context.Context, dir string, args ...string) ([]b
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("step50: git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return output, nil

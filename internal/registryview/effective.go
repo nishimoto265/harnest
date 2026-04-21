@@ -1,6 +1,8 @@
 package registryview
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -20,14 +22,22 @@ type promotionSnapshot struct {
 	previous    RuleState
 	hadPrevious bool
 	seq         int
+	offset      int64
+	sha256      string
 }
 
 func Build(entries []contracts.RuleRegistryEntry) (map[string]RuleState, error) {
 	states := make(map[string]RuleState)
 	history := make(map[string][]promotionSnapshot)
+	var offset int64
 
 	for idx, entry := range entries {
 		seq := idx + 1
+		result, nextOffset, err := registryAppendResult(entry, offset)
+		if err != nil {
+			return nil, err
+		}
+		offset = nextOffset
 		switch v := entry.Value.(type) {
 		case contracts.RuleRegistryAdded:
 			if err := contracts.ValidateRuleID(v.RuleID); err != nil {
@@ -45,6 +55,8 @@ func Build(entries []contracts.RuleRegistryEntry) (map[string]RuleState, error) 
 				previous:    previous,
 				hadPrevious: hadPrevious,
 				seq:         seq,
+				offset:      result.Offset,
+				sha256:      result.Sha256,
 			})
 			states[v.RuleID] = RuleState{
 				RuleID:           v.RuleID,
@@ -73,6 +85,8 @@ func Build(entries []contracts.RuleRegistryEntry) (map[string]RuleState, error) 
 				previous:    previous,
 				hadPrevious: hadPrevious,
 				seq:         seq,
+				offset:      result.Offset,
+				sha256:      result.Sha256,
 			})
 			states[v.RuleID] = RuleState{
 				RuleID:           v.RuleID,
@@ -102,6 +116,8 @@ func Build(entries []contracts.RuleRegistryEntry) (map[string]RuleState, error) 
 				previous:    previous,
 				hadPrevious: hadPrevious,
 				seq:         seq,
+				offset:      result.Offset,
+				sha256:      result.Sha256,
 			})
 			states[v.RuleID] = RuleState{
 				RuleID:           v.RuleID,
@@ -134,6 +150,8 @@ func Build(entries []contracts.RuleRegistryEntry) (map[string]RuleState, error) 
 				previous:    previous,
 				hadPrevious: hadPrevious,
 				seq:         seq,
+				offset:      result.Offset,
+				sha256:      result.Sha256,
 			})
 			states[v.RuleID] = RuleState{
 				RuleID:           v.RuleID,
@@ -189,12 +207,16 @@ func Build(entries []contracts.RuleRegistryEntry) (map[string]RuleState, error) 
 			state.Exists = true
 			states[v.RuleID] = state
 		case contracts.RuleRegistryRolledBack:
-			applyRollback(states, history, v.TargetOpID)
+			if err := applyRollback(states, history, v.TargetOpID, v.TargetOffset, v.TargetSha256); err != nil {
+				return nil, err
+			}
 		case *contracts.RuleRegistryRolledBack:
 			if v == nil {
 				continue
 			}
-			applyRollback(states, history, v.TargetOpID)
+			if err := applyRollback(states, history, v.TargetOpID, v.TargetOffset, v.TargetSha256); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -228,13 +250,18 @@ func previousState(states map[string]RuleState, ruleID string) (RuleState, bool,
 	return state, true, nil
 }
 
-func applyRollback(states map[string]RuleState, history map[string][]promotionSnapshot, targetOpID string) {
+func applyRollback(states map[string]RuleState, history map[string][]promotionSnapshot, targetOpID string, targetOffset int64, targetSha256 string) error {
 	targets, ok := history[targetOpID]
 	if !ok {
-		return
+		return nil
 	}
+	matchedTarget := false
 	for i := len(targets) - 1; i >= 0; i-- {
 		target := targets[i]
+		if target.offset != targetOffset || target.sha256 != targetSha256 {
+			continue
+		}
+		matchedTarget = true
 		current, ok := states[target.ruleID]
 		if !ok {
 			continue
@@ -244,11 +271,15 @@ func applyRollback(states map[string]RuleState, history map[string][]promotionSn
 		}
 		if !target.hadPrevious {
 			delete(states, target.ruleID)
-			return
+			return nil
 		}
 		states[target.ruleID] = target.previous
-		return
+		return nil
 	}
+	if !matchedTarget {
+		return fmt.Errorf("registryview: rollback target mismatch: op_id=%s target_offset=%d target_sha256=%s", targetOpID, targetOffset, targetSha256)
+	}
+	return nil
 }
 
 func MustGet(states map[string]RuleState, ruleID string) (RuleState, error) {
@@ -257,4 +288,17 @@ func MustGet(states map[string]RuleState, ruleID string) (RuleState, error) {
 		return RuleState{}, fmt.Errorf("registryview: rule %s not found", ruleID)
 	}
 	return state, nil
+}
+
+func registryAppendResult(entry contracts.RuleRegistryEntry, offset int64) (contracts.RegistryAppendResult, int64, error) {
+	payload, err := contracts.CanonicalMarshal(entry)
+	if err != nil {
+		return contracts.RegistryAppendResult{}, 0, err
+	}
+	sum := sha256.Sum256(payload)
+	result := contracts.RegistryAppendResult{
+		Offset: offset,
+		Sha256: hex.EncodeToString(sum[:]),
+	}
+	return result, offset + int64(len(payload)+1), nil
 }

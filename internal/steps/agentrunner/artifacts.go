@@ -12,16 +12,17 @@ import (
 	"strings"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 )
 
 const maxSuccessDiffBytes = 16 << 20
+const maxChecklistArtifactBytes = 10 << 20
 
 var (
 	ErrSuccessDiffOverflow   = errors.New("agentrunner: success diff exceeded 16MB limit")
 	ErrArtifactNotRegular    = errors.New("agentrunner: artifact path is not a regular file")
 	ErrArtifactCollectionTTL = errors.New("agentrunner: artifact collection deadline exceeded")
+	ErrArtifactTooLarge      = errors.New("agentrunner: artifact exceeds size limit")
 )
 
 func SuccessDiffBytes(ctx context.Context, worktreePath, baseSHA, errPrefix string) ([]byte, error) {
@@ -90,8 +91,13 @@ func WriteSuccessDiff(ctx context.Context, worktreePath, baseSHA, errPrefix, des
 		if err := contracts.EnsureCleanRelativePath(entry); err != nil {
 			return closeWithErr(err)
 		}
-		if err := ensureArtifactSourceRegular(filepath.Join(worktreePath, filepath.FromSlash(entry))); err != nil {
+		collectPath := filepath.Join(worktreePath, filepath.FromSlash(entry))
+		diffable, err := diffableArtifactSource(collectPath)
+		if err != nil {
 			return closeWithErr(err)
+		}
+		if !diffable {
+			continue
 		}
 		if err := streamGitNoIndexDiffContext(ctx, worktreePath, entry, errPrefix, writer); err != nil {
 			return closeWithErr(err)
@@ -124,7 +130,7 @@ func LoadChecklistArtifactContext(ctx context.Context, worktreePath, filename, e
 	if err := artifactCollectionDeadline(ctx); err != nil {
 		return contracts.ChecklistResult{}, err
 	}
-	checklist, err := internalio.ReadJSON[contracts.ChecklistResult](sourcePath)
+	checklist, err := loadChecklistArtifactFileContext(ctx, sourcePath)
 	if err != nil {
 		return contracts.ChecklistResult{}, err
 	}
@@ -265,19 +271,73 @@ func ensureArtifactSourceRegular(path string) error {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		targetInfo, err := os.Stat(path)
-		if err != nil {
-			return err
-		}
-		if targetInfo.Mode().IsRegular() {
-			return nil
-		}
 		return fmt.Errorf("%w: %s", ErrArtifactNotRegular, path)
 	}
 	if info.Mode().IsRegular() {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", ErrArtifactNotRegular, path)
+}
+
+func diffableArtifactSource(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, nil
+	}
+	return info.Mode().IsRegular(), nil
+}
+
+func loadChecklistArtifactFileContext(ctx context.Context, path string) (contracts.ChecklistResult, error) {
+	if err := artifactCollectionDeadline(ctx); err != nil {
+		return contracts.ChecklistResult{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return contracts.ChecklistResult{}, err
+	}
+	if info.Size() > maxChecklistArtifactBytes {
+		return contracts.ChecklistResult{}, fmt.Errorf("%w: path=%s size=%d limit=%d", ErrArtifactTooLarge, path, info.Size(), maxChecklistArtifactBytes)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return contracts.ChecklistResult{}, err
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(&contextReader{ctx: ctx, reader: file}, maxChecklistArtifactBytes+1))
+	if err != nil {
+		return contracts.ChecklistResult{}, err
+	}
+	if int64(len(data)) > maxChecklistArtifactBytes {
+		return contracts.ChecklistResult{}, fmt.Errorf("%w: path=%s size=%d limit=%d", ErrArtifactTooLarge, path, len(data), maxChecklistArtifactBytes)
+	}
+
+	var checklist contracts.ChecklistResult
+	if err := contracts.DecodeStrictJSON(data, &checklist); err != nil {
+		return contracts.ChecklistResult{}, err
+	}
+	return checklist, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := artifactCollectionDeadline(r.ctx); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(p)
+	if err == nil {
+		if ctxErr := artifactCollectionDeadline(r.ctx); ctxErr != nil {
+			return n, ctxErr
+		}
+	}
+	return n, err
 }
 
 func artifactCollectionDeadline(ctx context.Context) error {

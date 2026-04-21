@@ -1,6 +1,8 @@
 package step70_decide
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,8 +145,8 @@ func TestLatestRuleSha256_UsesRollbackAwareEffectiveState(t *testing.T) {
 				Kind:           contracts.RegistryKindRolledBack,
 				SchemaVersion:  "1",
 				TargetOpID:     strings.Repeat("b", 64),
-				TargetOffset:   1,
-				TargetSha256:   strings.Repeat("2", 64),
+				TargetOffset:   0,
+				TargetSha256:   "",
 				ByRunID:        "2026-04-21-PR42-abcdef0",
 				RollbackReason: contracts.RollbackReasonTransactionalFailure,
 				FailedStep:     contracts.FailedStep70,
@@ -154,6 +156,15 @@ func TestLatestRuleSha256_UsesRollbackAwareEffectiveState(t *testing.T) {
 			},
 		}},
 	}
+	addedPayload, err := contracts.CanonicalMarshal(lines[0].Entry)
+	require.NoError(t, err)
+	updatedPayload, err := contracts.CanonicalMarshal(lines[1].Entry)
+	require.NoError(t, err)
+	sum := sha256.Sum256(updatedPayload)
+	rolledBack := lines[2].Entry.Value.(contracts.RuleRegistryRolledBack)
+	rolledBack.TargetOffset = int64(len(addedPayload) + 1)
+	rolledBack.TargetSha256 = hex.EncodeToString(sum[:])
+	lines[2].Entry.Value = rolledBack
 
 	got, err := latestRuleSha256(lines, "rule-a")
 	require.NoError(t, err)

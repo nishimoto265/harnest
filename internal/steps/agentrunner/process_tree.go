@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,6 +90,24 @@ func (t *DescendantTracker) Snapshot() []int {
 		out = append(out, pid)
 	}
 	return out
+}
+
+func (t *DescendantTracker) CaptureBurst(window time.Duration) {
+	if t == nil {
+		return
+	}
+	if window <= 0 {
+		t.capture()
+		return
+	}
+	deadline := time.Now().Add(window)
+	for {
+		t.capture()
+		if !time.Now().Before(deadline) {
+			return
+		}
+		runtime.Gosched()
+	}
 }
 
 func CleanupProcessTree(lease ProcessLease, sessionID int, tracker *DescendantTracker) error {

@@ -640,6 +640,53 @@ func TestGitCLIWorktreeAdd_ExistingPath_VerifiesBranch(t *testing.T) {
 	assert.ErrorIs(t, err, ErrWorktreeDrift)
 }
 
+func TestGitCLIWorktreeAdd_RecreatesDirtyExistingWorktree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worktree")
+	repoRoot := t.TempDir()
+	branch := "auto-improve/run/pass1/a1"
+	require.NoError(t, os.MkdirAll(path, 0o755))
+
+	var calls [][]string
+	git := gitCLI{
+		stat: os.Stat,
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+			calls = append(calls, append([]string(nil), args...))
+			switch {
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "list", "--porcelain"}):
+				return []byte("worktree " + path + "\n\n"), nil, nil
+			case slices.Equal(args, []string{"-C", path, "rev-parse", "HEAD"}):
+				return []byte(testBaseSHA + "\n"), nil, nil
+			case slices.Equal(args, []string{"-C", path, "branch", "--show-current"}):
+				return []byte(branch + "\n"), nil, nil
+			case slices.Equal(args, []string{"-C", path, "status", "--porcelain"}):
+				return []byte(" M README.md\n"), nil, nil
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "remove", "--force", path}):
+				require.NoError(t, os.RemoveAll(path))
+				return []byte("Removed\n"), nil, nil
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", branch, path, testBaseSHA}):
+				return []byte("Preparing worktree\n"), nil, nil
+			default:
+				return nil, nil, fmt.Errorf("unexpected git args: %v", args)
+			}
+		},
+	}
+
+	created, err := git.WorktreeAdd(context.Background(), repoRoot, path, branch, testBaseSHA)
+	require.NoError(t, err)
+	assert.True(t, created)
+	assert.Equal(t,
+		[][]string{
+			{"-C", repoRoot, "worktree", "list", "--porcelain"},
+			{"-C", path, "rev-parse", "HEAD"},
+			{"-C", path, "branch", "--show-current"},
+			{"-C", path, "status", "--porcelain"},
+			{"-C", repoRoot, "worktree", "remove", "--force", path},
+			{"-C", repoRoot, "worktree", "add", "-b", branch, path, testBaseSHA},
+		},
+		calls,
+	)
+}
+
 func TestGitCLIWorktreeAdd_ExistingPathRequiresRegisteredWorktree(t *testing.T) {
 	path := t.TempDir()
 	repoRoot := t.TempDir()

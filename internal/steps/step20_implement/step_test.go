@@ -44,6 +44,9 @@ func TestStepRun(t *testing.T) {
 				"FAKE_CLAUDE_STDOUT": `{"event":"ok"}` + "\n",
 				"FAKE_CLAUDE_COMMIT": "1",
 			},
+			prepare: func(t *testing.T, fx *testFixture) {
+				t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "changed.txt"))
+			},
 			assertion: func(t *testing.T, fx *testFixture, err error) {
 				require.NoError(t, err)
 				manifest := fx.readManifest(t)
@@ -63,11 +66,11 @@ func TestStepRun(t *testing.T) {
 			assertion: func(t *testing.T, fx *testFixture, err error) {
 				require.NoError(t, err)
 				manifest := fx.readManifest(t)
-				success := manifest.Value.(contracts.ManifestSuccess)
-				require.Equal(t, fx.baseSHA, success.HeadSHA)
-				diffBytes, readErr := os.ReadFile(fx.diffPath())
-				require.NoError(t, readErr)
-				require.Empty(t, diffBytes)
+				failure := manifest.Value.(contracts.ManifestError)
+				require.Equal(t, 0, failure.ExitCode)
+				require.Equal(t, "unknown", failure.Reason)
+				require.Contains(t, failure.Detail, "no diff")
+				assert.NoFileExists(t, fx.diffPath())
 			},
 		},
 		{
@@ -126,6 +129,7 @@ func TestStepRun(t *testing.T) {
 				"FAKE_CLAUDE_STDOUT": `{"event":"rescued"}` + "\n",
 			},
 			prepare: func(t *testing.T, fx *testFixture) {
+				t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "rescued.txt"))
 				fx.seedResumeState(t, 0)
 			},
 			assertion: func(t *testing.T, fx *testFixture, err error) {
@@ -151,6 +155,7 @@ func TestStepRun(t *testing.T) {
 				"FAKE_CLAUDE_STDOUT": `{"event":"missing-heartbeat"}` + "\n",
 			},
 			prepare: func(t *testing.T, fx *testFixture) {
+				t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "missing-heartbeat.txt"))
 				fx.seedResumeStateWithoutHeartbeat(t, 0)
 			},
 			assertion: func(t *testing.T, fx *testFixture, err error) {
@@ -760,6 +765,7 @@ func TestStepRunSweepsGrandchildrenAfterSuccessfulExit(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	helperPath := writeBackgroundSentinelHelper(t, t.TempDir())
 	sentinelPath := filepath.Join(t.TempDir(), "background-child.txt")
+	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "background.txt"))
 	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_HELPER", helperPath)
 	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_PATH", sentinelPath)
 	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_DELAY", "200ms")
@@ -782,6 +788,7 @@ func TestStepRunKillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	helperPath := writeDetachedSleepHelper(t, t.TempDir())
 	pidPath := filepath.Join(t.TempDir(), "detached-child.pid")
+	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "detached.txt"))
 	t.Setenv("FAKE_CLAUDE_DETACH_HELPER", helperPath)
 	t.Setenv("FAKE_CLAUDE_DETACHED_PID_PATH", pidPath)
 	t.Setenv("FAKE_CLAUDE_DETACH_DELAY", "250ms")
@@ -918,6 +925,7 @@ func TestStepRun_GitCommandsIgnoreInheritedGitDir(t *testing.T) {
 
 	t.Setenv("GIT_DIR", filepath.Join(otherRepo, ".git"))
 	t.Setenv("GIT_WORK_TREE", otherRepo)
+	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "local-change.txt"))
 
 	require.NoError(t, fx.step.Run(context.Background(), fx.run))
 
@@ -956,6 +964,24 @@ func TestPidAliveTreatsEPERMAsAlive(t *testing.T) {
 	})
 
 	require.True(t, pidAlive(12345))
+}
+
+func TestShouldAttemptRescue_RequiresMatchingPGID(t *testing.T) {
+	originalKill := killProcess
+	originalGetpgid := getProcessGroupID
+	killProcess = func(pid int, sig syscall.Signal) error {
+		return nil
+	}
+	getProcessGroupID = func(pid int) (int, error) {
+		return pid + 1, nil
+	}
+	t.Cleanup(func() {
+		killProcess = originalKill
+		getProcessGroupID = originalGetpgid
+	})
+
+	assert.False(t, shouldAttemptRescue(true, 12345, 12346))
+	assert.True(t, shouldAttemptRescue(true, 12345, 12345))
 }
 
 func TestStepRunResumeStatePersistsChildPIDAndPGID(t *testing.T) {

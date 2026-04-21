@@ -40,6 +40,14 @@ func EnsureVerifiedIdempotencyIndex(registryPath, indexPath string) ([]contracts
 // If the index is missing or inconsistent it is rebuilt instead, which already
 // captures the just-appended registry row.
 func SyncIdempotencyIndex(registryPath, indexPath string, entry contracts.RuleRegistryEntry, result contracts.RegistryAppendResult) error {
+	lock, err := AcquireFileLock(indexPath + ".lock")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = lock.Unlock()
+	}()
+
 	_, rebuilt, err := EnsureVerifiedIdempotencyIndex(registryPath, indexPath)
 	if err != nil {
 		return err
@@ -51,6 +59,15 @@ func SyncIdempotencyIndex(registryPath, indexPath string, entry contracts.RuleRe
 	indexEntry, err := BuildRuleIdempotencyIndexEntry(entry, result)
 	if err != nil {
 		return err
+	}
+	existingEntries, err := ReadJSONL[contracts.RuleIdempotencyIndexEntry](indexPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, existing := range existingEntries {
+		if existing.RegistryOffset == indexEntry.RegistryOffset && existing.IdempotencyKey == indexEntry.IdempotencyKey {
+			return nil
+		}
 	}
 	return AppendIdempotencyIndexEntry(indexPath, indexEntry)
 }

@@ -14,6 +14,7 @@ import (
 )
 
 var killProcess = syscall.Kill
+var getProcessGroupID = syscall.Getpgid
 
 type resumeState struct {
 	ExpectedBaseSHA string    `json:"expected_base_sha" validate:"required,sha1_hex"`
@@ -136,8 +137,24 @@ func pidAlive(pid int) bool {
 	}
 }
 
-func shouldAttemptRescue(stale bool, pid int) bool {
-	return agentrunner.ShouldAttemptRescue(stale, pidAlive, pid)
+func processLeaseAlive(pid, expectedPGID int) bool {
+	if !pidAlive(pid) {
+		return false
+	}
+	if expectedPGID <= 0 {
+		return true
+	}
+	actualPGID, err := getProcessGroupID(pid)
+	if err != nil {
+		return !errors.Is(err, syscall.ESRCH)
+	}
+	return actualPGID == expectedPGID
+}
+
+func shouldAttemptRescue(stale bool, pid, pgid int) bool {
+	return agentrunner.ShouldAttemptRescue(stale, func(pid int) bool {
+		return processLeaseAlive(pid, pgid)
+	}, pid)
 }
 
 func (s resumeState) Validate() error {

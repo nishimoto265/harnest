@@ -235,14 +235,6 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	if err := agentrunner.ValidateSuccessHead(collectCtx, allocation, headSHA, "step20"); err != nil {
 		return err
 	}
-	diffPath, err := artifactPath(run.IO, run.Pass, run.Agent, diffFileName)
-	if err != nil {
-		return err
-	}
-	if err := agentrunner.WriteSuccessDiff(collectCtx, allocation.Path, allocation.BaseSHA, "step20", diffPath); err != nil {
-		return err
-	}
-
 	checklistPath, err := artifactPath(run.IO, run.Pass, run.Agent, checklistFileName)
 	if err != nil {
 		return err
@@ -252,6 +244,20 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 		return err
 	}
 	if err := internalio.WriteJSONAtomic(checklistPath, checklist); err != nil {
+		return err
+	}
+	diffPath, err := artifactPath(run.IO, run.Pass, run.Agent, diffFileName)
+	if err != nil {
+		return err
+	}
+	diffBytes, err := successDiffBytes(collectCtx, allocation.Path, allocation.BaseSHA)
+	if err != nil {
+		return err
+	}
+	if len(diffBytes) == 0 {
+		return s.writeNoChangeManifest(ctx, run, runResult)
+	}
+	if err := internalio.WriteAtomic(diffPath, diffBytes); err != nil {
 		return err
 	}
 
@@ -271,6 +277,28 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 			SessionPath:   filepath.Join(prefix, sessionFileName),
 			ChecklistPath: filepath.Join(prefix, checklistFileName),
 			PromptVersion: promptVersion,
+			StartedAt:     runResult.StartedAt.UTC(),
+			FinishedAt:    runResult.FinishedAt.UTC(),
+		},
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return writeManifest(run.IO, run.Pass, run.Agent, manifest)
+}
+
+func (s *Step) writeNoChangeManifest(ctx context.Context, run RunContext, runResult runnerResult) error {
+	manifest := contracts.Manifest{
+		Kind: contracts.ManifestKindError,
+		Value: contracts.ManifestError{
+			Kind:          contracts.ManifestKindError,
+			SchemaVersion: "1",
+			RunID:         run.IO.RunID,
+			Pass:          run.Pass,
+			Agent:         run.Agent,
+			ExitCode:      0,
+			Reason:        "unknown",
+			Detail:        "agent produced no diff",
 			StartedAt:     runResult.StartedAt.UTC(),
 			FinishedAt:    runResult.FinishedAt.UTC(),
 		},

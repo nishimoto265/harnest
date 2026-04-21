@@ -83,6 +83,9 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 		return runnerResult{}, err
 	}
 	tracker := agentrunner.StartDescendantTracker(lease.PID, 25*time.Millisecond)
+	if tracker != nil {
+		tracker.CaptureBurst(100 * time.Millisecond)
+	}
 	result.Lease = lease
 	if req.OnStart != nil {
 		if err := req.OnStart(lease, result.StartedAt); err != nil {
@@ -108,6 +111,7 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 	waitErr := cmd.Wait()
 	close(groupKillDone)
 	if tracker != nil {
+		tracker.CaptureBurst(25 * time.Millisecond)
 		tracker.Stop()
 	}
 	_ = agentrunner.CleanupProcessTree(lease, lease.PID, tracker)

@@ -492,6 +492,116 @@ func TestRun_ResumeFromRegistryAppended(t *testing.T) {
 	assert.NoFileExists(t, intentionPath(t, runCtx))
 }
 
+func TestRun_UsesPersistedDecisionBeforeRegistryAppendedIntention(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR410")
+	appendResult, _ := seedRegistryAdd(t, runCtx.RulesRegistryPath(), resolver, runCtx.RunID, candidates.CandidatesHash)
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageRegistryAppended
+	intention.RegistryAppendResult = &appendResult
+	require.NoError(t, store.Save(intention))
+
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, contracts.Decision{
+		Action: contracts.DecisionActionAdopt,
+		Value: contracts.DecisionAdopt{
+			Action:               contracts.DecisionActionAdopt,
+			SchemaVersion:        "1",
+			RunID:                runCtx.RunID,
+			IdempotencyKey:       intention.IdempotencyKey,
+			BestShaBefore:        intention.BestShaBefore,
+			TargetSha:            intention.TargetSha,
+			CandidatesHash:       intention.CandidatesHash,
+			RegistryAppendResult: appendResult,
+			DecidedAt:            fixedNow()(),
+		},
+	}))
+
+	require.NoError(t, Run(context.Background(), 410, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.TargetSHA},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	}))
+
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindPromoted, events[len(events)-1].Kind)
+	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
+func TestRun_ResumeFromPersistedDecisionRepublishesMissingRuleBodies(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR411")
+	resolver.target.RulesToAppend = []contracts.RuleRegistryEntry{
+		adoptAddedEntryWithBody(runCtx.RunID, "rule-a", "rule-a body\n"),
+		adoptAddedEntryWithBody(runCtx.RunID, "rule-b", "rule-b body\n"),
+	}
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageRegistryAppended
+	entries, err := registryEntriesFromPlannedAdoption(intention, fixedNow()())
+	require.NoError(t, err)
+	var appendResult contracts.RegistryAppendResult
+	for _, entry := range entries {
+		entry, err = deriveRegistryChain(entry, runCtx.RulesRegistryPath())
+		require.NoError(t, err)
+		appendResult, err = internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), entry)
+		require.NoError(t, err)
+	}
+	intention.RegistryAppendResult = &appendResult
+	require.NoError(t, store.Save(intention))
+
+	require.NoError(t, internalio.WriteAtomic(mustStagedRulePath(t, runCtx, "rules/rule-a.md"), []byte("rule-a body\n")))
+	require.NoError(t, internalio.WriteAtomic(mustStagedRulePath(t, runCtx, "rules/rule-b.md"), []byte("rule-b body\n")))
+
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, contracts.Decision{
+		Action: contracts.DecisionActionAdopt,
+		Value: contracts.DecisionAdopt{
+			Action:               contracts.DecisionActionAdopt,
+			SchemaVersion:        "1",
+			RunID:                runCtx.RunID,
+			IdempotencyKey:       intention.IdempotencyKey,
+			BestShaBefore:        intention.BestShaBefore,
+			TargetSha:            intention.TargetSha,
+			CandidatesHash:       intention.CandidatesHash,
+			RegistryAppendResult: appendResult,
+			DecidedAt:            fixedNow()(),
+		},
+	}))
+
+	originalPromote := promoteRuleSidecarFn
+	callCount := 0
+	promoteRuleSidecarFn = func(stagedPath, dstPath, wantSHA string) error {
+		callCount++
+		if callCount == 2 {
+			return errors.New("synthetic crash during rule publish")
+		}
+		return originalPromote(stagedPath, dstPath, wantSHA)
+	}
+	err = Run(context.Background(), 411, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.TargetSHA},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	})
+	require.ErrorContains(t, err, "synthetic crash")
+
+	promoteRuleSidecarFn = originalPromote
+	t.Cleanup(func() {
+		promoteRuleSidecarFn = originalPromote
+	})
+	require.NoError(t, Run(context.Background(), 411, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.TargetSHA},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	}))
+
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-a.md"))
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-b.md"))
+	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
 func TestRun_ResumeFromDecisionWritten(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR5")
 	registryPath := runCtx.RulesRegistryPath()
@@ -784,6 +894,42 @@ func TestRun_ResumeFromRollingBackRegistryAppended(t *testing.T) {
 	assert.NoFileExists(t, intentionPath(t, runCtx))
 }
 
+func TestAppendRegistryRollbacks_IgnoresMismatchedExistingRollbackTarget(t *testing.T) {
+	runCtx, _, candidates, _, resolver := newFixtureWithResolver(t, "PR120")
+	appendResult, _ := seedRegistryAdd(t, runCtx.RulesRegistryPath(), resolver, runCtx.RunID, candidates.CandidatesHash)
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.RegistryAppendResult = &appendResult
+	intention.AppendedEntryOpIDs = append(intention.AppendedEntryOpIDs, intention.PlannedAdoption.Entries[0].OpID)
+
+	bogusRollback := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindRolledBack,
+		Value: contracts.RuleRegistryRolledBack{
+			Kind:           contracts.RegistryKindRolledBack,
+			SchemaVersion:  "1",
+			TargetOpID:     intention.PlannedAdoption.Entries[0].OpID,
+			TargetOffset:   appendResult.Offset + 999,
+			TargetSha256:   strings.Repeat("f", 64),
+			ByRunID:        runCtx.RunID,
+			RollbackReason: contracts.RollbackReasonTransactionalFailure,
+			FailedStep:     contracts.FailedStep70,
+			VersionSeq:     2,
+			PrevHash:       appendResult.Sha256,
+			At:             fixedNow()(),
+		},
+	}
+	_, err := internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), bogusRollback)
+	require.NoError(t, err)
+
+	rollbackResult, err := appendRegistryRollbacks(runCtx, intention, contracts.RollbackReasonTransactionalFailure, fixedNow()())
+	require.NoError(t, err)
+	require.NotNil(t, rollbackResult)
+
+	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	require.Len(t, lines, 3)
+	assert.Equal(t, contracts.RegistryKindRolledBack, lines[2].Entry.Kind)
+}
+
 func TestRun_ResumeFromRollingBackBranchReverted(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR121")
 	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
@@ -958,11 +1104,41 @@ func TestRun_AbortsBeforePushWhenOtherRunSentinelAppears(t *testing.T) {
 	err := Run(context.Background(), 16, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()})
 	require.ErrorIs(t, err, ErrBlockedBySentinel)
 	assert.Empty(t, git.pushCalls)
-	assert.NoFileExists(t, intentionPath(t, runCtx))
+	require.FileExists(t, intentionPath(t, runCtx))
+	intention, loadErr := store.Load()
+	require.NoError(t, loadErr)
+	require.NotNil(t, intention)
+	assert.Equal(t, contracts.IntentionStagePlanning, intention.Stage)
 
 	decisionPath, pathErr := runCtx.ResolveRunRelative("70/decision.json")
 	require.NoError(t, pathErr)
 	assert.NoFileExists(t, decisionPath)
+}
+
+func TestRun_ResumePlanningRestartsWhenResolverTargetChanges(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR160")
+	originalTarget := resolver.target
+	changedTarget := Target{
+		BestBranch:    originalTarget.BestBranch,
+		BestShaBefore: originalTarget.BestShaBefore,
+		TargetSHA:     strings.Repeat("3", 40),
+		RulesToAppend: []contracts.RuleRegistryEntry{
+			adoptAddedEntryWithBody(runCtx.RunID, "rule-replanned", "body: replanned\n"),
+		},
+	}
+	intention := planningIntention(runCtx.RunID, originalTarget, candidates.CandidatesHash)
+	require.NoError(t, store.Save(intention))
+
+	git := &fakeGit{head: originalTarget.BestShaBefore}
+	require.NoError(t, Run(context.Background(), 160, runCtx, pkg, candidates, store, Deps{
+		Git:      git,
+		Resolver: &fixtureResolver{target: changedTarget},
+		Now:      fixedNow(),
+	}))
+
+	decision := mustDecisionAdopt(t, readDecision(t, runCtx))
+	assert.Equal(t, changedTarget.TargetSHA, decision.TargetSha)
+	assert.NoFileExists(t, intentionPath(t, runCtx))
 }
 
 func TestRun_IgnoresSelfOwnedSentinelAtStageBoundary(t *testing.T) {
@@ -1412,6 +1588,24 @@ func adoptAddedEntryWithTarget(runID contracts.RunID, candidatesHash, targetSHA,
 	}
 	v.IdempotencyKey = contracts.ComputeAdoptIdempotencyKey(string(runID), targetSHA, strings.Repeat("1", 40), candidatesHash)
 	return contracts.RuleRegistryEntry{Kind: v.Kind, Value: v}
+}
+
+func adoptAddedEntryWithBody(runID contracts.RunID, ruleID, body string) contracts.RuleRegistryEntry {
+	return contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         ruleID,
+			RulePath:       "rules/" + ruleID + ".md",
+			Sha256:         sha256String(body),
+			IdempotencyKey: strings.Repeat("0", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        runID,
+			At:             time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+		},
+	}
 }
 
 func planningIntention(runID contracts.RunID, target Target, candidatesHash string) contracts.IntentionRecord {

@@ -81,6 +81,16 @@ func (g gitCLI) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha str
 		if currentBranch == "" || currentBranch != branch {
 			return false, fmt.Errorf("%w: path=%s expected_branch=%s actual_branch=%s", ErrWorktreeDrift, path, branch, currentBranch)
 		}
+		clean, cerr := g.worktreeClean(ctx, path)
+		if cerr != nil {
+			return false, fmt.Errorf("%w: path=%s: cannot inspect worktree cleanliness: %v", ErrWorktreeDrift, path, cerr)
+		}
+		if !clean {
+			if err := g.removeWorktreeForce(ctx, repoRoot, path); err != nil {
+				return false, err
+			}
+			return g.WorktreeAdd(ctx, repoRoot, path, branch, sha)
+		}
 		return false, nil
 	} else if !os.IsNotExist(err) {
 		return false, fmt.Errorf("step10: stat %s: %w", path, err)
@@ -127,6 +137,14 @@ func (g gitCLI) currentBranch(ctx context.Context, repoRoot string) (string, err
 		return "", formatCommandFailure(fmt.Sprintf("step10: git branch --show-current (in %s)", repoRoot), err, out, stderr)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func (g gitCLI) worktreeClean(ctx context.Context, repoRoot string) (bool, error) {
+	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "status", "--porcelain")
+	if err != nil {
+		return false, formatCommandFailure(fmt.Sprintf("step10: git status --porcelain (in %s)", repoRoot), err, out, stderr)
+	}
+	return strings.TrimSpace(string(out)) == "", nil
 }
 
 func (g gitCLI) ResolveRef(ctx context.Context, repoRoot, ref string) (string, error) {

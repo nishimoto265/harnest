@@ -61,7 +61,7 @@ func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation co
 	if err != nil {
 		return 0, err
 	}
-	if !shouldAttemptRescue(stale, state.Pid) {
+	if !shouldAttemptRescue(stale, state.Pid, state.Pgid) {
 		return 0, fmt.Errorf("%w: agent %s", ErrRescueAbortedLeaseActive, run.Agent)
 	}
 	if state.RetryCount >= rescueMaxRetries(run.Config, s.cfg) {

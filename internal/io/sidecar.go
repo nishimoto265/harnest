@@ -3,6 +3,7 @@ package io
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,9 @@ import (
 
 func WriteSidecar(dir, sha256Hex string, content string) (string, error) {
 	if err := contracts.EnsureCleanAbsolutePath(dir); err != nil {
+		return "", err
+	}
+	if err := ensureNoSymlinkPathComponents(dir); err != nil {
 		return "", err
 	}
 	if len(sha256Hex) != sidecarDigestHexLength {
@@ -58,7 +62,18 @@ func SidecarRefPath(runDir, absolutePath string) (string, error) {
 	if err := contracts.EnsureCleanAbsolutePath(absolutePath); err != nil {
 		return "", err
 	}
-	rel, err := filepath.Rel(runDir, absolutePath)
+	if err := ensureNoSymlinkPathComponents(absolutePath); err != nil {
+		return "", err
+	}
+	realRunDir, err := filepath.EvalSymlinks(runDir)
+	if err != nil {
+		return "", err
+	}
+	realPath, err := filepath.EvalSymlinks(absolutePath)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(realRunDir, realPath)
 	if err != nil {
 		return "", err
 	}
@@ -69,4 +84,42 @@ func SidecarRefPath(runDir, absolutePath string) (string, error) {
 		return "", err
 	}
 	return rel, nil
+}
+
+func ensureNoSymlinkPathComponents(path string) error {
+	cleaned := filepath.Clean(path)
+	var pending []string
+	current := cleaned
+	for {
+		info, err := os.Lstat(current)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("io: symlinked path component: %s", current)
+			}
+			break
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil
+		}
+		pending = append(pending, filepath.Base(current))
+		current = parent
+	}
+	for i := len(pending) - 1; i >= 0; i-- {
+		current = filepath.Join(current, pending[i])
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("io: symlinked path component: %s", current)
+		}
+	}
+	return nil
 }
