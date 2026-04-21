@@ -128,6 +128,9 @@ func BuildFinalResultFromRaw(
 	if len(arbiterScores) == 0 || (len(primaryCompliance) > 0 && len(arbiterCompliance) == 0) {
 		return PanelResult{}, ErrPanelArbiterRowsRequired
 	}
+	if err := validateArbiterComplianceCoverage(primaryCompliance, secondaryCompliance, arbiterCompliance); err != nil {
+		return PanelResult{}, err
+	}
 
 	verdict := classifyArbiterVerdict(primaryScores, secondaryScores, arbiterScores, threshold)
 	return PanelResult{

@@ -287,6 +287,108 @@ func TestBuildFinalResultFromRaw_RequiresArbiterOnDisagreement(t *testing.T) {
 	require.ErrorIs(t, err, ErrPanelArbiterRequired)
 }
 
+func TestPanelResolver_Resolve_RejectsIncompleteArbiterComplianceCoverage(t *testing.T) {
+	runCtx := newTestRunContext(t)
+	input := testJudgeInput(runCtx.RunID)
+
+	outWithRules := func(role judges.Role, score int, rules ...string) judges.JudgeOutput {
+		compliance := make([]contracts.ComplianceEntry, 0, len(rules))
+		for _, ruleID := range rules {
+			compliance = append(compliance, complianceEntry(runCtx.RunID, ruleID, contracts.ComplianceVerdictCompliant))
+		}
+		return judges.JudgeOutput{
+			Scores:     allDimScores(runCtx.RunID, role, score),
+			Compliance: compliance,
+			Arbiter:    role == judges.RoleArbiter,
+		}
+	}
+
+	resolver := NewPanelResolver()
+	_, err := resolver.Resolve(context.Background(), PanelInput{
+		Primary:               fakeJudge{out: outWithRules(judges.RolePrimary, 80, "rule-a", "rule-b")},
+		Secondary:             fakeJudge{out: outWithRules(judges.RoleSecondary, 60, "rule-a", "rule-b")},
+		Arbiter:               fakeJudge{out: outWithRules(judges.RoleArbiter, 75, "rule-a")},
+		JudgeInput:            input,
+		OutputSha256:          testSha256Hex,
+		DisagreementThreshold: 5,
+		RunContext:            runCtx,
+		StepDir:               "30",
+	})
+	require.ErrorIs(t, err, ErrPanelArbiterRuleCoverage)
+}
+
+func TestBuildFinalResultFromRaw_RejectsIncompleteArbiterComplianceCoverage(t *testing.T) {
+	runCtx := newTestRunContext(t)
+	resolver := NewPanelResolver()
+	panelInput := PanelInput{
+		JudgeInput:            testJudgeInput(runCtx.RunID),
+		OutputSha256:          testSha256Hex,
+		DisagreementThreshold: 5,
+		RunContext:            runCtx,
+		StepDir:               "30",
+	}
+	outWithRules := func(role judges.Role, score int, rules ...string) judges.JudgeOutput {
+		compliance := make([]contracts.ComplianceEntry, 0, len(rules))
+		for _, ruleID := range rules {
+			compliance = append(compliance, complianceEntry(runCtx.RunID, ruleID, contracts.ComplianceVerdictCompliant))
+		}
+		return judges.JudgeOutput{
+			Scores:     allDimScores(runCtx.RunID, role, score),
+			Compliance: compliance,
+			Arbiter:    role == judges.RoleArbiter,
+		}
+	}
+
+	primary, err := resolver.ResolveRole(
+		context.Background(),
+		panelInput,
+		contracts.JudgeRolePrimary,
+		fakeJudge{out: outWithRules(judges.RolePrimary, 80, "rule-a", "rule-b")},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	secondary, err := resolver.ResolveRole(
+		context.Background(),
+		panelInput,
+		contracts.JudgeRoleSecondary,
+		fakeJudge{out: outWithRules(judges.RoleSecondary, 60, "rule-a", "rule-b")},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	arbiter, err := resolver.ResolveRole(
+		context.Background(),
+		panelInput,
+		contracts.JudgeRoleArbiter,
+		fakeJudge{out: outWithRules(judges.RoleArbiter, 75, "rule-a")},
+		primary.RawScores,
+		secondary.RawScores,
+		primary.RawCompliance,
+		secondary.RawCompliance,
+	)
+	require.NoError(t, err)
+
+	_, err = BuildFinalResultFromRaw(
+		primary.RawScores,
+		secondary.RawScores,
+		arbiter.RawScores,
+		primary.RawCompliance,
+		secondary.RawCompliance,
+		arbiter.RawCompliance,
+		5,
+		true,
+		true,
+	)
+	require.ErrorIs(t, err, ErrPanelArbiterRuleCoverage)
+}
+
 func TestPanelResolver_ResolveRole_RejectsJudgeOutputIdentityMismatch(t *testing.T) {
 	runCtx := newTestRunContext(t)
 	input := testJudgeInput(runCtx.RunID)
