@@ -60,6 +60,9 @@ func (r *PanelResolver) ResolveRole(
 	if err != nil {
 		return RoleResult{}, fmt.Errorf("scorecore: %s: %w", role, err)
 	}
+	if err := out.ValidateFor(in.JudgeInput); err != nil {
+		return RoleResult{}, fmt.Errorf("scorecore: %s: %w", role, err)
+	}
 
 	var (
 		primaryRefs             map[contracts.Dimension]*contracts.RawJudgeRef

@@ -126,8 +126,38 @@ func (out JudgeOutput) ValidateFor(input JudgeInput) error {
 	if err := input.Validate(); err != nil {
 		return err
 	}
-	if err := out.Validate(); err != nil {
-		return err
+	if len(out.Scores) != len(allDimensions) {
+		return fmt.Errorf("%w: got=%d want=%d", ErrJudgeOutputMissingScores, len(out.Scores), len(allDimensions))
+	}
+
+	dimensions := make(map[contracts.Dimension]struct{}, len(allDimensions))
+	var (
+		runID contracts.RunID
+		pass  int
+		agent contracts.AgentID
+	)
+	for i, score := range out.Scores {
+		if i == 0 {
+			runID = score.RunID
+			pass = score.Pass
+			agent = score.Agent
+		} else if score.RunID != runID || score.Pass != pass || score.Agent != agent {
+			return fmt.Errorf("%w: score dimension=%s", ErrJudgeOutputIdentity, score.Dimension)
+		}
+		if _, exists := dimensions[score.Dimension]; exists {
+			return fmt.Errorf("%w: dimension=%s", ErrJudgeOutputDuplicateScore, score.Dimension)
+		}
+		dimensions[score.Dimension] = struct{}{}
+	}
+	for _, dimension := range allDimensions {
+		if _, ok := dimensions[dimension]; !ok {
+			return fmt.Errorf("%w: dimension=%s", ErrJudgeOutputMissingScores, dimension)
+		}
+	}
+	for _, compliance := range out.Compliance {
+		if compliance.RunID != runID || compliance.Pass != pass || compliance.Agent != agent {
+			return fmt.Errorf("%w: compliance rule_id=%s", ErrJudgeOutputIdentity, compliance.RuleID)
+		}
 	}
 	for _, score := range out.Scores {
 		if score.RunID != input.RunID || score.Pass != input.Pass || score.Agent != input.Agent {

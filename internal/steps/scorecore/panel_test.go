@@ -212,6 +212,27 @@ func TestPanelResolver_Resolve_RequiresArbiterOnDisagreement(t *testing.T) {
 	require.ErrorIs(t, err, ErrPanelArbiterRequired)
 }
 
+func TestPanelResolver_Resolve_RejectsMismatchedJudgeIdentity(t *testing.T) {
+	runCtx := newTestRunContext(t)
+	input := testJudgeInput(runCtx.RunID)
+	primaryOut := judges.JudgeOutput{
+		Scores:     allDimScores(runCtx.RunID, judges.RolePrimary, 80),
+		Compliance: []contracts.ComplianceEntry{complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant)},
+	}
+	primaryOut = withAgent(primaryOut, contracts.AgentID("a2"))
+
+	r := NewPanelResolver()
+	_, err := r.Resolve(context.Background(), PanelInput{
+		Primary:               fakeJudge{out: primaryOut},
+		JudgeInput:            input,
+		OutputSha256:          testSha256Hex,
+		DisagreementThreshold: 5,
+		RunContext:            runCtx,
+		StepDir:               "30",
+	})
+	require.ErrorIs(t, err, judges.ErrJudgeOutputMissingInput)
+}
+
 func TestBuildFinalResultFromRaw_RequiresArbiterOnDisagreement(t *testing.T) {
 	runCtx := newTestRunContext(t)
 	resolver := NewPanelResolver()
@@ -259,6 +280,35 @@ func TestBuildFinalResultFromRaw_RequiresArbiterOnDisagreement(t *testing.T) {
 		false,
 	)
 	require.ErrorIs(t, err, ErrPanelArbiterRequired)
+}
+
+func TestPanelResolver_ResolveRole_RejectsMismatchedJudgeIdentity(t *testing.T) {
+	runCtx := newTestRunContext(t)
+	resolver := NewPanelResolver()
+	panelInput := PanelInput{
+		JudgeInput:            testJudgeInput(runCtx.RunID),
+		OutputSha256:          testSha256Hex,
+		DisagreementThreshold: 5,
+		RunContext:            runCtx,
+		StepDir:               "30",
+	}
+	primaryOut := judges.JudgeOutput{
+		Scores:     allDimScores(runCtx.RunID, judges.RolePrimary, 80),
+		Compliance: []contracts.ComplianceEntry{complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant)},
+	}
+	primaryOut = withAgent(primaryOut, contracts.AgentID("a2"))
+
+	_, err := resolver.ResolveRole(
+		context.Background(),
+		panelInput,
+		contracts.JudgeRolePrimary,
+		fakeJudge{out: primaryOut},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.ErrorIs(t, err, judges.ErrJudgeOutputMissingInput)
 }
 
 func TestWriteOverflowSidecar(t *testing.T) {
@@ -398,4 +448,14 @@ func complianceEntry(runID contracts.RunID, ruleID string, verdict contracts.Com
 func readAllBytes(t *testing.T, path string) ([]byte, error) {
 	t.Helper()
 	return os.ReadFile(path)
+}
+
+func withAgent(out judges.JudgeOutput, agent contracts.AgentID) judges.JudgeOutput {
+	for i := range out.Scores {
+		out.Scores[i].Agent = agent
+	}
+	for i := range out.Compliance {
+		out.Compliance[i].Agent = agent
+	}
+	return out
 }
