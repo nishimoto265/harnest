@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,8 @@ import (
 )
 
 const testBaseSHA = "0123456789abcdef0123456789abcdef01234567"
+const testMergeCommitOID = "89abcdef0123456789abcdef0123456789abcdef"
+const testBaseRefOID = "76543210fedcba9876543210fedcba9876543210"
 
 type stubGH struct {
 	info PRInfo
@@ -36,13 +39,17 @@ func (s stubGH) PRView(ctx context.Context, pr int, repo string) (PRInfo, error)
 }
 
 type stubGit struct {
-	mu        sync.Mutex
-	known     map[string]string // path → sha (marks "already exists")
-	createdBy []string
+	mu         sync.Mutex
+	known      map[string]string // path → sha (marks "already exists")
+	createdBy  []string
+	resolvedBy map[string]string
 }
 
 func newStubGit() *stubGit {
-	return &stubGit{known: map[string]string{}}
+	return &stubGit{
+		known:      map[string]string{},
+		resolvedBy: map[string]string{},
+	}
 }
 
 func (s *stubGit) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha string) (bool, error) {
@@ -60,6 +67,14 @@ func (s *stubGit) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha s
 }
 
 func (s *stubGit) ResolveRef(ctx context.Context, repoRoot, ref string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sha, ok := s.resolvedBy[repoRoot+"::"+ref]; ok {
+		return sha, nil
+	}
+	if sha, ok := s.resolvedBy[ref]; ok {
+		return sha, nil
+	}
 	return testBaseSHA, nil
 }
 
@@ -78,18 +93,21 @@ func newRunCtx(t *testing.T) internalio.RunContext {
 
 func TestRun_HappyPath_SixWorktrees(t *testing.T) {
 	rc := newRunCtx(t)
+	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
 	runner := &Runner{
 		GH: stubGH{info: PRInfo{
-			Number:     42,
-			Title:      "improve X",
-			Body:       "body text\n",
-			BaseRefOid: testBaseSHA,
-			HeadRefOid: testBaseSHA,
+			Number:         42,
+			Title:          "improve X",
+			Body:           "body text\n",
+			BaseRefOid:     testBaseRefOID,
+			HeadRefOid:     testBaseSHA,
+			MergeCommitOID: testMergeCommitOID,
 			LinkedIssues: []LinkedIssue{
 				{Number: 10, Title: "bug", Body: "repro steps"},
 			},
 		}},
-		Git: newStubGit(),
+		Git: git,
 	}
 
 	in := Input{
@@ -139,11 +157,12 @@ func TestRun_HappyPath_SixWorktrees(t *testing.T) {
 func TestRun_Resume_NoNewWorktrees(t *testing.T) {
 	rc := newRunCtx(t)
 	gh := stubGH{info: PRInfo{
-		Number:     42,
-		Title:      "improve X",
-		BaseRefOid: testBaseSHA,
+		Number:         42,
+		Title:          "improve X",
+		MergeCommitOID: testMergeCommitOID,
 	}}
 	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
 	runner := &Runner{GH: gh, Git: git}
 
 	in := Input{
@@ -165,7 +184,9 @@ func TestRun_Resume_NoNewWorktrees(t *testing.T) {
 
 func TestRun_ExpectedRunIDMismatch(t *testing.T) {
 	rc := newRunCtx(t)
-	runner := &Runner{GH: stubGH{info: PRInfo{BaseRefOid: testBaseSHA}}, Git: newStubGit()}
+	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
+	runner := &Runner{GH: stubGH{info: PRInfo{MergeCommitOID: testMergeCommitOID}}, Git: git}
 
 	in := Input{
 		PR:            42,
@@ -197,7 +218,9 @@ func TestRun_GHFailurePropagates(t *testing.T) {
 
 func TestRun_InvalidBaseSHA(t *testing.T) {
 	rc := newRunCtx(t)
-	runner := &Runner{GH: stubGH{info: PRInfo{BaseRefOid: "not-a-sha"}}, Git: newStubGit()}
+	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = "not-a-sha"
+	runner := &Runner{GH: stubGH{info: PRInfo{MergeCommitOID: testMergeCommitOID}}, Git: git}
 
 	in := Input{
 		PR:         42,
@@ -207,7 +230,196 @@ func TestRun_InvalidBaseSHA(t *testing.T) {
 	}
 	_, err := runner.Run(context.Background(), in)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "base_ref_oid")
+	assert.Contains(t, err.Error(), "merge-base")
+}
+
+func TestRun_NotMergedPR(t *testing.T) {
+	rc := newRunCtx(t)
+	runner := &Runner{GH: stubGH{info: PRInfo{}}, Git: newStubGit()}
+
+	in := Input{
+		PR:         42,
+		BestBranch: "auto-improve/best",
+		RepoRoot:   t.TempDir(),
+		RunCtx:     rc,
+	}
+	_, err := runner.Run(context.Background(), in)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "step10 requires a merged PR")
+}
+
+func TestRun_PersistedBaseSHADrift(t *testing.T) {
+	rc := newRunCtx(t)
+	require.NoError(t, internalio.WriteAtomic(rc.BaseSHAPath(), []byte(testBaseRefOID+"\n")))
+
+	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
+	runner := &Runner{
+		GH:  stubGH{info: PRInfo{Number: 42, Title: "improve X", MergeCommitOID: testMergeCommitOID}},
+		Git: git,
+	}
+
+	in := Input{
+		PR:         42,
+		BestBranch: "auto-improve/best",
+		RepoRoot:   t.TempDir(),
+		RunCtx:     rc,
+	}
+	_, err := runner.Run(context.Background(), in)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "persisted base.sha="+testBaseRefOID)
+	assert.Contains(t, err.Error(), "merge-base="+testBaseSHA)
+}
+
+func TestRun_PersistedBaseSHAMatchesMergeBase(t *testing.T) {
+	rc := newRunCtx(t)
+	require.NoError(t, internalio.WriteAtomic(rc.BaseSHAPath(), []byte(testBaseSHA+"\n")))
+
+	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
+	runner := &Runner{
+		GH:  stubGH{info: PRInfo{Number: 42, Title: "improve X", MergeCommitOID: testMergeCommitOID}},
+		Git: git,
+	}
+
+	in := Input{
+		PR:         42,
+		BestBranch: "auto-improve/best",
+		RepoRoot:   t.TempDir(),
+		RunCtx:     rc,
+	}
+	res, err := runner.Run(context.Background(), in)
+	require.NoError(t, err)
+	assert.Equal(t, testBaseSHA, res.Response.BaseSHA)
+}
+
+func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
+	rc := newRunCtx(t)
+	repoRoot := t.TempDir()
+	firstPath := filepath.Join(rc.WorktreeBase, fmt.Sprintf("%s-pass1-a1", rc.RunID))
+	firstBranch := fmt.Sprintf("auto-improve/%s/pass1/%s", rc.RunID, DefaultAgents[0])
+
+	git := gitCLI{
+		stat: os.Stat,
+		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			switch {
+			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
+				return []byte(testBaseSHA + "\n"), nil
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", firstBranch, firstPath, testBaseSHA}):
+				return []byte("fatal: a branch named '" + firstBranch + "' already exists\n"), errors.New("exit status 128")
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", firstPath, firstBranch}):
+				return []byte("Preparing worktree\n"), nil
+			case slices.Equal(args, []string{"-C", firstPath, "rev-parse", "HEAD"}):
+				return []byte(testBaseRefOID + "\n"), nil
+			default:
+				return nil, fmt.Errorf("unexpected git args: %v", args)
+			}
+		},
+	}
+
+	runner := &Runner{
+		GH:  stubGH{info: PRInfo{Number: 42, Title: "improve X", MergeCommitOID: testMergeCommitOID}},
+		Git: git,
+	}
+	in := Input{
+		PR:         42,
+		BestBranch: "auto-improve/best",
+		RepoRoot:   repoRoot,
+		RunCtx:     rc,
+	}
+
+	_, err := runner.Run(context.Background(), in)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWorktreeDrift)
+}
+
+func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
+	rc := newRunCtx(t)
+	repoRoot := t.TempDir()
+	firstPath := filepath.Join(rc.WorktreeBase, fmt.Sprintf("%s-pass1-a1", rc.RunID))
+	require.NoError(t, os.MkdirAll(firstPath, 0o755))
+
+	git := gitCLI{
+		stat: os.Stat,
+		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			switch {
+			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
+				return []byte(testBaseSHA + "\n"), nil
+			case slices.Equal(args, []string{"-C", firstPath, "rev-parse", "HEAD"}):
+				return []byte(testBaseSHA + "\n"), nil
+			case slices.Equal(args, []string{"-C", firstPath, "branch", "--show-current"}):
+				return []byte("wrong-branch\n"), nil
+			default:
+				return nil, fmt.Errorf("unexpected git args: %v", args)
+			}
+		},
+	}
+
+	runner := &Runner{
+		GH:  stubGH{info: PRInfo{Number: 42, Title: "improve X", MergeCommitOID: testMergeCommitOID}},
+		Git: git,
+	}
+	in := Input{
+		PR:         42,
+		BestBranch: "auto-improve/best",
+		RepoRoot:   repoRoot,
+		RunCtx:     rc,
+	}
+
+	_, err := runner.Run(context.Background(), in)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWorktreeDrift)
+}
+
+func TestGitCLIWorktreeAdd_RetryBranchExisting_VerifiesHEAD(t *testing.T) {
+	repoRoot := t.TempDir()
+	path := filepath.Join(t.TempDir(), "worktree")
+	branch := "auto-improve/run/pass1/a1"
+
+	git := gitCLI{
+		stat: os.Stat,
+		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			switch {
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", branch, path, testBaseSHA}):
+				return []byte("fatal: a branch named '" + branch + "' already exists\n"), errors.New("exit status 128")
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", path, branch}):
+				return []byte("Preparing worktree\n"), nil
+			case slices.Equal(args, []string{"-C", path, "rev-parse", "HEAD"}):
+				return []byte(testBaseRefOID + "\n"), nil
+			default:
+				return nil, fmt.Errorf("unexpected git args: %v", args)
+			}
+		},
+	}
+
+	created, err := git.WorktreeAdd(context.Background(), repoRoot, path, branch, testBaseSHA)
+	require.Error(t, err)
+	assert.False(t, created)
+	assert.ErrorIs(t, err, ErrWorktreeDrift)
+}
+
+func TestGitCLIWorktreeAdd_ExistingPath_VerifiesBranch(t *testing.T) {
+	path := t.TempDir()
+	branch := "auto-improve/run/pass1/a1"
+
+	git := gitCLI{
+		stat: os.Stat,
+		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			switch {
+			case slices.Equal(args, []string{"-C", path, "rev-parse", "HEAD"}):
+				return []byte(testBaseSHA + "\n"), nil
+			case slices.Equal(args, []string{"-C", path, "branch", "--show-current"}):
+				return []byte("wrong-branch\n"), nil
+			default:
+				return nil, fmt.Errorf("unexpected git args: %v", args)
+			}
+		},
+	}
+
+	created, err := git.WorktreeAdd(context.Background(), t.TempDir(), path, branch, testBaseSHA)
+	require.Error(t, err)
+	assert.False(t, created)
+	assert.ErrorIs(t, err, ErrWorktreeDrift)
 }
 
 func TestReconstructTaskPrompt_Variants(t *testing.T) {

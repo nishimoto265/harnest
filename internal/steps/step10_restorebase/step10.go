@@ -2,7 +2,7 @@
 //
 // step10 is the first step of an auto-improve run. For a merged PR it:
 //
-//  1. Fetches PR metadata (title/body/baseRefOid/linked issues) via `gh`.
+//  1. Fetches PR metadata (title/body/merge commit/linked issues) via `gh`.
 //  2. Carves 6 git worktrees from the merge-base (pass1 × 3 agents + pass2 × 3
 //     agents).
 //  3. Reconstructs the raw task prompt (NOT sanitized; downstream sanitizes).
@@ -17,7 +17,9 @@ package step10restorebase
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -80,13 +82,24 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 		now = func() time.Time { return time.Now().UTC() }
 	}
 
+	persistedBaseSHA, hasPersistedBaseSHA, err := readPersistedBaseSHA(in.RunCtx.BaseSHAPath())
+	if err != nil {
+		return Result{}, err
+	}
 	pr, err := r.GH.PRView(ctx, in.PR, in.Repo)
 	if err != nil {
 		return Result{}, fmt.Errorf("step10: gh pr view: %w", err)
 	}
-	baseSHA := pr.BaseRefOid
-	if err := validation.Instance().Var(baseSHA, "required,sha1_hex"); err != nil {
-		return Result{}, fmt.Errorf("step10: base_ref_oid is not a 40-hex sha: %q: %w", baseSHA, err)
+	derivedBaseSHA, err := r.deriveBaseSHA(ctx, in.RepoRoot, pr)
+	if err != nil {
+		return Result{}, err
+	}
+	baseSHA := derivedBaseSHA
+	if hasPersistedBaseSHA {
+		if persistedBaseSHA != derivedBaseSHA {
+			return Result{}, fmt.Errorf("step10: persisted base.sha=%s disagrees with merge-base=%s", persistedBaseSHA, derivedBaseSHA)
+		}
+		baseSHA = persistedBaseSHA
 	}
 
 	worktrees, created, err := r.carveWorktrees(ctx, in, agents, baseSHA)
@@ -128,6 +141,38 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 		return Result{}, fmt.Errorf("step10: response validation: %w", err)
 	}
 	return Result{Response: resp}, nil
+}
+
+func readPersistedBaseSHA(path string) (string, bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("step10: read base.sha: %w", err)
+	}
+	sha := strings.TrimSpace(string(data))
+	if err := validation.Instance().Var(sha, "required,sha1_hex"); err != nil {
+		return "", true, fmt.Errorf("step10: persisted base.sha is not a 40-hex sha: %q: %w", sha, err)
+	}
+	return sha, true, nil
+}
+
+func (r *Runner) deriveBaseSHA(ctx context.Context, repoRoot string, pr PRInfo) (string, error) {
+	if pr.MergeCommitOID == "" {
+		return "", fmt.Errorf("step10 requires a merged PR")
+	}
+	if err := validation.Instance().Var(pr.MergeCommitOID, "required,sha1_hex"); err != nil {
+		return "", fmt.Errorf("step10: merge_commit_oid is not a 40-hex sha: %q: %w", pr.MergeCommitOID, err)
+	}
+	baseSHA, err := r.Git.ResolveRef(ctx, repoRoot, pr.MergeCommitOID+"^1")
+	if err != nil {
+		return "", fmt.Errorf("step10: resolve merge-base from merge_commit=%s: %w", pr.MergeCommitOID, err)
+	}
+	if err := validation.Instance().Var(baseSHA, "required,sha1_hex"); err != nil {
+		return "", fmt.Errorf("step10: merge-base is not a 40-hex sha: %q: %w", baseSHA, err)
+	}
+	return baseSHA, nil
 }
 
 func (r *Runner) validateInput(in Input) ([]contracts.AgentID, error) {

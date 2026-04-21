@@ -50,13 +50,20 @@ var ErrWorktreeDrift = errors.New("step10: worktree drift")
 
 func (g gitCLI) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha string) (bool, error) {
 	if _, err := g.stat(path); err == nil {
-		// Path exists. Verify it's a worktree at the expected sha.
+		// Path exists. Verify it's a worktree at the expected sha and branch.
 		head, herr := g.ResolveRef(ctx, path, "HEAD")
 		if herr != nil {
 			return false, fmt.Errorf("%w: path=%s: cannot resolve HEAD: %v", ErrWorktreeDrift, path, herr)
 		}
 		if head != sha {
 			return false, fmt.Errorf("%w: path=%s expected=%s actual=%s", ErrWorktreeDrift, path, sha, head)
+		}
+		currentBranch, berr := g.currentBranch(ctx, path)
+		if berr != nil {
+			return false, fmt.Errorf("%w: path=%s: cannot resolve branch: %v", ErrWorktreeDrift, path, berr)
+		}
+		if currentBranch == "" || currentBranch != branch {
+			return false, fmt.Errorf("%w: path=%s expected_branch=%s actual_branch=%s", ErrWorktreeDrift, path, branch, currentBranch)
 		}
 		return false, nil
 	} else if !os.IsNotExist(err) {
@@ -71,11 +78,26 @@ func (g gitCLI) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha str
 			if err2 != nil {
 				return false, fmt.Errorf("step10: git worktree add %s: %w: %s", path, err2, string(out2))
 			}
+			head, herr := g.ResolveRef(ctx, path, "HEAD")
+			if herr != nil {
+				return false, fmt.Errorf("%w: path=%s: cannot resolve HEAD after retry: %v", ErrWorktreeDrift, path, herr)
+			}
+			if head != sha {
+				return false, fmt.Errorf("%w: path=%s expected=%s actual=%s", ErrWorktreeDrift, path, sha, head)
+			}
 			return true, nil
 		}
 		return false, fmt.Errorf("step10: git worktree add %s: %w: %s", path, err, string(out))
 	}
 	return true, nil
+}
+
+func (g gitCLI) currentBranch(ctx context.Context, repoRoot string) (string, error) {
+	out, err := g.run(ctx, "git", "-C", repoRoot, "branch", "--show-current")
+	if err != nil {
+		return "", fmt.Errorf("step10: git branch --show-current (in %s): %w: %s", repoRoot, err, string(out))
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func (g gitCLI) ResolveRef(ctx context.Context, repoRoot, ref string) (string, error) {
@@ -85,4 +107,3 @@ func (g gitCLI) ResolveRef(ctx context.Context, repoRoot, ref string) (string, e
 	}
 	return strings.TrimSpace(string(out)), nil
 }
-
