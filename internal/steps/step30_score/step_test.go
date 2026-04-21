@@ -10,6 +10,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,8 +28,8 @@ func TestStep30Score_RunAndResume(t *testing.T) {
 
 	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
 	require.NoError(t, err)
-	assert.Equal(t, int64(15), marker.ExpectedCounts.Scores)     // 3 agents × 5 dims
-	assert.Equal(t, int64(3), marker.ExpectedCounts.Compliance)  // 3 agents × 1 stub rule
+	assert.Equal(t, int64(15), marker.ExpectedCounts.Scores)    // 3 agents × 5 dims
+	assert.Equal(t, int64(3), marker.ExpectedCounts.Compliance) // 3 agents × 1 stub rule
 	assert.Len(t, marker.CompletedAgents, 3)
 
 	scoreFinalPath, err := runCtx.ResolveRunRelative("30/scores-A.jsonl")
@@ -74,6 +75,69 @@ func TestStep30Score_SkipsUnscorableAgents(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(10), marker.ExpectedCounts.Scores) // only a1 + a2
 	assert.Len(t, marker.CompletedAgents, 2)
+}
+
+func TestStep30Score_AllowsMultipleComplianceRowsPerAgent(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			if role == contracts.JudgeRoleSecondary {
+				score = 79
+			}
+			return makeJudgeOutput(input, role, score, []ruleVerdict{
+				{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
+				{ruleID: "rule-b", verdict: contracts.ComplianceVerdictViolated},
+			})
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	err := step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg})
+	require.NoError(t, err)
+
+	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
+	require.NoError(t, err)
+	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
+	require.NoError(t, err)
+	assert.Equal(t, int64(15), marker.ExpectedCounts.Scores)
+	assert.Equal(t, int64(6), marker.ExpectedCounts.Compliance)
+}
+
+func TestStep30Score_ResumeWithoutMarkerDoesNotRejudgeOrAppend(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			switch role {
+			case contracts.JudgeRoleSecondary:
+				score = 79
+			case contracts.JudgeRoleArbiter:
+				score = 78
+			}
+			return makeJudgeOutput(input, role, score, []ruleVerdict{
+				{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
+			})
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(markerPath))
+
+	before := statStep30Files(t, runCtx)
+	provider.reset()
+
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	after := statStep30Files(t, runCtx)
+	assert.Equal(t, before, after)
+	assert.Zero(t, provider.calls[contracts.JudgeRolePrimary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleArbiter])
 }
 
 // seedStep30Fixtures creates a minimal RunContext + TaskPackage with pass-1
@@ -165,4 +229,112 @@ func itoa(i int) string {
 	default:
 		return "x"
 	}
+}
+
+type fakePanelProvider struct {
+	outputs func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput
+	calls   map[contracts.JudgeRole]int
+}
+
+func (p *fakePanelProvider) Judges(input judges.JudgeInput) (judges.Judge, judges.Judge, judges.Judge, error) {
+	if p.calls == nil {
+		p.calls = make(map[contracts.JudgeRole]int)
+	}
+	return fakePanelJudge{provider: p, input: input, role: contracts.JudgeRolePrimary},
+		fakePanelJudge{provider: p, input: input, role: contracts.JudgeRoleSecondary},
+		fakePanelJudge{provider: p, input: input, role: contracts.JudgeRoleArbiter},
+		nil
+}
+
+func (p *fakePanelProvider) reset() {
+	clear(p.calls)
+}
+
+type fakePanelJudge struct {
+	provider *fakePanelProvider
+	input    judges.JudgeInput
+	role     contracts.JudgeRole
+}
+
+func (j fakePanelJudge) ScoreOutput(_ context.Context, _ judges.JudgeInput) (judges.JudgeOutput, error) {
+	j.provider.calls[j.role]++
+	return j.provider.outputs(j.input, j.role), nil
+}
+
+type ruleVerdict struct {
+	ruleID  string
+	verdict contracts.ComplianceVerdict
+}
+
+func makeJudgeOutput(input judges.JudgeInput, role contracts.JudgeRole, score int, verdicts []ruleVerdict) judges.JudgeOutput {
+	verdictPath := contracts.VerdictPathSingle
+	if role == contracts.JudgeRoleArbiter {
+		verdictPath = contracts.VerdictPathArbitrated
+	}
+
+	scores := make([]contracts.ScoreEntry, 0, 5)
+	for _, dimension := range []contracts.Dimension{
+		contracts.DimensionFidelity,
+		contracts.DimensionCorrectness,
+		contracts.DimensionMaintainability,
+		contracts.DimensionDiscipline,
+		contracts.DimensionCommunication,
+	} {
+		scores = append(scores, contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         input.RunID,
+			Pass:          input.Pass,
+			Agent:         input.Agent,
+			Dimension:     dimension,
+			Score:         score,
+			Reasons:       "fixture",
+			VerdictPath:   verdictPath,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+		})
+	}
+
+	compliance := make([]contracts.ComplianceEntry, 0, len(verdicts))
+	for _, verdict := range verdicts {
+		compliance = append(compliance, contracts.ComplianceEntry{
+			SchemaVersion: "1",
+			RunID:         input.RunID,
+			Pass:          input.Pass,
+			Agent:         input.Agent,
+			RuleID:        verdict.ruleID,
+			Verdict:       verdict.verdict,
+			Rationale:     "fixture",
+			VerdictPath:   verdictPath,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+		})
+	}
+
+	return judges.JudgeOutput{
+		Scores:     scores,
+		Compliance: compliance,
+		Arbiter:    role == contracts.JudgeRoleArbiter,
+	}
+}
+
+func statStep30Files(t *testing.T, runCtx internalio.RunContext) map[string]int64 {
+	t.Helper()
+
+	files := []string{
+		"30/scores-A-raw.jsonl",
+		"30/compliance-A-raw.jsonl",
+		"30/scores-A.jsonl",
+		"30/compliance-A.jsonl",
+	}
+	out := make(map[string]int64, len(files))
+	for _, rel := range files {
+		abs, err := runCtx.ResolveRunRelative(rel)
+		require.NoError(t, err)
+		info, err := os.Stat(abs)
+		require.NoError(t, err)
+		out[rel] = info.Size()
+	}
+	return out
 }

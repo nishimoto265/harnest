@@ -35,7 +35,10 @@ func AppendJSONL(path string, record any) error {
 	if _, err := f.Write([]byte{'\n'}); err != nil {
 		return err
 	}
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	return directorySync(filepath.Dir(path))
 }
 
 // ReadJSONL strict-decodes each JSONL row via contracts.DecodeStrictJSON.

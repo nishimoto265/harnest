@@ -60,26 +60,10 @@ func BuildStep30DoneMarker(in Step30MarkerInputs) (contracts.Step30DoneMarker, e
 		return contracts.Step30DoneMarker{}, fmt.Errorf("scorecore: read %s: %w", in.Paths.ComplianceRaw, err)
 	}
 
-	scoreFinalCollapsed := internalio.CollapseByKey(scoreFinal, func(e contracts.ScoreEntry) [2]string {
-		return [2]string{string(e.Agent), string(e.Dimension)}
-	})
-	complianceFinalCollapsed := internalio.CollapseByKey(complianceFinal, func(e contracts.ComplianceEntry) [2]string {
-		return [2]string{string(e.Agent), e.RuleID}
-	})
-	scoreRawCollapsed := internalio.CollapseByKey(scoreRaw, func(e contracts.RawScoreEntry) [3]string {
-		return [3]string{string(e.Agent), string(e.JudgeRole), string(e.Dimension)}
-	})
-	complianceRawCollapsed := internalio.CollapseByKey(complianceRaw, func(e contracts.RawComplianceEntry) [3]string {
-		return [3]string{string(e.Agent), string(e.JudgeRole), e.RuleID}
-	})
-
-	// Keep only raw-arbiter rows whose primary_ref/secondary_ref sha256 refer
-	// to the latest primary/secondary rows still present in the reduced raw
-	// layer. Arbiter rows linked to a stale (overwritten) primary/secondary
-	// are dropped from the hash input; this lets late-wins resume keep the
-	// marker stable.
-	scoreRawCollapsed = keepFreshArbiterScores(scoreRawCollapsed)
-	complianceRawCollapsed = keepFreshArbiterCompliance(complianceRawCollapsed)
+	scoreFinalCollapsed := CollapseFinalScores(scoreFinal)
+	complianceFinalCollapsed := CollapseFinalCompliance(complianceFinal)
+	scoreRawCollapsed := CollapseRawScores(scoreRaw)
+	complianceRawCollapsed := CollapseRawCompliance(complianceRaw)
 
 	scoresFinalHash, err := hashFinalScores(scoreFinalCollapsed)
 	if err != nil {
