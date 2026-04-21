@@ -177,7 +177,7 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 
 	remaining := deadline.Sub(s.now().UTC())
 	if remaining <= 0 {
-		return s.writeTimeoutManifest(run, allocation, timeout, stepStartedAt, s.now().UTC())
+		return s.writeTimeoutManifest(ctx, run, allocation, timeout, stepStartedAt, s.now().UTC())
 	}
 
 	runResult, err := s.runner.Run(ctx, runnerRequest{
@@ -199,20 +199,20 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 	}
 
 	if runResult.TimedOut {
-		return s.writeTimeoutManifest(run, allocation, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
+		return s.writeTimeoutManifest(ctx, run, allocation, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
 	}
 	if runResult.ExitCode != 0 {
-		return s.writeErrorManifest(run, runResult)
+		return s.writeErrorManifest(ctx, run, runResult)
 	}
-	return s.writeSuccessArtifacts(run, allocation, runResult)
+	return s.writeSuccessArtifacts(ctx, run, allocation, runResult)
 }
 
-func (s *Step) writeSuccessArtifacts(run RunContext, allocation contracts.WorktreeAllocation, runResult runnerResult) error {
-	headSHA, err := gitOutput(strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
+func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, runResult runnerResult) error {
+	headSHA, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
 		return err
 	}
-	diffBytes, err := gitOutputBytes(allocation.Path, "diff", allocation.BaseSHA+"..HEAD", "--binary")
+	diffBytes, err := gitOutputBytesContext(ctx, allocation.Path, "diff", allocation.BaseSHA+"..HEAD", "--binary")
 	if err != nil {
 		return err
 	}
@@ -257,10 +257,13 @@ func (s *Step) writeSuccessArtifacts(run RunContext, allocation contracts.Worktr
 			FinishedAt:    runResult.FinishedAt.UTC(),
 		},
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return writeManifest(run.IO, run.Pass, run.Agent, manifest)
 }
 
-func (s *Step) writeErrorManifest(run RunContext, runResult runnerResult) error {
+func (s *Step) writeErrorManifest(ctx context.Context, run RunContext, runResult runnerResult) error {
 	reason := interruptionReason(runResult.ExitCode, runResult.StdoutSnippet, runResult.StderrSnippet)
 	manifest := contracts.Manifest{
 		Kind: contracts.ManifestKindError,
@@ -277,10 +280,13 @@ func (s *Step) writeErrorManifest(run RunContext, runResult runnerResult) error 
 			FinishedAt:    runResult.FinishedAt.UTC(),
 		},
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return writeManifest(run.IO, run.Pass, run.Agent, manifest)
 }
 
-func (s *Step) writeTimeoutManifest(run RunContext, allocation contracts.WorktreeAllocation, timeout time.Duration, startedAt, finishedAt time.Time) error {
+func (s *Step) writeTimeoutManifest(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, timeout time.Duration, startedAt, finishedAt time.Time) error {
 	_ = allocation
 	manifest := contracts.Manifest{
 		Kind: contracts.ManifestKindTimeout,
@@ -294,6 +300,9 @@ func (s *Step) writeTimeoutManifest(run RunContext, allocation contracts.Worktre
 			StartedAt:      startedAt,
 			FinishedAt:     finishedAt,
 		},
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return writeManifest(run.IO, run.Pass, run.Agent, manifest)
 }

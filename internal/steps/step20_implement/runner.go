@@ -59,6 +59,7 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 
 	cmd := exec.CommandContext(timeoutCtx, req.Binary)
 	cmd.Dir = req.Workdir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	cmd.Env = append(os.Environ(), req.Env...)
 
@@ -72,7 +73,20 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 		return runnerResult{}, err
 	}
 
+	groupKillDone := make(chan struct{})
+	go func(pid int) {
+		select {
+		case <-timeoutCtx.Done():
+			_ = killProcessGroup(pid)
+		case <-groupKillDone:
+		}
+	}(cmd.Process.Pid)
+
 	waitErr := cmd.Wait()
+	close(groupKillDone)
+	if timeoutCtx.Err() != nil {
+		_ = killProcessGroup(cmd.Process.Pid)
+	}
 	result.FinishedAt = r.now().UTC()
 	result.StdoutSnippet = stdoutTail.Bytes()
 	result.StderrSnippet = stderrTail.Bytes()
@@ -93,6 +107,16 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 		return result, nil
 	}
 	return runnerResult{}, waitErr
+}
+
+func killProcessGroup(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
 }
 
 func exitCode(exitErr *exec.ExitError) int {

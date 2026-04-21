@@ -1,6 +1,7 @@
 package step20_implement
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -403,6 +404,14 @@ fi
 if [[ "${FAKE_CLAUDE_COMMIT:-}" == "1" ]]; then
   git commit --allow-empty -m test >/dev/null 2>&1
 fi
+if [[ "${FAKE_CLAUDE_FORK_SESSION_WRITER:-}" == "1" ]]; then
+  (
+    while true; do
+      printf '{"event":"child-process"}\n'
+      sleep 0.05
+    done
+  ) &
+fi
 if [[ "${FAKE_CLAUDE_SLEEP_SECONDS:-0}" != "0" ]]; then
   sleep "${FAKE_CLAUDE_SLEEP_SECONDS}"
 fi
@@ -556,6 +565,91 @@ func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
 	require.NotContains(t, string(logBytes), "clean -fd")
 
 	_, statErr := os.Stat(fx.manifestPath())
+	require.Error(t, statErr)
+	require.True(t, os.IsNotExist(statErr))
+}
+
+func TestStepRunCancelsChildProcessGroupOnContextCancellation(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	t.Setenv("FAKE_CLAUDE_FORK_SESSION_WRITER", "1")
+	t.Setenv("FAKE_CLAUDE_SLEEP_SECONDS", "5")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fx.step.Run(ctx, fx.run)
+	}()
+
+	require.Eventually(t, func() bool {
+		sessionBytes, err := os.ReadFile(fx.sessionPath())
+		if err != nil {
+			return false
+		}
+		return bytes.Count(sessionBytes, []byte("{\"event\":\"child-process\"}\n")) >= 2
+	}, time.Second, 10*time.Millisecond)
+
+	cancel()
+
+	err := <-errCh
+	require.ErrorIs(t, err, context.Canceled)
+
+	before, readErr := os.ReadFile(fx.sessionPath())
+	require.NoError(t, readErr)
+
+	time.Sleep(250 * time.Millisecond)
+
+	after, readErr := os.ReadFile(fx.sessionPath())
+	require.NoError(t, readErr)
+	require.Equal(t, before, after)
+
+	_, statErr := os.Stat(fx.manifestPath())
+	require.Error(t, statErr)
+	require.True(t, os.IsNotExist(statErr))
+}
+
+func TestStepRunSuccessArtifactsHonorContextCancellation(t *testing.T) {
+	fx := newTestFixture(t, 5)
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+
+	wrapperDir := t.TempDir()
+	logPath := filepath.Join(wrapperDir, "git.log")
+	writeFakeGitWrapper(t, wrapperDir)
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("FAKE_GIT_LOG", logPath)
+	t.Setenv("FAKE_GIT_SLEEP_ON_PREFIX", "rev-parse HEAD")
+	t.Setenv("FAKE_GIT_SLEEP_SECONDS", "5")
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fx.step.Run(ctx, fx.run)
+	}()
+
+	require.Eventually(t, func() bool {
+		logBytes, readErr := os.ReadFile(logPath)
+		if readErr != nil {
+			return false
+		}
+		return strings.Contains(string(logBytes), "rev-parse HEAD")
+	}, time.Second, 10*time.Millisecond)
+
+	cancel()
+
+	err = <-errCh
+	require.ErrorIs(t, err, context.Canceled)
+
+	_, statErr := os.Stat(fx.manifestPath())
+	require.Error(t, statErr)
+	require.True(t, os.IsNotExist(statErr))
+
+	_, statErr = os.Stat(fx.diffPath())
 	require.Error(t, statErr)
 	require.True(t, os.IsNotExist(statErr))
 }
