@@ -50,8 +50,8 @@ func TestPanelResolver_Resolve(t *testing.T) {
 		assert.Equal(t, contracts.VerdictPathAgreement, result.VerdictPath)
 		assert.Len(t, result.FinalScores, 5)
 		assert.Len(t, result.FinalCompliance, 1)
-		assert.Len(t, result.RawScores, 10)     // primary + secondary
-		assert.Len(t, result.RawCompliance, 2)  // primary + secondary
+		assert.Len(t, result.RawScores, 10)    // primary + secondary
+		assert.Len(t, result.RawCompliance, 2) // primary + secondary
 		for _, raw := range result.RawScores {
 			assert.Nil(t, raw.PrimaryRef)
 			assert.Nil(t, raw.SecondaryRef)
@@ -89,6 +89,32 @@ func TestPanelResolver_Resolve(t *testing.T) {
 			}
 		}
 		assert.Equal(t, 5, arbiterRows)
+	})
+
+	t.Run("compliance disagreement invokes arbiter", func(t *testing.T) {
+		primaryOut := baseScores(judges.RolePrimary, 80)
+		secondaryOut := baseScores(judges.RoleSecondary, 80)
+		secondaryOut.Compliance[0].Verdict = contracts.ComplianceVerdictViolated
+		arbiterOut := baseScores(judges.RoleArbiter, 80)
+		arbiterOut.Compliance[0].Verdict = contracts.ComplianceVerdictCompliant
+
+		r := NewPanelResolver()
+		result, err := r.Resolve(context.Background(), PanelInput{
+			Primary:               fakeJudge{out: primaryOut},
+			Secondary:             fakeJudge{out: secondaryOut},
+			Arbiter:               fakeJudge{out: arbiterOut},
+			JudgeInput:            input,
+			OutputSha256:          outputSha,
+			DisagreementThreshold: 5,
+			RunContext:            runCtx,
+			StepDir:               "30",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, contracts.VerdictPathArbitrated, result.VerdictPath)
+		assert.Len(t, result.RawScores, 15)
+		assert.Len(t, result.RawCompliance, 3)
+		require.Len(t, result.FinalCompliance, 1)
+		assert.Equal(t, contracts.ComplianceVerdictCompliant, result.FinalCompliance[0].Verdict)
 	})
 
 	t.Run("arbiter_overruled", func(t *testing.T) {

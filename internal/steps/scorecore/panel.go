@@ -55,21 +55,7 @@ func (in PanelInput) validate() error {
 	if in.Primary == nil {
 		return ErrPanelPrimaryRequired
 	}
-	if len(in.OutputSha256) != sha256HexLength {
-		return fmt.Errorf("%w: len=%d", ErrPanelOutputSha256, len(in.OutputSha256))
-	}
-	for _, r := range in.OutputSha256 {
-		if !isHexDigit(r) {
-			return fmt.Errorf("%w: value=%q", ErrPanelOutputSha256, in.OutputSha256)
-		}
-	}
-	if in.DisagreementThreshold < 0 {
-		return fmt.Errorf("%w: %d", ErrPanelThreshold, in.DisagreementThreshold)
-	}
-	if in.StepDir != "30" && in.StepDir != "60" {
-		return fmt.Errorf("%w: step_dir=%q", ErrPanelStepDir, in.StepDir)
-	}
-	return nil
+	return in.validateCommon()
 }
 
 // PanelResult is everything produced for one (pass, agent).
@@ -132,7 +118,7 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 		return PanelResult{}, err
 	}
 
-	disagree, err := anyDimensionDisagrees(primaryRaw, secondaryRaw, in.DisagreementThreshold)
+	disagree, err := PanelDisagrees(primaryRaw, secondaryRaw, primaryRawCompliance, secondaryRawCompliance, in.DisagreementThreshold)
 	if err != nil {
 		return PanelResult{}, err
 	}
