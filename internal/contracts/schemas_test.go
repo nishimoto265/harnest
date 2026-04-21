@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -549,9 +550,12 @@ func validIntentionBase() IntentionRecord {
 }
 
 func validPlannedAdoption() *PlannedAdoption {
+	idempotencyKey := ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", "0000000000000000000000000000000000000000000000000000000000000002")
 	return &PlannedAdoption{
+		IdempotencyKey: idempotencyKey,
 		Entries: []PlannedAdoptionEntry{
 			{
+				OpID:     ComputePlannedAdoptionEntryOpID(idempotencyKey, 0, "r-0001"),
 				Kind:     RegistryKindAdded,
 				RuleID:   "r-0001",
 				RulePath: "rules/r-0001.md",
@@ -732,13 +736,25 @@ func TestIntentionRecord_Validate_RejectsForgedIdempotencyKeyAcrossStages(t *tes
 	}
 }
 
+func TestIntentionRecord_Validate_RejectsPlannedAdoptionIdempotencyMismatch(t *testing.T) {
+	r := validIntentionBase()
+	r.Stage = IntentionStagePlanning
+	r.RegistryHeadBefore = ""
+	r.PlannedAdoption.IdempotencyKey = strings.Repeat("f", 64)
+
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPlannedAdoptionIdempotencyMismatch)
+}
+
 func TestIntentionRecord_UnmarshalJSON_RejectsMissingRegistryHeadBefore(t *testing.T) {
 	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
-	plannedAdoption := `{"entries":[{"kind":"added","rule_id":"r-0001","rule_path":"rules/r-0001.md","sha256":"0000000000000000000000000000000000000000000000000000000000000005"}]}`
+	idempotencyKey := ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash)
+	plannedAdoption := `{"idempotency_key":"` + idempotencyKey + `","entries":[{"kind":"added","op_id":"` + ComputePlannedAdoptionEntryOpID(idempotencyKey, 0, "r-0001") + `","rule_id":"r-0001","rule_path":"rules/r-0001.md","sha256":"0000000000000000000000000000000000000000000000000000000000000005"}]}`
 	data := []byte(`{
   "schema_version": "1",
   "stage": "planning",
-  "idempotency_key": "` + ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash) + `",
+  "idempotency_key": "` + idempotencyKey + `",
   "run_id": "2026-04-20-PR42-abcdef0",
   "best_sha_before": "1111111111111111111111111111111111111111",
   "target_sha": "2222222222222222222222222222222222222222",
@@ -754,11 +770,12 @@ func TestIntentionRecord_UnmarshalJSON_RejectsMissingRegistryHeadBefore(t *testi
 
 func TestIntentionRecord_UnmarshalJSON_AcceptsExplicitEmptyRegistryHeadBefore(t *testing.T) {
 	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
-	plannedAdoption := `{"entries":[{"kind":"added","rule_id":"r-0001","rule_path":"rules/r-0001.md","sha256":"0000000000000000000000000000000000000000000000000000000000000005"}]}`
+	idempotencyKey := ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash)
+	plannedAdoption := `{"idempotency_key":"` + idempotencyKey + `","entries":[{"kind":"added","op_id":"` + ComputePlannedAdoptionEntryOpID(idempotencyKey, 0, "r-0001") + `","rule_id":"r-0001","rule_path":"rules/r-0001.md","sha256":"0000000000000000000000000000000000000000000000000000000000000005"}]}`
 	data := []byte(`{
   "schema_version": "1",
   "stage": "planning",
-  "idempotency_key": "` + ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash) + `",
+  "idempotency_key": "` + idempotencyKey + `",
   "run_id": "2026-04-20-PR42-abcdef0",
   "best_sha_before": "1111111111111111111111111111111111111111",
   "target_sha": "2222222222222222222222222222222222222222",

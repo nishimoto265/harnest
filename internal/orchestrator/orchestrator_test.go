@@ -365,18 +365,21 @@ func validPlanningIntention(runID contracts.RunID) contracts.IntentionRecord {
 	best := strings.Repeat("1", 40)
 	target := strings.Repeat("2", 40)
 	hash := strings.Repeat("3", 64)
+	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(runID), target, best, hash)
 	return contracts.IntentionRecord{
 		SchemaVersion:      "1",
 		Stage:              contracts.IntentionStagePlanning,
-		IdempotencyKey:     contracts.ComputeAdoptIdempotencyKey(string(runID), target, best, hash),
+		IdempotencyKey:     idempotencyKey,
 		RunID:              runID,
 		BestShaBefore:      best,
 		TargetSha:          target,
 		CandidatesHash:     hash,
 		RegistryHeadBefore: "",
 		PlannedAdoption: &contracts.PlannedAdoption{
+			IdempotencyKey: idempotencyKey,
 			Entries: []contracts.PlannedAdoptionEntry{
 				{
+					OpID:     contracts.ComputePlannedAdoptionEntryOpID(idempotencyKey, 0, "r-0001"),
 					Kind:     contracts.RegistryKindAdded,
 					RuleID:   "r-0001",
 					RulePath: "rules/r-0001.md",

@@ -322,12 +322,10 @@ func TestRegistry_Reject_TrailingBytes(t *testing.T) {
 	assert.Error(t, json.Unmarshal([]byte(data), &e))
 }
 
-func TestRegistry_Added_RejectsVersionSeqOneWithPrevHash(t *testing.T) {
+func TestRegistry_Added_AllowsVersionSeqOneWithPrevHash(t *testing.T) {
 	data := strings.Replace(fixtureRegistryAdded(), `"prev_hash": ""`, `"prev_hash": "00000000000000000000000000000000000000000000000000000000000000aa"`, 1)
 	var e RuleRegistryEntry
-	err := json.Unmarshal([]byte(data), &e)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrRegistryPrevHashSequenceMismatch)
+	require.NoError(t, json.Unmarshal([]byte(data), &e))
 }
 
 func TestRegistry_Updated_RejectsMissingPrevHashAfterFirstVersion(t *testing.T) {

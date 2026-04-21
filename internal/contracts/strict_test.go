@@ -413,19 +413,22 @@ func TestTaskPackage_Validate_RejectsCrossPassDuplicateBranch(t *testing.T) {
 func TestDecodeStrict_IntentionRecord_EnforcesStageInvariant(t *testing.T) {
 	// stage=registry_appended but missing registry_append_result.
 	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
+	idempotencyKey := ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash)
 	data := []byte(`{
   "schema_version": "1",
   "stage": "registry_appended",
-  "idempotency_key": "` + ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash) + `",
+  "idempotency_key": "` + idempotencyKey + `",
   "run_id": "2026-04-20-PR42-abcdef0",
   "best_sha_before": "1111111111111111111111111111111111111111",
   "target_sha": "2222222222222222222222222222222222222222",
   "candidates_hash": "` + candidatesHash + `",
   "registry_head_before": "",
   "planned_adoption": {
+    "idempotency_key": "` + idempotencyKey + `",
     "entries": [
       {
         "kind": "added",
+        "op_id": "` + ComputePlannedAdoptionEntryOpID(idempotencyKey, 0, "r-0001") + `",
         "rule_id": "r-0001",
         "rule_path": "rules/r-0001.md",
         "sha256": "0000000000000000000000000000000000000000000000000000000000000005"

@@ -67,6 +67,56 @@ func TestRun_SentinelBlocksExecution(t *testing.T) {
 	assert.NoFileExists(t, decisionPath)
 }
 
+func TestNextRegistryVersionForRule_IsRuleScoped(t *testing.T) {
+	lines := []registryLine{
+		{
+			Entry: contracts.RuleRegistryEntry{
+				Kind: contracts.RegistryKindAdded,
+				Value: contracts.RuleRegistryAdded{
+					Kind:       contracts.RegistryKindAdded,
+					RuleID:     "rule-a",
+					VersionSeq: 2,
+				},
+			},
+		},
+		{
+			Entry: contracts.RuleRegistryEntry{
+				Kind: contracts.RegistryKindUpdated,
+				Value: contracts.RuleRegistryUpdated{
+					Kind:       contracts.RegistryKindUpdated,
+					RuleID:     "rule-b",
+					VersionSeq: 5,
+				},
+			},
+		},
+		{
+			Entry: contracts.RuleRegistryEntry{
+				Kind: contracts.RegistryKindStatusChanged,
+				Value: contracts.RuleRegistryStatusChanged{
+					Kind:       contracts.RegistryKindStatusChanged,
+					RuleID:     "rule-a",
+					VersionSeq: 4,
+				},
+			},
+		},
+		{
+			Entry: contracts.RuleRegistryEntry{
+				Kind: contracts.RegistryKindArchived,
+				Value: contracts.RuleRegistryArchived{
+					Kind:       contracts.RegistryKindArchived,
+					RuleID:     "rule-c",
+					VersionSeq: 7,
+				},
+			},
+		},
+	}
+
+	assert.EqualValues(t, 5, nextRegistryVersionForRule(lines, "rule-a"))
+	assert.EqualValues(t, 6, nextRegistryVersionForRule(lines, "rule-b"))
+	assert.EqualValues(t, 8, nextRegistryVersionForRule(lines, "rule-c"))
+	assert.EqualValues(t, 1, nextRegistryVersionForRule(lines, "rule-d"))
+}
+
 func TestRun_ResumeFromBranchPushed_IdempotencyHit(t *testing.T) {
 	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR4")
 	store := newTrackingStore(intentionPath(t, runCtx))
@@ -92,6 +142,34 @@ func TestRun_ResumeFromBranchPushed_IdempotencyHit(t *testing.T) {
 	assert.Empty(t, git.pushCalls)
 }
 
+func TestRun_ResumeFromBranchPushed_MultiEntryIdempotencyHit(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR401")
+	resolver.target.RulesToAppend = adoptAddedEntriesWithTarget(runCtx.RunID, candidates.CandidatesHash, resolver.target.TargetSHA, "rule-a", "rule-b")
+	store := newTrackingStore(intentionPath(t, runCtx))
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageBranchPushed
+	require.NoError(t, store.Save(intention))
+
+	entries, err := registryEntriesFromPlannedAdoption(intention, time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	var lastResult contracts.RegistryAppendResult
+	for _, entry := range entries {
+		derived, deriveErr := deriveRegistryChain(entry, runCtx.RulesRegistryPath())
+		require.NoError(t, deriveErr)
+		lastResult, err = internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), derived)
+		require.NoError(t, err)
+	}
+
+	deps := Deps{Git: &fakeGit{head: resolver.target.TargetSHA}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 401, runCtx, pkg, candidates, store, deps))
+
+	adopt := mustDecisionAdopt(t, readDecision(t, runCtx))
+	assert.Equal(t, lastResult, adopt.RegistryAppendResult)
+	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	assert.Len(t, lines, 2)
+}
+
 func TestRun_ResumeFromBranchPushed_CASAppendSucceeds(t *testing.T) {
 	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR42")
 	store := newTrackingStore(intentionPath(t, runCtx))
@@ -105,10 +183,12 @@ func TestRun_ResumeFromBranchPushed_CASAppendSucceeds(t *testing.T) {
 	decision := readDecision(t, runCtx)
 	adopt, ok := decision.Value.(contracts.DecisionAdopt)
 	require.True(t, ok)
-	require.Len(t, store.saved, 3)
-	assert.Equal(t, contracts.IntentionStageRegistryAppended, store.saved[1].Stage)
-	require.NotNil(t, store.saved[1].RegistryAppendResult)
-	assert.Equal(t, *store.saved[1].RegistryAppendResult, adopt.RegistryAppendResult)
+	require.Len(t, store.saved, 4)
+	assert.Equal(t, contracts.IntentionStageBranchPushed, store.saved[1].Stage)
+	assert.NotEmpty(t, store.saved[1].AppendedEntryOpIDs)
+	assert.Equal(t, contracts.IntentionStageRegistryAppended, store.saved[2].Stage)
+	require.NotNil(t, store.saved[2].RegistryAppendResult)
+	assert.Equal(t, *store.saved[2].RegistryAppendResult, adopt.RegistryAppendResult)
 
 	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
 	require.NoError(t, err)
@@ -130,13 +210,61 @@ func TestRun_ResumeFromBranchPushed_CASMismatchRetrySucceeds(t *testing.T) {
 
 	decision := readDecision(t, runCtx)
 	adopt := mustDecisionAdopt(t, decision)
-	assert.Equal(t, contracts.IntentionStageRegistryAppended, store.saved[1].Stage)
+	assert.Equal(t, contracts.IntentionStageRegistryAppended, store.saved[2].Stage)
 
 	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
 	require.NoError(t, err)
 	require.Len(t, lines, 2)
 	assert.Equal(t, lines[len(lines)-1].Offset, adopt.RegistryAppendResult.Offset)
 	assert.Equal(t, lines[len(lines)-1].Sha256, adopt.RegistryAppendResult.Sha256)
+}
+
+func TestRun_ResumeFromBranchPushed_MultiEntryResumePartialFromRegistry(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR430")
+	resolver.target.RulesToAppend = adoptAddedEntriesWithTarget(runCtx.RunID, candidates.CandidatesHash, resolver.target.TargetSHA, "rule-a", "rule-b")
+	store := newTrackingStore(intentionPath(t, runCtx))
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageBranchPushed
+	require.NoError(t, store.Save(intention))
+
+	entries, err := registryEntriesFromPlannedAdoption(intention, time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	_, err = internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), entries[0])
+	require.NoError(t, err)
+
+	deps := Deps{Git: &fakeGit{head: resolver.target.TargetSHA}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 430, runCtx, pkg, candidates, store, deps))
+
+	adopt := mustDecisionAdopt(t, readDecision(t, runCtx))
+	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	require.Len(t, lines, 2)
+	assert.Equal(t, lines[1].Offset, adopt.RegistryAppendResult.Offset)
+	assert.Equal(t, lines[1].Sha256, adopt.RegistryAppendResult.Sha256)
+}
+
+func TestRun_ResumeFromBranchPushed_MultiEntryCrashRecoveryFromPersistedProgress(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR431")
+	resolver.target.RulesToAppend = adoptAddedEntriesWithTarget(runCtx.RunID, candidates.CandidatesHash, resolver.target.TargetSHA, "rule-a", "rule-b")
+	store := newTrackingStore(intentionPath(t, runCtx))
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageBranchPushed
+
+	entries, err := registryEntriesFromPlannedAdoption(intention, time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	_, err = internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), entries[0])
+	require.NoError(t, err)
+	intention.AppendedEntryOpIDs = []string{intention.PlannedAdoption.Entries[0].OpID}
+	require.NoError(t, store.Save(intention))
+
+	deps := Deps{Git: &fakeGit{head: resolver.target.TargetSHA}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 431, runCtx, pkg, candidates, store, deps))
+
+	adopt := mustDecisionAdopt(t, readDecision(t, runCtx))
+	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	require.Len(t, lines, 2)
+	assert.Equal(t, lines[1].Sha256, adopt.RegistryAppendResult.Sha256)
 }
 
 func TestRun_ResumeFromBranchPushed_CASMismatchTwiceRollsBack(t *testing.T) {
@@ -157,6 +285,52 @@ func TestRun_ResumeFromBranchPushed_CASMismatchTwiceRollsBack(t *testing.T) {
 	require.Len(t, git.pushCalls, 1)
 	assert.Equal(t, resolver.target.BestShaBefore, git.pushCalls[0].target)
 	assert.Equal(t, resolver.target.TargetSHA, git.pushCalls[0].expected)
+}
+
+func TestRun_MultiEntryAppendFailure_RollbackAppendsMarkersForCommittedRows(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR440")
+	resolver.target.RulesToAppend = adoptAddedEntriesWithTarget(runCtx.RunID, candidates.CandidatesHash, resolver.target.TargetSHA, "rule-a", "rule-b", "rule-c")
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	plannedOpIDs := []string{
+		intention.PlannedAdoption.Entries[0].OpID,
+		intention.PlannedAdoption.Entries[1].OpID,
+	}
+
+	original := appendRegistryEntry
+	appendCount := 0
+	appendRegistryEntry = func(path string, entry contracts.RuleRegistryEntry) (contracts.RegistryAppendResult, error) {
+		if path == runCtx.RulesRegistryPath() {
+			switch entry.Kind {
+			case contracts.RegistryKindAdded, contracts.RegistryKindUpdated:
+				appendCount++
+				if appendCount == 3 {
+					return contracts.RegistryAppendResult{}, errors.New("boom")
+				}
+			}
+		}
+		return original(path, entry)
+	}
+	t.Cleanup(func() {
+		appendRegistryEntry = original
+	})
+
+	deps := Deps{Git: &fakeGit{head: resolver.target.TargetSHA}, Resolver: resolver, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 440, runCtx, pkg, candidates, store, deps))
+
+	rollback := mustDecisionRollback(t, readDecision(t, runCtx))
+	assert.Equal(t, contracts.RollbackReasonTransactionalFailure, rollback.RollbackReason)
+
+	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	require.Len(t, lines, 4)
+	rolledBack := make([]contracts.RuleRegistryRolledBack, 0, 2)
+	for _, line := range lines {
+		if v, ok := line.Entry.Value.(contracts.RuleRegistryRolledBack); ok {
+			rolledBack = append(rolledBack, v)
+		}
+	}
+	require.Len(t, rolledBack, 2)
+	assert.ElementsMatch(t, plannedOpIDs, []string{rolledBack[0].TargetOpID, rolledBack[1].TargetOpID})
 }
 
 func TestRun_ResumeFromBranchPushed_RegistryDivergedRollsBack(t *testing.T) {
@@ -378,7 +552,7 @@ func TestRun_RollbackWithoutRegistryAppendSkipsRollbackRegistryStage(t *testing.
 func TestRun_ResumeFromRollingBackRegistryAppended(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR12")
 	appendResult, _ := seedRegistryAdd(t, runCtx.RulesRegistryPath(), resolver, runCtx.RunID, candidates.CandidatesHash)
-	rollbackResult, err := appendRegistryRollback(runCtx, contracts.IntentionRecord{
+	rollbackResult, err := appendRegistryRollbacks(runCtx, contracts.IntentionRecord{
 		SchemaVersion:        "1",
 		Stage:                contracts.IntentionStageRollingBackBranchReverted,
 		IdempotencyKey:       contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), resolver.target.TargetSHA, resolver.target.BestShaBefore, candidates.CandidatesHash),
@@ -387,17 +561,18 @@ func TestRun_ResumeFromRollingBackRegistryAppended(t *testing.T) {
 		TargetSha:            resolver.target.TargetSHA,
 		CandidatesHash:       candidates.CandidatesHash,
 		RegistryHeadBefore:   "",
-		PlannedAdoption:      mustPlannedAdoption(t, resolver.target.RulesToAppend),
+		PlannedAdoption:      mustPlannedAdoption(t, contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), resolver.target.TargetSHA, resolver.target.BestShaBefore, candidates.CandidatesHash), resolver.target.RulesToAppend),
 		StartedAt:            time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
 		RegistryAppendResult: &appendResult,
 	}, contracts.RollbackReasonTransactionalFailure, time.Date(2026, 4, 21, 10, 0, 1, 0, time.UTC))
 	require.NoError(t, err)
+	require.NotNil(t, rollbackResult)
 
 	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
 	intention.Stage = contracts.IntentionStageRollingBackRegistryAppended
 	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
 	intention.FailedStep = contracts.FailedStep70
-	intention.RegistryAppendResult = &rollbackResult
+	intention.RegistryAppendResult = rollbackResult
 	require.NoError(t, store.Save(intention))
 
 	deps := Deps{Git: &fakeGit{head: resolver.target.BestShaBefore}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
@@ -685,6 +860,14 @@ func adoptAddedEntry(runID contracts.RunID, candidatesHash string) contracts.Rul
 	return adoptAddedEntryWithTarget(runID, candidatesHash, strings.Repeat("2", 40), "rule-seed")
 }
 
+func adoptAddedEntriesWithTarget(runID contracts.RunID, candidatesHash, targetSHA string, ruleIDs ...string) []contracts.RuleRegistryEntry {
+	entries := make([]contracts.RuleRegistryEntry, 0, len(ruleIDs))
+	for _, ruleID := range ruleIDs {
+		entries = append(entries, adoptAddedEntryWithTarget(runID, candidatesHash, targetSHA, ruleID))
+	}
+	return entries
+}
+
 func adoptAddedEntryWithTarget(runID contracts.RunID, candidatesHash, targetSHA, ruleID string) contracts.RuleRegistryEntry {
 	key := contracts.ComputeAdoptIdempotencyKey(string(runID), strings.Repeat("2", 40), strings.Repeat("1", 40), candidatesHash)
 	v := contracts.RuleRegistryAdded{
@@ -704,25 +887,26 @@ func adoptAddedEntryWithTarget(runID contracts.RunID, candidatesHash, targetSHA,
 }
 
 func planningIntention(runID contracts.RunID, target Target, candidatesHash string) contracts.IntentionRecord {
+	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(runID), target.TargetSHA, target.BestShaBefore, candidatesHash)
 	return contracts.IntentionRecord{
 		SchemaVersion:      "1",
 		Stage:              contracts.IntentionStagePlanning,
-		IdempotencyKey:     contracts.ComputeAdoptIdempotencyKey(string(runID), target.TargetSHA, target.BestShaBefore, candidatesHash),
+		IdempotencyKey:     idempotencyKey,
 		RunID:              runID,
 		BestShaBefore:      target.BestShaBefore,
 		TargetSha:          target.TargetSHA,
 		CandidatesHash:     candidatesHash,
 		RegistryHeadBefore: "",
-		PlannedAdoption:    mustPlannedAdoption(nil, target.RulesToAppend),
+		PlannedAdoption:    mustPlannedAdoption(nil, idempotencyKey, target.RulesToAppend),
 		StartedAt:          time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
 	}
 }
 
-func mustPlannedAdoption(t *testing.T, entries []contracts.RuleRegistryEntry) *contracts.PlannedAdoption {
+func mustPlannedAdoption(t *testing.T, intentionIdempotencyKey string, entries []contracts.RuleRegistryEntry) *contracts.PlannedAdoption {
 	if t != nil {
 		t.Helper()
 	}
-	planned, err := plannedAdoptionFromRegistryEntries(entries)
+	planned, err := plannedAdoptionFromRegistryEntries(intentionIdempotencyKey, entries)
 	if t != nil {
 		require.NoError(t, err)
 	} else if err != nil {
@@ -733,7 +917,10 @@ func mustPlannedAdoption(t *testing.T, entries []contracts.RuleRegistryEntry) *c
 
 func seedRegistryAdd(t *testing.T, path string, resolver *fixtureResolver, runID contracts.RunID, candidatesHash string) (contracts.RegistryAppendResult, contracts.RuleRegistryEntry) {
 	t.Helper()
-	entry := adoptAddedEntry(runID, candidatesHash)
+	intention := planningIntention(runID, resolver.target, candidatesHash)
+	entries, err := registryEntriesFromPlannedAdoption(intention, time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	entry := entries[0]
 	result, err := internalio.AppendRegistryEntry(path, entry)
 	require.NoError(t, err)
 	return result, entry

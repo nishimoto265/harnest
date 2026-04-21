@@ -60,6 +60,11 @@ type IntentionRecord struct {
 	// RegistryAppendResult: stage=registry_appended 以降に populate される.
 	RegistryAppendResult *RegistryAppendResult `json:"registry_append_result,omitempty" validate:"omitempty"`
 
+	// AppendedEntryOpIDs: stage4 multi-entry append 中に成功済み row の per-entry
+	// idempotency key を逐次保存する。branch_pushed のままでも rollback /
+	// recovery が committed row を再発見できるようにする。
+	AppendedEntryOpIDs []string `json:"appended_entry_op_ids,omitempty" validate:"omitempty,dive,sha256_hex"`
+
 	// RecoveryReason / FailedStep: stage=needs_manual_recovery もしくは
 	// rolling_back_* 時にのみ populate.
 	RecoveryReason RollbackReason `json:"recovery_reason,omitempty" validate:"omitempty,oneof=lease_failure remote_divergence registry_divergence worktree_rescue_loop manual_abort_pending_cleanup transactional_failure"`
@@ -72,23 +77,34 @@ type IntentionRecord struct {
 //   - stage=needs_manual_recovery / rolling_back_*                       →
 //     recovery_reason + failed_step 必須
 var (
-	ErrIntentionMissingRegistryAppendResult = errors.New("contracts: intention: registry_append_result is required for this stage")
-	ErrIntentionMissingRecoveryReason       = errors.New("contracts: intention: recovery_reason is required for this stage")
-	ErrIntentionMissingFailedStep           = errors.New("contracts: intention: failed_step is required for this stage")
-	ErrIntentionMissingRegistryHeadBefore   = errors.New("contracts: intention: registry_head_before field is required")
-	ErrIntentionMissingPlannedAdoption      = errors.New("contracts: intention: planned_adoption is required for this stage")
-	ErrIntentionIdempotencyKeyMismatch      = errors.New("contracts: intention: idempotency_key does not match derived value")
-	ErrPlannedAdoptionEmpty                 = errors.New("contracts: intention: planned_adoption.entries must contain at least one entry")
-	ErrPlannedAdoptionUnsupportedKind       = errors.New("contracts: intention: planned_adoption supports only added/updated entries")
-	ErrPlannedAdoptionPrevSha256Required    = errors.New("contracts: intention: planned_adoption.updated requires prev_sha256")
-	ErrPlannedAdoptionPrevSha256Forbidden   = errors.New("contracts: intention: planned_adoption.added must not set prev_sha256")
+	ErrIntentionMissingRegistryAppendResult  = errors.New("contracts: intention: registry_append_result is required for this stage")
+	ErrIntentionMissingRecoveryReason        = errors.New("contracts: intention: recovery_reason is required for this stage")
+	ErrIntentionMissingFailedStep            = errors.New("contracts: intention: failed_step is required for this stage")
+	ErrIntentionMissingRegistryHeadBefore    = errors.New("contracts: intention: registry_head_before field is required")
+	ErrIntentionMissingPlannedAdoption       = errors.New("contracts: intention: planned_adoption is required for this stage")
+	ErrIntentionIdempotencyKeyMismatch       = errors.New("contracts: intention: idempotency_key does not match derived value")
+	ErrPlannedAdoptionEmpty                  = errors.New("contracts: intention: planned_adoption.entries must contain at least one entry")
+	ErrPlannedAdoptionIdempotencyMismatch    = errors.New("contracts: intention: planned_adoption.idempotency_key must match intention.idempotency_key")
+	ErrPlannedAdoptionUnsupportedKind        = errors.New("contracts: intention: planned_adoption supports only added/updated entries")
+	ErrPlannedAdoptionPrevSha256Required     = errors.New("contracts: intention: planned_adoption.updated requires prev_sha256")
+	ErrPlannedAdoptionPrevSha256Forbidden    = errors.New("contracts: intention: planned_adoption.added must not set prev_sha256")
+	ErrPlannedAdoptionOpIDRequired           = errors.New("contracts: intention: planned_adoption entry op_id is required")
+	ErrPlannedAdoptionAppendedEntryUnknown   = errors.New("contracts: intention: appended_entry_op_ids must belong to planned_adoption entries")
+	ErrPlannedAdoptionAppendedEntryDuplicate = errors.New("contracts: intention: appended_entry_op_ids must be unique")
 )
 
 type PlannedAdoption struct {
-	Entries []PlannedAdoptionEntry `json:"entries" validate:"required,min=1,dive"`
+	IdempotencyKey string                 `json:"idempotency_key" validate:"required,sha256_hex"`
+	Entries        []PlannedAdoptionEntry `json:"entries" validate:"required,min=1,dive"`
 }
 
-func (p PlannedAdoption) Validate() error {
+func (p PlannedAdoption) Validate(intentionIdempotencyKey string) error {
+	if p.IdempotencyKey == "" {
+		return ErrPlannedAdoptionIdempotencyMismatch
+	}
+	if intentionIdempotencyKey != "" && p.IdempotencyKey != intentionIdempotencyKey {
+		return fmt.Errorf("%w: planned=%s intention=%s", ErrPlannedAdoptionIdempotencyMismatch, p.IdempotencyKey, intentionIdempotencyKey)
+	}
 	if len(p.Entries) == 0 {
 		return ErrPlannedAdoptionEmpty
 	}
@@ -102,6 +118,7 @@ func (p PlannedAdoption) Validate() error {
 
 type PlannedAdoptionEntry struct {
 	Kind       RegistryKind `json:"kind" validate:"required,oneof=added updated"`
+	OpID       string       `json:"op_id" validate:"required,sha256_hex"`
 	RuleID     string       `json:"rule_id" validate:"required"`
 	RulePath   string       `json:"rule_path" validate:"required"`
 	Sha256     string       `json:"sha256" validate:"required,sha256_hex"`
@@ -110,6 +127,9 @@ type PlannedAdoptionEntry struct {
 
 func (e PlannedAdoptionEntry) Validate() error {
 	if err := validateStruct(e); err != nil {
+		if e.OpID == "" {
+			return ErrPlannedAdoptionOpIDRequired
+		}
 		return err
 	}
 	switch e.Kind {
@@ -154,14 +174,33 @@ func (r IntentionRecord) Validate() error {
 	if err := validateStruct(r); err != nil {
 		return err
 	}
-	if r.PlannedAdoption != nil {
-		if err := r.PlannedAdoption.Validate(); err != nil {
-			return err
-		}
-	}
 	expected := ComputeAdoptIdempotencyKey(string(r.RunID), r.TargetSha, r.BestShaBefore, r.CandidatesHash)
 	if r.IdempotencyKey != expected {
 		return fmt.Errorf("%w: got=%s want=%s", ErrIntentionIdempotencyKeyMismatch, r.IdempotencyKey, expected)
+	}
+	if r.PlannedAdoption != nil {
+		if err := r.PlannedAdoption.Validate(r.IdempotencyKey); err != nil {
+			return err
+		}
+	}
+	if len(r.AppendedEntryOpIDs) > 0 {
+		if r.PlannedAdoption == nil {
+			return ErrIntentionMissingPlannedAdoption
+		}
+		allowed := make(map[string]struct{}, len(r.PlannedAdoption.Entries))
+		for _, entry := range r.PlannedAdoption.Entries {
+			allowed[entry.OpID] = struct{}{}
+		}
+		seen := make(map[string]struct{}, len(r.AppendedEntryOpIDs))
+		for _, opID := range r.AppendedEntryOpIDs {
+			if _, ok := allowed[opID]; !ok {
+				return fmt.Errorf("%w: %s", ErrPlannedAdoptionAppendedEntryUnknown, opID)
+			}
+			if _, ok := seen[opID]; ok {
+				return fmt.Errorf("%w: %s", ErrPlannedAdoptionAppendedEntryDuplicate, opID)
+			}
+			seen[opID] = struct{}{}
+		}
 	}
 	switch r.Stage {
 	case IntentionStagePlanning,
