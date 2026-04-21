@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -93,6 +94,28 @@ func TestStepRun(t *testing.T) {
 			},
 		},
 		{
+			name:       "active lease aborts without rewriting state",
+			timeoutSec: 5,
+			prepare: func(t *testing.T, fx *testFixture) {
+				fx.seedActiveLeaseState(t)
+			},
+			assertion: func(t *testing.T, fx *testFixture, err error) {
+				require.ErrorIs(t, err, ErrRescueAbortedLeaseActive)
+
+				_, statErr := os.Stat(fx.manifestPath())
+				require.Error(t, statErr)
+				require.True(t, os.IsNotExist(statErr))
+
+				stateBytes, readErr := os.ReadFile(fx.statePath())
+				require.NoError(t, readErr)
+				require.Equal(t, fx.stateSnapshot, stateBytes)
+
+				info, infoErr := os.Stat(fx.heartbeatLeasePath())
+				require.NoError(t, infoErr)
+				require.True(t, info.ModTime().Equal(fx.heartbeatSnapshotModTime))
+			},
+		},
+		{
 			name:       "rescue then success",
 			timeoutSec: 5,
 			env: map[string]string{
@@ -115,6 +138,48 @@ func TestStepRun(t *testing.T) {
 				rescuedEntries, readDirErr := os.ReadDir(filepath.Join(fx.agentDir, rescuedDirName))
 				require.NoError(t, readDirErr)
 				require.NotEmpty(t, rescuedEntries)
+			},
+		},
+		{
+			name:       "missing heartbeat rescues stale state",
+			timeoutSec: 5,
+			env: map[string]string{
+				"FAKE_CLAUDE_STDOUT": `{"event":"missing-heartbeat"}` + "\n",
+			},
+			prepare: func(t *testing.T, fx *testFixture) {
+				fx.seedResumeStateWithoutHeartbeat(t, 0)
+			},
+			assertion: func(t *testing.T, fx *testFixture, err error) {
+				require.NoError(t, err)
+				manifest := fx.readManifest(t)
+				_, ok := manifest.Value.(contracts.ManifestSuccess)
+				require.True(t, ok)
+
+				state, ok, readErr := loadResumeState(fx.agentDir)
+				require.NoError(t, readErr)
+				require.True(t, ok)
+				require.Equal(t, 1, state.RetryCount)
+
+				rescuedEntries, readDirErr := os.ReadDir(filepath.Join(fx.agentDir, rescuedDirName))
+				require.NoError(t, readDirErr)
+				require.NotEmpty(t, rescuedEntries)
+			},
+		},
+		{
+			name:       "session transcript is truncated on fresh attempt",
+			timeoutSec: 5,
+			env: map[string]string{
+				"FAKE_CLAUDE_STDOUT": `{"event":"fresh-attempt"}` + "\n",
+			},
+			prepare: func(t *testing.T, fx *testFixture) {
+				require.NoError(t, os.MkdirAll(filepath.Dir(fx.sessionPath()), 0o755))
+				require.NoError(t, os.WriteFile(fx.sessionPath(), []byte("stale-attempt\n"), 0o644))
+			},
+			assertion: func(t *testing.T, fx *testFixture, err error) {
+				require.NoError(t, err)
+				sessionBytes, readErr := os.ReadFile(fx.sessionPath())
+				require.NoError(t, readErr)
+				require.Equal(t, `{"event":"fresh-attempt"}`+"\n", string(sessionBytes))
 			},
 		},
 		{
@@ -159,6 +224,9 @@ type testFixture struct {
 	baseSHA  string
 	agentDir string
 	worktree string
+
+	stateSnapshot            []byte
+	heartbeatSnapshotModTime time.Time
 }
 
 func newTestFixture(t *testing.T, timeoutSec int) *testFixture {
@@ -256,6 +324,14 @@ func (fx *testFixture) sessionPath() string {
 	return path
 }
 
+func (fx *testFixture) statePath() string {
+	return resumeStatePath(fx.agentDir)
+}
+
+func (fx *testFixture) heartbeatLeasePath() string {
+	return heartbeatPath(fx.agentDir)
+}
+
 func (fx *testFixture) readManifest(t *testing.T) contracts.Manifest {
 	t.Helper()
 	manifest, err := internalio.ReadJSON[contracts.Manifest](fx.manifestPath())
@@ -275,6 +351,39 @@ func (fx *testFixture) seedResumeState(t *testing.T, retryCount int) {
 		LastHeartbeat:   oldTime,
 	}))
 	require.NoError(t, touchHeartbeat(fx.agentDir, oldTime))
+}
+
+func (fx *testFixture) seedResumeStateWithoutHeartbeat(t *testing.T, retryCount int) {
+	t.Helper()
+	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	require.NoError(t, os.MkdirAll(fx.agentDir, 0o755))
+	require.NoError(t, saveResumeState(fx.agentDir, resumeState{
+		ExpectedBaseSHA: fx.baseSHA,
+		StartedAt:       oldTime,
+		Pid:             999999,
+		RetryCount:      retryCount,
+		LastHeartbeat:   oldTime,
+	}))
+}
+
+func (fx *testFixture) seedActiveLeaseState(t *testing.T) {
+	t.Helper()
+	now := time.Now().UTC()
+	require.NoError(t, os.MkdirAll(fx.agentDir, 0o755))
+	require.NoError(t, saveResumeState(fx.agentDir, resumeState{
+		ExpectedBaseSHA: fx.baseSHA,
+		StartedAt:       now,
+		Pid:             os.Getpid(),
+		RetryCount:      1,
+		LastHeartbeat:   now,
+	}))
+	require.NoError(t, touchHeartbeat(fx.agentDir, now))
+	stateBytes, err := os.ReadFile(fx.statePath())
+	require.NoError(t, err)
+	fx.stateSnapshot = stateBytes
+	info, err := os.Stat(fx.heartbeatLeasePath())
+	require.NoError(t, err)
+	fx.heartbeatSnapshotModTime = info.ModTime()
 }
 
 func writeFakeClaudeScript(t *testing.T, dir string) string {
@@ -362,4 +471,118 @@ func runGit(t *testing.T, dir string, args ...string) string {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 	return string(out)
+}
+
+func TestWriteCommitBundleFallsBackToFullHeadWhenBaseIsUnreachable(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	baseSHA := initGitRepo(t, repo, "auto-improve/test/pass1/a1")
+	require.NotEmpty(t, baseSHA)
+	runGit(t, repo, "commit", "--allow-empty", "-m", "head")
+
+	rescueDir := filepath.Join(root, "rescue")
+	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
+
+	commitCount, bundleMode, err := writeCommitBundle(context.Background(), repo, rescueDir, strings.Repeat("f", 40))
+	require.NoError(t, err)
+	require.Equal(t, "full_head", bundleMode)
+	require.Greater(t, commitCount, 0)
+	require.FileExists(t, filepath.Join(rescueDir, "commits.bundle"))
+
+	verifyOut := runGit(t, repo, "bundle", "verify", filepath.Join(rescueDir, "commits.bundle"))
+	require.Contains(t, verifyOut, "is okay")
+}
+
+func TestStepRunReturnsLeaseContendedDuringConcurrentStartup(t *testing.T) {
+	fx := newTestFixture(t, 3)
+	t.Setenv("FAKE_CLAUDE_STDOUT", `{"event":"slow"}`+"\n")
+	t.Setenv("FAKE_CLAUDE_SLEEP_SECONDS", "1")
+
+	firstErrCh := make(chan error, 1)
+	go func() {
+		firstErrCh <- fx.step.Run(context.Background(), fx.run)
+	}()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(fx.sessionPath())
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	err := fx.step.Run(context.Background(), fx.run)
+	require.ErrorIs(t, err, ErrAgentLeaseContended)
+	require.NoError(t, <-firstErrCh)
+}
+
+func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	fx.seedResumeState(t, 0)
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+
+	wrapperDir := t.TempDir()
+	logPath := filepath.Join(wrapperDir, "git.log")
+	writeFakeGitWrapper(t, wrapperDir)
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("FAKE_GIT_LOG", logPath)
+	t.Setenv("FAKE_GIT_SLEEP_ON_PREFIX", "diff HEAD --binary")
+	t.Setenv("FAKE_GIT_SLEEP_SECONDS", "5")
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fx.step.Run(ctx, fx.run)
+	}()
+
+	require.Eventually(t, func() bool {
+		logBytes, readErr := os.ReadFile(logPath)
+		if readErr != nil {
+			return false
+		}
+		return strings.Contains(string(logBytes), "diff HEAD --binary")
+	}, time.Second, 10*time.Millisecond)
+
+	cancel()
+
+	err = <-errCh
+	require.ErrorIs(t, err, context.Canceled)
+
+	logBytes, readErr := os.ReadFile(logPath)
+	require.NoError(t, readErr)
+	require.NotContains(t, string(logBytes), "reset --hard")
+	require.NotContains(t, string(logBytes), "clean -fd")
+
+	_, statErr := os.Stat(fx.manifestPath())
+	require.Error(t, statErr)
+	require.True(t, os.IsNotExist(statErr))
+}
+
+func TestPidAliveTreatsEPERMAsAlive(t *testing.T) {
+	originalKill := killProcess
+	killProcess = func(pid int, sig syscall.Signal) error {
+		return syscall.EPERM
+	}
+	t.Cleanup(func() {
+		killProcess = originalKill
+	})
+
+	require.True(t, pidAlive(12345))
+}
+
+func writeFakeGitWrapper(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "git")
+	script := `#!/bin/bash
+set -euo pipefail
+joined="$*"
+printf '%s\n' "$joined" >> "$FAKE_GIT_LOG"
+if [[ -n "${FAKE_GIT_SLEEP_ON_PREFIX:-}" && "$joined" == "${FAKE_GIT_SLEEP_ON_PREFIX}"* ]]; then
+  sleep "${FAKE_GIT_SLEEP_SECONDS:-5}"
+fi
+exec "$REAL_GIT" "$@"
+`
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
 }

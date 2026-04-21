@@ -32,6 +32,11 @@ const (
 	promptVersion       = string(prompt.TemplateStep20Implement)
 )
 
+var (
+	ErrAgentLeaseContended      = errors.New("step20: agent lease contended")
+	ErrRescueAbortedLeaseActive = errors.New("step20: rescue aborted because lease is active")
+)
+
 type RunContext struct {
 	Config      *config.Config
 	Logger      *slog.Logger
@@ -114,6 +119,15 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 		return err
 	}
 
+	leaseLock, acquired, err := tryAcquireRescueLock(filepath.Join(agentDir, rescueLockFileName))
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		return fmt.Errorf("%w: agent %s", ErrAgentLeaseContended, run.Agent)
+	}
+	defer leaseLock.Unlock()
+
 	stepStartedAt := s.now().UTC()
 	retryCount, err := s.resumeIfNeeded(ctx, run, allocation, agentDir)
 	if err != nil {
@@ -137,6 +151,9 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 		Pid:             os.Getpid(),
 		RetryCount:      retryCount,
 		LastHeartbeat:   stepStartedAt,
+	}
+	if err := touchHeartbeat(agentDir, state.LastHeartbeat); err != nil {
+		return err
 	}
 	if err := saveResumeState(agentDir, state); err != nil {
 		return err
