@@ -128,6 +128,61 @@ func TestRun_IdempotentWhenDoneMarkerExists(t *testing.T) {
 	assert.Equal(t, beforeScores, afterScores)
 }
 
+func TestRun_RebuildsWhenDoneMarkerVerificationFails(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		agents:          []contracts.AgentID{"a1", "a2", "a3"},
+		writePass1Score: true,
+	})
+
+	now := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+
+	donePath := mustResolve(t, runIO, "60/done.marker")
+	freshMarker := mustReadJSON[contracts.Step60DoneMarker](t, donePath)
+	freshArtifacts := readStep60Artifacts(t, runIO)
+
+	mutatedMarker := freshMarker
+	mutatedMarker.ContentHashes.ScoresFinal = flipHexChar(mutatedMarker.ContentHashes.ScoresFinal)
+	require.NoError(t, internalio.WriteJSONAtomic(donePath, mutatedMarker))
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+
+	assert.Equal(t, freshArtifacts, readStep60Artifacts(t, runIO))
+
+	beforeStat, err := os.Stat(donePath)
+	require.NoError(t, err)
+	beforeMarkerBytes := mustReadFile(t, donePath)
+
+	later := now.Add(2 * time.Hour)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return later },
+	}))
+
+	afterStat, err := os.Stat(donePath)
+	require.NoError(t, err)
+	assert.Equal(t, beforeMarkerBytes, mustReadFile(t, donePath))
+	assert.Equal(t, beforeStat.ModTime(), afterStat.ModTime())
+}
+
 func TestRun_ErrorsWhenPass2ManifestMissing(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		agents:             []contracts.AgentID{"a1", "a2", "a3"},
@@ -305,7 +360,7 @@ func TestRun_ArbiterVerdictPaths(t *testing.T) {
 	})
 }
 
-func TestRun_ComplianceRuleUnionIncludesSecondaryOnlyRule(t *testing.T) {
+func TestRun_ComplianceSingleSideRuleKeepsRawProvenance(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score:        true,
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
@@ -352,8 +407,57 @@ func TestRun_ComplianceRuleUnionIncludesSecondaryOnlyRule(t *testing.T) {
 	}
 	assert.Equal(t, contracts.ComplianceVerdictCompliant, byRule["shared"].Verdict)
 	assert.Equal(t, contracts.VerdictPathArbitrated, byRule["shared"].VerdictPath)
-	assert.Equal(t, contracts.ComplianceVerdictValidException, byRule["secondary-only"].Verdict)
-	assert.Equal(t, contracts.VerdictPathArbiterOverruled, byRule["secondary-only"].VerdictPath)
+	assert.Equal(t, contracts.ComplianceVerdictViolated, byRule["secondary-only"].Verdict)
+	assert.Equal(t, contracts.VerdictPathSingle, byRule["secondary-only"].VerdictPath)
+
+	rawCompliance := mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl")
+	var secondaryOnly []contracts.RawComplianceEntry
+	for _, entry := range rawCompliance {
+		if entry.RuleID == "secondary-only" {
+			secondaryOnly = append(secondaryOnly, entry)
+		}
+	}
+	require.Len(t, secondaryOnly, 1)
+	assert.Equal(t, contracts.JudgeRoleSecondary, secondaryOnly[0].JudgeRole)
+	assert.Equal(t, contracts.ComplianceVerdictViolated, secondaryOnly[0].Verdict)
+}
+
+func TestRun_NormalizesRawResolvedAtToRunSnapshot(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+
+	judgeResolvedAt := time.Date(2026, 4, 20, 23, 59, 59, 0, time.UTC)
+	runResolvedAt := time.Date(2026, 4, 21, 18, 0, 0, 0, time.UTC)
+	primary := scriptedJudge{score: 80, reasonPrefix: "primary", compliance: map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant}, resolvedAt: judgeResolvedAt}
+	secondary := scriptedJudge{score: 70, reasonPrefix: "secondary", compliance: map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictViolated}, resolvedAt: judgeResolvedAt}
+	arbiter := scriptedJudge{score: 80, reasonPrefix: "primary", compliance: map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant}, resolvedAt: judgeResolvedAt}
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     arbiter,
+		Now:         func() time.Time { return runResolvedAt },
+	}))
+
+	for _, entry := range mustReadJSONL[contracts.ScoreEntry](t, runIO, "60/scores-B.jsonl") {
+		assert.Equal(t, runResolvedAt, entry.ResolvedAt)
+	}
+	for _, entry := range mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl") {
+		assert.Equal(t, runResolvedAt, entry.ResolvedAt)
+	}
+	for _, entry := range mustReadJSONL[contracts.RawScoreEntry](t, runIO, "60/scores-B-raw.jsonl") {
+		assert.Equal(t, runResolvedAt, entry.ResolvedAt)
+	}
+	for _, entry := range mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl") {
+		assert.Equal(t, runResolvedAt, entry.ResolvedAt)
+	}
+
+	marker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
+	assert.Equal(t, runResolvedAt, marker.ResolvedAt)
 }
 
 func TestRun_GoldenHashes(t *testing.T) {
@@ -389,6 +493,7 @@ type scriptedJudge struct {
 	score        int
 	reasonPrefix string
 	compliance   map[string]contracts.ComplianceVerdict
+	resolvedAt   time.Time
 }
 
 func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
@@ -402,6 +507,10 @@ func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput)
 	}
 
 	scores := make([]contracts.ScoreEntry, 0, len(canonicalDimensions))
+	resolvedAt := j.resolvedAt
+	if resolvedAt.IsZero() {
+		resolvedAt = time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC)
+	}
 	for _, dimension := range canonicalDimensions {
 		scores = append(scores, contracts.ScoreEntry{
 			SchemaVersion: "1",
@@ -414,7 +523,7 @@ func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput)
 			VerdictPath:   contracts.VerdictPathSingle,
 			RubricVersion: "scripted-rubric",
 			PromptVersion: "scripted-prompt",
-			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+			ResolvedAt:    resolvedAt,
 		})
 	}
 
@@ -438,7 +547,7 @@ func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput)
 			VerdictPath:   contracts.VerdictPathSingle,
 			RubricVersion: "scripted-rubric",
 			PromptVersion: "scripted-prompt",
-			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+			ResolvedAt:    resolvedAt,
 		})
 	}
 
@@ -670,4 +779,14 @@ func mustHashReducedRawCompliance(t *testing.T, runIO internalio.RunContext) str
 	hash, err := hashReducedRawComplianceFile(mustResolve(t, runIO, "60/compliance-B-raw.jsonl"))
 	require.NoError(t, err)
 	return hash
+}
+
+func flipHexChar(value string) string {
+	if value == "" {
+		return value
+	}
+	if value[0] == '0' {
+		return "1" + value[1:]
+	}
+	return "0" + value[1:]
 }
