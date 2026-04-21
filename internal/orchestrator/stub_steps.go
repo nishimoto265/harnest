@@ -19,6 +19,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/steps/step30_score"
 	"github.com/nishimoto265/auto-improve/internal/steps/step40_classify"
 	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
+	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 )
 
 func defaultSteps(cfg *config.Config) Steps {
@@ -36,8 +37,8 @@ func defaultSteps(cfg *config.Config) Steps {
 		Step40:  stubStep40{},
 		Step50:  step50,
 		Step60:  step60Step{},
-		Step70:  stubStep70{},
-		Archive: stubArchiveStep{},
+		Step70:  realStep70{},
+		Archive: realArchiveStep{},
 	}
 }
 
@@ -377,6 +378,64 @@ func (stubStep70) Run(ctx context.Context, run *StepRunContext) error {
 type stubArchiveStep struct{}
 
 func (stubArchiveStep) Run(ctx context.Context, run *StepRunContext) error {
+	_ = ctx
+	_ = run
+	return nil
+}
+
+// realStep70 is the production wiring for step70, delegating to
+// internal/steps/step70_decide. The resolver defaults to NoopResolver so that
+// pipeline runs without a promotion target emit a noop decision (matches the
+// prior stubStep70 behaviour for tests and empty-candidate flows).
+type realStep70 struct{}
+
+func (realStep70) Run(ctx context.Context, run *StepRunContext) error {
+	if run.TaskPackage == nil {
+		return errors.New("orchestrator: step70 requires task_package")
+	}
+	if run.Candidates == nil {
+		return errors.New("orchestrator: step70 requires candidates")
+	}
+	if run.Config == nil {
+		return errors.New("orchestrator: step70 requires config")
+	}
+	repoRoot, err := run.Config.RepoRoot()
+	if err != nil {
+		return err
+	}
+	store := run.IntentionFile
+	deps := step70_decide.Deps{
+		Git: step70_decide.RealGitOps{
+			RepoDir: repoRoot,
+		},
+		Resolver: step70_decide.FilesystemResolver{
+			RepoDir: repoRoot,
+		},
+	}
+	if err := step70_decide.Run(ctx, run.PR, run.IO, run.TaskPackage, run.Candidates, store, deps); err != nil {
+		return err
+	}
+	decisionPath, err := run.IO.ResolveRunRelative("70/decision.json")
+	if err != nil {
+		return err
+	}
+	if fileExists(decisionPath) {
+		decision, err := internalio.ReadJSON[contracts.Decision](decisionPath)
+		if err != nil {
+			return err
+		}
+		run.Decision = &decision
+	}
+	return nil
+}
+
+// realArchiveStep is intentionally a no-op in the per-run step pipeline.
+// Sunset/archive is a separate cycle-level tick owned by sunset_tick / the
+// `auto-improve sunset` entry points, both of which delegate to
+// internal/archive.RunSunsetWithLock.
+type realArchiveStep struct{}
+
+func (realArchiveStep) Run(ctx context.Context, run *StepRunContext) error {
 	_ = ctx
 	_ = run
 	return nil

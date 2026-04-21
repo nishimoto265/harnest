@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -322,16 +323,12 @@ func TestRegistry_Reject_TrailingBytes(t *testing.T) {
 	assert.Error(t, json.Unmarshal([]byte(data), &e))
 }
 
-func TestRegistry_Added_RejectsVersionSeqOneWithPrevHash(t *testing.T) {
-	data := strings.Replace(fixtureRegistryAdded(), `"prev_hash": ""`, `"prev_hash": "00000000000000000000000000000000000000000000000000000000000000aa"`, 1)
-	var e RuleRegistryEntry
-	err := json.Unmarshal([]byte(data), &e)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrRegistryPrevHashSequenceMismatch)
-}
-
-func TestRegistry_Updated_RejectsMissingPrevHashAfterFirstVersion(t *testing.T) {
-	data := `{
+func fixtureRegistryByKind(kind RegistryKind) string {
+	switch kind {
+	case RegistryKindAdded:
+		return fixtureRegistryAdded()
+	case RegistryKindUpdated:
+		return `{
   "kind": "updated",
   "schema_version": "1",
   "rule_id": "r-0001",
@@ -340,14 +337,123 @@ func TestRegistry_Updated_RejectsMissingPrevHashAfterFirstVersion(t *testing.T) 
   "prev_sha256": "0000000000000000000000000000000000000000000000000000000000000001",
   "idempotency_key": "0000000000000000000000000000000000000000000000000000000000000003",
   "version_seq": 2,
-  "prev_hash": "",
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000099",
   "by_run_id": "2026-04-21-PR43-abcdef1",
   "at": "2026-04-21T12:00:00Z"
 }`
-	var e RuleRegistryEntry
-	err := json.Unmarshal([]byte(data), &e)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrRegistryPrevHashSequenceMismatch)
+	case RegistryKindRolledBack:
+		return `{
+  "kind": "rolled_back",
+  "schema_version": "1",
+  "target_op_id": "0000000000000000000000000000000000000000000000000000000000000002",
+  "target_offset": 1024,
+  "target_sha256": "0000000000000000000000000000000000000000000000000000000000000030",
+  "by_run_id": "2026-04-22-PR44-abcdef2",
+  "rollback_reason": "lease_failure",
+  "failed_step": "70",
+  "version_seq": 3,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000088",
+  "at": "2026-04-22T12:00:00Z"
+}`
+	case RegistryKindStatusChanged:
+		return `{
+  "kind": "status_changed",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "active",
+  "new_status": "deprecated",
+  "transition": "deprecate",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000050",
+  "version_seq": 4,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000077",
+  "by_sunset_run_id": "sunset-2026-04-22",
+  "at": "2026-04-22T00:00:00Z"
+}`
+	case RegistryKindArchived:
+		return `{
+  "kind": "archived",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "deprecated",
+  "new_status": "archived",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000050",
+  "version_seq": 5,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000077",
+  "by_sunset_run_id": "sunset-2026-04-22",
+  "at": "2026-04-22T00:00:00Z"
+}`
+	case RegistryKindRestored:
+		return `{
+  "kind": "restored",
+  "schema_version": "1",
+  "rule_id": "r-0001",
+  "prev_status": "archived",
+  "new_status": "active",
+  "op_id": "0000000000000000000000000000000000000000000000000000000000000060",
+  "version_seq": 6,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000066",
+  "by_sunset_run_id": "sunset-2026-05-01",
+  "at": "2026-05-01T00:00:00Z"
+}`
+	default:
+		return ""
+	}
+}
+
+func TestRegistry_RejectsVersionSeqOneWithPrevHashAcrossVariants(t *testing.T) {
+	versionSeqPattern := regexp.MustCompile(`"version_seq": \d+`)
+	prevHashPattern := regexp.MustCompile(`"prev_hash": "[0-9a-f]*"`)
+
+	tests := []struct {
+		name string
+		kind RegistryKind
+	}{
+		{name: "added", kind: RegistryKindAdded},
+		{name: "updated", kind: RegistryKindUpdated},
+		{name: "rolled_back", kind: RegistryKindRolledBack},
+		{name: "status_changed", kind: RegistryKindStatusChanged},
+		{name: "archived", kind: RegistryKindArchived},
+		{name: "restored", kind: RegistryKindRestored},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := versionSeqPattern.ReplaceAllString(fixtureRegistryByKind(tt.kind), `"version_seq": 1`)
+			data = prevHashPattern.ReplaceAllString(data, `"prev_hash": "00000000000000000000000000000000000000000000000000000000000000aa"`)
+			var e RuleRegistryEntry
+			err := json.Unmarshal([]byte(data), &e)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrRegistryPrevHashMustBeEmptyOnFirst)
+		})
+	}
+}
+
+func TestRegistry_RejectsMissingPrevHashAfterFirstVersionAcrossVariants(t *testing.T) {
+	versionSeqPattern := regexp.MustCompile(`"version_seq": \d+`)
+	prevHashPattern := regexp.MustCompile(`"prev_hash": "[0-9a-f]*"`)
+
+	tests := []struct {
+		name string
+		kind RegistryKind
+	}{
+		{name: "added", kind: RegistryKindAdded},
+		{name: "updated", kind: RegistryKindUpdated},
+		{name: "rolled_back", kind: RegistryKindRolledBack},
+		{name: "status_changed", kind: RegistryKindStatusChanged},
+		{name: "archived", kind: RegistryKindArchived},
+		{name: "restored", kind: RegistryKindRestored},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := versionSeqPattern.ReplaceAllString(fixtureRegistryByKind(tt.kind), `"version_seq": 2`)
+			data = prevHashPattern.ReplaceAllString(data, `"prev_hash": ""`)
+			var e RuleRegistryEntry
+			err := json.Unmarshal([]byte(data), &e)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrRegistryPrevHashSequenceMismatch)
+		})
+	}
 }
 
 func TestRegistry_RolledBack_RejectsMissingTargetOffset(t *testing.T) {

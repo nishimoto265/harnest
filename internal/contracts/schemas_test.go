@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -513,6 +514,7 @@ func TestIntentionRecord_Valid_Planning(t *testing.T) {
 		TargetSha:          "2222222222222222222222222222222222222222",
 		CandidatesHash:     candidatesHash,
 		RegistryHeadBefore: "",
+		PlannedAdoption:    validPlannedAdoption(),
 		StartedAt:          time.Now(),
 	}
 	assert.NoError(t, validation.Instance().Struct(i))
@@ -536,13 +538,30 @@ func TestIntentionRecord_Reject_BadStage(t *testing.T) {
 func validIntentionBase() IntentionRecord {
 	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
 	return IntentionRecord{
-		SchemaVersion:  "1",
-		IdempotencyKey: ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash),
-		RunID:          "2026-04-20-PR42-abcdef0",
-		BestShaBefore:  "1111111111111111111111111111111111111111",
-		TargetSha:      "2222222222222222222222222222222222222222",
-		CandidatesHash: candidatesHash,
-		StartedAt:      time.Now(),
+		SchemaVersion:   "1",
+		IdempotencyKey:  ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash),
+		RunID:           "2026-04-20-PR42-abcdef0",
+		BestShaBefore:   "1111111111111111111111111111111111111111",
+		TargetSha:       "2222222222222222222222222222222222222222",
+		CandidatesHash:  candidatesHash,
+		PlannedAdoption: validPlannedAdoption(),
+		StartedAt:       time.Now(),
+	}
+}
+
+func validPlannedAdoption() *PlannedAdoption {
+	idempotencyKey := ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", "0000000000000000000000000000000000000000000000000000000000000002")
+	return &PlannedAdoption{
+		IdempotencyKey: idempotencyKey,
+		Entries: []PlannedAdoptionEntry{
+			{
+				OpID:     ComputePlannedAdoptionEntryOpID(idempotencyKey, 0, "r-0001"),
+				Kind:     RegistryKindAdded,
+				RuleID:   "r-0001",
+				RulePath: "rules/r-0001.md",
+				Sha256:   "0000000000000000000000000000000000000000000000000000000000000005",
+			},
+		},
 	}
 }
 
@@ -550,6 +569,16 @@ func TestIntentionRecord_Validate_Planning_NoExtraRequired(t *testing.T) {
 	r := validIntentionBase()
 	r.Stage = IntentionStagePlanning
 	assert.NoError(t, r.Validate())
+}
+
+func TestIntentionRecord_Validate_BranchPushed_RequiresPlannedAdoption(t *testing.T) {
+	r := validIntentionBase()
+	r.Stage = IntentionStageBranchPushed
+	r.PlannedAdoption = nil
+
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingPlannedAdoption)
 }
 
 func TestIntentionRecord_Validate_RegistryAppended_RequiresAppendResult(t *testing.T) {
@@ -600,7 +629,7 @@ func TestIntentionRecord_Validate_RollingBackDecisionWritten_RequiresAll(t *test
 	r.Stage = IntentionStageRollingBackDecisionWritten
 	err := r.Validate()
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrIntentionMissingRegistryAppendResult)
+	assert.ErrorIs(t, err, ErrIntentionMissingRecoveryReason)
 }
 
 func TestIntentionRecord_Validate_RollingBackBranchReverted_RequiresRecovery(t *testing.T) {
@@ -646,14 +675,18 @@ func TestIntentionRecord_AllStagesEnumerated(t *testing.T) {
 	for _, s := range all {
 		candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
 		i := IntentionRecord{
-			SchemaVersion:  "1",
-			Stage:          s,
-			IdempotencyKey: ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash),
-			RunID:          "2026-04-20-PR42-abcdef0",
-			BestShaBefore:  "1111111111111111111111111111111111111111",
-			TargetSha:      "2222222222222222222222222222222222222222",
-			CandidatesHash: candidatesHash,
-			StartedAt:      time.Now(),
+			SchemaVersion:   "1",
+			Stage:           s,
+			IdempotencyKey:  ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash),
+			RunID:           "2026-04-20-PR42-abcdef0",
+			BestShaBefore:   "1111111111111111111111111111111111111111",
+			TargetSha:       "2222222222222222222222222222222222222222",
+			CandidatesHash:  candidatesHash,
+			PlannedAdoption: validPlannedAdoption(),
+			StartedAt:       time.Now(),
+		}
+		if s == IntentionStageNeedsManualRecovery {
+			i.PlannedAdoption = nil
 		}
 		assert.NoError(t, validation.Instance().Struct(i), string(s))
 	}
@@ -703,16 +736,30 @@ func TestIntentionRecord_Validate_RejectsForgedIdempotencyKeyAcrossStages(t *tes
 	}
 }
 
+func TestIntentionRecord_Validate_RejectsPlannedAdoptionIdempotencyMismatch(t *testing.T) {
+	r := validIntentionBase()
+	r.Stage = IntentionStagePlanning
+	r.RegistryHeadBefore = ""
+	r.PlannedAdoption.IdempotencyKey = strings.Repeat("f", 64)
+
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPlannedAdoptionIdempotencyMismatch)
+}
+
 func TestIntentionRecord_UnmarshalJSON_RejectsMissingRegistryHeadBefore(t *testing.T) {
 	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
+	idempotencyKey := ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash)
+	plannedAdoption := `{"idempotency_key":"` + idempotencyKey + `","entries":[{"kind":"added","op_id":"` + ComputePlannedAdoptionEntryOpID(idempotencyKey, 0, "r-0001") + `","rule_id":"r-0001","rule_path":"rules/r-0001.md","sha256":"0000000000000000000000000000000000000000000000000000000000000005"}]}`
 	data := []byte(`{
   "schema_version": "1",
   "stage": "planning",
-  "idempotency_key": "` + ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash) + `",
+  "idempotency_key": "` + idempotencyKey + `",
   "run_id": "2026-04-20-PR42-abcdef0",
   "best_sha_before": "1111111111111111111111111111111111111111",
   "target_sha": "2222222222222222222222222222222222222222",
   "candidates_hash": "` + candidatesHash + `",
+  "planned_adoption": ` + plannedAdoption + `,
   "started_at": "2026-04-20T10:00:00Z"
 }`)
 	var record IntentionRecord
@@ -723,20 +770,34 @@ func TestIntentionRecord_UnmarshalJSON_RejectsMissingRegistryHeadBefore(t *testi
 
 func TestIntentionRecord_UnmarshalJSON_AcceptsExplicitEmptyRegistryHeadBefore(t *testing.T) {
 	candidatesHash := "0000000000000000000000000000000000000000000000000000000000000002"
+	idempotencyKey := ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash)
+	plannedAdoption := `{"idempotency_key":"` + idempotencyKey + `","entries":[{"kind":"added","op_id":"` + ComputePlannedAdoptionEntryOpID(idempotencyKey, 0, "r-0001") + `","rule_id":"r-0001","rule_path":"rules/r-0001.md","sha256":"0000000000000000000000000000000000000000000000000000000000000005"}]}`
 	data := []byte(`{
   "schema_version": "1",
   "stage": "planning",
-  "idempotency_key": "` + ComputeAdoptIdempotencyKey("2026-04-20-PR42-abcdef0", "2222222222222222222222222222222222222222", "1111111111111111111111111111111111111111", candidatesHash) + `",
+  "idempotency_key": "` + idempotencyKey + `",
   "run_id": "2026-04-20-PR42-abcdef0",
   "best_sha_before": "1111111111111111111111111111111111111111",
   "target_sha": "2222222222222222222222222222222222222222",
   "candidates_hash": "` + candidatesHash + `",
   "registry_head_before": "",
+  "planned_adoption": ` + plannedAdoption + `,
   "started_at": "2026-04-20T10:00:00Z"
 }`)
 	var record IntentionRecord
 	require.NoError(t, json.Unmarshal(data, &record))
 	assert.Equal(t, "", record.RegistryHeadBefore)
+}
+
+func TestPlannedAdoption_RoundTrip(t *testing.T) {
+	original := validPlannedAdoption()
+
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	var decoded PlannedAdoption
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, *original, decoded)
 }
 
 func TestIntentionRecord_MarshalJSON_RejectsForgedIdempotencyKey(t *testing.T) {

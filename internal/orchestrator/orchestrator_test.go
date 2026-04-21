@@ -231,6 +231,30 @@ func TestIntentionStore_RoundTrip(t *testing.T) {
 	assert.Nil(t, loaded)
 }
 
+func TestRealArchiveStep_NoOpLeavesSunsetStateUntouched(t *testing.T) {
+	cfg := testConfig(t)
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR89-abcdef0", cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(runCtx.RunsBase, 0o755))
+
+	markerPath := filepath.Join(runCtx.RunsBase, "sunset-running.marker")
+	lastSunsetPath := filepath.Join(runCtx.RunsBase, "last-sunset-at")
+	require.NoError(t, os.WriteFile(markerPath, []byte("2026-04-21T09:00:00Z\nstale-run\n"), 0o644))
+	require.NoError(t, os.WriteFile(lastSunsetPath, []byte("2026-04-21T08:00:00Z\n"), 0o644))
+
+	step := realArchiveStep{}
+	require.NoError(t, step.Run(context.Background(), &StepRunContext{IO: runCtx}))
+	require.NoError(t, step.Run(context.Background(), &StepRunContext{IO: runCtx}))
+
+	markerBody, err := os.ReadFile(markerPath)
+	require.NoError(t, err)
+	assert.Equal(t, "2026-04-21T09:00:00Z\nstale-run\n", string(markerBody))
+
+	lastSunsetBody, err := os.ReadFile(lastSunsetPath)
+	require.NoError(t, err)
+	assert.Equal(t, "2026-04-21T08:00:00Z\n", string(lastSunsetBody))
+}
+
 type callRecorder struct {
 	mu    sync.Mutex
 	calls []string
@@ -415,16 +439,29 @@ func validPlanningIntention(runID contracts.RunID) contracts.IntentionRecord {
 	best := strings.Repeat("1", 40)
 	target := strings.Repeat("2", 40)
 	hash := strings.Repeat("3", 64)
+	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(runID), target, best, hash)
 	return contracts.IntentionRecord{
 		SchemaVersion:      "1",
 		Stage:              contracts.IntentionStagePlanning,
-		IdempotencyKey:     contracts.ComputeAdoptIdempotencyKey(string(runID), target, best, hash),
+		IdempotencyKey:     idempotencyKey,
 		RunID:              runID,
 		BestShaBefore:      best,
 		TargetSha:          target,
 		CandidatesHash:     hash,
 		RegistryHeadBefore: "",
-		StartedAt:          time.Now().UTC(),
+		PlannedAdoption: &contracts.PlannedAdoption{
+			IdempotencyKey: idempotencyKey,
+			Entries: []contracts.PlannedAdoptionEntry{
+				{
+					OpID:     contracts.ComputePlannedAdoptionEntryOpID(idempotencyKey, 0, "r-0001"),
+					Kind:     contracts.RegistryKindAdded,
+					RuleID:   "r-0001",
+					RulePath: "rules/r-0001.md",
+					Sha256:   strings.Repeat("4", 64),
+				},
+			},
+		},
+		StartedAt: time.Now().UTC(),
 	}
 }
 
