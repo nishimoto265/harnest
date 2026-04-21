@@ -110,7 +110,10 @@ func TestRun_DefaultStub_EndToEnd(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
 	require.NoError(t, err)
+	orch.steps.Step10 = stubStep10{}
 	orch.steps.Step20 = stubAgentSteps()
+	orch.steps.Step50 = stubAgentSteps()
+	orch.steps.Step70 = stubStep70{}
 
 	err = orch.Run(context.Background(), 77, RunOptions{
 		RunID: "2026-04-21-PR77-abcdef0",
@@ -134,6 +137,50 @@ func TestRun_DefaultStub_EndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, events)
 	assert.Equal(t, contracts.StateKindCompleted, events[len(events)-1].Kind)
+}
+
+func TestRun_DefaultSteps_RealWiringWithFakeCLIs(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repo.Root = repoRootFromTestFile(t)
+	binDir := installFakeCLI(t)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
+
+	t.Setenv("AUTO_IMPROVE_TEST_BASE_SHA", strings.Repeat("a", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_TARGET_SHA", strings.Repeat("b", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_MERGE_SHA", strings.Repeat("c", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_BEST_SHA", strings.Repeat("d", 40))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	runID := contracts.RunID("2026-04-21-PR42-abcdeff")
+	require.NoError(t, orch.Run(context.Background(), 42, RunOptions{RunID: runID}))
+
+	runDir := filepath.Join(cfg.Paths.Runs, string(runID))
+	taskPackagePath := filepath.Join(runDir, "task-package.json")
+	decisionPath := filepath.Join(runDir, "70", "decision.json")
+	assert.FileExists(t, taskPackagePath)
+	assert.FileExists(t, decisionPath)
+	assert.FileExists(t, filepath.Join(runDir, "30", "done.marker"))
+	assert.NoFileExists(t, filepath.Join(runDir, "60", "done.marker"))
+
+	decision, err := internalio.ReadJSON[contracts.Decision](decisionPath)
+	require.NoError(t, err)
+	assert.Equal(t, contracts.DecisionActionNoop, decision.Action)
+
+	_, err = internalio.ReadJSON[contracts.TaskPackage](taskPackagePath)
+	require.NoError(t, err)
+	for _, agent := range []contracts.AgentID{"a1", "a2", "a3"} {
+		manifest, manifestErr := internalio.LoadFinalizedManifest(internalio.RunContext{
+			RunID:        runID,
+			RunsBase:     cfg.Paths.Runs,
+			WorktreeBase: cfg.Worktree.Base,
+		}, 1, agent)
+		require.NoError(t, manifestErr)
+		require.NotNil(t, manifest)
+		assert.Equal(t, contracts.ManifestKindSuccess, manifest.Kind)
+	}
 }
 
 func TestStubMarkerStep_SeedsPass1ScoresFromTaskPackageWorktrees(t *testing.T) {
@@ -284,7 +331,35 @@ func (s recordingStep) Run(ctx context.Context, run *StepRunContext) error {
 	case "10":
 		return stubStep10{}.Run(ctx, run)
 	case "40":
-		return stubStep40{}.Run(ctx, run)
+		if err := (stubStep40{}).Run(ctx, run); err != nil {
+			return err
+		}
+		if run.Candidates == nil || len(run.Candidates.Candidates) == 0 {
+			candidates := []contracts.Candidate{{
+				CandidateID:        "cand-test-001",
+				Kind:               contracts.CandidateKindNew,
+				Title:              "stub candidate",
+				Problem:            "problem",
+				Rationale:          "rationale",
+				ProposedBodyPath:   "40/candidates/cand-test-001.md",
+				ProposedBodySha256: strings.Repeat("a", 64),
+			}}
+			run.Candidates = &contracts.Candidates{
+				SchemaVersion:  "1",
+				RunID:          run.IO.RunID,
+				Candidates:     candidates,
+				CandidatesHash: contracts.CanonicalCandidatesHash(candidates),
+				CreatedAt:      time.Now().UTC(),
+			}
+			candidatesPath, err := run.IO.ResolveRunRelative("40/candidates.json")
+			if err != nil {
+				return err
+			}
+			if err := internalio.WriteJSONAtomic(candidatesPath, run.Candidates); err != nil {
+				return err
+			}
+		}
+		return nil
 	case "70":
 		return stubStep70{}.Run(ctx, run)
 	default:
@@ -339,7 +414,37 @@ func testConfig(t *testing.T) *config.Config {
 		},
 		RegistryHighThreshold:     config.DefaultRegistryHighThreshold,
 		RegistryCriticalThreshold: config.DefaultRegistryCriticalThreshold,
+		StepTimeouts: map[string]int{
+			"step10": 300,
+			"step20": 300,
+			"step30": 300,
+			"step40": 300,
+			"step50": 300,
+			"step60": 300,
+			"step70": 300,
+		},
 	}
+}
+
+func repoRootFromTestFile(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	return filepath.Clean(filepath.Join(wd, "..", ".."))
+}
+
+func installFakeCLI(t *testing.T) string {
+	t.Helper()
+	sourceDir := filepath.Join(repoRootFromTestFile(t), "internal", "orchestrator", "testdata", "bin")
+	destDir := t.TempDir()
+	for _, name := range []string{"gh", "git", "claude"} {
+		src := filepath.Join(sourceDir, name)
+		data, err := os.ReadFile(src)
+		require.NoError(t, err)
+		dst := filepath.Join(destDir, name)
+		require.NoError(t, os.WriteFile(dst, data, 0o755))
+	}
+	return destDir
 }
 
 func seedResumeRun(t *testing.T, runCtx internalio.RunContext, pr int) error {

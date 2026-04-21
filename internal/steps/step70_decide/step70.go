@@ -11,16 +11,12 @@
 package step70_decide
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -95,7 +91,7 @@ func Run(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contrac
 	if blocked, err := SentinelExists(runCtx.RunsBase); err != nil {
 		return fmt.Errorf("step70: sentinel scan: %w", err)
 	} else if blocked {
-		return nil
+		return ErrBlockedBySentinel
 	}
 
 	lock, err := internalio.AcquirePromotionLock(runCtx)
@@ -111,7 +107,7 @@ func Run(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contrac
 	if blocked, err := SentinelExists(runCtx.RunsBase); err != nil {
 		return err
 	} else if blocked {
-		return nil
+		return ErrBlockedBySentinel
 	}
 
 	intention, err := store.Load()
@@ -127,7 +123,7 @@ func Run(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contrac
 		return err
 	}
 	if ok {
-		return finalizePersistedDecision(pr, runCtx, pkg, decision, store, writer, deps)
+		return finalizePersistedDecision(ctx, pr, runCtx, pkg, decision, store, writer, deps)
 	}
 
 	return startFresh(ctx, pr, runCtx, pkg, candidates, store, writer, deps)
@@ -201,8 +197,8 @@ func driveAdopt(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := pushBranch(target, deps); err != nil {
-		return handleRollback(pr, runCtx, pkg, target, intention, store, writer, deps, classifyPushErr(err))
+	if err := pushBranch(ctx, target, deps); err != nil {
+		return handleRollback(ctx, pr, runCtx, pkg, target, intention, store, writer, deps, classifyPushErr(err))
 	}
 	intention.Stage = contracts.IntentionStageBranchPushed
 	if err := store.Save(intention); err != nil {
@@ -221,17 +217,17 @@ func driveRegistry(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 		if errors.Is(err, ErrRegistryDivergence) {
 			reason = contracts.RollbackReasonRegistryDivergence
 		}
-		return handleRollback(pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, reason)
+		return handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, reason)
 	}
 	intention.RegistryAppendResult = &appendResult
 	intention.Stage = contracts.IntentionStageRegistryAppended
 	if err := store.Save(intention); err != nil {
 		return err
 	}
-	return driveDecision(pr, runCtx, pkg, intention, store, writer, deps)
+	return driveDecision(ctx, pr, runCtx, pkg, intention, store, writer, deps)
 }
 
-func driveDecision(pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
+func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
 	now := deps.Now()
 	decision := contracts.Decision{
 		Action: contracts.DecisionActionAdopt,
@@ -254,36 +250,42 @@ func driveDecision(pr int, runCtx internalio.RunContext, pkg *contracts.TaskPack
 	if err := store.Save(intention); err != nil {
 		return err
 	}
-	return finalizeAfterDecision(pr, runCtx, pkg, store, writer, deps)
+	return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps)
 }
 
-func finalizeAfterDecision(pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, store IntentionWriter, writer state.Writer, deps Deps) error {
+func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, store IntentionWriter, writer state.Writer, deps Deps) error {
+	if err := cleanupWorktrees(ctx, pkg, deps.Git); err != nil {
+		return err
+	}
 	if err := store.Delete(); err != nil {
 		return err
 	}
-	if err := appendStateOnce(runCtx, writer, contracts.StateKindPromoted, promotedEvent(pr, runCtx.RunID, deps.Now())); err != nil {
-		return err
-	}
-	return cleanupWorktrees(pkg)
+	return appendStateOnce(runCtx, writer, contracts.StateKindPromoted, promotedEvent(pr, runCtx.RunID, deps.Now()))
 }
 
-func finalizePersistedDecision(pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, decision contracts.Decision, store IntentionWriter, writer state.Writer, deps Deps) error {
+func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, decision contracts.Decision, store IntentionWriter, writer state.Writer, deps Deps) error {
 	switch v := decision.Value.(type) {
 	case contracts.DecisionAdopt:
+		if err := cleanupWorktrees(ctx, pkg, deps.Git); err != nil {
+			return err
+		}
 		if err := appendStateOnce(runCtx, writer, contracts.StateKindPromoted, promotedEvent(pr, runCtx.RunID, deps.Now())); err != nil {
 			return err
 		}
 		_ = store.Delete()
-		return cleanupWorktrees(pkg)
+		return nil
 	case *contracts.DecisionAdopt:
 		if v == nil {
 			return nil
 		}
+		if err := cleanupWorktrees(ctx, pkg, deps.Git); err != nil {
+			return err
+		}
 		if err := appendStateOnce(runCtx, writer, contracts.StateKindPromoted, promotedEvent(pr, runCtx.RunID, deps.Now())); err != nil {
 			return err
 		}
 		_ = store.Delete()
-		return cleanupWorktrees(pkg)
+		return nil
 	case contracts.DecisionRollback:
 		if err := appendStateOnce(runCtx, writer, contracts.StateKindRollback, rollbackEvent(pr, runCtx.RunID, v.RollbackReason, v.FailedStep, deps.Now())); err != nil {
 			return err
@@ -300,20 +302,27 @@ func finalizePersistedDecision(pr int, runCtx internalio.RunContext, pkg *contra
 		_ = store.Delete()
 		return nil
 	default:
-		return cleanupWorktrees(pkg)
+		return cleanupWorktrees(ctx, pkg, deps.Git)
 	}
 }
 
 // ---- Rollback ----
 
-func handleRollback(pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, reason contracts.RollbackReason) error {
-	remoteHead, err := deps.Git.RemoteHead(target.BestBranch)
+func handleRollback(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, reason contracts.RollbackReason) error {
+	intention.Stage = contracts.IntentionStageRollingBackBranchReverted
+	intention.RecoveryReason = reason
+	intention.FailedStep = contracts.FailedStep70
+	if err := store.Save(intention); err != nil {
+		return err
+	}
+
+	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
 	if err != nil {
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, reason)
 	}
 	switch remoteHead {
 	case target.TargetSHA:
-		if err := deps.Git.PushForceWithLease(target.BestBranch, target.BestShaBefore, target.TargetSHA); err != nil {
+		if err := deps.Git.PushForceWithLease(ctx, target.BestBranch, target.BestShaBefore, target.TargetSHA); err != nil {
 			if errors.Is(err, ErrLeaseFailure) {
 				return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonLeaseFailure)
 			}
@@ -323,13 +332,6 @@ func handleRollback(pr int, runCtx internalio.RunContext, pkg *contracts.TaskPac
 		// Push never landed; no branch mutation needed.
 	default:
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRemoteDivergence)
-	}
-
-	intention.Stage = contracts.IntentionStageRollingBackBranchReverted
-	intention.RecoveryReason = reason
-	intention.FailedStep = contracts.FailedStep70
-	if err := store.Save(intention); err != nil {
-		return err
 	}
 
 	rollbackResult, err := appendRegistryRollbacks(runCtx, intention, reason, deps.Now())
@@ -371,13 +373,16 @@ func handleRollback(pr int, runCtx internalio.RunContext, pkg *contracts.TaskPac
 	return store.Delete()
 }
 
-func resumeRollback(pr int, runCtx internalio.RunContext, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
+func resumeRollback(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
 	reason := intention.RecoveryReason
 	if reason == "" {
 		reason = contracts.RollbackReasonTransactionalFailure
 	}
 
 	if intention.Stage == contracts.IntentionStageRollingBackBranchReverted {
+		if err := ensureRollbackBranchState(ctx, pr, runCtx, pkg, intention, store, writer, deps); err != nil {
+			return err
+		}
 		result, err := appendRegistryRollbacks(runCtx, intention, reason, deps.Now())
 		if err != nil {
 			return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
@@ -422,14 +427,36 @@ func resumeRollback(pr int, runCtx internalio.RunContext, intention contracts.In
 	return store.Delete()
 }
 
+func ensureRollbackBranchState(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
+	target := targetFromIntention(pkg, intention)
+	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
+	if err != nil {
+		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+	}
+	switch remoteHead {
+	case target.TargetSHA:
+		if err := deps.Git.PushForceWithLease(ctx, target.BestBranch, target.BestShaBefore, target.TargetSHA); err != nil {
+			if errors.Is(err, ErrLeaseFailure) {
+				return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonLeaseFailure)
+			}
+			return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+		}
+	case target.BestShaBefore, "":
+		return nil
+	default:
+		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRemoteDivergence)
+	}
+	return nil
+}
+
 func markManualRecovery(pr int, runCtx internalio.RunContext, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, reason contracts.RollbackReason) error {
 	intention.Stage = contracts.IntentionStageNeedsManualRecovery
 	intention.RecoveryReason = reason
 	intention.FailedStep = contracts.FailedStep70
-	if err := store.Save(intention); err != nil {
+	if err := writeSentinel(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, deps.Now()); err != nil {
 		return err
 	}
-	if err := writeSentinel(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, deps.Now()); err != nil {
+	if err := store.Save(intention); err != nil {
 		return err
 	}
 	if err := appendStateOnce(runCtx, writer, contracts.StateKindNeedsManualRecovery, needsManualRecoveryEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, deps.Now())); err != nil {
@@ -454,7 +481,7 @@ func writeNoop(runCtx internalio.RunContext, pkg *contracts.TaskPackage, deps De
 	if err := writeDecision(runCtx, decision); err != nil {
 		return err
 	}
-	return cleanupWorktrees(pkg)
+	return cleanupWorktrees(context.Background(), pkg, deps.Git)
 }
 
 func writeReject(runCtx internalio.RunContext, pkg *contracts.TaskPackage, reason string, deps Deps) error {
@@ -471,7 +498,7 @@ func writeReject(runCtx internalio.RunContext, pkg *contracts.TaskPackage, reaso
 	if err := writeDecision(runCtx, decision); err != nil {
 		return err
 	}
-	return cleanupWorktrees(pkg)
+	return cleanupWorktrees(context.Background(), pkg, deps.Git)
 }
 
 func writeDecision(runCtx internalio.RunContext, decision contracts.Decision) error {
@@ -502,8 +529,8 @@ func loadDecisionIfExists(runCtx internalio.RunContext) (contracts.Decision, boo
 
 // ---- Git push staging ----
 
-func pushBranch(target Target, deps Deps) error {
-	return deps.Git.PushForceWithLease(target.BestBranch, target.TargetSHA, target.BestShaBefore)
+func pushBranch(ctx context.Context, target Target, deps Deps) error {
+	return deps.Git.PushForceWithLease(ctx, target.BestBranch, target.TargetSHA, target.BestShaBefore)
 }
 
 func classifyPushErr(err error) contracts.RollbackReason {
@@ -518,11 +545,7 @@ func classifyPushErr(err error) contracts.RollbackReason {
 
 // ---- Registry append / idempotency ----
 
-type registryLine struct {
-	Offset int64
-	Sha256 string
-	Entry  contracts.RuleRegistryEntry
-}
+type registryLine = internalio.RegistryLine
 
 type plannedRegistryMatch struct {
 	EntryIndex int
@@ -1039,49 +1062,7 @@ func syncRegistryIndex(runCtx internalio.RunContext, entry contracts.RuleRegistr
 }
 
 func readRegistryLines(path string) ([]registryLine, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer f.Close()
-
-	reader := bufio.NewReader(f)
-	lines := make([]registryLine, 0, 8)
-	var offset int64
-	for {
-		raw, err := reader.ReadBytes('\n')
-		if len(raw) == 0 && err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return nil, err
-		}
-		line := strings.TrimRight(string(raw), "\n")
-		if line == "" {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			offset += int64(len(raw))
-			continue
-		}
-		var entry contracts.RuleRegistryEntry
-		if decodeErr := contracts.DecodeStrictJSON([]byte(line), &entry); decodeErr != nil {
-			return nil, decodeErr
-		}
-		lines = append(lines, registryLine{
-			Offset: offset,
-			Sha256: hashOfRegistryLine([]byte(line)),
-			Entry:  entry,
-		})
-		offset += int64(len(line) + 1)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-	}
-	return lines, nil
+	return internalio.RegistryLines(path)
 }
 
 func currentRegistryHead(path string) (string, error) {
@@ -1154,15 +1135,15 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 		}
 		return planningDecision(ctx, pr, runCtx, pkg, candidates, target, *intention, store, writer, deps)
 	case contracts.IntentionStageBranchPushed:
-		return resumeBranchPushed(pr, runCtx, pkg, *intention, store, writer, deps)
+		return resumeBranchPushed(ctx, pr, runCtx, pkg, *intention, store, writer, deps)
 	case contracts.IntentionStageRegistryAppended:
-		return driveDecision(pr, runCtx, pkg, *intention, store, writer, deps)
+		return driveDecision(ctx, pr, runCtx, pkg, *intention, store, writer, deps)
 	case contracts.IntentionStageDecisionWritten:
-		return finalizeAfterDecision(pr, runCtx, pkg, store, writer, deps)
+		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps)
 	case contracts.IntentionStageRollingBackBranchReverted,
 		contracts.IntentionStageRollingBackRegistryAppended,
 		contracts.IntentionStageRollingBackDecisionWritten:
-		return resumeRollback(pr, runCtx, *intention, store, writer, deps)
+		return resumeRollback(ctx, pr, runCtx, pkg, *intention, store, writer, deps)
 	case contracts.IntentionStageNeedsManualRecovery:
 		return ErrNeedsManualRecovery
 	default:
@@ -1170,24 +1151,24 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 	}
 }
 
-func resumeBranchPushed(pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
+func resumeBranchPushed(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
 	appendResult, err := appendRegistryEntries(runCtx, &intention, store, writer, deps, pr)
 	if err != nil {
 		if errors.Is(err, ErrRegistryDivergence) {
-			return handleRollback(pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonRegistryDivergence)
+			return handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonRegistryDivergence)
 		}
-		return handleRollback(pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+		return handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
 	}
 	intention.RegistryAppendResult = &appendResult
 	intention.Stage = contracts.IntentionStageRegistryAppended
 	if err := store.Save(intention); err != nil {
 		return err
 	}
-	return driveDecision(pr, runCtx, pkg, intention, store, writer, deps)
+	return driveDecision(ctx, pr, runCtx, pkg, intention, store, writer, deps)
 }
 
 func planningDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
-	remoteHead, err := deps.Git.RemoteHead(target.BestBranch)
+	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
 	if err != nil {
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
 	}
@@ -1223,13 +1204,16 @@ func planningDecision(ctx context.Context, pr int, runCtx internalio.RunContext,
 
 // ---- Cleanup ----
 
-func cleanupWorktrees(pkg *contracts.TaskPackage) error {
+func cleanupWorktrees(ctx context.Context, pkg *contracts.TaskPackage, git GitOps) error {
 	if pkg == nil {
 		return nil
 	}
 	for _, wt := range pkg.Worktrees {
-		cmd := exec.Command("git", "worktree", "remove", "--force", wt.Path)
-		_ = cmd.Run()
+		if git != nil {
+			if err := git.RemoveWorktree(ctx, wt.Path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
 		if _, err := os.Stat(wt.Path); err == nil {
 			if err := os.RemoveAll(filepath.Clean(wt.Path)); err != nil {
 				return err

@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -391,7 +392,7 @@ func resolveScorableAgents(req Request) ([]scorableAgent, error) {
 		}
 		manifest, err := internalio.LoadScorableManifest(req.RunContext, 1, wt.Agent)
 		if err != nil {
-			if errors.Is(err, internalio.ErrNotScorable) {
+			if shouldSkipManifest(err) {
 				continue
 			}
 			if os.IsNotExist(err) {
@@ -407,6 +408,19 @@ func resolveScorableAgents(req Request) ([]scorableAgent, error) {
 		out = append(out, scorableAgent{agent: wt.Agent})
 	}
 	return out, nil
+}
+
+func shouldSkipManifest(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, internalio.ErrNotScorable) ||
+		errors.Is(err, contracts.ErrDuplicateJSONKey) ||
+		errors.Is(err, contracts.ErrTrailingJSON) ||
+		errors.Is(err, contracts.ErrUnknownManifestKind) {
+		return true
+	}
+	return strings.Contains(err.Error(), "Field validation")
 }
 
 type stepPathsResult struct {

@@ -7,14 +7,20 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	ilog "github.com/nishimoto265/auto-improve/internal/logger"
 	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/auto-improve/internal/steps/step20_implement"
+	"github.com/nishimoto265/auto-improve/internal/steps/step50_implement"
+	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 	"gopkg.in/yaml.v3"
 )
 
@@ -73,6 +79,8 @@ type StepRunContext struct {
 	IntentionFile *IntentionStore
 }
 
+var errStopPipeline = errors.New("orchestrator: stop pipeline")
+
 func NewOrchestrator(cfg *config.Config) (*Orchestrator, error) {
 	if cfg == nil {
 		return nil, errors.New("orchestrator: config is required")
@@ -80,11 +88,55 @@ func NewOrchestrator(cfg *config.Config) (*Orchestrator, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	decoders := ContractDecoders{
+		Step10: func(data []byte, req any) (any, error) {
+			request, ok := req.(stepio.Step10Request)
+			if !ok {
+				return nil, fmt.Errorf("orchestrator: step10 decoder expects Step10Request, got %T", req)
+			}
+			return stepio.DecodeAndValidateStep10Response(data, request)
+		},
+		Step20: func(data []byte, req any) (any, error) {
+			request, ok := req.(stepio.Step20Request)
+			if !ok {
+				return nil, fmt.Errorf("orchestrator: step20 decoder expects Step20Request, got %T", req)
+			}
+			return stepio.DecodeAndValidateStep20Response(data, request)
+		},
+		Step30: func(data []byte, req any) (any, error) {
+			request, ok := req.(stepio.Step30Request)
+			if !ok {
+				return nil, fmt.Errorf("orchestrator: step30 decoder expects Step30Request, got %T", req)
+			}
+			return stepio.DecodeAndValidateStep30Response(data, request)
+		},
+		Step50: func(data []byte, req any) (any, error) {
+			request, ok := req.(stepio.Step50Request)
+			if !ok {
+				return nil, fmt.Errorf("orchestrator: step50 decoder expects Step50Request, got %T", req)
+			}
+			return stepio.DecodeAndValidateStep50Response(data, request)
+		},
+		Step60: func(data []byte, req any) (any, error) {
+			request, ok := req.(stepio.Step60Request)
+			if !ok {
+				return nil, fmt.Errorf("orchestrator: step60 decoder expects Step60Request, got %T", req)
+			}
+			return stepio.DecodeAndValidateStep60Response(data, request)
+		},
+		Step70: func(data []byte, req any) (any, error) {
+			request, ok := req.(stepio.Step70Request)
+			if !ok {
+				return nil, fmt.Errorf("orchestrator: step70 decoder expects Step70Request, got %T", req)
+			}
+			return stepio.DecodeAndValidateStep70Response(data, request)
+		},
+	}
 	return &Orchestrator{
 		cfg:      cfg,
 		logger:   ilog.New(slog.LevelInfo),
-		decoders: ContractDecoders{},
-		steps:    defaultSteps(cfg),
+		decoders: decoders,
+		steps:    defaultSteps(cfg, decoders),
 	}, nil
 }
 
@@ -146,6 +198,9 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 			}
 		case contracts.FailedStep20:
 			if err := o.runParallel(ctx, run, 1, contracts.FailedStep20, o.steps.Step20); err != nil {
+				if errors.Is(err, errStopPipeline) {
+					return nil
+				}
 				return err
 			}
 			if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep20, time.Now().UTC())); err != nil {
@@ -166,13 +221,22 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 				return err
 			}
 		case contracts.FailedStep50:
+			if noCandidates(run.Candidates) {
+				continue
+			}
 			if err := o.runParallel(ctx, run, 2, contracts.FailedStep50, o.steps.Step50); err != nil {
+				if errors.Is(err, errStopPipeline) {
+					return nil
+				}
 				return err
 			}
 			if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep50, time.Now().UTC())); err != nil {
 				return err
 			}
 		case contracts.FailedStep60:
+			if noCandidates(run.Candidates) {
+				continue
+			}
 			if err := o.runSingle(ctx, run, contracts.FailedStep60, o.steps.Step60); err != nil {
 				return err
 			}
@@ -181,6 +245,18 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 			}
 		case contracts.FailedStep70:
 			if err := o.runSingle(ctx, run, contracts.FailedStep70, o.steps.Step70); err != nil {
+				switch {
+				case errors.Is(err, step70_decide.ErrBlockedBySentinel):
+					if appendErr := o.appendInterrupted(run.PR, run.IO.RunID, contracts.FailedStep70, contracts.InterruptedReasonUnknown, "step70 blocked by needs-recovery sentinel"); appendErr != nil {
+						return appendErr
+					}
+					return nil
+				case errors.Is(err, step70_decide.ErrNeedsManualRecovery):
+					if appendErr := o.ensureStep70NeedsManualRecoveryState(run); appendErr != nil {
+						return appendErr
+					}
+					return nil
+				}
 				return err
 			}
 			if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep70, time.Now().UTC())); err != nil {
@@ -252,6 +328,13 @@ func (o *Orchestrator) selectRun(pr int, opts RunOptions) (runSelection, error) 
 		}, nil
 	case state.NextActionNeedsManualRecovery:
 		runID, _ := stateRunID(*latest.LastEvent)
+		runCtx, err := loadRunContext(runID, runsBase, worktreeBase)
+		if err != nil {
+			return runSelection{}, err
+		}
+		if err := ensureNeedsRecoverySentinelFromState(runCtx, latest.LastEvent); err != nil {
+			return runSelection{}, err
+		}
 		return runSelection{}, fmt.Errorf("orchestrator: PR %d is blocked by needs_manual_recovery: run_id=%s", pr, runID)
 	default:
 		return newFreshSelection(pr, opts, runsBase, worktreeBase)
@@ -342,6 +425,11 @@ func (o *Orchestrator) loadPersistedArtifacts(run *StepRunContext) error {
 			return err
 		}
 		run.Intention = intention
+		if intention != nil && intention.Stage == contracts.IntentionStageNeedsManualRecovery {
+			if err := ensureNeedsRecoverySentinel(run.IO, run.PR, run.IO.RunID, intention.RecoveryReason, intention.FailedStep); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
@@ -439,9 +527,20 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 		return fmt.Errorf("orchestrator: no agents configured for pass %d", pass)
 	}
 
-	errCh := make(chan error, len(agents))
+	type parallelResult struct {
+		agent contracts.AgentID
+		err   error
+	}
+	errCh := make(chan parallelResult, len(agents))
 	var wg sync.WaitGroup
 	for _, agent := range agents {
+		done, err := hasFinalizedManifest(run.IO, pass, agent)
+		if err != nil {
+			return err
+		}
+		if done {
+			continue
+		}
 		runner, ok := runners[agent]
 		if !ok || runner == nil {
 			return fmt.Errorf("orchestrator: missing runner for step %s agent %s", step, agent)
@@ -454,15 +553,37 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 			stepRun.Step = step
 			stepRun.Pass = pass
 			stepRun.Agent = agent
-			errCh <- runner.Run(ctx, &stepRun)
+			errCh <- parallelResult{agent: agent, err: runner.Run(ctx, &stepRun)}
 		}()
 	}
 	wg.Wait()
 	close(errCh)
-	for err := range errCh {
-		if err != nil {
+
+	rescueExhausted := make([]stepio.RescueExhausted, 0, len(agents))
+	for result := range errCh {
+		if result.err == nil {
+			continue
+		}
+		var exhausted20 *step20_implement.RescueExhaustedError
+		if errors.As(result.err, &exhausted20) {
+			rescueExhausted = append(rescueExhausted, exhausted20.Result())
+			continue
+		}
+		var exhausted50 *step50_implement.RescueExhaustedError
+		if errors.As(result.err, &exhausted50) {
+			rescueExhausted = append(rescueExhausted, exhausted50.Result())
+			continue
+		}
+		return result.err
+	}
+	if len(rescueExhausted) > 0 {
+		if err := o.handleRescueExhausted(run, step, rescueExhausted); err != nil {
 			return err
 		}
+		return errStopPipeline
+	}
+	if err := o.validateImplementationBoundary(run, pass, agents); err != nil {
+		return err
 	}
 	return nil
 }
@@ -707,4 +828,261 @@ func rollbackEntry(pr int, runID contracts.RunID, reason contracts.RollbackReaso
 		At:             at,
 	}
 	return contracts.StateEntry{Kind: contracts.StateKindRollback, Value: value}
+}
+
+func noCandidates(candidates *contracts.Candidates) bool {
+	return candidates != nil && len(candidates.Candidates) == 0
+}
+
+func hasFinalizedManifest(runIO internalio.RunContext, pass int, agent contracts.AgentID) (bool, error) {
+	manifest, err := internalio.LoadFinalizedManifest(runIO, pass, agent)
+	if err == nil && manifest != nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, nil
+}
+
+func scorableAgentsForPass(runIO internalio.RunContext, pkg *contracts.TaskPackage, pass int) ([]contracts.AgentID, error) {
+	if pkg == nil {
+		return nil, errors.New("orchestrator: task package is required")
+	}
+	agents := make([]contracts.AgentID, 0, len(pkg.Worktrees))
+	seen := make(map[contracts.AgentID]struct{}, len(pkg.Worktrees))
+	for _, wt := range pkg.Worktrees {
+		if wt.Pass != pass {
+			continue
+		}
+		if _, ok := seen[wt.Agent]; ok {
+			continue
+		}
+		manifest, err := internalio.LoadScorableManifest(runIO, pass, wt.Agent)
+		if err != nil {
+			if shouldSkipScorableManifest(err) || os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		if manifest == nil {
+			continue
+		}
+		seen[wt.Agent] = struct{}{}
+		agents = append(agents, wt.Agent)
+	}
+	return agents, nil
+}
+
+func shouldSkipScorableManifest(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, internalio.ErrNotScorable) ||
+		errors.Is(err, contracts.ErrDuplicateJSONKey) ||
+		errors.Is(err, contracts.ErrTrailingJSON) ||
+		errors.Is(err, contracts.ErrUnknownManifestKind) {
+		return true
+	}
+	return strings.Contains(err.Error(), "Field validation")
+}
+
+func (o *Orchestrator) validateImplementationBoundary(run *StepRunContext, pass int, agents []contracts.AgentID) error {
+	if run == nil || run.TaskPackage == nil {
+		return errors.New("orchestrator: task package is required")
+	}
+	if run.Config == nil {
+		return errors.New("orchestrator: config is required")
+	}
+	results := make([]stepio.Step20AgentResult, 0, len(agents))
+	for _, agent := range agents {
+		manifest, err := internalio.LoadFinalizedManifest(run.IO, pass, agent)
+		if err != nil {
+			return fmt.Errorf("orchestrator: load finalized manifest pass=%d agent=%s: %w", pass, agent, err)
+		}
+		results = append(results, stepio.Step20AgentResult{
+			Agent:    agent,
+			Manifest: *manifest,
+		})
+	}
+
+	switch pass {
+	case 1:
+		if o.decoders.Step20 == nil {
+			return nil
+		}
+		timeout := run.Config.StepTimeouts["step20"]
+		req := stepio.Step20Request{
+			TaskPackage:    *run.TaskPackage,
+			Agents:         append([]contracts.AgentID(nil), agents...),
+			TimeoutSeconds: timeout,
+		}
+		resp, err := stepio.NewStep20Response(results, nil, req)
+		if err != nil {
+			return err
+		}
+		payload, err := resp.MarshalJSON()
+		if err != nil {
+			return err
+		}
+		_, err = o.decoders.Step20(payload, req)
+		return err
+	case 2:
+		if o.decoders.Step50 == nil {
+			return nil
+		}
+		timeout := run.Config.StepTimeouts["step50"]
+		req := stepio.Step50Request{
+			TaskPackage:      *run.TaskPackage,
+			Agents:           append([]contracts.AgentID(nil), agents...),
+			TimeoutSeconds:   timeout,
+			CandidateRuleIDs: candidateRuleIDs(run.Candidates),
+		}
+		resp, err := stepio.NewStep50Response(results, nil, req)
+		if err != nil {
+			return err
+		}
+		payload, err := resp.MarshalJSON()
+		if err != nil {
+			return err
+		}
+		_, err = o.decoders.Step50(payload, req)
+		return err
+	default:
+		return fmt.Errorf("orchestrator: unsupported implementation pass=%d", pass)
+	}
+}
+
+func candidateRuleIDs(candidates *contracts.Candidates) []string {
+	if candidates == nil || len(candidates.Candidates) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(candidates.Candidates))
+	for _, candidate := range candidates.Candidates {
+		ids = append(ids, candidate.CandidateID)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+func (o *Orchestrator) appendInterrupted(pr int, runID contracts.RunID, step contracts.FailedStep, reason contracts.InterruptedReason, detail string) error {
+	value := contracts.StateEntryInterrupted{
+		Kind:   contracts.StateKindInterrupted,
+		PR:     pr,
+		RunID:  runID,
+		Step:   step,
+		Reason: reason,
+		Detail: detail,
+		At:     time.Now().UTC(),
+	}
+	return o.appendState(contracts.StateEntry{Kind: value.Kind, Value: value})
+}
+
+func (o *Orchestrator) handleRescueExhausted(run *StepRunContext, step contracts.FailedStep, exhausted []stepio.RescueExhausted) error {
+	now := time.Now().UTC()
+	for _, item := range exhausted {
+		pr := run.PR
+		runID := run.IO.RunID
+		failedStep := step
+		detail := fmt.Sprintf("agent=%s retry_count=%d", item.Agent, item.RetryCount)
+		warning := contracts.StateEntryWarning{
+			Kind:   contracts.StateKindWarningRescueRetry,
+			PR:     &pr,
+			RunID:  &runID,
+			Step:   &failedStep,
+			Detail: detail,
+			At:     now,
+		}
+		if err := o.appendState(contracts.StateEntry{Kind: warning.Kind, Value: warning}); err != nil {
+			return err
+		}
+	}
+	if err := o.appendInterrupted(run.PR, run.IO.RunID, step, contracts.InterruptedReasonUnknown, "worktree rescue exhausted"); err != nil {
+		return err
+	}
+	if err := ensureNeedsRecoverySentinel(run.IO, run.PR, run.IO.RunID, contracts.RollbackReasonWorktreeRescueLoop, step); err != nil {
+		return err
+	}
+	manual := contracts.StateEntryNeedsManualRecovery{
+		Kind:       contracts.StateKindNeedsManualRecovery,
+		PR:         run.PR,
+		RunID:      run.IO.RunID,
+		Step:       step,
+		Reason:     contracts.RollbackReasonWorktreeRescueLoop,
+		FailedStep: step,
+		At:         now,
+	}
+	return o.appendState(contracts.StateEntry{Kind: manual.Kind, Value: manual})
+}
+
+func (o *Orchestrator) ensureStep70NeedsManualRecoveryState(run *StepRunContext) error {
+	reason := contracts.RollbackReasonTransactionalFailure
+	failedStep := contracts.FailedStep70
+	if run.Intention != nil {
+		if run.Intention.RecoveryReason != "" {
+			reason = run.Intention.RecoveryReason
+		}
+		if run.Intention.FailedStep != "" {
+			failedStep = run.Intention.FailedStep
+		}
+	}
+	if err := ensureNeedsRecoverySentinel(run.IO, run.PR, run.IO.RunID, reason, failedStep); err != nil {
+		return err
+	}
+	entries, err := state.ScanEventsForRun(run.IO, run.IO.RunID)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Kind == contracts.StateKindNeedsManualRecovery {
+			return nil
+		}
+	}
+	value := contracts.StateEntryNeedsManualRecovery{
+		Kind:       contracts.StateKindNeedsManualRecovery,
+		PR:         run.PR,
+		RunID:      run.IO.RunID,
+		Step:       contracts.FailedStep70,
+		Reason:     reason,
+		FailedStep: failedStep,
+		At:         time.Now().UTC(),
+	}
+	return o.appendState(contracts.StateEntry{Kind: value.Kind, Value: value})
+}
+
+func ensureNeedsRecoverySentinelFromState(runCtx internalio.RunContext, entry *contracts.StateEntry) error {
+	if entry == nil {
+		return nil
+	}
+	switch value := entry.Value.(type) {
+	case contracts.StateEntryNeedsManualRecovery:
+		return ensureNeedsRecoverySentinel(runCtx, value.PR, value.RunID, value.Reason, value.FailedStep)
+	case *contracts.StateEntryNeedsManualRecovery:
+		if value == nil {
+			return nil
+		}
+		return ensureNeedsRecoverySentinel(runCtx, value.PR, value.RunID, value.Reason, value.FailedStep)
+	default:
+		return nil
+	}
+}
+
+func ensureNeedsRecoverySentinel(runCtx internalio.RunContext, pr int, runID contracts.RunID, reason contracts.RollbackReason, failedStep contracts.FailedStep) error {
+	path := filepath.Join(runCtx.RunsBase, "needs-recovery", string(runID)+".json")
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	sentinel := contracts.NeedsRecoverySentinel{
+		RunID:      runID,
+		PR:         pr,
+		Reason:     reason,
+		FailedStep: failedStep,
+		CreatedAt:  time.Now().UTC(),
+	}
+	if err := sentinel.Validate(); err != nil {
+		return err
+	}
+	return internalio.WriteJSONAtomic(path, sentinel)
 }

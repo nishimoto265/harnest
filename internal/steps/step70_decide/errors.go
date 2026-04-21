@@ -7,6 +7,10 @@ import "errors"
 // classify the failure into the correct rollback reason without relying on
 // string matching.
 var (
+	// ErrBlockedBySentinel signals that a durable needs-recovery sentinel from
+	// another incomplete run is present, so step70 must not begin.
+	ErrBlockedBySentinel = errors.New("step70: blocked by needs_manual_recovery sentinel")
+
 	// ErrLeaseFailure: git push --force-with-lease rejected because remote
 	// advanced past best_sha_before since planning (lease mismatch). Caller
 	// must route to the rollback path with reason=lease_failure.

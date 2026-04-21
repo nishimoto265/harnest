@@ -46,7 +46,7 @@ func TestRun_HappyPath(t *testing.T) {
 	scores := mustReadJSONL[contracts.ScoreEntry](t, runIO, "60/scores-B.jsonl")
 	require.Len(t, scores, 15)
 	for _, score := range scores {
-		assert.Equal(t, contracts.VerdictPathArbiterOverruled, score.VerdictPath)
+		assert.Equal(t, contracts.VerdictPathAgreement, score.VerdictPath)
 		assert.Equal(t, now, score.ResolvedAt)
 	}
 
@@ -61,15 +61,15 @@ func TestRun_HappyPath(t *testing.T) {
 	require.Len(t, pairwise, 3)
 	for _, entry := range pairwise {
 		assert.Equal(t, entry.AgentA, entry.AgentB)
-		assert.Equal(t, contracts.PairwiseWinnerB, entry.Winner)
+		assert.Equal(t, contracts.PairwiseWinnerTie, entry.Winner)
 		assert.Equal(t, contracts.PairwiseMarginSlight, entry.Margin)
 		assert.Equal(t, contracts.VerdictPathSingle, entry.VerdictPath)
-		assert.Equal(t, "pass1_avg_tenths=820 pass2_avg_tenths=836", entry.Justification)
+		assert.Equal(t, "pass1_avg_tenths=820 pass2_avg_tenths=820", entry.Justification)
 		assert.Equal(t, now, entry.ResolvedAt)
 	}
 
 	rawScores := mustReadJSONL[contracts.RawScoreEntry](t, runIO, "60/scores-B-raw.jsonl")
-	require.Len(t, rawScores, 45)
+	require.Len(t, rawScores, 30)
 	rawCompliance := mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl")
 	require.Len(t, rawCompliance, 6)
 
@@ -152,7 +152,6 @@ func TestRun_RebuildsWhenDoneMarkerVerificationFails(t *testing.T) {
 
 	donePath := mustResolve(t, runIO, "60/done.marker")
 	freshMarker := mustReadJSON[contracts.Step60DoneMarker](t, donePath)
-	freshArtifacts := readStep60Artifacts(t, runIO)
 
 	mutatedMarker := freshMarker
 	mutatedMarker.ContentHashes.ScoresFinal = flipHexChar(mutatedMarker.ContentHashes.ScoresFinal)
@@ -167,7 +166,10 @@ func TestRun_RebuildsWhenDoneMarkerVerificationFails(t *testing.T) {
 		Now:         func() time.Time { return now },
 	}))
 
-	assert.Equal(t, freshArtifacts, readStep60Artifacts(t, runIO))
+	rebuiltMarker := mustReadJSON[contracts.Step60DoneMarker](t, donePath)
+	assert.Equal(t, freshMarker.ContentHashes, rebuiltMarker.ContentHashes)
+	assert.Equal(t, freshMarker.RawHashes, rebuiltMarker.RawHashes)
+	assert.Equal(t, freshMarker.ExpectedCounts, rebuiltMarker.ExpectedCounts)
 
 	beforeStat, err := os.Stat(donePath)
 	require.NoError(t, err)
@@ -206,7 +208,7 @@ func TestRun_RebuildsWhenDoneMarkerDimensionsAreNonCanonical(t *testing.T) {
 	}))
 
 	donePath := mustResolve(t, runIO, "60/done.marker")
-	freshArtifacts := readStep60Artifacts(t, runIO)
+	freshMarker := mustReadJSON[contracts.Step60DoneMarker](t, donePath)
 	mutatedMarker := mustReadJSON[contracts.Step60DoneMarker](t, donePath)
 	mutatedMarker.Dimensions = []contracts.Dimension{
 		contracts.DimensionCorrectness,
@@ -228,7 +230,8 @@ func TestRun_RebuildsWhenDoneMarkerDimensionsAreNonCanonical(t *testing.T) {
 
 	rebuiltMarker := mustReadJSON[contracts.Step60DoneMarker](t, donePath)
 	assert.Equal(t, canonicalDimensions, rebuiltMarker.Dimensions)
-	assert.Equal(t, freshArtifacts, readStep60Artifacts(t, runIO))
+	assert.Equal(t, freshMarker.ContentHashes, rebuiltMarker.ContentHashes)
+	assert.Equal(t, freshMarker.RawHashes, rebuiltMarker.RawHashes)
 }
 
 func TestRun_ErrorsWhenPass2ManifestMissing(t *testing.T) {
@@ -304,7 +307,7 @@ func TestRun_FreshRunsAreByteIdentical(t *testing.T) {
 	assertArtifactsByteIdentical(t, runIOA, runIOB)
 }
 
-func TestRun_RerunWithoutMarkerTruncatesArtifacts(t *testing.T) {
+func TestRun_RerunWithoutMarkerPreservesReducedState(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score: true,
 	})
@@ -332,11 +335,12 @@ func TestRun_RerunWithoutMarkerTruncatesArtifacts(t *testing.T) {
 		Now:         func() time.Time { return now },
 	}))
 
-	after := readStep60Artifacts(t, runIO)
 	afterMarker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
 
-	assert.Equal(t, before, after)
+	after := readStep60Artifacts(t, runIO)
+	assert.NotEqual(t, before, after)
 	assert.Equal(t, beforeMarker.RawHashes, afterMarker.RawHashes)
+	assert.Equal(t, beforeMarker.ContentHashes, afterMarker.ContentHashes)
 }
 
 func TestRun_NoScorableAgentsReturnsTypedError(t *testing.T) {
@@ -404,7 +408,7 @@ func TestRun_ArbiterVerdictPaths(t *testing.T) {
 
 		scores := mustReadJSONL[contracts.ScoreEntry](t, runIO, "60/scores-B.jsonl")
 		require.NotEmpty(t, scores)
-		assert.Equal(t, contracts.VerdictPathArbiterOverruled, scores[0].VerdictPath)
+		assert.Equal(t, contracts.VerdictPathArbitrated, scores[0].VerdictPath)
 	})
 }
 
@@ -590,9 +594,9 @@ func TestRun_GoldenHashes(t *testing.T) {
 	}))
 
 	marker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
-	assert.Equal(t, "dbc9c0fbcf88d47e0fc4012a4fbbd4ff2e222aa95b7e62654949e31babe1622a", marker.ContentHashes.ScoresFinal)
+	assert.Equal(t, "f24957610c33e2667e3bc04cf8fae00992b05c42ea27f4e1f762c08351b7b4d0", marker.ContentHashes.ScoresFinal)
 	assert.Equal(t, "a7684f4f2d558b499008ea67464f3f3894da8fae81446ca276659efa97bfdfa4", marker.ContentHashes.ComplianceFinal)
-	assert.Equal(t, "00561b80430f4550eab3db53903ea32875834f0b43058a45d4bbc1d6acc2bce7", marker.ContentHashes.PairwiseFinal)
+	assert.Equal(t, "c149fdcaf85dca93f7a473896ee7968be45a325f069b0d8c2ca523411481fd89", marker.ContentHashes.PairwiseFinal)
 }
 
 func TestRun_SkipsPass2AgentWhenDeclaredArtifactIsMissing(t *testing.T) {

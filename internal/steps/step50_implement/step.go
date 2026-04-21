@@ -1,391 +1,401 @@
-// Package step50_implement は step50(pass2 implement) の agent 実行境界を担当する。
-// 候補ルールを読み込んで prompt を生成し、Claude CLI を worktree 上で起動し、
-// 成功時のみ diff/session/checklist を確定した上で manifest.json を atomic write する。
 package step50_implement
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/interruption"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	ilog "github.com/nishimoto265/auto-improve/internal/logger"
-	"github.com/nishimoto265/auto-improve/internal/orchestrator"
+	"github.com/nishimoto265/auto-improve/internal/prompt"
 )
 
 const (
-	passNumber                  = 2
-	step50PromptVersion         = "step50-implement-pass2@v1"
-	defaultStep50TimeoutSeconds = 1800
-	maxStderrTailBytes          = 64 << 10
-	stderrDetailRuneLimit       = 300
-	checklistFilename           = "checklist-result.json"
+	passNumber = 2
+
+	defaultHeartbeatInterval = 60 * time.Second
+	defaultStaleAfter        = 5 * time.Minute
+	defaultRescueMaxRetries  = 3
+
+	resumeStateFileName = ".resume-state.json"
+	heartbeatFileName   = ".heartbeat"
+	sessionFileName     = "session.jsonl"
+	diffFileName        = "diff.patch"
+	checklistFileName   = "checklist-result.json"
+	rescuedDirName      = "rescued"
+	rescueLockFileName  = ".rescue.lock"
+	promptVersion       = string(prompt.TemplateStep50Implement)
 )
 
-// Step runs step50 pass2 implementation for one agent.
-type Step struct{}
+var (
+	ErrAgentLeaseContended      = errors.New("step50: agent lease contended")
+	ErrRescueAbortedLeaseActive = errors.New("step50: rescue aborted because lease is active")
+)
 
-// Run executes the pass2 implement agent, then writes the terminal manifest.
-func (Step) Run(ctx context.Context, run *orchestrator.StepRunContext) error {
-	if run == nil {
-		return errors.New("step50_implement: step run context is required")
+type RunContext struct {
+	Config      *config.Config
+	Logger      *slog.Logger
+	PR          int
+	Pass        int
+	Agent       contracts.AgentID
+	IO          internalio.RunContext
+	TaskPackage *contracts.TaskPackage
+}
+
+type Step struct {
+	cfg               *config.Config
+	now               func() time.Time
+	heartbeatInterval time.Duration
+	staleAfter        time.Duration
+	runner            runner
+}
+
+type stepOptions struct {
+	now               func() time.Time
+	heartbeatInterval time.Duration
+	staleAfter        time.Duration
+	runner            runner
+}
+
+func NewStep(cfg *config.Config) *Step {
+	return newStep(cfg, stepOptions{})
+}
+
+func newStep(cfg *config.Config, opts stepOptions) *Step {
+	if opts.now == nil {
+		opts.now = time.Now
 	}
-	if run.Config == nil {
-		return errors.New("step50_implement: config is required")
+	if opts.heartbeatInterval <= 0 {
+		opts.heartbeatInterval = defaultHeartbeatInterval
+	}
+	if opts.staleAfter <= 0 {
+		opts.staleAfter = defaultStaleAfter
+	}
+	if opts.runner == nil {
+		opts.runner = commandRunner{now: opts.now}
+	}
+	return &Step{
+		cfg:               cfg,
+		now:               opts.now,
+		heartbeatInterval: opts.heartbeatInterval,
+		staleAfter:        opts.staleAfter,
+		runner:            opts.runner,
+	}
+}
+
+func (s Step) Run(ctx context.Context, run RunContext) error {
+	step := s
+	if step.now == nil {
+		impl := newStep(step.cfg, stepOptions{})
+		step = *impl
+	}
+	return step.run(ctx, run)
+}
+
+func (s *Step) run(ctx context.Context, run RunContext) error {
+	if run.Pass != passNumber {
+		return fmt.Errorf("step50: unsupported pass: %d", run.Pass)
 	}
 	if run.TaskPackage == nil {
-		return errors.New("step50_implement: task package is required")
+		return errors.New("step50: task package is required")
+	}
+	if run.Config == nil {
+		run.Config = s.cfg
+	}
+	if run.Config == nil {
+		return errors.New("step50: config is required")
 	}
 
-	logger := run.Logger
-	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	allocation, err := worktreeFor(run.TaskPackage, run.Pass, run.Agent)
+	if err != nil {
+		return err
 	}
-	logger = logger.With(
-		slog.String(ilog.FieldRunID, string(run.IO.RunID)),
-		slog.String(ilog.FieldAgent, string(run.Agent)),
-		slog.Int(ilog.FieldPass, passNumber),
-	)
-
-	worktree, err := resolveWorktree(run.TaskPackage, passNumber, run.Agent)
+	timeout, err := stepTimeout(run.Config, "step50")
 	if err != nil {
 		return err
 	}
 
+	agentDir, err := agentDir(run.IO, run.Pass, run.Agent)
+	if err != nil {
+		return err
+	}
+	if err := ensureDir(agentDir); err != nil {
+		return err
+	}
+
+	leaseLock, acquired, err := tryAcquireRescueLock(filepath.Join(agentDir, rescueLockFileName))
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		return fmt.Errorf("%w: agent %s", ErrAgentLeaseContended, run.Agent)
+	}
+	defer leaseLock.Unlock()
+
+	stepStartedAt := s.now().UTC()
+	retryCount, err := s.resumeIfNeeded(ctx, run, allocation, agentDir)
+	if err != nil {
+		return err
+	}
+
+	deadline := stepStartedAt.Add(timeout)
 	candidatesPath, err := run.IO.ResolveRunRelative(filepath.Join("40", "candidates.json"))
 	if err != nil {
-		return fmt.Errorf("resolve candidates path: %w", err)
+		return err
 	}
 	rulePayloads, err := LoadRulePayloads(candidatesPath)
 	if err != nil {
-		return fmt.Errorf("load rule payloads: %w", err)
+		return fmt.Errorf("step50: load rule payloads: %w", err)
 	}
-	candidateRuleIDs := rulePayloadIDs(rulePayloads)
-
-	renderedPrompt, err := RenderPrompt(PromptData{
+	promptText, err := RenderPrompt(PromptData{
 		TaskPackage:      *run.TaskPackage,
 		Agent:            run.Agent,
-		CandidateRuleIDs: candidateRuleIDs,
+		CandidateRuleIDs: rulePayloadIDs(rulePayloads),
 		RulePayloads:     rulePayloads,
-		WorktreePath:     worktree.Path,
+		WorktreePath:     allocation.Path,
 		Pass:             passNumber,
 	})
 	if err != nil {
-		return fmt.Errorf("render prompt: %w", err)
+		return fmt.Errorf("step50: render prompt: %w", err)
 	}
 
-	agentPrefix := filepath.Join("50-pass2", string(run.Agent))
-	agentDir, err := run.IO.ResolveRunRelative(agentPrefix)
+	state := resumeState{
+		ExpectedBaseSHA: allocation.BaseSHA,
+		StartedAt:       stepStartedAt,
+		Pid:             os.Getpid(),
+		RetryCount:      retryCount,
+		LastHeartbeat:   stepStartedAt,
+	}
+	if err := touchHeartbeat(agentDir, state.LastHeartbeat); err != nil {
+		return err
+	}
+	if err := saveResumeState(agentDir, state); err != nil {
+		return err
+	}
+
+	heartbeat, err := startHeartbeat(ctx, heartbeatConfig{
+		agentDir:  agentDir,
+		interval:  s.heartbeatInterval,
+		now:       s.now,
+		baseState: state,
+	})
 	if err != nil {
-		return fmt.Errorf("resolve agent dir: %w", err)
+		return err
 	}
-	if err := os.MkdirAll(agentDir, 0o755); err != nil {
-		return fmt.Errorf("create agent dir: %w", err)
-	}
-	// Pre-clean: guarantee no stale artifacts from an earlier partial Run
-	// contaminate the terminal manifest, regardless of outcome variant.
-	if err := removeStepArtifacts(run.IO, agentPrefix); err != nil {
-		return fmt.Errorf("pre-clean stale artifacts: %w", err)
-	}
+	defer heartbeat.Stop()
 
-	manifestPath, err := run.IO.ManifestPath(passNumber, run.Agent)
-	if err != nil {
-		return fmt.Errorf("resolve manifest path: %w", err)
-	}
-
-	stepTimeoutSeconds := stepTimeout(run.Config)
-	startedAt := time.Now().UTC()
-	execCtx, cancel := context.WithTimeout(ctx, time.Duration(stepTimeoutSeconds)*time.Second)
-	defer cancel()
-
-	var stdout bytes.Buffer
-	stderrTail := newTailBuffer(maxStderrTailBytes)
-
-	logger.Info("starting step50 implement command")
-
-	cmd := exec.CommandContext(execCtx, run.Config.ClaudeBinary(), "-p", "--output-format=stream-json")
-	configureCommandProcessGroup(cmd)
-	cmd.Dir = worktree.Path
-	cmd.Stdin = strings.NewReader(renderedPrompt)
-	cmd.Stdout = &stdout
-	cmd.Stderr = stderrTail
-
-	err = cmd.Run()
-	finishedAt := clampFinishedAt(startedAt, time.Now().UTC())
-
-	if err != nil && ctx.Err() != nil {
-		if killErr := killCommandProcessGroup(cmd); killErr != nil {
-			return errors.Join(ctx.Err(), killErr)
-		}
-		return ctx.Err()
-	}
-	if shouldWriteTimeoutManifest(err, execCtx) {
-		if killErr := killCommandProcessGroup(cmd); killErr != nil {
-			return killErr
-		}
-		if cleanupErr := removeStepArtifacts(run.IO, agentPrefix); cleanupErr != nil {
-			return cleanupErr
-		}
-		logger.Warn("step50 implement timed out", slog.Int("timeout_seconds", stepTimeoutSeconds))
-		return writeManifest(manifestPath, contracts.Manifest{
-			Kind: contracts.ManifestKindTimeout,
-			Value: contracts.ManifestTimeout{
-				Kind:           contracts.ManifestKindTimeout,
-				SchemaVersion:  "1",
-				RunID:          run.IO.RunID,
-				Pass:           passNumber,
-				Agent:          run.Agent,
-				TimeoutSeconds: stepTimeoutSeconds,
-				StartedAt:      startedAt,
-				FinishedAt:     finishedAt,
-			},
-		})
-	}
-	if err != nil {
-		if cleanupErr := removeStepArtifacts(run.IO, agentPrefix); cleanupErr != nil {
-			return cleanupErr
-		}
-		exitCode := exitCodeFromError(err, cmd.ProcessState)
-		kind := interruption.Classify(exitCode, stdout.Bytes(), stderrTail.Bytes())
-		logger.Warn("step50 implement exited with non-zero status",
-			slog.Int("exit_code", exitCode),
-			slog.String("reason", string(kind)),
-		)
-		return writeManifest(manifestPath, contracts.Manifest{
-			Kind: contracts.ManifestKindError,
-			Value: contracts.ManifestError{
-				Kind:          contracts.ManifestKindError,
-				SchemaVersion: "1",
-				RunID:         run.IO.RunID,
-				Pass:          passNumber,
-				Agent:         run.Agent,
-				ExitCode:      exitCode,
-				Reason:        string(kind),
-				Detail:        truncateRunes(strings.TrimSpace(stderrTail.String()), stderrDetailRuneLimit),
-				StartedAt:     startedAt,
-				FinishedAt:    finishedAt,
-			},
-		})
-	}
-
-	diffBytes, err := gitOutput(ctx, worktree.Path, "diff", worktree.BaseSHA+"..HEAD", "--binary")
-	if err != nil {
-		return fmt.Errorf("capture diff: %w", err)
-	}
-	headSHABytes, err := gitOutput(ctx, worktree.Path, "rev-parse", "HEAD")
-	if err != nil {
-		return fmt.Errorf("resolve head sha: %w", err)
-	}
-	headSHA := strings.TrimSpace(string(headSHABytes))
-
-	checklistResult, err := readChecklistArtifact(worktree.Path, run.IO.RunID, run.Agent)
+	sessionPath, err := artifactPath(run.IO, run.Pass, run.Agent, sessionFileName)
 	if err != nil {
 		return err
 	}
 
-	sessionPath, err := run.IO.ResolveRunRelative(filepath.Join(agentPrefix, "session.jsonl"))
+	remaining := deadline.Sub(s.now().UTC())
+	if remaining <= 0 {
+		return s.writeTimeoutManifest(ctx, run, timeout, stepStartedAt, s.now().UTC())
+	}
+
+	runResult, err := s.runner.Run(ctx, runnerRequest{
+		Binary:      run.Config.ClaudeBinary(),
+		Workdir:     allocation.Path,
+		Prompt:      promptText,
+		SessionPath: sessionPath,
+		Timeout:     remaining,
+		Env: []string{
+			"AUTO_IMPROVE_STEP=50",
+			"AUTO_IMPROVE_PASS=2",
+			"AUTO_IMPROVE_AGENT=" + string(run.Agent),
+			"AUTO_IMPROVE_RUN_ID=" + string(run.TaskPackage.RunID),
+			"AUTO_IMPROVE_OUTPUT_DIR=" + manifestPrefix(run.Pass, run.Agent),
+		},
+	})
 	if err != nil {
-		return fmt.Errorf("resolve session path: %w", err)
-	}
-	if err := internalio.WriteAtomic(sessionPath, stdout.Bytes()); err != nil {
-		return fmt.Errorf("write session: %w", err)
+		return err
 	}
 
-	diffPath, err := run.IO.ResolveRunRelative(filepath.Join(agentPrefix, "diff.patch"))
+	if runResult.TimedOut {
+		return s.writeTimeoutManifest(ctx, run, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
+	}
+	if runResult.ExitCode != 0 {
+		return s.writeErrorManifest(ctx, run, runResult)
+	}
+	return s.writeSuccessArtifacts(ctx, run, allocation, runResult)
+}
+
+func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, runResult runnerResult) error {
+	headSHA, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
-		return fmt.Errorf("resolve diff path: %w", err)
+		return err
 	}
-	if err := internalio.WriteAtomic(diffPath, diffBytes); err != nil {
-		return fmt.Errorf("write diff: %w", err)
-	}
-
-	checklistPath, err := run.IO.ResolveRunRelative(filepath.Join(agentPrefix, checklistFilename))
+	diffBytes, err := gitOutputBytesContext(ctx, allocation.Path, "diff", allocation.BaseSHA+"..HEAD", "--binary")
 	if err != nil {
-		return fmt.Errorf("resolve checklist path: %w", err)
-	}
-	if err := internalio.WriteJSONAtomic(checklistPath, checklistResult); err != nil {
-		return fmt.Errorf("write checklist: %w", err)
+		return err
 	}
 
-	logger.Info("step50 implement completed successfully", slog.String("head_sha", headSHA))
+	diffPath, err := artifactPath(run.IO, run.Pass, run.Agent, diffFileName)
+	if err != nil {
+		return err
+	}
+	if err := writeAtomic(diffPath, diffBytes); err != nil {
+		return err
+	}
 
-	return writeManifest(manifestPath, contracts.Manifest{
+	checklistPath, err := artifactPath(run.IO, run.Pass, run.Agent, checklistFileName)
+	if err != nil {
+		return err
+	}
+	checklist, err := loadChecklistArtifact(allocation.Path, run.TaskPackage.RunID, run.Pass, run.Agent)
+	if err != nil {
+		return err
+	}
+	if err := writeJSONAtomic(checklistPath, checklist); err != nil {
+		return err
+	}
+
+	prefix := manifestPrefix(run.Pass, run.Agent)
+	manifest := contracts.Manifest{
 		Kind: contracts.ManifestKindSuccess,
 		Value: contracts.ManifestSuccess{
 			Kind:          contracts.ManifestKindSuccess,
 			SchemaVersion: "1",
-			RunID:         run.IO.RunID,
-			Pass:          passNumber,
+			RunID:         run.TaskPackage.RunID,
+			Pass:          run.Pass,
 			Agent:         run.Agent,
-			BranchName:    worktree.Branch,
+			BranchName:    allocation.Branch,
 			HeadSHA:       headSHA,
-			BaseSHA:       worktree.BaseSHA,
-			DiffPath:      filepath.Join(agentPrefix, "diff.patch"),
-			SessionPath:   filepath.Join(agentPrefix, "session.jsonl"),
-			ChecklistPath: filepath.Join(agentPrefix, checklistFilename),
-			PromptVersion: step50PromptVersion,
-			StartedAt:     startedAt,
-			FinishedAt:    finishedAt,
+			BaseSHA:       allocation.BaseSHA,
+			DiffPath:      filepath.Join(prefix, diffFileName),
+			SessionPath:   filepath.Join(prefix, sessionFileName),
+			ChecklistPath: filepath.Join(prefix, checklistFileName),
+			PromptVersion: promptVersion,
+			StartedAt:     runResult.StartedAt.UTC(),
+			FinishedAt:    runResult.FinishedAt.UTC(),
 		},
-	})
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return writeManifest(run.IO, run.Pass, run.Agent, manifest)
 }
 
-func resolveWorktree(pkg *contracts.TaskPackage, pass int, agent contracts.AgentID) (contracts.WorktreeAllocation, error) {
+func (s *Step) writeErrorManifest(ctx context.Context, run RunContext, runResult runnerResult) error {
+	reason := interruptionReason(runResult.ExitCode, runResult.StdoutSnippet, runResult.StderrSnippet)
+	manifest := contracts.Manifest{
+		Kind: contracts.ManifestKindError,
+		Value: contracts.ManifestError{
+			Kind:          contracts.ManifestKindError,
+			SchemaVersion: "1",
+			RunID:         run.TaskPackage.RunID,
+			Pass:          run.Pass,
+			Agent:         run.Agent,
+			ExitCode:      runResult.ExitCode,
+			Reason:        string(reason),
+			Detail:        truncateDetail(runResult.StderrSnippet, runResult.StdoutSnippet),
+			StartedAt:     runResult.StartedAt.UTC(),
+			FinishedAt:    runResult.FinishedAt.UTC(),
+		},
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return writeManifest(run.IO, run.Pass, run.Agent, manifest)
+}
+
+func (s *Step) writeTimeoutManifest(ctx context.Context, run RunContext, timeout time.Duration, startedAt, finishedAt time.Time) error {
+	manifest := contracts.Manifest{
+		Kind: contracts.ManifestKindTimeout,
+		Value: contracts.ManifestTimeout{
+			Kind:           contracts.ManifestKindTimeout,
+			SchemaVersion:  "1",
+			RunID:          run.TaskPackage.RunID,
+			Pass:           run.Pass,
+			Agent:          run.Agent,
+			TimeoutSeconds: int(timeout / time.Second),
+			StartedAt:      startedAt,
+			FinishedAt:     finishedAt,
+		},
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return writeManifest(run.IO, run.Pass, run.Agent, manifest)
+}
+
+func writeManifest(runIO internalio.RunContext, pass int, agent contracts.AgentID, manifest contracts.Manifest) error {
+	path, err := runIO.ManifestPath(pass, agent)
+	if err != nil {
+		return err
+	}
+	return writeJSONAtomic(path, manifest)
+}
+
+func artifactPath(runIO internalio.RunContext, pass int, agent contracts.AgentID, name string) (string, error) {
+	rel := filepath.Join(manifestPrefix(pass, agent), name)
+	return runIO.ResolveRunRelative(rel)
+}
+
+func ensureDir(path string) error {
+	return os.MkdirAll(path, 0o755)
+}
+
+func manifestPrefix(pass int, agent contracts.AgentID) string {
+	if pass == passNumber {
+		return filepath.Join("50-pass2", string(agent))
+	}
+	return filepath.Join("20-pass1", string(agent))
+}
+
+func worktreeFor(pkg *contracts.TaskPackage, pass int, agent contracts.AgentID) (contracts.WorktreeAllocation, error) {
+	if pkg == nil {
+		return contracts.WorktreeAllocation{}, errors.New("step50: task package is required")
+	}
 	for _, worktree := range pkg.Worktrees {
 		if worktree.Pass == pass && worktree.Agent == agent {
 			return worktree, nil
 		}
 	}
-	return contracts.WorktreeAllocation{}, fmt.Errorf("step50_implement: missing worktree allocation: pass=%d agent=%s", pass, agent)
+	return contracts.WorktreeAllocation{}, fmt.Errorf("step50: missing worktree allocation: pass=%d agent=%s", pass, agent)
 }
 
-func stepTimeout(cfg *config.Config) int {
-	if cfg == nil || cfg.StepTimeouts == nil {
-		return defaultStep50TimeoutSeconds
+func agentDir(runIO internalio.RunContext, pass int, agent contracts.AgentID) (string, error) {
+	return runIO.ResolveRunRelative(manifestPrefix(pass, agent))
+}
+
+func stepTimeout(cfg *config.Config, key string) (time.Duration, error) {
+	if cfg == nil {
+		return 0, errors.New("step50: config is required")
 	}
-	timeoutSeconds := cfg.StepTimeouts["step50"]
-	if timeoutSeconds <= 0 {
-		return defaultStep50TimeoutSeconds
+	seconds, ok := cfg.StepTimeouts[key]
+	if !ok || seconds <= 0 {
+		return 0, fmt.Errorf("step50: missing step timeout: %s", key)
 	}
-	return timeoutSeconds
+	return time.Duration(seconds) * time.Second, nil
+}
+
+func loadChecklistArtifact(worktreePath string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {
+	sourcePath := filepath.Join(worktreePath, checklistFileName)
+	if _, err := os.Stat(sourcePath); err == nil {
+		result, readErr := readJSON[contracts.ChecklistResult](sourcePath)
+		if readErr != nil {
+			return contracts.ChecklistResult{}, readErr
+		}
+		return result, nil
+	} else if !os.IsNotExist(err) {
+		return contracts.ChecklistResult{}, err
+	}
+	return contracts.ChecklistResult{
+		SchemaVersion: "1",
+		RunID:         runID,
+		Pass:          pass,
+		Agent:         agent,
+		Items:         []contracts.ChecklistItem{},
+	}, nil
 }
 
 func shouldWriteTimeoutManifest(err error, execCtx context.Context) bool {
 	return err != nil && errors.Is(execCtx.Err(), context.DeadlineExceeded)
-}
-
-func writeManifest(path string, manifest contracts.Manifest) error {
-	return internalio.WriteJSONAtomic(path, manifest)
-}
-
-func rulePayloadIDs(payloads []RulePayload) []string {
-	if len(payloads) == 0 {
-		return nil
-	}
-	ids := make([]string, 0, len(payloads))
-	for _, payload := range payloads {
-		ids = append(ids, payload.ID)
-	}
-	return ids
-}
-
-func readChecklistArtifact(worktreePath string, runID contracts.RunID, agent contracts.AgentID) (contracts.ChecklistResult, error) {
-	path := filepath.Join(worktreePath, checklistFilename)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return contracts.ChecklistResult{}, fmt.Errorf("read checklist artifact: %w", err)
-	}
-
-	var checklist contracts.ChecklistResult
-	if err := contracts.DecodeStrictJSON(data, &checklist); err != nil {
-		return contracts.ChecklistResult{}, fmt.Errorf("decode checklist artifact: %w", err)
-	}
-	if checklist.RunID != runID {
-		return contracts.ChecklistResult{}, fmt.Errorf("checklist artifact run_id mismatch: got=%s want=%s", checklist.RunID, runID)
-	}
-	if checklist.Pass != passNumber {
-		return contracts.ChecklistResult{}, fmt.Errorf("checklist artifact pass mismatch: got=%d want=%d", checklist.Pass, passNumber)
-	}
-	if checklist.Agent != agent {
-		return contracts.ChecklistResult{}, fmt.Errorf("checklist artifact agent mismatch: got=%s want=%s", checklist.Agent, agent)
-	}
-	return checklist, nil
-}
-
-func gitOutput(ctx context.Context, worktreePath string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
-	}
-	return output, nil
-}
-
-func exitCodeFromError(err error, processState *os.ProcessState) int {
-	if exitCode, ok := signalExitCode(processState); ok {
-		return exitCode
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode()
-	}
-	return 1
-}
-
-func removeStepArtifacts(runIO internalio.RunContext, agentPrefix string) error {
-	for _, name := range []string{"diff.patch", "session.jsonl", checklistFilename} {
-		path, err := runIO.ResolveRunRelative(filepath.Join(agentPrefix, name))
-		if err != nil {
-			return fmt.Errorf("resolve stale artifact path %q: %w", name, err)
-		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove stale artifact %q: %w", path, err)
-		}
-	}
-	return nil
-}
-
-func clampFinishedAt(startedAt, finishedAt time.Time) time.Time {
-	if finishedAt.Before(startedAt) {
-		return startedAt
-	}
-	return finishedAt
-}
-
-func truncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return ""
-	}
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes])
-}
-
-type tailBuffer struct {
-	limit int
-	data  []byte
-}
-
-func newTailBuffer(limit int) *tailBuffer {
-	return &tailBuffer{limit: limit}
-}
-
-func (b *tailBuffer) Write(p []byte) (int, error) {
-	if b.limit <= 0 {
-		return len(p), nil
-	}
-	if len(p) >= b.limit {
-		b.data = append(b.data[:0], p[len(p)-b.limit:]...)
-		return len(p), nil
-	}
-	if len(b.data)+len(p) > b.limit {
-		drop := len(b.data) + len(p) - b.limit
-		b.data = append(b.data[drop:], p...)
-		return len(p), nil
-	}
-	b.data = append(b.data, p...)
-	return len(p), nil
-}
-
-func (b *tailBuffer) Bytes() []byte {
-	return append([]byte(nil), b.data...)
-}
-
-func (b *tailBuffer) String() string {
-	return string(b.data)
 }

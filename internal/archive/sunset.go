@@ -3,13 +3,11 @@
 package archive
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -52,11 +50,7 @@ type Result struct {
 	SkippedOpIDs  []string
 }
 
-type registryLine struct {
-	Offset int64
-	Sha256 string
-	Entry  contracts.RuleRegistryEntry
-}
+type registryLine = internalio.RegistryLine
 
 func RunSunset(ctx context.Context, opts Opts) (Result, error) {
 	if err := ctx.Err(); err != nil {
@@ -320,6 +314,10 @@ func reconcileStaleMarker(ctx context.Context, opts Opts) error {
 	if len(lines) < 2 {
 		return fmt.Errorf("archive: invalid stale marker contents")
 	}
+	recordedStart, err := time.Parse(time.RFC3339Nano, lines[0])
+	if err != nil {
+		return fmt.Errorf("archive: parse stale marker start time: %w", err)
+	}
 	staleRunID := lines[1]
 	missing := make([]Transition, 0, len(opts.Transitions))
 	for _, transition := range opts.Transitions {
@@ -339,7 +337,7 @@ func reconcileStaleMarker(ctx context.Context, opts Opts) error {
 			return err
 		}
 	}
-	if err := writeLastSunsetAt(opts.RunsBase, opts.Now()); err != nil {
+	if err := writeLastSunsetAt(opts.RunsBase, recordedStart); err != nil {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -483,49 +481,7 @@ func registryLookupLines(path string) ([]registryLine, error) {
 }
 
 func readRegistryLines(path string) ([]registryLine, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer f.Close()
-
-	reader := bufio.NewReader(f)
-	lines := make([]registryLine, 0, 8)
-	var offset int64
-	for {
-		raw, err := reader.ReadBytes('\n')
-		if len(raw) == 0 && err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return nil, err
-		}
-		line := strings.TrimRight(string(raw), "\n")
-		if line == "" {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			offset += int64(len(raw))
-			continue
-		}
-		var entry contracts.RuleRegistryEntry
-		if decodeErr := contracts.DecodeStrictJSON([]byte(line), &entry); decodeErr != nil {
-			return nil, decodeErr
-		}
-		lines = append(lines, registryLine{
-			Offset: offset,
-			Sha256: hashLine([]byte(line)),
-			Entry:  entry,
-		})
-		offset += int64(len(line) + 1)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-	}
-	return lines, nil
+	return internalio.RegistryLines(path)
 }
 
 func registryLineCount(path string) (int, error) {
@@ -534,9 +490,4 @@ func registryLineCount(path string) (int, error) {
 		return 0, err
 	}
 	return len(lines), nil
-}
-
-func hashLine(line []byte) string {
-	sum := sha256.Sum256(line)
-	return hex.EncodeToString(sum[:])
 }

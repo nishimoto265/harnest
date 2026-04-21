@@ -85,3 +85,14 @@ func verifyCandidateBodySHA(body []byte, want string) error {
 	}
 	return nil
 }
+
+func rulePayloadIDs(payloads []RulePayload) []string {
+	if len(payloads) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(payloads))
+	for _, payload := range payloads {
+		ids = append(ids, payload.ID)
+	}
+	return ids
+}

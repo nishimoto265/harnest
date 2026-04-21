@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -54,7 +55,7 @@ func Run(ctx context.Context, cfg Config) (*contracts.Candidates, error) {
 	}
 
 	createdAt := cfg.now()
-	items, classifications, err := buildCandidates(cfg.IO.RunID, createdAt, scores, compliance, registry)
+	items, classifications, err := buildCandidates(cfg.IO.RunID, createdAt, scores, compliance, registry, filepath.Dir(cfg.registryPath()))
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +123,7 @@ func readJSONLAt[T any](runIO internalio.RunContext, rel string) ([]T, error) {
 	return internalio.ReadJSONL[T](path)
 }
 
-func buildCandidates(runID contracts.RunID, now time.Time, scores []contracts.ScoreEntry, compliance []contracts.ComplianceEntry, registry []contracts.RuleRegistryEntry) ([]contracts.Candidate, []contracts.ClassificationEntry, error) {
+func buildCandidates(runID contracts.RunID, now time.Time, scores []contracts.ScoreEntry, compliance []contracts.ComplianceEntry, registry []contracts.RuleRegistryEntry, registryBase string) ([]contracts.Candidate, []contracts.ClassificationEntry, error) {
 	if len(scores) == 0 || len(compliance) == 0 {
 		return []contracts.Candidate{}, []contracts.ClassificationEntry{}, nil
 	}
@@ -133,6 +134,7 @@ func buildCandidates(runID contracts.RunID, now time.Time, scores []contracts.Sc
 	}
 
 	activeRules := activeRulesFromRegistry(registry)
+	activeRuleBodies := activeRuleBodiesFromRegistry(registry, registryBase, activeRules)
 	ruleIDs := make([]string, 0, len(violations))
 	for ruleID := range violations {
 		ruleIDs = append(ruleIDs, ruleID)
@@ -142,7 +144,7 @@ func buildCandidates(runID contracts.RunID, now time.Time, scores []contracts.Sc
 	candidates := make([]contracts.Candidate, 0, len(ruleIDs))
 	classifications := make([]contracts.ClassificationEntry, 0, len(ruleIDs))
 	for idx, ruleID := range ruleIDs {
-		candidate, classification, err := buildCandidate(runID, now, idx+1, ruleID, violations[ruleID], activeRules[ruleID])
+		candidate, classification, err := buildCandidate(runID, now, idx+1, ruleID, violations[ruleID], activeRules[ruleID], activeRuleBodies)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -271,22 +273,35 @@ func rollbackRule(states map[string]ruleState, rollbackTargets map[string]rollba
 	}
 }
 
-func buildCandidate(runID contracts.RunID, now time.Time, index int, ruleID string, violationCount int, existsInRegistry bool) (contracts.Candidate, contracts.ClassificationEntry, error) {
+func buildCandidate(runID contracts.RunID, now time.Time, index int, ruleID string, violationCount int, existsInRegistry bool, activeRuleBodies map[string]string) (contracts.Candidate, contracts.ClassificationEntry, error) {
 	candidateID := fmt.Sprintf("cand-%s-%03d", runID, index)
 	title := fmt.Sprintf("Rule candidate for %s", ruleID)
 	problem := fmt.Sprintf("Pass1 recorded %d violation(s) for rule %s.", violationCount, ruleID)
 	rationale := fmt.Sprintf("Phase 0 deterministic classify generated one candidate from compliance-A.jsonl for %s.", ruleID)
 
+	bodyPath := filepath.Join("40", "candidates", candidateID+".md")
+	draftBody := candidateBodyMarkdown(contracts.Candidate{
+		CandidateID:      candidateID,
+		Kind:             contracts.CandidateKindNew,
+		TargetRuleID:     "",
+		Title:            title,
+		Problem:          problem,
+		Rationale:        rationale,
+		ProposedBodyPath: bodyPath,
+	})
+
 	kind := contracts.CandidateKindNew
 	targetRuleID := ""
 	similarity := 0
-	if existsInRegistry {
+	if matchedRuleID, matchedScore := bestDuplicateMatch(draftBody, activeRuleBodies); matchedRuleID != "" && matchedScore >= 0.9 {
+		kind = contracts.CandidateKindDuplicate
+		targetRuleID = matchedRuleID
+		similarity = int(matchedScore * 100)
+	} else if existsInRegistry {
 		kind = contracts.CandidateKindUpdate
 		targetRuleID = ruleID
 		similarity = 90
 	}
-
-	bodyPath := filepath.Join("40", "candidates", candidateID+".md")
 	body := candidateBodyMarkdown(contracts.Candidate{
 		CandidateID:      candidateID,
 		Kind:             kind,
@@ -327,6 +342,95 @@ func buildCandidate(runID contracts.RunID, now time.Time, index int, ruleID stri
 	}
 
 	return candidate, classification, nil
+}
+
+func activeRuleBodiesFromRegistry(entries []contracts.RuleRegistryEntry, registryBase string, activeRules map[string]bool) map[string]string {
+	bodies := make(map[string]string, len(activeRules))
+	for ruleID := range activeRules {
+		path, ok := latestRulePath(entries, ruleID)
+		if !ok {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(registryBase, path))
+		if err != nil {
+			continue
+		}
+		bodies[ruleID] = string(body)
+	}
+	return bodies
+}
+
+func latestRulePath(entries []contracts.RuleRegistryEntry, ruleID string) (string, bool) {
+	for i := len(entries) - 1; i >= 0; i-- {
+		switch v := entries[i].Value.(type) {
+		case contracts.RuleRegistryUpdated:
+			if v.RuleID == ruleID {
+				return v.RulePath, true
+			}
+		case *contracts.RuleRegistryUpdated:
+			if v != nil && v.RuleID == ruleID {
+				return v.RulePath, true
+			}
+		case contracts.RuleRegistryAdded:
+			if v.RuleID == ruleID {
+				return v.RulePath, true
+			}
+		case *contracts.RuleRegistryAdded:
+			if v != nil && v.RuleID == ruleID {
+				return v.RulePath, true
+			}
+		}
+	}
+	return "", false
+}
+
+func bestDuplicateMatch(candidateBody string, activeRuleBodies map[string]string) (string, float64) {
+	bestRuleID := ""
+	bestScore := 0.0
+	for ruleID, body := range activeRuleBodies {
+		score := tokenSetSimilarity(candidateBody, body)
+		if score > bestScore {
+			bestRuleID = ruleID
+			bestScore = score
+		}
+	}
+	return bestRuleID, bestScore
+}
+
+func tokenSetSimilarity(left, right string) float64 {
+	leftSet := normalizedTokenSet(left)
+	rightSet := normalizedTokenSet(right)
+	if len(leftSet) == 0 && len(rightSet) == 0 {
+		return 1
+	}
+	intersection := 0
+	union := make(map[string]struct{}, len(leftSet)+len(rightSet))
+	for token := range leftSet {
+		union[token] = struct{}{}
+	}
+	for token := range rightSet {
+		if _, ok := leftSet[token]; ok {
+			intersection++
+		}
+		union[token] = struct{}{}
+	}
+	return float64(intersection) / float64(len(union))
+}
+
+func normalizedTokenSet(value string) map[string]struct{} {
+	value = strings.ToLower(value)
+	value = strings.ReplaceAll(value, "\n", " ")
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
+	set := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		if field == "" {
+			continue
+		}
+		set[field] = struct{}{}
+	}
+	return set
 }
 
 func candidateBodyMarkdown(candidate contracts.Candidate) string {

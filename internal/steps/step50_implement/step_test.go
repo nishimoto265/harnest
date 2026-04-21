@@ -17,7 +17,6 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/orchestrator"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -178,7 +177,7 @@ func TestStepRunParentCancelDoesNotWriteManifest(t *testing.T) {
 	assertArtifactPresence(t, env.run.IO.RunDir(), false)
 }
 
-func TestStepRunMissingChecklistFails(t *testing.T) {
+func TestStepRunMissingChecklistSynthesizesEmptyResult(t *testing.T) {
 	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
 	t.Setenv("FAKE_AGENT", "a1")
 	t.Setenv("FAKE_SKIP_CHECKLIST", "1")
@@ -186,12 +185,15 @@ func TestStepRunMissingChecklistFails(t *testing.T) {
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
 
 	err := (Step{}).Run(context.Background(), env.run)
-	require.ErrorContains(t, err, "read checklist artifact")
+	require.NoError(t, err)
 
-	_, statErr := os.Stat(env.manifestPath)
-	require.Error(t, statErr)
-	assert.True(t, os.IsNotExist(statErr))
-	assertArtifactPresence(t, env.run.IO.RunDir(), false)
+	manifest := readManifest(t, env.manifestPath)
+	success, ok := manifest.Value.(contracts.ManifestSuccess)
+	require.True(t, ok)
+	checklistPath := filepath.Join(env.run.IO.RunDir(), success.ChecklistPath)
+	checklist, readErr := internalio.ReadJSON[contracts.ChecklistResult](checklistPath)
+	require.NoError(t, readErr)
+	assert.Empty(t, checklist.Items)
 }
 
 func TestStepRunRemovesStaleArtifactsOnNonSuccess(t *testing.T) {
@@ -214,7 +216,10 @@ func TestStepRunRemovesStaleArtifactsOnNonSuccess(t *testing.T) {
 
 	manifest := readManifest(t, env.manifestPath)
 	assert.Equal(t, contracts.ManifestKindError, manifest.Kind)
-	assertArtifactPresence(t, env.run.IO.RunDir(), false)
+	diffPath := filepath.Join(env.run.IO.RunDir(), "50-pass2", "a1", "diff.patch")
+	checklistPath := filepath.Join(env.run.IO.RunDir(), "50-pass2", "a1", "checklist-result.json")
+	assert.FileExists(t, diffPath)
+	assert.FileExists(t, checklistPath)
 }
 
 func TestLoadRulePayloadsRejectsPathTraversal(t *testing.T) {
@@ -280,7 +285,7 @@ func TestShouldWriteTimeoutManifestRequiresRunError(t *testing.T) {
 }
 
 type stepTestEnv struct {
-	run          *orchestrator.StepRunContext
+	run          RunContext
 	manifestPath string
 }
 
@@ -326,7 +331,7 @@ func newStepTestEnv(t *testing.T, script string, timeoutSeconds int) stepTestEnv
 			"step50": timeoutSeconds,
 		},
 	}
-	run := &orchestrator.StepRunContext{
+	run := RunContext{
 		Config:      cfg,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		PR:          42,
@@ -385,7 +390,6 @@ func assertArtifactPresence(t *testing.T, runDir string, shouldExist bool) {
 	t.Helper()
 	for _, rel := range []string{
 		filepath.Join("50-pass2", "a1", "diff.patch"),
-		filepath.Join("50-pass2", "a1", "session.jsonl"),
 		filepath.Join("50-pass2", "a1", "checklist-result.json"),
 	} {
 		_, err := os.Stat(filepath.Join(runDir, rel))

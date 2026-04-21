@@ -18,6 +18,10 @@ type RegistryLine struct {
 	Entry  contracts.RuleRegistryEntry
 }
 
+func RegistryLines(path string) ([]RegistryLine, error) {
+	return readRegistryLines(path)
+}
+
 func AppendRegistryEntry(path string, entry contracts.RuleRegistryEntry) (contracts.RegistryAppendResult, error) {
 	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
 		return contracts.RegistryAppendResult{}, err

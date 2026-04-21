@@ -59,7 +59,7 @@ func TestRun_SentinelBlocksExecution(t *testing.T) {
 	blockPath := filepath.Join(runCtx.RunsBase, "needs-recovery", "other-run.json")
 	require.NoError(t, os.WriteFile(blockPath, []byte("{}"), 0o644))
 
-	require.NoError(t, Run(context.Background(), 3, runCtx, pkg, candidates, store, Deps{Now: fixedNow()}))
+	require.ErrorIs(t, Run(context.Background(), 3, runCtx, pkg, candidates, store, Deps{Now: fixedNow()}), ErrBlockedBySentinel)
 
 	// No decision written.
 	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
@@ -647,7 +647,7 @@ func TestRun_NeedsManualRecoveryStageRequiresExplicitCleanup(t *testing.T) {
 	require.NoError(t, writeSentinel(runCtx.RunsBase, runCtx.RunID, 123, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70, fixedNow()()))
 
 	deps := Deps{Git: &fakeGit{head: resolver.target.BestShaBefore}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
-	require.NoError(t, Run(context.Background(), 123, runCtx, pkg, candidates, store, deps))
+	require.ErrorIs(t, Run(context.Background(), 123, runCtx, pkg, candidates, store, deps), ErrBlockedBySentinel)
 	assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
 
 	require.NoError(t, FinalizeCleanup(runCtx, store))
@@ -800,17 +800,21 @@ type fakeGit struct {
 	pushCalls []fakePushCall
 }
 
-func (g *fakeGit) RemoteHead(string) (string, error) {
+func (g *fakeGit) RemoteHead(_ context.Context, _ string) (string, error) {
 	return g.head, nil
 }
 
-func (g *fakeGit) PushForceWithLease(branch, target, expected string) error {
+func (g *fakeGit) PushForceWithLease(_ context.Context, branch, target, expected string) error {
 	g.pushCalls = append(g.pushCalls, fakePushCall{branch: branch, target: target, expected: expected})
 	if g.pushErr != nil && len(g.pushCalls) == 1 {
 		return g.pushErr
 	}
 	// Subsequent calls (rollback revert) succeed so the rollback path can
 	// reach terminal state.
+	return nil
+}
+
+func (g *fakeGit) RemoveWorktree(_ context.Context, _ string) error {
 	return nil
 }
 

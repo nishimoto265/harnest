@@ -13,31 +13,35 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
+	step10restorebase "github.com/nishimoto265/auto-improve/internal/steps/step10_restorebase"
 	"github.com/nishimoto265/auto-improve/internal/steps/step20_implement"
 	"github.com/nishimoto265/auto-improve/internal/steps/step30_score"
 	"github.com/nishimoto265/auto-improve/internal/steps/step40_classify"
+	"github.com/nishimoto265/auto-improve/internal/steps/step50_implement"
 	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
 	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 )
 
-func defaultSteps(cfg *config.Config) Steps {
+func defaultSteps(cfg *config.Config, decoders ContractDecoders) Steps {
 	step20 := make(map[contracts.AgentID]Step, len(defaultAgents))
 	step50 := make(map[contracts.AgentID]Step, len(defaultAgents))
 	implStep := step20_implement.NewStep(cfg)
+	step50Impl := step50_implement.NewStep(cfg)
 	for _, agent := range defaultAgents {
 		step20[agent] = step20Adapter{impl: implStep}
-		step50[agent] = stubImplementStep{}
+		step50[agent] = step50Adapter{impl: step50Impl}
 	}
 	return Steps{
-		Step10:  stubStep10{},
+		Step10:  step10Adapter{runner: step10restorebase.NewRunner(), decode: decoders.Step10},
 		Step20:  step20,
-		Step30:  newStep30ScoreAdapter(step30_score.New()),
+		Step30:  newStep30ScoreAdapter(step30_score.New(), decoders.Step30),
 		Step40:  stubStep40{},
 		Step50:  step50,
 		Step60:  step60Step{},
-		Step70:  realStep70{},
+		Step70:  realStep70{cfg: cfg},
 		Archive: realArchiveStep{},
 	}
 }
@@ -46,17 +50,53 @@ func defaultSteps(cfg *config.Config) Steps {
 // pulling the orchestrator package into step30_score (one-way import graph).
 type step30ScoreAdapter struct {
 	step *step30_score.Step
+	decode func([]byte, any) (any, error)
 }
 
-func newStep30ScoreAdapter(step *step30_score.Step) step30ScoreAdapter {
-	return step30ScoreAdapter{step: step}
+func newStep30ScoreAdapter(step *step30_score.Step, decode func([]byte, any) (any, error)) step30ScoreAdapter {
+	return step30ScoreAdapter{step: step, decode: decode}
 }
 
 func (a step30ScoreAdapter) Run(ctx context.Context, run *StepRunContext) error {
-	return a.step.Run(ctx, step30_score.Request{
+	if err := a.step.Run(ctx, step30_score.Request{
 		RunContext:  run.IO,
 		TaskPackage: run.TaskPackage,
-	})
+	}); err != nil {
+		return err
+	}
+	if a.decode == nil {
+		return nil
+	}
+	scorableAgents, err := scorableAgentsForPass(run.IO, run.TaskPackage, 1)
+	if err != nil {
+		return err
+	}
+	req := stepio.Step30Request{
+		TaskPackage:    *run.TaskPackage,
+		ScorableAgents: scorableAgents,
+		RubricVersion:  "default",
+		PromptVersion:  "phase0-stub",
+	}
+	markerPath, err := run.IO.ResolveRunRelative("30/done.marker")
+	if err != nil {
+		return err
+	}
+	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
+	if err != nil {
+		return err
+	}
+	resp := stepio.Step30Response{
+		RunID:           run.IO.RunID,
+		ScoresCount:     int(marker.ExpectedCounts.Scores),
+		ComplianceCount: int(marker.ExpectedCounts.Compliance),
+		ResolvedAt:      marker.ResolvedAt,
+	}
+	payload, err := contracts.MarshalStrict(resp)
+	if err != nil {
+		return err
+	}
+	_, err = a.decode(payload, req)
+	return err
 }
 
 type step20Adapter struct {
@@ -79,6 +119,71 @@ func (s step20Adapter) Run(ctx context.Context, run *StepRunContext) error {
 		IO:          run.IO,
 		TaskPackage: run.TaskPackage,
 	})
+}
+
+type step10Adapter struct {
+	runner *step10restorebase.Runner
+	decode func([]byte, any) (any, error)
+}
+
+func (a step10Adapter) Run(ctx context.Context, run *StepRunContext) error {
+	if a.runner == nil {
+		return errors.New("orchestrator: step10 runner is not configured")
+	}
+	if run == nil {
+		return errors.New("orchestrator: step run context is required")
+	}
+	if run.Config == nil {
+		return errors.New("orchestrator: step10 config is required")
+	}
+	repoRoot, err := run.Config.RepoRoot()
+	if err != nil {
+		return err
+	}
+	req := stepio.Step10Request{
+		PR:            run.PR,
+		BestBranch:    run.Config.Repo.BestBranch,
+		ExpectedRunID: run.IO.RunID,
+		HarnessFiles:  true,
+	}
+	result, err := a.runner.Run(ctx, step10restorebase.Input{
+		PR:            run.PR,
+		BestBranch:    run.Config.Repo.BestBranch,
+		HarnessFiles:  true,
+		ExpectedRunID: run.IO.RunID,
+		RepoRoot:      repoRoot,
+		Repo:          run.Config.Repo.GitHub,
+		RunCtx:        run.IO,
+		Agents:        defaultAgents,
+		Logger:        run.Logger,
+	})
+	if err != nil {
+		return err
+	}
+	if a.decode == nil {
+		run.TaskPackage = &result.Response.TaskPackage
+		return nil
+	}
+	payload, err := contracts.MarshalStrict(result.Response)
+	if err != nil {
+		return err
+	}
+	decoded, err := a.decode(payload, req)
+	if err != nil {
+		return err
+	}
+	switch value := decoded.(type) {
+	case stepio.Step10Response:
+		run.TaskPackage = &value.TaskPackage
+	case *stepio.Step10Response:
+		if value == nil {
+			return errors.New("orchestrator: step10 decoder returned nil response")
+		}
+		run.TaskPackage = &value.TaskPackage
+	default:
+		return fmt.Errorf("orchestrator: unexpected step10 decoder result type %T", decoded)
+	}
+	return nil
 }
 
 type stubStep10 struct{}
@@ -169,6 +274,28 @@ func (stubImplementStep) Run(ctx context.Context, run *StepRunContext) error {
 		return err
 	}
 	return internalio.WriteJSONAtomic(manifestPath, manifest)
+}
+
+type step50Adapter struct {
+	impl *step50_implement.Step
+}
+
+func (s step50Adapter) Run(ctx context.Context, run *StepRunContext) error {
+	if s.impl == nil {
+		return errors.New("orchestrator: step50 implementation is not configured")
+	}
+	if run == nil {
+		return errors.New("orchestrator: step run context is required")
+	}
+	return s.impl.Run(ctx, step50_implement.RunContext{
+		Config:      run.Config,
+		Logger:      run.Logger,
+		PR:          run.PR,
+		Pass:        run.Pass,
+		Agent:       run.Agent,
+		IO:          run.IO,
+		TaskPackage: run.TaskPackage,
+	})
 }
 
 type stubMarkerStep struct {
@@ -387,7 +514,9 @@ func (stubArchiveStep) Run(ctx context.Context, run *StepRunContext) error {
 // internal/steps/step70_decide. The resolver defaults to NoopResolver so that
 // pipeline runs without a promotion target emit a noop decision (matches the
 // prior stubStep70 behaviour for tests and empty-candidate flows).
-type realStep70 struct{}
+type realStep70 struct {
+	cfg *config.Config
+}
 
 func (realStep70) Run(ctx context.Context, run *StepRunContext) error {
 	if run.TaskPackage == nil {
@@ -411,6 +540,8 @@ func (realStep70) Run(ctx context.Context, run *StepRunContext) error {
 		Resolver: step70_decide.FilesystemResolver{
 			RepoDir: repoRoot,
 		},
+		RegistryHighAt: run.Config.RegistryHighThreshold,
+		RegistryCritAt: run.Config.RegistryCriticalThreshold,
 	}
 	if err := step70_decide.Run(ctx, run.PR, run.IO, run.TaskPackage, run.Candidates, store, deps); err != nil {
 		return err
