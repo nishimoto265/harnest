@@ -44,6 +44,12 @@ func buildRawScoreEntries(
 			PromptVersion:      score.PromptVersion,
 			ResolvedAt:         score.ResolvedAt,
 		}
+		if in.RubricVersion != "" {
+			row.RubricVersion = in.RubricVersion
+		}
+		if in.PromptVersion != "" {
+			row.PromptVersion = in.PromptVersion
+		}
 		if role == contracts.JudgeRoleArbiter {
 			row.PrimaryRef = primaryRefs[score.Dimension]
 			row.SecondaryRef = secondaryRefs[score.Dimension]
@@ -89,6 +95,12 @@ func buildRawComplianceEntries(
 			RubricVersion:        compliance.RubricVersion,
 			PromptVersion:        compliance.PromptVersion,
 			ResolvedAt:           compliance.ResolvedAt,
+		}
+		if in.RubricVersion != "" {
+			row.RubricVersion = in.RubricVersion
+		}
+		if in.PromptVersion != "" {
+			row.PromptVersion = in.PromptVersion
 		}
 		if role == contracts.JudgeRoleArbiter {
 			row.PrimaryRef = primaryRefs[compliance.RuleID]

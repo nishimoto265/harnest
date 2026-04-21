@@ -12,6 +12,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
+	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -235,7 +236,7 @@ func TestStep30Score_AllowsEmptyComplianceAcrossPanel(t *testing.T) {
 	assert.Empty(t, complianceFinal)
 }
 
-func TestStep30Score_RewritesComplianceAfterRuleShrink(t *testing.T) {
+func TestStep30Score_PreservesComplianceHistoryAfterRuleShrink(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
 	currentVerdicts := []ruleVerdict{
 		{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
@@ -274,14 +275,19 @@ func TestStep30Score_RewritesComplianceAfterRuleShrink(t *testing.T) {
 	require.NoError(t, err)
 	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](complianceFinalPath)
 	require.NoError(t, err)
-	require.Len(t, complianceFinal, 3)
+	require.Len(t, complianceFinal, 6)
+	collapsed := scorecore.CollapseFinalCompliance(complianceFinal)
+	require.Len(t, collapsed, 6)
+
+	ruleCounts := map[string]int{}
 	for _, row := range complianceFinal {
-		assert.Equal(t, "rule-a", row.RuleID)
+		ruleCounts[row.RuleID]++
 	}
+	assert.Equal(t, map[string]int{"rule-a": 3, "rule-b": 3}, ruleCounts)
 
 	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
 	require.NoError(t, err)
-	assert.Equal(t, int64(3), marker.ExpectedCounts.Compliance)
+	assert.Equal(t, int64(6), marker.ExpectedCounts.Compliance)
 }
 
 func TestStep30Score_RunSerializesConcurrentWriters(t *testing.T) {
