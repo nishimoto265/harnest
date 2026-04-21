@@ -103,7 +103,7 @@ var (
 
 // Run executes the step. Idempotent: a second call after a valid done.marker
 // is a no-op; an invalid marker is removed and the step restarts.
-func (s *Step) Run(ctx context.Context, req Request) error {
+func (s *Step) Run(ctx context.Context, req Request) (err error) {
 	if req.TaskPackage == nil {
 		return ErrNoTaskPackage
 	}
@@ -112,6 +112,16 @@ func (s *Step) Run(ctx context.Context, req Request) error {
 	if err != nil {
 		return err
 	}
+
+	lock, err := internalio.AcquireFileLock(paths.LockPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if unlockErr := lock.Unlock(); err == nil && unlockErr != nil {
+			err = unlockErr
+		}
+	}()
 
 	if err := os.MkdirAll(filepath.Dir(paths.MarkerPath), 0o755); err != nil {
 		return err
@@ -238,9 +248,14 @@ func (s *Step) Run(ctx context.Context, req Request) error {
 		if err != nil {
 			return fmt.Errorf("step30_score: resolve final agent=%s: %w", agent.agent, err)
 		}
-		if err := appendExpectedFinal(paths, agentState, result); err != nil {
-			return fmt.Errorf("step30_score: append final agent=%s: %w", agent.agent, err)
+		if err := appendExpectedFinalScores(paths, agentState, result); err != nil {
+			return fmt.Errorf("step30_score: append final scores agent=%s: %w", agent.agent, err)
 		}
+		agentState.upsertFinalCompliance(result.FinalCompliance)
+	}
+
+	if err := rewriteExpectedFinalCompliance(paths, state, scorableAgents); err != nil {
+		return fmt.Errorf("step30_score: rewrite final compliance: %w", err)
 	}
 
 	agentIDs := make([]contracts.AgentID, 0, len(scorableAgents))
@@ -349,11 +364,11 @@ func (s *Step) runRole(
 			return err
 		}
 	}
+	agentState.replaceRawScores(role, result.RawScores)
+	agentState.replaceRawCompliance(role, result.RawCompliance)
 	if role == contracts.JudgeRolePrimary || role == contracts.JudgeRoleSecondary {
 		agentState.clearArbiter()
 	}
-	agentState.upsertRawScores(result.RawScores)
-	agentState.upsertRawCompliance(result.RawCompliance)
 	return nil
 }
 
@@ -396,6 +411,7 @@ func resolveScorableAgents(req Request) ([]scorableAgent, error) {
 
 type stepPathsResult struct {
 	MarkerPath      string
+	LockPath        string
 	ScoreFinal      string
 	ComplianceFinal string
 	ScoreRaw        string
@@ -405,6 +421,10 @@ type stepPathsResult struct {
 
 func stepPaths(runCtx internalio.RunContext) (stepPathsResult, error) {
 	marker, err := runCtx.ResolveRunRelative("30/done.marker")
+	if err != nil {
+		return stepPathsResult{}, err
+	}
+	lockPath, err := runCtx.ResolveRunRelative("30/.step30.lock")
 	if err != nil {
 		return stepPathsResult{}, err
 	}
@@ -426,6 +446,7 @@ func stepPaths(runCtx internalio.RunContext) (stepPathsResult, error) {
 	}
 	return stepPathsResult{
 		MarkerPath:      marker,
+		LockPath:        lockPath,
 		ScoreFinal:      scoreFinal,
 		ComplianceFinal: complianceFinal,
 		ScoreRaw:        scoreRaw,
@@ -512,10 +533,20 @@ func (s *resumeAgentState) upsertRawScores(rows []contracts.RawScoreEntry) {
 	}
 }
 
+func (s *resumeAgentState) replaceRawScores(role contracts.JudgeRole, rows []contracts.RawScoreEntry) {
+	s.rawScores[role] = make(map[contracts.Dimension]contracts.RawScoreEntry, len(rows))
+	s.upsertRawScores(rows)
+}
+
 func (s *resumeAgentState) upsertRawCompliance(rows []contracts.RawComplianceEntry) {
 	for _, row := range rows {
 		s.rawCompliance[row.JudgeRole][row.RuleID] = row
 	}
+}
+
+func (s *resumeAgentState) replaceRawCompliance(role contracts.JudgeRole, rows []contracts.RawComplianceEntry) {
+	s.rawCompliance[role] = make(map[string]contracts.RawComplianceEntry, len(rows))
+	s.upsertRawCompliance(rows)
 }
 
 func (s *resumeAgentState) upsertFinalScores(rows []contracts.ScoreEntry) {
@@ -563,6 +594,20 @@ func (s *resumeAgentState) rawComplianceSlice(role contracts.JudgeRole) []contra
 	return out
 }
 
+func (s *resumeAgentState) currentComplianceRuleIDs() map[string]struct{} {
+	rules := make(map[string]struct{})
+	for _, role := range []contracts.JudgeRole{
+		contracts.JudgeRolePrimary,
+		contracts.JudgeRoleSecondary,
+		contracts.JudgeRoleArbiter,
+	} {
+		for ruleID := range s.rawCompliance[role] {
+			rules[ruleID] = struct{}{}
+		}
+	}
+	return rules
+}
+
 func (s *resumeAgentState) arbiterCompleteFor(primaryCompliance []contracts.RawComplianceEntry, outputSha string) bool {
 	if !hasAllDimensions(s.rawScores[contracts.JudgeRoleArbiter]) {
 		return false
@@ -595,7 +640,7 @@ func (s *resumeAgentState) roleOutputShaMatches(role contracts.JudgeRole, output
 	return true
 }
 
-func appendExpectedFinal(paths stepPathsResult, state *resumeAgentState, result scorecore.PanelResult) error {
+func appendExpectedFinalScores(paths stepPathsResult, state *resumeAgentState, result scorecore.PanelResult) error {
 	for _, row := range result.FinalScores {
 		current, ok := state.finalScores[row.Dimension]
 		if ok {
@@ -612,23 +657,73 @@ func appendExpectedFinal(paths stepPathsResult, state *resumeAgentState, result 
 		}
 		state.upsertFinalScores([]contracts.ScoreEntry{row})
 	}
-	for _, row := range result.FinalCompliance {
-		current, ok := state.finalCompliance[row.RuleID]
-		if ok {
-			same, err := sameCanonicalJSON(current, row)
-			if err != nil {
-				return err
-			}
-			if same {
+	return nil
+}
+
+func rewriteExpectedFinalCompliance(paths stepPathsResult, state *resumeState, agents []scorableAgent) error {
+	rows := currentFinalComplianceRows(state, agents)
+	return writeJSONLAtomic(paths.ComplianceFinal, rows)
+}
+
+func currentFinalComplianceRows(state *resumeState, agents []scorableAgent) []contracts.ComplianceEntry {
+	agentIDs := make([]contracts.AgentID, 0, len(agents))
+	for _, agent := range agents {
+		agentIDs = append(agentIDs, agent.agent)
+	}
+	sort.Slice(agentIDs, func(i, j int) bool {
+		return agentIDs[i] < agentIDs[j]
+	})
+
+	rows := make([]contracts.ComplianceEntry, 0)
+	for _, agentID := range agentIDs {
+		agentState := state.agent(agentID)
+		ruleIDs := agentState.currentComplianceRuleIDs()
+		if len(ruleIDs) == 0 {
+			agentState.finalCompliance = map[string]contracts.ComplianceEntry{}
+			continue
+		}
+
+		nextFinal := make(map[string]contracts.ComplianceEntry, len(ruleIDs))
+		sortedRuleIDs := make([]string, 0, len(ruleIDs))
+		for ruleID := range ruleIDs {
+			sortedRuleIDs = append(sortedRuleIDs, ruleID)
+		}
+		sort.Strings(sortedRuleIDs)
+
+		for _, ruleID := range sortedRuleIDs {
+			row, ok := agentState.finalCompliance[ruleID]
+			if !ok {
 				continue
 			}
+			nextFinal[ruleID] = row
+			rows = append(rows, row)
 		}
-		if err := internalio.AppendJSONL(paths.ComplianceFinal, row); err != nil {
+		agentState.finalCompliance = nextFinal
+	}
+	return rows
+}
+
+func writeJSONLAtomic[T any](path string, rows []T) error {
+	var buffer bytes.Buffer
+	for _, row := range rows {
+		if _, err := contracts.MarshalStrict(row); err != nil {
 			return err
 		}
-		state.upsertFinalCompliance([]contracts.ComplianceEntry{row})
+		payload, err := contracts.CanonicalMarshal(row)
+		if err != nil {
+			return err
+		}
+		if len(payload)+1 > internalio.JSONLMaxLineBytes {
+			return internalio.ErrEntryTooLarge
+		}
+		if _, err := buffer.Write(payload); err != nil {
+			return err
+		}
+		if err := buffer.WriteByte('\n'); err != nil {
+			return err
+		}
 	}
-	return nil
+	return internalio.WriteAtomic(path, buffer.Bytes())
 }
 
 func sameCanonicalJSON(left, right any) (bool, error) {
