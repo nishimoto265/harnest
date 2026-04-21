@@ -253,7 +253,7 @@ func previousState(states map[string]RuleState, ruleID string) (RuleState, bool,
 func applyRollback(states map[string]RuleState, history map[string][]promotionSnapshot, targetOpID string, targetOffset int64, targetSha256 string) error {
 	targets, ok := history[targetOpID]
 	if !ok {
-		return nil
+		return fmt.Errorf("registryview: rollback target op_id not found: op_id=%s", targetOpID)
 	}
 	matchedTarget := false
 	for i := len(targets) - 1; i >= 0; i-- {

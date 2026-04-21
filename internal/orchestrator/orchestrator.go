@@ -62,6 +62,8 @@ type Orchestrator struct {
 	stateWriter state.Writer
 	decoders    ContractDecoders
 	steps       Steps
+	runMu       sync.Mutex
+	running     bool
 }
 
 type StepRunContext struct {
@@ -81,6 +83,9 @@ type StepRunContext struct {
 
 var errStopPipeline = errors.New("orchestrator: stop pipeline")
 var errNoScorableAgentsResume = errors.New("orchestrator: resume selected step30 but pass1 has no scorable agents")
+var errConcurrentRun = errors.New("orchestrator: concurrent Run() on the same instance is not allowed")
+
+var beforeFreshRunGateHook = func(*StepRunContext) error { return nil }
 
 type GlobalNeedsRecoveryError struct {
 	Sentinel contracts.NeedsRecoverySentinel
@@ -166,6 +171,11 @@ func NewOrchestrator(cfg *config.Config) (*Orchestrator, error) {
 }
 
 func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
+	if err := o.enterRun(); err != nil {
+		return err
+	}
+	defer o.leaveRun()
+
 	if pr <= 0 {
 		return fmt.Errorf("orchestrator: pr must be > 0: pr=%d", pr)
 	}
@@ -197,13 +207,18 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 		IntentionFile: NewIntentionStore(selection.runContext),
 	}
 
+	if selection.fresh {
+		if err := beforeFreshRunGateHook(run); err != nil {
+			return err
+		}
+		if err := o.ensureNoGlobalSentinel(run.IO); err != nil {
+			return err
+		}
+	}
 	if err := o.ensureRunScaffold(run); err != nil {
 		return err
 	}
 	if selection.fresh {
-		if err := o.ensureNoGlobalSentinel(run.IO); err != nil {
-			return err
-		}
 		if err := o.appendState(startedEntry(pr, selection.runContext.RunID, time.Now().UTC())); err != nil {
 			return err
 		}
@@ -317,6 +332,18 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 				}
 				return err
 			}
+			if err := ctx.Err(); err != nil {
+				terminal, terminalErr := hasTerminalEvent(run.IO, run.IO.RunID)
+				if terminalErr != nil {
+					return terminalErr
+				}
+				if !terminal {
+					if appendErr := o.appendInterrupted(run.PR, run.IO.RunID, contracts.FailedStep70, interruptedReasonFromContext(err), err.Error()); appendErr != nil {
+						return appendErr
+					}
+				}
+				return nil
+			}
 			terminal, err := hasTerminalEvent(run.IO, run.IO.RunID)
 			if err != nil {
 				return err
@@ -347,6 +374,22 @@ func (o *Orchestrator) appendState(entry contracts.StateEntry) error {
 		return errors.New("orchestrator: state writer is not initialized")
 	}
 	return o.stateWriter.Append(entry)
+}
+
+func (o *Orchestrator) enterRun() error {
+	o.runMu.Lock()
+	defer o.runMu.Unlock()
+	if o.running {
+		return errConcurrentRun
+	}
+	o.running = true
+	return nil
+}
+
+func (o *Orchestrator) leaveRun() {
+	o.runMu.Lock()
+	defer o.runMu.Unlock()
+	o.running = false
 }
 
 func (o *Orchestrator) selectRun(pr int, opts RunOptions) (runSelection, error) {
@@ -427,6 +470,9 @@ func loadRunContext(runID contracts.RunID, runsBase, worktreeBase string) (inter
 	}
 	taskPackagePath := runCtx.TaskPackagePath()
 	if !fileExists(taskPackagePath) {
+		if err := validatePersistedRunScopedArtifacts(runCtx); err != nil {
+			return internalio.RunContext{}, err
+		}
 		return runCtx, nil
 	}
 	pkg, err := internalio.ReadJSON[contracts.TaskPackage](taskPackagePath)
@@ -436,7 +482,14 @@ func loadRunContext(runID contracts.RunID, runsBase, worktreeBase string) (inter
 	if pkg.RunID != runID {
 		return internalio.RunContext{}, fmt.Errorf("orchestrator: task package run_id mismatch: selected=%s package=%s", runID, pkg.RunID)
 	}
-	return internalio.RunContextFromTaskPackage(pkg, runsBase, worktreeBase)
+	runCtx, err = internalio.RunContextFromTaskPackage(pkg, runsBase, worktreeBase)
+	if err != nil {
+		return internalio.RunContext{}, err
+	}
+	if err := validatePersistedRunScopedArtifacts(runCtx); err != nil {
+		return internalio.RunContext{}, err
+	}
+	return runCtx, nil
 }
 
 func (o *Orchestrator) ensureRunScaffold(run *StepRunContext) error {
@@ -470,7 +523,7 @@ func (o *Orchestrator) loadPersistedArtifacts(run *StepRunContext) error {
 		return err
 	}
 	if run.Candidates == nil && fileExists(candidatesPath) {
-		candidates, err := internalio.ReadJSON[contracts.Candidates](candidatesPath)
+		candidates, err := readCandidatesForRun(candidatesPath, run.IO.RunID)
 		if err != nil {
 			return err
 		}
@@ -482,7 +535,7 @@ func (o *Orchestrator) loadPersistedArtifacts(run *StepRunContext) error {
 		return err
 	}
 	if run.Decision == nil && fileExists(decisionPath) {
-		decision, err := internalio.ReadJSON[contracts.Decision](decisionPath)
+		decision, err := readDecisionForRun(decisionPath, run.IO.RunID)
 		if err != nil {
 			return err
 		}
@@ -496,6 +549,18 @@ func (o *Orchestrator) loadPersistedArtifacts(run *StepRunContext) error {
 		}
 		run.Intention = intention
 		if intention != nil && intention.Stage == contracts.IntentionStageNeedsManualRecovery {
+			suppress, err := shouldSuppressNeedsRecoveryReconstruction(run.IO.RunsBase, run.IO.RunID)
+			if err != nil {
+				return err
+			}
+			if suppress {
+				return nil
+			}
+			if _, exists, err := existingNeedsRecoverySentinelPath(run.IO.RunsBase, run.IO.RunID); err != nil {
+				return err
+			} else if exists {
+				return nil
+			}
 			if err := ensureNeedsRecoverySentinel(run.IO, run.PR, run.IO.RunID, intention.RecoveryReason, intention.FailedStep); err != nil {
 				return err
 			}
@@ -914,6 +979,17 @@ func stepDoneEntry(pr int, runID contracts.RunID, step contracts.FailedStep, at 
 	return contracts.StateEntry{Kind: contracts.StateKindStepDone, Value: value}
 }
 
+func interruptedReasonFromContext(err error) contracts.InterruptedReason {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return contracts.InterruptedReasonContext
+	case errors.Is(err, context.Canceled):
+		return contracts.InterruptedReasonSignal
+	default:
+		return contracts.InterruptedReasonUnknown
+	}
+}
+
 func completedEntry(pr int, runID contracts.RunID, step contracts.FailedStep, at time.Time) contracts.StateEntry {
 	value := contracts.StateEntryCompleted{
 		Kind:  contracts.StateKindCompleted,
@@ -1201,6 +1277,18 @@ func ensureNeedsRecoverySentinelFromState(runCtx internalio.RunContext, entry *c
 	if entry == nil {
 		return nil
 	}
+	suppress, err := shouldSuppressNeedsRecoveryReconstruction(runCtx.RunsBase, runCtx.RunID)
+	if err != nil {
+		return err
+	}
+	if suppress {
+		return nil
+	}
+	if _, exists, err := existingNeedsRecoverySentinelPath(runCtx.RunsBase, runCtx.RunID); err != nil {
+		return err
+	} else if exists {
+		return nil
+	}
 	switch value := entry.Value.(type) {
 	case contracts.StateEntryNeedsManualRecovery:
 		if value.Step != contracts.FailedStep70 || value.Reason == contracts.RollbackReasonWorktreeRescueLoop {
@@ -1270,7 +1358,7 @@ func firstNeedsRecoverySentinel(runsBase string) (contracts.NeedsRecoverySentine
 			continue
 		}
 		name := entry.Name()
-		if strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".aborted.json") {
+		if contracts.IsNeedsRecoverySentinelFilename(name) {
 			names = append(names, name)
 		}
 	}
@@ -1319,14 +1407,20 @@ func ensureNeedsRecoverySentinelFromLatestRun(runsBase string, latest state.Late
 	default:
 		return contracts.NeedsRecoverySentinel{}, false, nil
 	}
+	suppress, err := shouldSuppressNeedsRecoveryReconstruction(runsBase, sentinel.RunID)
+	if err != nil {
+		return contracts.NeedsRecoverySentinel{}, false, err
+	}
+	if suppress {
+		return contracts.NeedsRecoverySentinel{}, false, nil
+	}
 	if err := sentinel.Validate(); err != nil {
 		return contracts.NeedsRecoverySentinel{}, false, err
 	}
-	path := filepath.Join(runsBase, "needs-recovery", string(sentinel.RunID)+".json")
-	if _, err := os.Stat(path); err != nil {
-		if !os.IsNotExist(err) {
-			return contracts.NeedsRecoverySentinel{}, false, err
-		}
+	if _, exists, err := existingNeedsRecoverySentinelPath(runsBase, sentinel.RunID); err != nil {
+		return contracts.NeedsRecoverySentinel{}, false, err
+	} else if !exists {
+		path := needsRecoverySentinelPath(runsBase, sentinel.RunID)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return contracts.NeedsRecoverySentinel{}, false, err
 		}
@@ -1351,7 +1445,140 @@ func hasTerminalEvent(runCtx internalio.RunContext, runID contracts.RunID) (bool
 }
 
 func sentinelRunIDFromFilename(name string) contracts.RunID {
-	name = strings.TrimSuffix(name, ".aborted.json")
-	name = strings.TrimSuffix(name, ".json")
-	return contracts.RunID(name)
+	return contracts.SentinelRunIDFromFilename(name)
+}
+
+func validatePersistedRunScopedArtifacts(runCtx internalio.RunContext) error {
+	candidatesPath, err := runCtx.ResolveRunRelative("40/candidates.json")
+	if err != nil {
+		return err
+	}
+	if fileExists(candidatesPath) {
+		if _, err := readCandidatesForRun(candidatesPath, runCtx.RunID); err != nil {
+			return err
+		}
+	}
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	if err != nil {
+		return err
+	}
+	if fileExists(decisionPath) {
+		if _, err := readDecisionForRun(decisionPath, runCtx.RunID); err != nil {
+			return err
+		}
+	}
+	intentionPath, err := runCtx.ResolveRunRelative("70/intention.json")
+	if err != nil {
+		return err
+	}
+	if fileExists(intentionPath) {
+		if _, err := readIntentionRecordForRun(intentionPath, runCtx.RunID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readCandidatesForRun(path string, runID contracts.RunID) (contracts.Candidates, error) {
+	candidates, err := internalio.ReadJSON[contracts.Candidates](path)
+	if err != nil {
+		return contracts.Candidates{}, err
+	}
+	if candidates.RunID != runID {
+		return contracts.Candidates{}, fmt.Errorf("orchestrator: candidates run_id mismatch: expected=%s got=%s", runID, candidates.RunID)
+	}
+	return candidates, nil
+}
+
+func readDecisionForRun(path string, runID contracts.RunID) (contracts.Decision, error) {
+	decision, err := internalio.ReadJSON[contracts.Decision](path)
+	if err != nil {
+		return contracts.Decision{}, err
+	}
+	if decisionRunID, ok := decisionRunID(decision); ok && decisionRunID != runID {
+		return contracts.Decision{}, fmt.Errorf("orchestrator: decision run_id mismatch: expected=%s got=%s", runID, decisionRunID)
+	}
+	return decision, nil
+}
+
+func readIntentionRecordForRun(path string, runID contracts.RunID) (contracts.IntentionRecord, error) {
+	record, err := internalio.ReadJSON[contracts.IntentionRecord](path)
+	if err != nil {
+		return contracts.IntentionRecord{}, err
+	}
+	if record.RunID != runID {
+		return contracts.IntentionRecord{}, fmt.Errorf("orchestrator: intention run_id mismatch: expected=%s got=%s", runID, record.RunID)
+	}
+	return record, nil
+}
+
+func decisionRunID(decision contracts.Decision) (contracts.RunID, bool) {
+	switch value := decision.Value.(type) {
+	case contracts.DecisionAdopt:
+		return value.RunID, true
+	case *contracts.DecisionAdopt:
+		if value != nil {
+			return value.RunID, true
+		}
+	case contracts.DecisionRollback:
+		return value.RunID, true
+	case *contracts.DecisionRollback:
+		if value != nil {
+			return value.RunID, true
+		}
+	case contracts.DecisionNoop:
+		return value.RunID, true
+	case *contracts.DecisionNoop:
+		if value != nil {
+			return value.RunID, true
+		}
+	case contracts.DecisionReject:
+		return value.RunID, true
+	case *contracts.DecisionReject:
+		if value != nil {
+			return value.RunID, true
+		}
+	}
+	return "", false
+}
+
+func needsRecoverySentinelPath(runsBase string, runID contracts.RunID) string {
+	return filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelFilename(runID))
+}
+
+func needsRecoverySentinelAbortedPath(runsBase string, runID contracts.RunID) string {
+	return filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelAbortedFilename(runID))
+}
+
+func needsRecoverySentinelClearedPath(runsBase string, runID contracts.RunID) string {
+	return filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelClearedFilename(runID))
+}
+
+func existingNeedsRecoverySentinelPath(runsBase string, runID contracts.RunID) (string, bool, error) {
+	for _, path := range []string{
+		needsRecoverySentinelPath(runsBase, runID),
+		needsRecoverySentinelAbortedPath(runsBase, runID),
+	} {
+		if _, err := os.Stat(path); err == nil {
+			return path, true, nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", false, err
+		}
+	}
+	return "", false, nil
+}
+
+func shouldSuppressNeedsRecoveryReconstruction(runsBase string, runID contracts.RunID) (bool, error) {
+	_, exists, err := existingNeedsRecoveryClearedMarker(runsBase, runID)
+	return exists, err
+}
+
+func existingNeedsRecoveryClearedMarker(runsBase string, runID contracts.RunID) (string, bool, error) {
+	path := needsRecoverySentinelClearedPath(runsBase, runID)
+	if _, err := os.Stat(path); err == nil {
+		return path, true, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", false, err
+	}
+	return "", false, nil
 }

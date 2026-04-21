@@ -165,6 +165,19 @@ func TestRun_SunsetMarkerBlocksExecution(t *testing.T) {
 	assert.NoFileExists(t, decisionPath)
 }
 
+func TestRun_DivergedSunsetMarkerDoesNotBlockExecution(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR304")
+	require.NoError(t, os.WriteFile(filepath.Join(runCtx.RunsBase, sunsetMarkerFile+".diverged"), []byte("{}"), 0o644))
+
+	err := Run(context.Background(), 304, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.BestShaBefore},
+		Resolver: resolver,
+		Now:      fixedNow(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, contracts.DecisionActionAdopt, readDecision(t, runCtx).Action)
+}
+
 func TestNextRegistryVersionForRule_IsChainScoped(t *testing.T) {
 	lines := []registryLine{
 		{
@@ -600,6 +613,44 @@ func TestRun_ResumeFromPersistedDecisionRepublishesMissingRuleBodies(t *testing.
 	assert.FileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-a.md"))
 	assert.FileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-b.md"))
 	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
+func TestRun_RulePublishConflictTransitionsToManualRecovery(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR412")
+	resolver.target.RulesToAppend = []contracts.RuleRegistryEntry{
+		adoptAddedEntryWithBody(runCtx.RunID, "rule-conflict", "new body\n"),
+	}
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageRegistryAppended
+	entries, err := registryEntriesFromPlannedAdoption(intention, fixedNow()())
+	require.NoError(t, err)
+	entry, err := deriveRegistryChain(entries[0], runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	appendResult, err := internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), entry)
+	require.NoError(t, err)
+	intention.RegistryAppendResult = &appendResult
+	require.NoError(t, store.Save(intention))
+
+	require.NoError(t, internalio.WriteAtomic(mustStagedRulePath(t, runCtx, "rules/rule-conflict.md"), []byte("new body\n")))
+	require.NoError(t, internalio.WriteAtomic(filepath.Join(runCtx.RunsBase, "rules", "rule-conflict.md"), []byte("old body\n")))
+
+	err = Run(context.Background(), 412, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.TargetSHA},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	})
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+
+	decisionPath, decisionErr := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, decisionErr)
+	assert.NoFileExists(t, decisionPath)
+
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
+	assert.Equal(t, "rule_publish_conflict", recovery.Detail)
 }
 
 func TestRun_ResumeFromDecisionWritten(t *testing.T) {
@@ -1041,6 +1092,63 @@ func TestRun_PlanningRecoveryPrePushCrash_RegistryAdvancedRestartsFresh(t *testi
 	assert.Equal(t, contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), secondTarget.TargetSHA, secondTarget.BestShaBefore, candidates.CandidatesHash), adopt.IdempotencyKey)
 	assert.NotEqual(t, intention.IdempotencyKey, adopt.IdempotencyKey)
 	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
+func TestRun_PlanningResumeRefreshesOnCandidatesHashMismatch(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR130")
+	candidates.Candidates = []contracts.Candidate{
+		{
+			CandidateID:        "cand-1",
+			Kind:               contracts.CandidateKindNew,
+			Title:              "candidate title",
+			Problem:            "problem",
+			Rationale:          "rationale",
+			ProposedBodyPath:   "40/candidates/cand-1.md",
+			ProposedBodySha256: strings.Repeat("a", 64),
+		},
+	}
+	candidates.CandidatesHash = contracts.CanonicalCandidatesHash(candidates.Candidates)
+	require.NoError(t, candidates.Validate())
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	require.NoError(t, store.Save(intention))
+
+	candidates.Candidates[0].Title = "candidate title changed"
+	candidates.CandidatesHash = contracts.CanonicalCandidatesHash(candidates.Candidates)
+	require.NoError(t, candidates.Validate())
+
+	require.NoError(t, Run(context.Background(), 130, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.BestShaBefore},
+		Resolver: resolver,
+		Now:      fixedNow(),
+	}))
+
+	decision := mustDecisionAdopt(t, readDecision(t, runCtx))
+	assert.Equal(t, candidates.CandidatesHash, decision.CandidatesHash)
+	assert.Contains(t, readStateKinds(t, runCtx), contracts.StateKindInterrupted)
+}
+
+func TestPromoteRuleSidecarAndCleanup_FsyncParentDirsAfterDeletion(t *testing.T) {
+	runCtx, _, _, _, _ := newFixtureWithResolver(t, "PR413")
+	originalSync := syncStagingParentDir
+	var calls []string
+	syncStagingParentDir = func(path string) error {
+		calls = append(calls, filepath.Clean(path))
+		return nil
+	}
+	t.Cleanup(func() {
+		syncStagingParentDir = originalSync
+	})
+
+	stagedPath := mustStagedRulePath(t, runCtx, "rules/rule-a.md")
+	require.NoError(t, internalio.WriteAtomic(stagedPath, []byte("rule-a body\n")))
+	require.NoError(t, promoteRuleSidecar(stagedPath, filepath.Join(runCtx.RunsBase, "rules", "rule-a.md"), sha256String("rule-a body\n")))
+
+	require.NoError(t, internalio.WriteAtomic(mustStagedRulePath(t, runCtx, "rules/rule-b.md"), []byte("rule-b body\n")))
+	require.NoError(t, cleanupStagedRuleSidecars(runCtx))
+
+	assert.Contains(t, calls, filepath.Clean(filepath.Dir(stagedPath)))
+	assert.Contains(t, calls, filepath.Clean(runCtx.RunDir()))
 }
 
 func TestFindRegistryByIdempotencyKey_RebuildsMandatoryIndexBeforeLookup(t *testing.T) {
@@ -1922,6 +2030,16 @@ func readStateEvents(t *testing.T, runCtx internalio.RunContext) []contracts.Sta
 	return events
 }
 
+func readStateKinds(t *testing.T, runCtx internalio.RunContext) []contracts.StateKind {
+	t.Helper()
+	events := readStateEvents(t, runCtx)
+	kinds := make([]contracts.StateKind, 0, len(events))
+	for _, event := range events {
+		kinds = append(kinds, event.Kind)
+	}
+	return kinds
+}
+
 func mustDecisionAdopt(t *testing.T, decision contracts.Decision) contracts.DecisionAdopt {
 	t.Helper()
 	switch v := decision.Value.(type) {
@@ -1933,6 +2051,20 @@ func mustDecisionAdopt(t *testing.T, decision contracts.Decision) contracts.Deci
 	default:
 		t.Fatalf("expected adopt decision, got action=%s type=%T", decision.Action, decision.Value)
 		return contracts.DecisionAdopt{}
+	}
+}
+
+func mustNeedsManualRecoveryEvent(t *testing.T, entry contracts.StateEntry) contracts.StateEntryNeedsManualRecovery {
+	t.Helper()
+	switch v := entry.Value.(type) {
+	case contracts.StateEntryNeedsManualRecovery:
+		return v
+	case *contracts.StateEntryNeedsManualRecovery:
+		require.NotNil(t, v)
+		return *v
+	default:
+		t.Fatalf("expected needs_manual_recovery event, got kind=%s type=%T", entry.Kind, entry.Value)
+		return contracts.StateEntryNeedsManualRecovery{}
 	}
 }
 

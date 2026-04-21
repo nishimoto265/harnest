@@ -84,7 +84,7 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 	}
 	tracker := agentrunner.StartDescendantTracker(lease.PID, 25*time.Millisecond)
 	if tracker != nil {
-		tracker.CaptureBurst(100 * time.Millisecond)
+		tracker.CaptureBurst(250 * time.Millisecond)
 	}
 	result.Lease = lease
 	if req.OnStart != nil {

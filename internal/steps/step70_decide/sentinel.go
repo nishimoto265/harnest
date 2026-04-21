@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -42,11 +41,11 @@ func sentinelExistsExceptRun(runsBase string, ignoreRunID contracts.RunID) (bool
 			}
 			name := entry.Name()
 			if ignoreRunID != "" {
-				if name == string(ignoreRunID)+".json" || name == string(ignoreRunID)+".aborted.json" {
+				if name == contracts.NeedsRecoverySentinelFilename(ignoreRunID) || name == contracts.NeedsRecoverySentinelAbortedFilename(ignoreRunID) {
 					continue
 				}
 			}
-			if strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".aborted.json") {
+			if contracts.IsNeedsRecoverySentinelFilename(name) {
 				return true, nil
 			}
 		}
@@ -88,8 +87,9 @@ func FinalizeCleanup(runCtx internalio.RunContext, store IntentionWriter) error 
 		}
 	}
 	for _, path := range []string{
-		filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"),
-		filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".aborted.json"),
+		filepath.Join(runCtx.RunsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelFilename(runCtx.RunID)),
+		filepath.Join(runCtx.RunsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelAbortedFilename(runCtx.RunID)),
+		filepath.Join(runCtx.RunsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelClearedFilename(runCtx.RunID)),
 	} {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err

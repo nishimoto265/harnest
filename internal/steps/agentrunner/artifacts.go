@@ -92,16 +92,18 @@ func WriteSuccessDiff(ctx context.Context, worktreePath, baseSHA, errPrefix, des
 			return closeWithErr(err)
 		}
 		collectPath := filepath.Join(worktreePath, filepath.FromSlash(entry))
-		diffable, err := diffableArtifactSource(collectPath)
+		snapshotRoot, diffable, err := snapshotDiffableArtifact(ctx, collectPath, filepath.Dir(destPath), entry)
 		if err != nil {
 			return closeWithErr(err)
 		}
 		if !diffable {
 			continue
 		}
-		if err := streamGitNoIndexDiffContext(ctx, worktreePath, entry, errPrefix, writer); err != nil {
+		if err := streamGitNoIndexDiffContext(ctx, snapshotRoot, entry, errPrefix, writer); err != nil {
+			_ = os.RemoveAll(snapshotRoot)
 			return closeWithErr(err)
 		}
+		_ = os.RemoveAll(snapshotRoot)
 		if writer.truncated {
 			return closeWithErr(fmt.Errorf("%w: worktree=%s entry=%s", ErrSuccessDiffOverflow, worktreePath, entry))
 		}
@@ -266,46 +268,34 @@ func (w *cappedDiffWriter) Write(p []byte) (int, error) {
 }
 
 func ensureArtifactSourceRegular(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%w: %s", ErrArtifactNotRegular, path)
-	}
-	if info.Mode().IsRegular() {
-		return nil
-	}
-	return fmt.Errorf("%w: %s", ErrArtifactNotRegular, path)
+	_, _, _, err := validatedRegularFileIdentity(path)
+	return err
 }
 
 func diffableArtifactSource(path string) (bool, error) {
-	info, err := os.Lstat(path)
+	file, _, _, err := OpenValidatedRegularFile(path)
 	if err != nil {
+		if errors.Is(err, ErrArtifactNotRegular) {
+			return false, nil
+		}
 		return false, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return false, nil
-	}
-	return info.Mode().IsRegular(), nil
+	_ = file.Close()
+	return true, nil
 }
 
 func loadChecklistArtifactFileContext(ctx context.Context, path string) (contracts.ChecklistResult, error) {
 	if err := artifactCollectionDeadline(ctx); err != nil {
 		return contracts.ChecklistResult{}, err
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return contracts.ChecklistResult{}, err
-	}
-	if info.Size() > maxChecklistArtifactBytes {
-		return contracts.ChecklistResult{}, fmt.Errorf("%w: path=%s size=%d limit=%d", ErrArtifactTooLarge, path, info.Size(), maxChecklistArtifactBytes)
-	}
-	file, err := os.Open(path)
+	file, _, size, err := OpenValidatedRegularFile(path)
 	if err != nil {
 		return contracts.ChecklistResult{}, err
 	}
 	defer file.Close()
+	if size > maxChecklistArtifactBytes {
+		return contracts.ChecklistResult{}, fmt.Errorf("%w: path=%s size=%d limit=%d", ErrArtifactTooLarge, path, size, maxChecklistArtifactBytes)
+	}
 
 	data, err := io.ReadAll(io.LimitReader(&contextReader{ctx: ctx, reader: file}, maxChecklistArtifactBytes+1))
 	if err != nil {
@@ -320,6 +310,44 @@ func loadChecklistArtifactFileContext(ctx context.Context, path string) (contrac
 		return contracts.ChecklistResult{}, err
 	}
 	return checklist, nil
+}
+
+func snapshotDiffableArtifact(ctx context.Context, sourcePath, tempDir, relativePath string) (string, bool, error) {
+	file, _, _, err := OpenValidatedRegularFile(sourcePath)
+	if err != nil {
+		if errors.Is(err, ErrArtifactNotRegular) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	defer file.Close()
+
+	snapshotRoot, err := os.MkdirTemp(tempDir, "success-diff-snapshot-*")
+	if err != nil {
+		return "", false, err
+	}
+	snapshotPath := filepath.Join(snapshotRoot, filepath.FromSlash(relativePath))
+	if err := os.MkdirAll(filepath.Dir(snapshotPath), 0o755); err != nil {
+		_ = os.RemoveAll(snapshotRoot)
+		return "", false, err
+	}
+	tempFile, err := os.Create(snapshotPath)
+	if err != nil {
+		_ = os.RemoveAll(snapshotRoot)
+		return "", false, err
+	}
+	cleanup := func(err error) (string, bool, error) {
+		_ = tempFile.Close()
+		_ = os.RemoveAll(snapshotRoot)
+		return "", false, err
+	}
+	if _, err := io.Copy(tempFile, &contextReader{ctx: ctx, reader: file}); err != nil {
+		return cleanup(err)
+	}
+	if err := tempFile.Close(); err != nil {
+		return cleanup(err)
+	}
+	return snapshotRoot, true, nil
 }
 
 type contextReader struct {

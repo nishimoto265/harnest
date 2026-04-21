@@ -749,6 +749,48 @@ func TestLoadRunContext_RejectsTaskPackageRunIDMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "task package run_id mismatch")
 }
 
+func TestLoadRunContext_RejectsCandidatesRunIDMismatch(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR84-abcdef0", runsBase, worktreeBase)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
+
+	pkg := stubTaskPackageForRun(runCtx, 84)
+	require.NoError(t, internalio.WriteJSONAtomic(runCtx.TaskPackagePath(), pkg))
+
+	candidatesPath, err := runCtx.ResolveRunRelative("40/candidates.json")
+	require.NoError(t, err)
+	candidates := forcedCandidate("2026-04-21-PR85-badcafe")
+	require.NoError(t, internalio.WriteJSONAtomic(candidatesPath, candidates))
+
+	_, err = loadRunContext(runCtx.RunID, runsBase, worktreeBase)
+	require.ErrorContains(t, err, "candidates run_id mismatch")
+}
+
+func TestLoadRunContext_RejectsIntentionRunIDMismatch(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR86-abcdef0", runsBase, worktreeBase)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
+
+	pkg := stubTaskPackageForRun(runCtx, 86)
+	require.NoError(t, internalio.WriteJSONAtomic(runCtx.TaskPackagePath(), pkg))
+
+	store := NewIntentionStore(runCtx)
+	intention := validPlanningIntention("2026-04-21-PR87-badcafe")
+	intention.RunID = "2026-04-21-PR87-badcafe"
+	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runCtx.RunDir(), "70", "intention.json"), intention))
+
+	_, err = loadRunContext(runCtx.RunID, runsBase, worktreeBase)
+	require.ErrorContains(t, err, "intention run_id mismatch")
+
+	loaded, loadErr := store.Load()
+	require.ErrorContains(t, loadErr, "run_id mismatch")
+	assert.Nil(t, loaded)
+}
+
 func TestFirstNeedsRecoverySentinel_MalformedJSONMaintainsBlockedState(t *testing.T) {
 	runsBase := t.TempDir()
 	path := filepath.Join(runsBase, "needs-recovery", "2026-04-21-PR99-deadbee.json")
@@ -785,6 +827,143 @@ func TestFirstNeedsRecoverySentinel_RecreatesMissingSentinelFromProcessedState(t
 	assert.True(t, blocked)
 	assert.Equal(t, runCtx.RunID, sentinel.RunID)
 	assert.FileExists(t, filepath.Join(runsBase, "needs-recovery", string(runCtx.RunID)+".json"))
+}
+
+func TestRun_ClearedNeedsRecoveryMarkerSuppressesSentinelRehydration(t *testing.T) {
+	cfg := testConfig(t)
+	blockedRunID := contracts.RunID("2026-04-21-PR100-deadbee")
+	blockedRunCtx, err := internalio.NewRunContext(blockedRunID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, state.Append(blockedRunCtx, contracts.StateEntry{
+		Kind: contracts.StateKindNeedsManualRecovery,
+		Value: contracts.StateEntryNeedsManualRecovery{
+			Kind:       contracts.StateKindNeedsManualRecovery,
+			PR:         100,
+			RunID:      blockedRunID,
+			Step:       contracts.FailedStep70,
+			Reason:     contracts.RollbackReasonTransactionalFailure,
+			FailedStep: contracts.FailedStep70,
+			At:         time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}))
+	require.NoError(t, internalio.WriteAtomic(
+		needsRecoverySentinelClearedPath(cfg.Paths.Runs, blockedRunID),
+		[]byte(fmt.Sprintf("{\"run_id\":%q,\"state\":\"cleared\"}\n", blockedRunID)),
+	))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps = stubPipelineSteps(nil, nil)
+	runID := contracts.RunID("2026-04-21-PR101-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 101, RunOptions{RunID: runID}))
+	assert.NoFileExists(t, needsRecoverySentinelPath(cfg.Paths.Runs, blockedRunID))
+}
+
+func TestFirstNeedsRecoverySentinel_PreservesAbortedSentinelDuringRehydration(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR102-deadbee", runsBase, worktreeBase)
+	require.NoError(t, err)
+	sentinel := contracts.NeedsRecoverySentinel{
+		RunID:      runCtx.RunID,
+		PR:         102,
+		Reason:     contracts.RollbackReasonTransactionalFailure,
+		FailedStep: contracts.FailedStep70,
+		CreatedAt:  time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+	}
+	require.NoError(t, internalio.WriteJSONAtomic(needsRecoverySentinelAbortedPath(runsBase, runCtx.RunID), sentinel))
+	require.NoError(t, state.Append(runCtx, contracts.StateEntry{
+		Kind: contracts.StateKindNeedsManualRecovery,
+		Value: contracts.StateEntryNeedsManualRecovery{
+			Kind:       contracts.StateKindNeedsManualRecovery,
+			PR:         102,
+			RunID:      runCtx.RunID,
+			Step:       contracts.FailedStep70,
+			Reason:     contracts.RollbackReasonTransactionalFailure,
+			FailedStep: contracts.FailedStep70,
+			At:         sentinel.CreatedAt,
+		},
+	}))
+
+	got, blocked, err := firstNeedsRecoverySentinel(runsBase)
+	require.NoError(t, err)
+	assert.True(t, blocked)
+	assert.Equal(t, runCtx.RunID, got.RunID)
+	assert.FileExists(t, needsRecoverySentinelAbortedPath(runsBase, runCtx.RunID))
+	assert.NoFileExists(t, needsRecoverySentinelPath(runsBase, runCtx.RunID))
+}
+
+func TestRun_CanceledAfterStep70NoopAppendsInterruptedInsteadOfCompleted(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	cancelStep := &cancelAfterNoopStep{}
+	orch.steps = stubPipelineSteps(nil, cancelStep)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelStep.cancel = cancel
+
+	runID := contracts.RunID("2026-04-21-PR103-abcdef0")
+	require.NoError(t, orch.Run(ctx, 103, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindInterrupted, events[len(events)-1].Kind)
+	assert.NotContains(t, eventKinds(events), contracts.StateKindCompleted)
+}
+
+func TestRun_FreshSecondSentinelGatePreventsScaffoldWrites(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	originalHook := beforeFreshRunGateHook
+	beforeFreshRunGateHook = func(run *StepRunContext) error {
+		blockedRunCtx, err := internalio.NewRunContext("2026-04-21-PR104-abcdef0", run.IO.RunsBase, run.IO.WorktreeBase)
+		if err != nil {
+			return err
+		}
+		return ensureNeedsRecoverySentinel(blockedRunCtx, 104, blockedRunCtx.RunID, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70)
+	}
+	t.Cleanup(func() {
+		beforeFreshRunGateHook = originalHook
+	})
+
+	runID := contracts.RunID("2026-04-21-PR105-abcdef0")
+	err = orch.Run(context.Background(), 105, RunOptions{RunID: runID})
+	var blockedErr *GlobalNeedsRecoveryError
+	require.ErrorAs(t, err, &blockedErr)
+
+	runCtx, ctxErr := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, ctxErr)
+	_, statErr := os.Stat(runCtx.RunDir())
+	require.Error(t, statErr)
+	assert.True(t, os.IsNotExist(statErr))
+	assert.NoFileExists(t, filepath.Join(runCtx.RunDir(), "config.snapshot.yaml"))
+}
+
+func TestRun_RejectsConcurrentUseOnSameInstance(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	blocker := newBlockingStartStep()
+	orch.steps = stubPipelineSteps(blocker, nil)
+
+	firstErrCh := make(chan error, 1)
+	go func() {
+		firstErrCh <- orch.Run(context.Background(), 106, RunOptions{RunID: "2026-04-21-PR106-abcdef0"})
+	}()
+
+	<-blocker.started
+	err = orch.Run(context.Background(), 107, RunOptions{RunID: "2026-04-21-PR107-abcdef0"})
+	require.ErrorIs(t, err, errConcurrentRun)
+
+	close(blocker.release)
+	require.NoError(t, <-firstErrCh)
 }
 
 func TestRun_ResumeFromBranchPushed_EndToEnd(t *testing.T) {
@@ -945,6 +1124,68 @@ func TestRealArchiveStep_NoOpLeavesSunsetStateUntouched(t *testing.T) {
 type callRecorder struct {
 	mu    sync.Mutex
 	calls []string
+}
+
+type cancelAfterNoopStep struct {
+	cancel context.CancelFunc
+}
+
+func (s *cancelAfterNoopStep) Run(ctx context.Context, run *StepRunContext) error {
+	if err := (stubStep70{}).Run(ctx, run); err != nil {
+		return err
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
+	return nil
+}
+
+type blockingStartStep struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingStartStep() *blockingStartStep {
+	return &blockingStartStep{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (s *blockingStartStep) Run(ctx context.Context, run *StepRunContext) error {
+	s.once.Do(func() {
+		close(s.started)
+	})
+	<-s.release
+	return stubStep10{}.Run(ctx, run)
+}
+
+func stubPipelineSteps(step10 Step, step70 Step) Steps {
+	if step10 == nil {
+		step10 = stubStep10{}
+	}
+	if step70 == nil {
+		step70 = stubStep70{}
+	}
+	return Steps{
+		Step10: step10,
+		Step20: map[contracts.AgentID]Step{
+			"a1": stubImplementStep{},
+			"a2": stubImplementStep{},
+			"a3": stubImplementStep{},
+		},
+		Step30: stubMarkerStep{path: "30/done.marker"},
+		Step40: duplicateOnlyCandidateStep{},
+		Step50: map[contracts.AgentID]Step{
+			"a1": stubImplementStep{},
+			"a2": stubImplementStep{},
+			"a3": stubImplementStep{},
+		},
+		Step60:  step60Step{},
+		Step70:  step70,
+		Archive: stubArchiveStep{},
+	}
 }
 
 type forcedCandidateStep struct{}

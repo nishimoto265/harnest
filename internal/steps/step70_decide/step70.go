@@ -31,6 +31,9 @@ const registryMandatoryIndexAt = 1800
 
 var appendRegistryEntry = internalio.AppendRegistryEntry
 var promoteRuleSidecarFn = promoteRuleSidecar
+var syncStagingParentDir = syncDir
+
+var errRulePublishConflict = errors.New("step70: canonical rule sidecar conflict")
 
 // TargetResolver is injected by the caller (orchestrator) to derive the
 // promotion target (best candidate head) from candidates + manifests.
@@ -264,6 +267,12 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 		return nil
 	}
 	if err := promoteStagedRuleSidecars(runCtx, &intention); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, errRulePublishConflict) {
+			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, classifyRulePublishFailureDetail(err))
+		}
 		return err
 	}
 	now := deps.Now()
@@ -295,9 +304,17 @@ func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunCon
 	if err := blockOnOtherRunSentinel(runCtx); err != nil {
 		return err
 	}
-	if intention, err := store.Load(); err != nil {
+	intention, err := store.Load()
+	if err != nil {
 		return err
-	} else if err := promoteStagedRuleSidecars(runCtx, intention); err != nil {
+	}
+	if err := promoteStagedRuleSidecars(runCtx, intention); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if intention != nil && errors.Is(err, errRulePublishConflict) {
+			return markManualRecoveryWithDetail(pr, runCtx, *intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, classifyRulePublishFailureDetail(err))
+		}
 		return err
 	}
 	if err := cleanupWorktrees(ctx, runCtx, pkg, deps.Git); err != nil {
@@ -503,6 +520,10 @@ func ensureRollbackBranchState(ctx context.Context, pr int, runCtx internalio.Ru
 }
 
 func markManualRecovery(pr int, runCtx internalio.RunContext, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, reason contracts.RollbackReason) error {
+	return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, reason, "")
+}
+
+func markManualRecoveryWithDetail(pr int, runCtx internalio.RunContext, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, reason contracts.RollbackReason, detail string) error {
 	intention.Stage = contracts.IntentionStageNeedsManualRecovery
 	intention.RecoveryReason = reason
 	intention.FailedStep = contracts.FailedStep70
@@ -512,8 +533,8 @@ func markManualRecovery(pr int, runCtx internalio.RunContext, intention contract
 	if err := writeSentinel(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, deps.Now()); err != nil {
 		return err
 	}
-	if err := appendStateOnce(runCtx, writer, contracts.StateKindNeedsManualRecovery, needsManualRecoveryEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, deps.Now())); err != nil {
-		return ErrNeedsManualRecovery
+	if err := appendStateOnce(runCtx, writer, contracts.StateKindNeedsManualRecovery, needsManualRecoveryEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, detail, deps.Now())); err != nil {
+		return err
 	}
 	return ErrNeedsManualRecovery
 }
@@ -997,12 +1018,12 @@ func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
 		}
 		sum := sha256.Sum256(data)
 		if hex.EncodeToString(sum[:]) == wantSHA {
-			if err := os.Remove(stagedPath); err != nil && !os.IsNotExist(err) {
+			if err := removePathAndSyncParent(stagedPath); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 			return nil
 		}
-		return fmt.Errorf("step70: canonical rule sidecar sha mismatch: path=%s", dstPath)
+		return fmt.Errorf("%w: path=%s", errRulePublishConflict, dstPath)
 	} else if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -1021,7 +1042,7 @@ func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
 	if err := internalio.WriteAtomic(dstPath, data); err != nil {
 		return err
 	}
-	if err := os.Remove(stagedPath); err != nil && !os.IsNotExist(err) {
+	if err := removePathAndSyncParent(stagedPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
@@ -1032,10 +1053,7 @@ func cleanupStagedRuleSidecars(runCtx internalio.RunContext) error {
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(stagingDir); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return removeAllAndSyncParent(stagingDir)
 }
 
 func nextRegistryVersionForRule(lines []registryLine, _ string) int64 {
@@ -1143,8 +1161,11 @@ func matchesIdempotency(line registryLine, key string) (bool, int64, string) {
 	return false, 0, ""
 }
 
-func planningResumeNeedsRefresh(intention contracts.IntentionRecord, fresh Target, hasTarget bool) (bool, error) {
+func planningResumeNeedsRefresh(intention contracts.IntentionRecord, currentCandidatesHash string, fresh Target, hasTarget bool) (bool, error) {
 	if !hasTarget {
+		return true, nil
+	}
+	if currentCandidatesHash != intention.CandidatesHash {
 		return true, nil
 	}
 	if fresh.TargetSHA != intention.TargetSha {
@@ -1303,7 +1324,7 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 		if err != nil {
 			return err
 		}
-		if restart, err := planningResumeNeedsRefresh(*intention, target, hasTarget); err != nil {
+		if restart, err := planningResumeNeedsRefresh(*intention, candidates.CandidatesHash, target, hasTarget); err != nil {
 			return err
 		} else if restart {
 			if err := cleanupStagedRuleSidecars(runCtx); err != nil {
@@ -1478,7 +1499,7 @@ func rollbackEvent(pr int, runID contracts.RunID, reason contracts.RollbackReaso
 	return contracts.StateEntry{Kind: v.Kind, Value: v}
 }
 
-func needsManualRecoveryEvent(pr int, runID contracts.RunID, reason contracts.RollbackReason, failed contracts.FailedStep, at time.Time) contracts.StateEntry {
+func needsManualRecoveryEvent(pr int, runID contracts.RunID, reason contracts.RollbackReason, failed contracts.FailedStep, detail string, at time.Time) contracts.StateEntry {
 	v := contracts.StateEntryNeedsManualRecovery{
 		Kind:       contracts.StateKindNeedsManualRecovery,
 		PR:         pr,
@@ -1486,9 +1507,47 @@ func needsManualRecoveryEvent(pr int, runID contracts.RunID, reason contracts.Ro
 		Step:       contracts.FailedStep70,
 		Reason:     reason,
 		FailedStep: failed,
+		Detail:     detail,
 		At:         at,
 	}
 	return contracts.StateEntry{Kind: v.Kind, Value: v}
+}
+
+func classifyRulePublishFailureDetail(err error) string {
+	if errors.Is(err, errRulePublishConflict) {
+		return "rule_publish_conflict"
+	}
+	return "rule_publish_failure"
+}
+
+func removePathAndSyncParent(path string) error {
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return syncStagingParentDir(filepath.Dir(path))
+}
+
+func removeAllAndSyncParent(path string) error {
+	if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	parent := filepath.Dir(path)
+	if _, err := os.Stat(parent); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return syncStagingParentDir(parent)
+}
+
+func syncDir(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func appendStateOnce(runCtx internalio.RunContext, writer state.Writer, kind contracts.StateKind, entry contracts.StateEntry) error {

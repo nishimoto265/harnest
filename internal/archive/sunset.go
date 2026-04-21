@@ -22,6 +22,7 @@ import (
 
 const (
 	markerFilename     = "sunset-running.marker"
+	divergedMarkerFile = markerFilename + ".diverged"
 	lastSunsetFilename = "last-sunset-at"
 	defaultGate        = 24 * time.Hour
 	defaultLockTimeout = 30 * time.Second
@@ -138,6 +139,11 @@ func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 	} else if blocked {
 		return Result{}, nil
 	}
+	if diverged, err := divergedMarkerExists(opts.RunsBase); err != nil {
+		return Result{}, err
+	} else if diverged {
+		return Result{}, ErrStaleMarkerDiverged
+	}
 
 	lockPath := filepath.Join(opts.RunsBase, "promotion.lock")
 	var lock *internalio.FileLock
@@ -168,6 +174,11 @@ func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 		return Result{}, err
 	} else if blocked {
 		return Result{}, nil
+	}
+	if diverged, err := divergedMarkerExists(opts.RunsBase); err != nil {
+		return Result{}, err
+	} else if diverged {
+		return Result{}, ErrStaleMarkerDiverged
 	}
 
 	if err := reconcileStaleMarker(ctx, opts); err != nil {
@@ -395,6 +406,9 @@ func reconcileStaleMarker(ctx context.Context, opts Opts) error {
 		if ok, err := markerSnapshotMatches(opts.RunsBase, marker); err != nil {
 			return err
 		} else if !ok {
+			if err := markStaleMarkerDiverged(opts.RunsBase); err != nil {
+				return err
+			}
 			return ErrStaleMarkerDiverged
 		}
 	}
@@ -583,9 +597,30 @@ func sentinelExists(runsBase string) (bool, error) {
 			continue
 		}
 		name := entry.Name()
-		if strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".aborted.json") {
+		if contracts.IsNeedsRecoverySentinelFilename(name) {
 			return true, nil
 		}
+	}
+	return false, nil
+}
+
+func markStaleMarkerDiverged(runsBase string) error {
+	from := filepath.Join(runsBase, markerFilename)
+	to := filepath.Join(runsBase, divergedMarkerFile)
+	if err := os.Rename(from, to); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func divergedMarkerExists(runsBase string) (bool, error) {
+	if _, err := os.Stat(filepath.Join(runsBase, divergedMarkerFile)); err == nil {
+		return true, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return false, err
 	}
 	return false, nil
 }

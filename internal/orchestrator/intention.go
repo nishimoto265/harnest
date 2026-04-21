@@ -36,6 +36,9 @@ func (s *IntentionStore) Load() (*contracts.IntentionRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	if record.RunID != s.runCtx.RunID {
+		return nil, errors.New("orchestrator: intention run_id mismatch")
+	}
 	return &record, nil
 }
 
@@ -43,6 +46,9 @@ func (s *IntentionStore) Save(record contracts.IntentionRecord) error {
 	path, err := s.Path()
 	if err != nil {
 		return err
+	}
+	if record.RunID != s.runCtx.RunID {
+		return errors.New("orchestrator: intention run_id mismatch")
 	}
 	return internalio.WriteJSONAtomic(path, record)
 }

@@ -88,6 +88,26 @@ func TestWriteSuccessDiff_SkipsSymlinkedUntrackedFile(t *testing.T) {
 	assert.NotContains(t, string(diff), "loot")
 }
 
+func TestWriteSuccessDiff_SkipsHardlinkedUntrackedFile(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, "", "git", "init", "-b", "main", repoDir)
+	runGit(t, repoDir, "git", "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "git", "config", "user.name", "Agent Runner Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repoDir, "git", "add", "README.md")
+	runGit(t, repoDir, "git", "commit", "-m", "base")
+
+	baseSHA := strings.TrimSpace(runGit(t, repoDir, "git", "rev-parse", "HEAD"))
+	externalPath := filepath.Join(t.TempDir(), "external.txt")
+	require.NoError(t, os.WriteFile(externalPath, []byte("top-secret\n"), 0o644))
+	require.NoError(t, os.Link(externalPath, filepath.Join(repoDir, "loot")))
+
+	diff, err := SuccessDiffBytes(context.Background(), repoDir, baseSHA, "test")
+	require.NoError(t, err)
+	assert.NotContains(t, string(diff), "top-secret")
+	assert.NotContains(t, string(diff), "loot")
+}
+
 func TestLoadChecklistArtifact_RejectsFIFO(t *testing.T) {
 	worktreePath := t.TempDir()
 	checklistPath := filepath.Join(worktreePath, "checklist-result.json")

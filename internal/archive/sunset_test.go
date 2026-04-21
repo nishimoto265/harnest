@@ -14,6 +14,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -209,7 +210,11 @@ func TestRunSunsetWithLock_DetectsStaleMarkerRegistryDivergence(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrStaleMarkerDiverged)
 	assert.Empty(t, result.AppendedOpIDs)
-	assert.FileExists(t, filepath.Join(runsBase, markerFilename))
+	assert.NoFileExists(t, filepath.Join(runsBase, markerFilename))
+	assert.FileExists(t, filepath.Join(runsBase, divergedMarkerFile))
+	blocked, sentinelErr := step70_decide.SentinelExists(runsBase)
+	require.NoError(t, sentinelErr)
+	assert.False(t, blocked)
 	assert.Len(t, readRegistryLinesForTest(t, registryPath), 3)
 }
 

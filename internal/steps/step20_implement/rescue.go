@@ -26,6 +26,8 @@ type RescueExhaustedError struct {
 	Rescue stepio.RescueExhausted
 }
 
+const maxRescueUntrackedBytes = 32 << 20
+
 func (e *RescueExhaustedError) Error() string {
 	return fmt.Sprintf("step20: rescue exhausted: agent=%s retry_count=%d", e.Rescue.Agent, e.Rescue.RetryCount)
 }
@@ -314,7 +316,7 @@ func copyUntrackedFiles(ctx context.Context, worktreePath, rescueDir string) ([]
 	}
 	entries := strings.Split(list, "\x00")
 	rescueBase := filepath.Join(rescueDir, "untracked")
-	symlinkLog := make([]string, 0)
+	skipLog := make([]string, 0)
 	artifacts := make([]rescueArtifactDigest, 0, len(entries)+1)
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
@@ -334,13 +336,27 @@ func copyUntrackedFiles(ctx context.Context, worktreePath, rescueDir string) ([]
 			return nil, err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			symlinkLog = append(symlinkLog, cleaned)
+			skipLog = append(skipLog, "symlink:"+cleaned)
+			continue
+		}
+		file, perm, size, err := agentrunner.OpenValidatedRegularFile(src)
+		if err != nil {
+			if errors.Is(err, agentrunner.ErrArtifactNotRegular) {
+				skipLog = append(skipLog, "skipped_non_regular:"+cleaned)
+				continue
+			}
+			return nil, err
+		}
+		if size > maxRescueUntrackedBytes {
+			_ = file.Close()
+			skipLog = append(skipLog, fmt.Sprintf("skipped_too_large:%s:%d", cleaned, size))
 			continue
 		}
 		if err := ensureDir(filepath.Dir(dst)); err != nil {
+			_ = file.Close()
 			return nil, err
 		}
-		if err := copyFile(src, dst, info.Mode().Perm()); err != nil {
+		if err := copyOpenFileContext(ctx, file, dst, perm, maxRescueUntrackedBytes); err != nil {
 			return nil, err
 		}
 		digest, err := fileDigest(dst)
@@ -353,7 +369,7 @@ func copyUntrackedFiles(ctx context.Context, worktreePath, rescueDir string) ([]
 		})
 	}
 	symlinkPath := filepath.Join(rescueDir, "untracked-symlinks.txt")
-	if err := internalio.WriteAtomic(symlinkPath, []byte(strings.Join(symlinkLog, "\n"))); err != nil {
+	if err := internalio.WriteAtomic(symlinkPath, []byte(strings.Join(skipLog, "\n"))); err != nil {
 		return nil, err
 	}
 	digest, err := fileDigest(symlinkPath)
@@ -377,20 +393,20 @@ func verifyRescueState(rescueDir string) error {
 	return agentrunner.VerifyRescueState(rescueDir, fileDigest, "step20")
 }
 
-func copyFile(src, dst string, perm os.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
+func copyOpenFileContext(ctx context.Context, in *os.File, dst string, perm os.FileMode, sizeLimit int64) error {
 	defer in.Close()
-
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	written, err := io.CopyBuffer(out, io.LimitReader(&copyContextReader{ctx: ctx, reader: in}, sizeLimit+1), make([]byte, 32<<10))
+	if err != nil {
 		_ = out.Close()
 		return err
+	}
+	if written > sizeLimit {
+		_ = out.Close()
+		return fmt.Errorf("step20: rescue untracked file exceeds size limit: path=%s size=%d limit=%d", dst, written, sizeLimit)
 	}
 	if err := out.Sync(); err != nil {
 		_ = out.Close()
@@ -400,6 +416,24 @@ func copyFile(src, dst string, perm os.FileMode) error {
 		return err
 	}
 	return syncDir(filepath.Dir(dst))
+}
+
+type copyContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *copyContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(p)
+	if err == nil {
+		if ctxErr := r.ctx.Err(); ctxErr != nil {
+			return n, ctxErr
+		}
+	}
+	return n, err
 }
 
 func fileDigest(path string) (string, error) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,7 +59,7 @@ func (t *DescendantTracker) capture() {
 	if t == nil || t.rootPID <= 0 {
 		return
 	}
-	descendants, err := processDescendants(t.rootPID)
+	descendants, err := processDescendants(t.rootPID, t.snapshotSeeds())
 	if err != nil {
 		return
 	}
@@ -69,6 +70,20 @@ func (t *DescendantTracker) capture() {
 			t.seen[pid] = struct{}{}
 		}
 	}
+}
+
+func (t *DescendantTracker) snapshotSeeds() []int {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	seeds := make([]int, 0, len(t.seen)+1)
+	seeds = append(seeds, t.rootPID)
+	for pid := range t.seen {
+		seeds = append(seeds, pid)
+	}
+	return seeds
 }
 
 func (t *DescendantTracker) Stop() {
@@ -110,13 +125,52 @@ func (t *DescendantTracker) CaptureBurst(window time.Duration) {
 	}
 }
 
+func (t *DescendantTracker) CaptureUntilStable(maxWait, interval time.Duration) {
+	if t == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 25 * time.Millisecond
+	}
+	if maxWait <= 0 {
+		maxWait = 500 * time.Millisecond
+	}
+	deadline := time.Now().Add(maxWait)
+	var last []int
+	stableSamples := 0
+	for {
+		t.capture()
+		current := t.Snapshot()
+		sort.Ints(current)
+		if samePIDSet(last, current) {
+			stableSamples++
+			if stableSamples >= 2 {
+				return
+			}
+		} else {
+			stableSamples = 0
+			last = append(last[:0], current...)
+		}
+		if !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(interval)
+	}
+}
+
 func CleanupProcessTree(lease ProcessLease, sessionID int, tracker *DescendantTracker) error {
 	errs := make([]error, 0, 3)
-	if err := KillProcessGroup(lease.PGID); err != nil {
+	if tracker != nil {
+		tracker.CaptureUntilStable(500*time.Millisecond, 25*time.Millisecond)
+	}
+	if err := KillProcessGroupUntilGone(lease.PGID, 500*time.Millisecond, 25*time.Millisecond); err != nil {
 		errs = append(errs, err)
 	}
-	if err := KillSessionProcesses(sessionID); err != nil {
+	if err := KillSessionProcessesUntilGone(sessionID, 500*time.Millisecond, 25*time.Millisecond); err != nil {
 		errs = append(errs, err)
+	}
+	if tracker != nil {
+		tracker.CaptureUntilStable(500*time.Millisecond, 25*time.Millisecond)
 	}
 	if err := killPIDs(tracker.Snapshot()); err != nil {
 		errs = append(errs, err)
@@ -125,12 +179,50 @@ func CleanupProcessTree(lease ProcessLease, sessionID int, tracker *DescendantTr
 }
 
 func KillSessionProcesses(sessionID int) error {
+	pids, err := sessionProcesses(sessionID)
+	if err != nil {
+		return err
+	}
+	return killPIDs(pids)
+}
+
+func KillSessionProcessesUntilGone(sessionID int, maxWait, interval time.Duration) error {
 	if sessionID <= 0 {
 		return nil
 	}
+	if interval <= 0 {
+		interval = 25 * time.Millisecond
+	}
+	if maxWait <= 0 {
+		maxWait = 500 * time.Millisecond
+	}
+	deadline := time.Now().Add(maxWait)
+	var lastErr error
+	for {
+		pids, err := sessionProcesses(sessionID)
+		if err != nil {
+			return errors.Join(lastErr, err)
+		}
+		if len(pids) == 0 {
+			return lastErr
+		}
+		if err := killPIDs(pids); err != nil {
+			lastErr = err
+		}
+		if !time.Now().Before(deadline) {
+			return lastErr
+		}
+		time.Sleep(interval)
+	}
+}
+
+func sessionProcesses(sessionID int) ([]int, error) {
+	if sessionID <= 0 {
+		return nil, nil
+	}
 	psOutput, err := exec.Command("ps", "-axo", "pid=,sess=").Output()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pids := make([]int, 0, 8)
 	scanner := bufio.NewScanner(bytes.NewReader(psOutput))
@@ -149,12 +241,12 @@ func KillSessionProcesses(sessionID int) error {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return err
+		return nil, err
 	}
-	return killPIDs(pids)
+	return pids, nil
 }
 
-func processDescendants(rootPID int) ([]int, error) {
+func processDescendants(rootPID int, seeds []int) ([]int, error) {
 	if rootPID <= 0 {
 		return nil, nil
 	}
@@ -180,15 +272,108 @@ func processDescendants(rootPID int) ([]int, error) {
 		return nil, err
 	}
 
+	visited := map[int]struct{}{}
+	queue := make([]int, 0, len(seeds)+1)
+	for _, seed := range seeds {
+		if seed <= 0 {
+			continue
+		}
+		if _, ok := visited[seed]; ok {
+			continue
+		}
+		visited[seed] = struct{}{}
+		queue = append(queue, seed)
+	}
+	if _, ok := visited[rootPID]; !ok {
+		visited[rootPID] = struct{}{}
+		queue = append(queue, rootPID)
+	}
 	out := make([]int, 0, 8)
-	queue := append([]int(nil), children[rootPID]...)
 	for len(queue) > 0 {
 		pid := queue[0]
 		queue = queue[1:]
-		out = append(out, pid)
-		queue = append(queue, children[pid]...)
+		for _, child := range children[pid] {
+			if _, ok := visited[child]; ok {
+				continue
+			}
+			visited[child] = struct{}{}
+			out = append(out, child)
+			queue = append(queue, child)
+		}
 	}
 	return out, nil
+}
+
+func KillProcessGroupUntilGone(pgid int, maxWait, interval time.Duration) error {
+	if pgid <= 0 {
+		return nil
+	}
+	if interval <= 0 {
+		interval = 25 * time.Millisecond
+	}
+	if maxWait <= 0 {
+		maxWait = 500 * time.Millisecond
+	}
+	deadline := time.Now().Add(maxWait)
+	var lastErr error
+	for {
+		if err := KillProcessGroup(pgid); err != nil {
+			lastErr = err
+		}
+		members, err := processGroupMembers(pgid)
+		if err != nil {
+			return errors.Join(lastErr, err)
+		}
+		if len(members) == 0 {
+			return lastErr
+		}
+		if !time.Now().Before(deadline) {
+			return lastErr
+		}
+		time.Sleep(interval)
+	}
+}
+
+func processGroupMembers(pgid int) ([]int, error) {
+	if pgid <= 0 {
+		return nil, nil
+	}
+	psOutput, err := exec.Command("ps", "-axo", "pid=,pgid=").Output()
+	if err != nil {
+		return nil, err
+	}
+	pids := make([]int, 0, 8)
+	scanner := bufio.NewScanner(bytes.NewReader(psOutput))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) != 2 {
+			continue
+		}
+		pid, errPID := strconv.Atoi(fields[0])
+		group, errGroup := strconv.Atoi(fields[1])
+		if errPID != nil || errGroup != nil {
+			continue
+		}
+		if group == pgid && pid > 0 {
+			pids = append(pids, pid)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return pids, nil
+}
+
+func samePIDSet(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func killPIDs(pids []int) error {

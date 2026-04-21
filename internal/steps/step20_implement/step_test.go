@@ -465,6 +465,7 @@ func writeBackgroundSentinelHelper(t *testing.T, dir string) string {
 import (
 	"os"
 	"os/exec"
+	"strconv"
 	"time"
 )
 
@@ -473,6 +474,9 @@ func main() {
 		os.Exit(2)
 	}
 	if os.Getenv("BACKGROUND_SENTINEL_CHILD") == "1" {
+		if err := os.WriteFile(os.Args[1]+".pid", []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+			os.Exit(1)
+		}
 		delay, err := time.ParseDuration(os.Args[2])
 		if err != nil {
 			os.Exit(2)
@@ -765,6 +769,7 @@ func TestStepRunSweepsGrandchildrenAfterSuccessfulExit(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	helperPath := writeBackgroundSentinelHelper(t, t.TempDir())
 	sentinelPath := filepath.Join(t.TempDir(), "background-child.txt")
+	pidPath := sentinelPath + ".pid"
 	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "background.txt"))
 	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_HELPER", helperPath)
 	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_PATH", sentinelPath)
@@ -773,11 +778,13 @@ func TestStepRunSweepsGrandchildrenAfterSuccessfulExit(t *testing.T) {
 	err := fx.step.Run(context.Background(), fx.run)
 	require.NoError(t, err)
 
-	time.Sleep(350 * time.Millisecond)
-
-	_, statErr := os.Stat(sentinelPath)
-	require.Error(t, statErr)
-	require.True(t, os.IsNotExist(statErr))
+	pidBytes, readErr := os.ReadFile(pidPath)
+	require.NoError(t, readErr)
+	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	require.NoError(t, parseErr)
+	require.Eventually(t, func() bool {
+		return !pidAlive(pid)
+	}, 2*time.Second, 20*time.Millisecond)
 
 	manifest := fx.readManifest(t)
 	_, ok := manifest.Value.(contracts.ManifestSuccess)
@@ -803,6 +810,29 @@ func TestStepRunKillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return !pidAlive(pid)
 	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestCopyUntrackedFiles_SkipsFIFOWithinBoundedTime(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	poisonPath := filepath.Join(fx.worktree, "poison")
+	require.NoError(t, syscall.Mkfifo(poisonPath, 0o644))
+
+	rescueDir := filepath.Join(t.TempDir(), "rescue")
+	require.NoError(t, os.MkdirAll(filepath.Join(rescueDir, "untracked"), 0o755))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	artifacts, err := copyUntrackedFiles(ctx, fx.worktree, rescueDir)
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), time.Second)
+	assert.NoFileExists(t, filepath.Join(rescueDir, "untracked", "poison"))
+
+	paths := make([]string, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		paths = append(paths, artifact.Path)
+	}
+	assert.NotContains(t, paths, "untracked/poison")
 }
 
 func TestStepRun_FailsWhenSuccessDiffOverflows(t *testing.T) {
