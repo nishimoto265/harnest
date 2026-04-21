@@ -269,7 +269,7 @@ func TestRunContextFromTaskPackage_RejectsWorktreeOutsideConfiguredBase(t *testi
 
 	_, err := RunContextFromTaskPackage(pkg, runsBase, worktreeBase)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "persisted worktree path mismatch")
+	assert.ErrorIs(t, err, ErrWorktreeBaseMismatch)
 }
 
 func TestRunContextFromTaskPackage_UsesPersistedWorktreeBaseForResume(t *testing.T) {
@@ -278,13 +278,20 @@ func TestRunContextFromTaskPackage_UsesPersistedWorktreeBaseForResume(t *testing
 	persistedWorktreeBase := filepath.Join(t.TempDir(), "persisted-worktrees")
 	pkg := testTaskPackage(t, runsBase, persistedWorktreeBase)
 
-	ctx, err := RunContextFromTaskPackage(pkg, runsBase, currentWorktreeBase)
-	require.NoError(t, err)
-	assert.Equal(t, persistedWorktreeBase, ctx.WorktreeBase)
+	_, err := RunContextFromTaskPackage(pkg, runsBase, currentWorktreeBase)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWorktreeBaseMismatch)
+}
 
-	path, err := ctx.Pass1WorktreePath("a1")
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(persistedWorktreeBase, fmt.Sprintf("%s-pass1-a1", pkg.RunID)), path)
+func TestRunContextFromTaskPackage_RejectsTamperedConfiguredWorktreeBase(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	pkg := testTaskPackage(t, runsBase, worktreeBase)
+	pkg.Worktrees[0].Path = filepath.Join("/tmp", "foreign-base", fmt.Sprintf("%s-pass1-a1", pkg.RunID))
+
+	_, err := RunContextFromTaskPackage(pkg, runsBase, worktreeBase)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWorktreeBaseMismatch)
 }
 
 func TestLoadFinalizedManifest_RejectsCrossRunManifestIdentity(t *testing.T) {

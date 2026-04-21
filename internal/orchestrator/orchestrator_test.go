@@ -761,6 +761,32 @@ func TestFirstNeedsRecoverySentinel_MalformedJSONMaintainsBlockedState(t *testin
 	assert.Equal(t, contracts.RunID("2026-04-21-PR99-deadbee"), sentinel.RunID)
 }
 
+func TestFirstNeedsRecoverySentinel_RecreatesMissingSentinelFromProcessedState(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR99-deadbee", runsBase, worktreeBase)
+	require.NoError(t, err)
+
+	require.NoError(t, state.Append(runCtx, contracts.StateEntry{
+		Kind: contracts.StateKindNeedsManualRecovery,
+		Value: contracts.StateEntryNeedsManualRecovery{
+			Kind:       contracts.StateKindNeedsManualRecovery,
+			PR:         99,
+			RunID:      runCtx.RunID,
+			Step:       contracts.FailedStep70,
+			Reason:     contracts.RollbackReasonTransactionalFailure,
+			FailedStep: contracts.FailedStep70,
+			At:         time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}))
+
+	sentinel, blocked, err := firstNeedsRecoverySentinel(runsBase)
+	require.NoError(t, err)
+	assert.True(t, blocked)
+	assert.Equal(t, runCtx.RunID, sentinel.RunID)
+	assert.FileExists(t, filepath.Join(runsBase, "needs-recovery", string(runCtx.RunID)+".json"))
+}
+
 func TestRun_ResumeFromBranchPushed_EndToEnd(t *testing.T) {
 	cfg := testConfig(t)
 	runID := contracts.RunID("2026-04-21-PR47-abcdef0")
@@ -808,7 +834,7 @@ func TestStubMarkerStep_SeedsPass1ScoresFromTaskPackageWorktrees(t *testing.T) {
 			worktrees = append(worktrees, contracts.WorktreeAllocation{
 				Agent:   agent,
 				Pass:    pass,
-				Path:    filepath.Join(cfg.Worktree.Base, string(runID), fmt.Sprintf("pass%d", pass), string(agent)),
+				Path:    filepath.Join(cfg.Worktree.Base, fmt.Sprintf("%s-pass%d-%s", runID, pass, agent)),
 				Branch:  fmt.Sprintf("stub/%s/pass%d/%s", runID, pass, agent),
 				BaseSHA: strings.Repeat("a", 40),
 				HeadSHA: strings.Repeat("b", 40),

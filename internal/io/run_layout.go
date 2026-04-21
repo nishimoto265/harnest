@@ -63,14 +63,17 @@ func RunContextFromTaskPackage(pkg contracts.TaskPackage, runsBase, worktreeBase
 	if err != nil {
 		return RunContext{}, err
 	}
+	if !sameCanonicalPath(derivedWorktreeBase, worktreeBase) {
+		return RunContext{}, fmt.Errorf("%w: configured=%q persisted=%q", ErrWorktreeBaseMismatch, worktreeBase, derivedWorktreeBase)
+	}
 	ctx := RunContext{
 		RunID:        pkg.RunID,
 		RunsBase:     runsBase,
-		WorktreeBase: derivedWorktreeBase,
+		WorktreeBase: worktreeBase,
 	}
 	ctx.worktrees = make(map[int]map[contracts.AgentID]contracts.WorktreeAllocation, 2)
 	for _, worktree := range pkg.Worktrees {
-		if err := validatePersistedWorktreeAllocation(pkg.RunID, worktree, derivedWorktreeBase); err != nil {
+		if err := validatePersistedWorktreeAllocation(pkg.RunID, worktree, worktreeBase); err != nil {
 			return RunContext{}, err
 		}
 		if _, ok := ctx.worktrees[worktree.Pass]; !ok {
@@ -79,6 +82,18 @@ func RunContextFromTaskPackage(pkg contracts.TaskPackage, runsBase, worktreeBase
 		ctx.worktrees[worktree.Pass][worktree.Agent] = worktree
 	}
 	return ctx, nil
+}
+
+func sameCanonicalPath(left, right string) bool {
+	leftKey, err := contracts.CanonicalizePathForUniqueness(left)
+	if err != nil {
+		return false
+	}
+	rightKey, err := contracts.CanonicalizePathForUniqueness(right)
+	if err != nil {
+		return false
+	}
+	return leftKey == rightKey
 }
 
 func (ctx RunContext) RunDir() string {

@@ -22,6 +22,7 @@ const (
 	defaultHeartbeatInterval = 60 * time.Second
 	defaultStaleAfter        = 5 * time.Minute
 	defaultRescueMaxRetries  = 3
+	successCollectTTL        = 10 * time.Second
 
 	resumeStateFileName = ".resume-state.json"
 	heartbeatFileName   = ".heartbeat"
@@ -243,18 +244,21 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	if err := run.IO.ValidateWorktreeAllocation(allocation); err != nil {
 		return err
 	}
-	headSHA, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
+	collectCtx, cancel := context.WithTimeout(ctx, successCollectTTL)
+	defer cancel()
+
+	headSHA, err := gitOutputContext(collectCtx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
 		return err
 	}
-	if err := validateSuccessHead(ctx, allocation, headSHA); err != nil {
+	if err := agentrunner.ValidateSuccessHead(collectCtx, allocation, headSHA, "step50"); err != nil {
 		return err
 	}
 	diffPath, err := artifactPath(run.IO, run.Pass, run.Agent, diffFileName)
 	if err != nil {
 		return err
 	}
-	if err := agentrunner.WriteSuccessDiff(ctx, allocation.Path, allocation.BaseSHA, "step50", diffPath); err != nil {
+	if err := agentrunner.WriteSuccessDiff(collectCtx, allocation.Path, allocation.BaseSHA, "step50", diffPath); err != nil {
 		return err
 	}
 
@@ -262,7 +266,7 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	if err != nil {
 		return err
 	}
-	checklist, err := loadChecklistArtifact(allocation.Path, run.TaskPackage.RunID, run.Pass, run.Agent)
+	checklist, err := loadChecklistArtifact(collectCtx, allocation.Path, run.TaskPackage.RunID, run.Pass, run.Agent)
 	if err != nil {
 		return err
 	}
@@ -390,8 +394,8 @@ func stepTimeout(cfg *config.Config, key string) (time.Duration, error) {
 	return time.Duration(seconds) * time.Second, nil
 }
 
-func loadChecklistArtifact(worktreePath string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {
-	return agentrunner.LoadChecklistArtifact(worktreePath, checklistFileName, "step50", runID, pass, agent)
+func loadChecklistArtifact(ctx context.Context, worktreePath string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {
+	return agentrunner.LoadChecklistArtifactContext(ctx, worktreePath, checklistFileName, "step50", runID, pass, agent)
 }
 
 func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte, error) {
@@ -400,25 +404,4 @@ func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte
 
 func shouldWriteTimeoutManifest(err error, execCtx context.Context) bool {
 	return err != nil && errors.Is(execCtx.Err(), context.DeadlineExceeded)
-}
-
-func validateSuccessHead(ctx context.Context, allocation contracts.WorktreeAllocation, headSHA string) error {
-	currentBranch, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "branch", "--show-current")
-	if err != nil {
-		return err
-	}
-	if currentBranch != allocation.Branch {
-		return fmt.Errorf("step50: current branch mismatch: got=%s want=%s", currentBranch, allocation.Branch)
-	}
-	branchHead, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "refs/heads/"+allocation.Branch)
-	if err != nil {
-		return err
-	}
-	if branchHead != headSHA {
-		return fmt.Errorf("step50: branch ref mismatch: head=%s branch=%s ref=%s", headSHA, allocation.Branch, branchHead)
-	}
-	if err := runGitCommand(ctx, allocation.Path, "merge-base", "--is-ancestor", allocation.BaseSHA, headSHA); err != nil {
-		return fmt.Errorf("step50: base sha is not an ancestor of head: %w", err)
-	}
-	return nil
 }

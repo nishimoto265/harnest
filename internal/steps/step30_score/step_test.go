@@ -226,6 +226,43 @@ func TestStep30Score_ResumeRerunsWhenPromptVersionChanges(t *testing.T) {
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
 }
 
+func TestStep30Score_FailsClosedOnMalformedManifest(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	manifestPath, err := runCtx.ManifestPath(1, "a1")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`{"kind":"success","kind":"error"}`+"\n"), 0o644))
+
+	err = New().Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, contracts.ErrDuplicateJSONKey)
+}
+
+func TestStep30Score_ResumeRerunsWhenRawComplianceIsMissing(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			if role == contracts.JudgeRoleSecondary {
+				score = 79
+			}
+			return makeJudgeOutput(input, role, score, []ruleVerdict{{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant}})
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	complianceRawPath, err := runCtx.ResolveRunRelative("30/compliance-A-raw.jsonl")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(complianceRawPath))
+
+	provider.reset()
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
+}
+
 func TestStep30Score_AllowsEmptyComplianceAcrossPanel(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
 	provider := &fakePanelProvider{

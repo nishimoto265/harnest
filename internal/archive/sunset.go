@@ -16,6 +16,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/registryview"
 	"github.com/nishimoto265/auto-improve/internal/state"
 )
 
@@ -27,6 +28,7 @@ const (
 )
 
 var errBlockedBySentinel = errors.New("archive: blocked by sentinel")
+var ErrStaleMarkerDiverged = errors.New("archive: stale sunset marker diverged from current registry snapshot")
 
 var appendRegistryEntry = internalio.AppendRegistryEntry
 
@@ -57,9 +59,11 @@ type Result struct {
 }
 
 type sunsetMarker struct {
-	RecordedStartTime time.Time    `json:"recorded_start_time"`
-	SunsetRunID       string       `json:"sunset_run_id"`
-	Transitions       []Transition `json:"transitions"`
+	RecordedStartTime time.Time      `json:"recorded_start_time"`
+	SunsetRunID       string         `json:"sunset_run_id"`
+	Transitions       []Transition   `json:"transitions"`
+	RegistryHeadSHA   string         `json:"registry_head_sha,omitempty"`
+	RuleSeqSnapshot   map[string]int `json:"rule_seq_snapshot,omitempty"`
 }
 
 type registryLine = internalio.RegistryLine
@@ -383,6 +387,11 @@ func reconcileStaleMarker(ctx context.Context, opts Opts) error {
 		return err
 	}
 	missing := make([]Transition, 0, len(marker.Transitions))
+	if ok, err := markerSnapshotMatches(opts.RunsBase, marker); err != nil {
+		return err
+	} else if !ok {
+		return ErrStaleMarkerDiverged
+	}
 	for _, transition := range marker.Transitions {
 		opID := ComputeOpID(marker.SunsetRunID, transition.RuleID, transitionKey(transition))
 		if _, ok, err := findByOpID(filepath.Join(opts.RunsBase, "rules-registry.jsonl"), opID); err != nil {
@@ -428,10 +437,16 @@ func gateAllows(opts Opts) (bool, error) {
 
 func writeMarker(opts Opts) error {
 	path := filepath.Join(opts.RunsBase, markerFilename)
+	registryHeadSHA, ruleSeqSnapshot, err := markerSnapshot(opts.RunsBase, opts.Transitions)
+	if err != nil {
+		return err
+	}
 	return internalio.WriteJSONAtomic(path, sunsetMarker{
 		RecordedStartTime: opts.Now(),
 		SunsetRunID:       opts.SunsetRunID,
 		Transitions:       append([]Transition(nil), opts.Transitions...),
+		RegistryHeadSHA:   registryHeadSHA,
+		RuleSeqSnapshot:   ruleSeqSnapshot,
 	})
 }
 
@@ -476,6 +491,23 @@ func emitSizeWarnings(opts Opts) error {
 }
 
 func sentinelExists(runsBase string) (bool, error) {
+	processedPath := filepath.Join(runsBase, "processed.jsonl")
+	latestRuns, err := state.NeedsManualRecoveryRunsPath(processedPath)
+	if err != nil {
+		return false, err
+	}
+	for _, latest := range latestRuns {
+		switch value := latest.LastEvent.Value.(type) {
+		case contracts.StateEntryNeedsManualRecovery:
+			if value.Step == contracts.FailedStep70 && value.Reason != contracts.RollbackReasonWorktreeRescueLoop {
+				return true, nil
+			}
+		case *contracts.StateEntryNeedsManualRecovery:
+			if value != nil && value.Step == contracts.FailedStep70 && value.Reason != contracts.RollbackReasonWorktreeRescueLoop {
+				return true, nil
+			}
+		}
+	}
 	dir := filepath.Join(runsBase, "needs-recovery")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -494,6 +526,56 @@ func sentinelExists(runsBase string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func markerSnapshot(runsBase string, transitions []Transition) (string, map[string]int, error) {
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	lines, err := readRegistryLines(registryPath)
+	if err != nil {
+		return "", nil, err
+	}
+	head := ""
+	if len(lines) > 0 {
+		head = lines[len(lines)-1].Sha256
+	}
+	entries := make([]contracts.RuleRegistryEntry, 0, len(lines))
+	for _, line := range lines {
+		entries = append(entries, line.Entry)
+	}
+	states, err := registryview.Build(entries)
+	if err != nil {
+		return "", nil, err
+	}
+	snapshot := make(map[string]int, len(transitions))
+	for _, transition := range transitions {
+		snapshot[transition.RuleID] = 0
+		if state, ok := states[transition.RuleID]; ok {
+			snapshot[transition.RuleID] = state.LastPromotionSeq
+		}
+	}
+	return head, snapshot, nil
+}
+
+func markerSnapshotMatches(runsBase string, marker sunsetMarker) (bool, error) {
+	if marker.RegistryHeadSHA == "" && len(marker.RuleSeqSnapshot) == 0 {
+		return true, nil
+	}
+	head, snapshot, err := markerSnapshot(runsBase, marker.Transitions)
+	if err != nil {
+		return false, err
+	}
+	if head != marker.RegistryHeadSHA {
+		return false, nil
+	}
+	if len(snapshot) != len(marker.RuleSeqSnapshot) {
+		return false, nil
+	}
+	for ruleID, seq := range marker.RuleSeqSnapshot {
+		if snapshot[ruleID] != seq {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func readMarker(path string) (sunsetMarker, error) {

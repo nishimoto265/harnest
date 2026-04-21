@@ -2,10 +2,12 @@ package agentrunner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -61,15 +63,25 @@ func TestWriteSuccessDiff_CapsHugeUntrackedPatch(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "huge.txt"), []byte(strings.Repeat("x", maxSuccessDiffBytes)), 0o644))
 
 	destPath := filepath.Join(t.TempDir(), "diff.patch")
-	require.NoError(t, WriteSuccessDiff(context.Background(), repoDir, baseSHA, "test", destPath))
+	err := WriteSuccessDiff(context.Background(), repoDir, baseSHA, "test", destPath)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrSuccessDiffOverflow)
+	_, statErr := os.Stat(destPath)
+	assert.Error(t, statErr)
+	assert.True(t, os.IsNotExist(statErr))
+}
 
-	info, err := os.Stat(destPath)
-	require.NoError(t, err)
-	assert.LessOrEqual(t, info.Size(), int64(maxSuccessDiffBytes))
+func TestLoadChecklistArtifact_RejectsFIFO(t *testing.T) {
+	worktreePath := t.TempDir()
+	checklistPath := filepath.Join(worktreePath, "checklist-result.json")
+	require.NoError(t, syscall.Mkfifo(checklistPath, 0o644))
 
-	diff, err := os.ReadFile(destPath)
-	require.NoError(t, err)
-	assert.Contains(t, string(diff), "diff truncated")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := LoadChecklistArtifactContext(ctx, worktreePath, "checklist-result.json", "step20", "2026-04-21-PR42-abcdef0", 1, "a1")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrArtifactNotRegular))
 }
 
 func runGit(t *testing.T, dir string, name string, args ...string) string {

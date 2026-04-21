@@ -131,7 +131,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary"); err != nil {
+	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv"); err != nil {
 		return 0, err
 	}
 	if digest, err := fileDigest(filepath.Join(rescueDir, "tracked.patch")); err == nil {
@@ -143,7 +143,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary"); err != nil {
+	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"); err != nil {
 		return 0, err
 	}
 	if digest, err := fileDigest(filepath.Join(rescueDir, "staged.patch")); err == nil {

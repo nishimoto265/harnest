@@ -123,6 +123,7 @@ func TestRun_RegistryMatchesProduceMixedNewAndUpdateCandidates(t *testing.T) {
 	writeRegistry(t, cfg.registryPath(),
 		registryAdded("rule-active", "1111111111111111111111111111111111111111111111111111111111111111"),
 		registryAdded("rule-archived", "2222222222222222222222222222222222222222222222222222222222222222"),
+		registryAdded("rule-restored", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"),
 		registryArchived("rule-archived", "3333333333333333333333333333333333333333333333333333333333333333"),
 		registryRestored("rule-restored", "4444444444444444444444444444444444444444444444444444444444444444"),
 	)
@@ -209,6 +210,34 @@ func TestRun_RerunKeepsCandidatesHashStable(t *testing.T) {
 	assert.NoError(t, second.VerifyCandidatesHash())
 }
 
+func TestRun_RejectsTamperedActiveRuleSidecar(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+	writeCompliance(t, cfg.IO, testComplianceEntry(cfg.IO.RunID, "rule-tampered", contracts.ComplianceVerdictViolated))
+
+	ruleBody := "# canonical body\n"
+	rulePath := filepath.Join(cfg.IO.RunsBase, "rules", "rule-tampered.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rulePath), 0o755))
+	require.NoError(t, os.WriteFile(rulePath, []byte("# tampered body\n"), 0o644))
+	writeRegistry(t, cfg.registryPath(), contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-tampered",
+			RulePath:       filepath.Join("rules", "rule-tampered.md"),
+			Sha256:         sha256String(ruleBody),
+			IdempotencyKey: strings.Repeat("a", 64),
+			VersionSeq:     1,
+			ByRunID:        "2026-04-20-PR1-aaaaaaa",
+			At:             time.Date(2026, 4, 20, 9, 0, 0, 0, time.UTC),
+		},
+	})
+
+	_, err := Run(context.Background(), cfg)
+	require.ErrorContains(t, err, "rule sidecar sha mismatch")
+}
+
 func TestRun_RegistryVariantsProduceExpectedCandidateKinds(t *testing.T) {
 	cfg := newTestConfig(t)
 	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
@@ -219,6 +248,7 @@ func TestRun_RegistryVariantsProduceExpectedCandidateKinds(t *testing.T) {
 	)
 	writeRegistry(t, cfg.registryPath(),
 		registryUpdated("rule-updated", strings.Repeat("7", 64)),
+		registryAdded("rule-status-active", strings.Repeat("6", 64)),
 		registryStatusChanged(
 			"rule-status-active",
 			contracts.RuleStatusActive,
@@ -474,7 +504,43 @@ func writeCompliance(t *testing.T, runIO internalio.RunContext, entries ...contr
 
 func writeRegistry(t *testing.T, path string, entries ...contracts.RuleRegistryEntry) {
 	t.Helper()
-	writeJSONL(t, path, entries...)
+	normalized := make([]contracts.RuleRegistryEntry, 0, len(entries))
+	lastSha := make(map[string]string)
+	registryBase := filepath.Dir(path)
+	for _, entry := range entries {
+		switch value := entry.Value.(type) {
+		case contracts.RuleRegistryAdded:
+			absPath := filepath.Join(registryBase, value.RulePath)
+			if _, err := os.Stat(absPath); os.IsNotExist(err) {
+				body := fmt.Sprintf("# %s added\n", value.RuleID)
+				value.Sha256 = sha256String(body)
+				writeRegistryRuleSidecar(t, registryBase, value.RulePath, body)
+			}
+			lastSha[value.RuleID] = value.Sha256
+			entry = contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
+		case contracts.RuleRegistryUpdated:
+			absPath := filepath.Join(registryBase, value.RulePath)
+			if _, err := os.Stat(absPath); os.IsNotExist(err) {
+				body := fmt.Sprintf("# %s updated\n", value.RuleID)
+				if prev, ok := lastSha[value.RuleID]; ok {
+					value.PrevSha256 = prev
+				}
+				value.Sha256 = sha256String(body)
+				writeRegistryRuleSidecar(t, registryBase, value.RulePath, body)
+			}
+			lastSha[value.RuleID] = value.Sha256
+			entry = contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
+		}
+		normalized = append(normalized, entry)
+	}
+	writeJSONL(t, path, normalized...)
+}
+
+func writeRegistryRuleSidecar(t *testing.T, registryBase, rulePath, body string) {
+	t.Helper()
+	absPath := filepath.Join(registryBase, rulePath)
+	require.NoError(t, os.MkdirAll(filepath.Dir(absPath), 0o755))
+	require.NoError(t, os.WriteFile(absPath, []byte(body), 0o644))
 }
 
 func writeJSONL[T any](t *testing.T, path string, entries ...T) {

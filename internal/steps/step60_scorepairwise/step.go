@@ -112,12 +112,20 @@ func Run(ctx context.Context, in Input) error {
 	defer func() {
 		_ = lock.Unlock()
 	}()
+	rawState, err := loadStep60RawState(paths)
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(paths.Done); err == nil {
 		matches, err := doneMarkerMatchesCurrentState(paths)
 		if err != nil {
 			return err
 		}
-		if matches {
+		versionsMatch, err := step60VersionsMatch(paths, in.RubricVersion, in.PromptVersion)
+		if err != nil {
+			return err
+		}
+		if matches && versionsMatch {
 			return nil
 		}
 		if err := os.Remove(paths.Done); err != nil && !os.IsNotExist(err) {
@@ -157,10 +165,6 @@ func Run(ctx context.Context, in Input) error {
 		RubricVersion: in.RubricVersion,
 		PromptVersion: in.PromptVersion,
 		ResolvedAt:    resolvedAt,
-	}
-	rawState, err := loadStep60RawState(paths)
-	if err != nil {
-		return err
 	}
 
 	finalScores := make([]contracts.ScoreEntry, 0, len(scorableRuns)*len(canonicalDimensions))
@@ -786,6 +790,7 @@ func resetStep60Outputs(paths step60Paths) error {
 type step60RawState struct {
 	scores     map[contracts.AgentID]map[contracts.JudgeRole]map[contracts.Dimension]contracts.RawScoreEntry
 	compliance map[contracts.AgentID]map[contracts.JudgeRole]map[string]contracts.RawComplianceEntry
+	final      map[contracts.AgentID]map[string]contracts.ComplianceEntry
 }
 
 func loadStep60RawState(paths step60Paths) (step60RawState, error) {
@@ -797,9 +802,14 @@ func loadStep60RawState(paths step60Paths) (step60RawState, error) {
 	if err != nil {
 		return step60RawState{}, err
 	}
+	finalComplianceRows, err := readJSONLOrEmpty[contracts.ComplianceEntry](paths.ComplianceFinal)
+	if err != nil {
+		return step60RawState{}, err
+	}
 	state := step60RawState{
 		scores:     map[contracts.AgentID]map[contracts.JudgeRole]map[contracts.Dimension]contracts.RawScoreEntry{},
 		compliance: map[contracts.AgentID]map[contracts.JudgeRole]map[string]contracts.RawComplianceEntry{},
+		final:      map[contracts.AgentID]map[string]contracts.ComplianceEntry{},
 	}
 	for _, row := range reduceRawScores(scoreRows) {
 		state.ensureAgent(row.Agent)
@@ -808,6 +818,12 @@ func loadStep60RawState(paths step60Paths) (step60RawState, error) {
 	for _, row := range reduceRawCompliance(complianceRows) {
 		state.ensureAgent(row.Agent)
 		state.compliance[row.Agent][row.JudgeRole][row.RuleID] = row
+	}
+	for _, row := range internalio.CollapseByKey(finalComplianceRows, func(entry contracts.ComplianceEntry) complianceKey {
+		return complianceKey{Agent: entry.Agent, RuleID: entry.RuleID}
+	}) {
+		state.ensureAgent(row.Agent)
+		state.final[row.Agent][row.RuleID] = row
 	}
 	return state, nil
 }
@@ -826,6 +842,9 @@ func (s *step60RawState) ensureAgent(agent contracts.AgentID) {
 			contracts.JudgeRoleSecondary: {},
 			contracts.JudgeRoleArbiter:   {},
 		}
+	}
+	if _, ok := s.final[agent]; !ok {
+		s.final[agent] = map[string]contracts.ComplianceEntry{}
 	}
 }
 
@@ -859,10 +878,11 @@ func tryReuseRawPanelResult(state step60RawState, agent contracts.AgentID, outpu
 	secondaryScores := state.scoreRows(agent, contracts.JudgeRoleSecondary)
 	primaryCompliance := state.complianceRows(agent, contracts.JudgeRolePrimary)
 	secondaryCompliance := state.complianceRows(agent, contracts.JudgeRoleSecondary)
+	expectedCompliance := state.expectedComplianceRuleIDs(agent)
 	if !rawRoleUsable(primaryScores, outputHash, rubricVersion, promptVersion) || !rawRoleUsable(secondaryScores, outputHash, rubricVersion, promptVersion) {
 		return scorecore.PanelResult{}, false, nil
 	}
-	if !rawComplianceUsable(primaryCompliance, outputHash, rubricVersion, promptVersion) || !rawComplianceUsable(secondaryCompliance, outputHash, rubricVersion, promptVersion) {
+	if !rawComplianceUsable(primaryCompliance, expectedCompliance, outputHash, rubricVersion, promptVersion) || !rawComplianceUsable(secondaryCompliance, expectedCompliance, outputHash, rubricVersion, promptVersion) {
 		return scorecore.PanelResult{}, false, nil
 	}
 	arbiterScores := state.scoreRows(agent, contracts.JudgeRoleArbiter)
@@ -870,7 +890,7 @@ func tryReuseRawPanelResult(state step60RawState, agent contracts.AgentID, outpu
 	if !rawRoleUsable(arbiterScores, outputHash, rubricVersion, promptVersion) {
 		arbiterScores = nil
 	}
-	if !rawComplianceUsable(arbiterCompliance, outputHash, rubricVersion, promptVersion) {
+	if !rawArbiterComplianceUsable(arbiterCompliance, outputHash, rubricVersion, promptVersion) {
 		arbiterCompliance = nil
 	}
 	result, err := scorecore.BuildFinalResultFromRaw(
@@ -922,13 +942,49 @@ func rawRoleUsable(rows []contracts.RawScoreEntry, outputHash, rubricVersion, pr
 	return true
 }
 
-func rawComplianceUsable(rows []contracts.RawComplianceEntry, outputHash, rubricVersion, promptVersion string) bool {
+func rawComplianceUsable(rows []contracts.RawComplianceEntry, expected map[string]struct{}, outputHash, rubricVersion, promptVersion string) bool {
+	if len(expected) > 0 && len(rows) != len(expected) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		if row.OutputSha256 != outputHash || row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false
+		}
+		seen[row.RuleID] = struct{}{}
+	}
+	for ruleID := range expected {
+		if _, ok := seen[ruleID]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func rawArbiterComplianceUsable(rows []contracts.RawComplianceEntry, outputHash, rubricVersion, promptVersion string) bool {
 	for _, row := range rows {
 		if row.OutputSha256 != outputHash || row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
 			return false
 		}
 	}
 	return true
+}
+
+func (s step60RawState) expectedComplianceRuleIDs(agent contracts.AgentID) map[string]struct{} {
+	rules := make(map[string]struct{})
+	for _, role := range []contracts.JudgeRole{
+		contracts.JudgeRolePrimary,
+		contracts.JudgeRoleSecondary,
+		contracts.JudgeRoleArbiter,
+	} {
+		for ruleID := range s.compliance[agent][role] {
+			rules[ruleID] = struct{}{}
+		}
+	}
+	for ruleID := range s.final[agent] {
+		rules[ruleID] = struct{}{}
+	}
+	return rules
 }
 
 func readJSONLOrEmpty[T any](path string) ([]T, error) {
@@ -940,6 +996,55 @@ func readJSONLOrEmpty[T any](path string) ([]T, error) {
 		return nil, err
 	}
 	return rows, nil
+}
+
+func step60VersionsMatch(paths step60Paths, rubricVersion, promptVersion string) (bool, error) {
+	scoreRaw, err := readJSONLOrEmpty[contracts.RawScoreEntry](paths.ScoresRaw)
+	if err != nil {
+		return false, err
+	}
+	complianceRaw, err := readJSONLOrEmpty[contracts.RawComplianceEntry](paths.ComplianceRaw)
+	if err != nil {
+		return false, err
+	}
+	scoreFinal, err := readJSONLOrEmpty[contracts.ScoreEntry](paths.ScoresFinal)
+	if err != nil {
+		return false, err
+	}
+	complianceFinal, err := readJSONLOrEmpty[contracts.ComplianceEntry](paths.ComplianceFinal)
+	if err != nil {
+		return false, err
+	}
+	pairwiseRows, err := readJSONLOrEmpty[contracts.PairwiseEntry](paths.Pairwise)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range scoreRaw {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false, nil
+		}
+	}
+	for _, row := range complianceRaw {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false, nil
+		}
+	}
+	for _, row := range scoreFinal {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false, nil
+		}
+	}
+	for _, row := range complianceFinal {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false, nil
+		}
+	}
+	for _, row := range pairwiseRows {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func minInt(left, right int) int {

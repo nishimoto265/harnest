@@ -16,7 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -424,16 +423,7 @@ func resolveScorableAgents(req Request) ([]scorableAgent, error) {
 }
 
 func shouldSkipManifest(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, internalio.ErrNotScorable) ||
-		errors.Is(err, contracts.ErrDuplicateJSONKey) ||
-		errors.Is(err, contracts.ErrTrailingJSON) ||
-		errors.Is(err, contracts.ErrUnknownManifestKind) {
-		return true
-	}
-	return strings.Contains(err.Error(), "Field validation")
+	return errors.Is(err, internalio.ErrNotScorable)
 }
 
 type stepPathsResult struct {
@@ -594,7 +584,13 @@ func (s *resumeAgentState) clearArbiter() {
 }
 
 func (s *resumeAgentState) roleComplete(role contracts.JudgeRole, outputSha, rubricVersion, promptVersion string) bool {
-	return hasAllDimensions(s.rawScores[role]) && s.roleOutputShaMatches(role, outputSha) && s.roleVersionMatches(role, rubricVersion, promptVersion)
+	if !hasAllDimensions(s.rawScores[role]) {
+		return false
+	}
+	if !s.roleOutputShaMatches(role, outputSha) || !s.roleVersionMatches(role, rubricVersion, promptVersion) {
+		return false
+	}
+	return s.roleComplianceCoverage(role, s.expectedComplianceRuleIDs())
 }
 
 func (s *resumeAgentState) rawScoreSlice(role contracts.JudgeRole) []contracts.RawScoreEntry {
@@ -631,6 +627,14 @@ func (s *resumeAgentState) currentComplianceRuleIDs() map[string]struct{} {
 		for ruleID := range s.rawCompliance[role] {
 			rules[ruleID] = struct{}{}
 		}
+	}
+	return rules
+}
+
+func (s *resumeAgentState) expectedComplianceRuleIDs() map[string]struct{} {
+	rules := s.currentComplianceRuleIDs()
+	for ruleID := range s.finalCompliance {
+		rules[ruleID] = struct{}{}
 	}
 	return rules
 }
@@ -678,6 +682,21 @@ func (s *resumeAgentState) roleOutputShaMatches(role contracts.JudgeRole, output
 	}
 	for _, row := range s.rawCompliance[role] {
 		if row.OutputSha256 != outputSha {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *resumeAgentState) roleComplianceCoverage(role contracts.JudgeRole, expected map[string]struct{}) bool {
+	if len(expected) == 0 {
+		return len(s.rawCompliance[role]) == 0
+	}
+	if len(s.rawCompliance[role]) != len(expected) {
+		return false
+	}
+	for ruleID := range expected {
+		if _, ok := s.rawCompliance[role][ruleID]; !ok {
 			return false
 		}
 	}

@@ -15,11 +15,11 @@ var killProcess = syscall.Kill
 
 type resumeState struct {
 	ExpectedBaseSHA string    `json:"expected_base_sha" validate:"required,sha1_hex"`
-	StartedAt       time.Time `json:"started_at" validate:"required"`
-	Pid             int       `json:"pid" validate:"required,gt=0"`
+	StartedAt       time.Time `json:"started_at,omitempty"`
+	Pid             int       `json:"pid,omitempty" validate:"gte=0"`
 	Pgid            int       `json:"pgid" validate:"gte=0"`
 	RetryCount      int       `json:"retry_count" validate:"gte=0"`
-	LastHeartbeat   time.Time `json:"last_heartbeat" validate:"required"`
+	LastHeartbeat   time.Time `json:"last_heartbeat,omitempty"`
 }
 
 func resumeStatePath(agentDir string) string {
@@ -136,4 +136,26 @@ func pidAlive(pid int) bool {
 
 func shouldAttemptRescue(stale bool, pid int) bool {
 	return agentrunner.ShouldAttemptRescue(stale, pidAlive, pid)
+}
+
+func (s resumeState) Validate() error {
+	if s.ExpectedBaseSHA == "" {
+		return errors.New("step50: resume state: expected_base_sha is required")
+	}
+	if s.Pid == 0 {
+		if s.Pgid != 0 {
+			return errors.New("step50: resume state: pgid requires pid")
+		}
+		if !s.StartedAt.IsZero() || !s.LastHeartbeat.IsZero() {
+			return errors.New("step50: resume state: inactive lease must not persist heartbeat timestamps")
+		}
+		return nil
+	}
+	if s.Pid < 0 {
+		return errors.New("step50: resume state: pid must be >= 0")
+	}
+	if s.StartedAt.IsZero() || s.LastHeartbeat.IsZero() {
+		return errors.New("step50: resume state: active lease requires started_at and last_heartbeat")
+	}
+	return nil
 }

@@ -12,6 +12,8 @@ package step70_decide
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -280,6 +282,11 @@ func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunCon
 	if err := blockOnOtherRunSentinel(runCtx); err != nil {
 		return err
 	}
+	if intention, err := store.Load(); err != nil {
+		return err
+	} else if err := promoteStagedRuleSidecars(runCtx, intention); err != nil {
+		return err
+	}
 	if err := cleanupWorktrees(ctx, runCtx, pkg, deps.Git); err != nil {
 		return err
 	}
@@ -391,6 +398,9 @@ func handleRollback(ctx context.Context, pr int, runCtx internalio.RunContext, p
 	if err := appendStateOnce(runCtx, writer, contracts.StateKindRollback, rollbackEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, deps.Now())); err != nil {
 		return err
 	}
+	if err := cleanupStagedRuleSidecars(runCtx); err != nil {
+		return err
+	}
 	return store.Delete()
 }
 
@@ -443,6 +453,9 @@ func resumeRollback(ctx context.Context, pr int, runCtx internalio.RunContext, p
 	}
 
 	if err := appendStateOnce(runCtx, writer, contracts.StateKindRollback, rollbackEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, deps.Now())); err != nil {
+		return err
+	}
+	if err := cleanupStagedRuleSidecars(runCtx); err != nil {
 		return err
 	}
 	return store.Delete()
@@ -934,6 +947,76 @@ func targetFromIntention(pkg *contracts.TaskPackage, intention contracts.Intenti
 		BestShaBefore: intention.BestShaBefore,
 		TargetSHA:     intention.TargetSha,
 	}
+}
+
+func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contracts.IntentionRecord) error {
+	stagingDir, err := runCtx.ResolveRunRelative("staging")
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(stagingDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if intention == nil || intention.PlannedAdoption == nil {
+		return cleanupStagedRuleSidecars(runCtx)
+	}
+	for _, entry := range intention.PlannedAdoption.Entries {
+		stagedPath, err := stagedRuleSidecarPath(runCtx, entry.RulePath)
+		if err != nil {
+			return err
+		}
+		dstPath := filepath.Join(runCtx.RunsBase, filepath.FromSlash(entry.RulePath))
+		if err := promoteRuleSidecar(stagedPath, dstPath, entry.Sha256); err != nil {
+			return err
+		}
+	}
+	return cleanupStagedRuleSidecars(runCtx)
+}
+
+func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
+	if info, err := os.Stat(dstPath); err == nil && info.Mode().IsRegular() {
+		data, err := os.ReadFile(dstPath)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		if hex.EncodeToString(sum[:]) == wantSHA {
+			if err := os.Remove(stagedPath); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		}
+		return fmt.Errorf("step70: canonical rule sidecar sha mismatch: path=%s", dstPath)
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	data, err := os.ReadFile(stagedPath)
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != wantSHA {
+		return fmt.Errorf("step70: staged rule sidecar sha mismatch: path=%s", stagedPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+		return err
+	}
+	return os.Rename(stagedPath, dstPath)
+}
+
+func cleanupStagedRuleSidecars(runCtx internalio.RunContext) error {
+	stagingDir, err := runCtx.ResolveRunRelative("staging")
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(stagingDir); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func nextRegistryVersionForRule(lines []registryLine, _ string) int64 {

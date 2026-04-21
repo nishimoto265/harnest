@@ -19,6 +19,7 @@ var (
 	ErrInvalidPass              = errors.New("io: invalid pass")
 	ErrWorktreePathUnavailable  = errors.New("io: worktree path is unavailable in this run context")
 	ErrWorktreePathEscapesBase  = errors.New("io: worktree path escapes configured worktree_base")
+	ErrWorktreeBaseMismatch     = errors.New("io: persisted worktree_base does not match configured worktree_base")
 	ErrSidecarDigestMismatch    = errors.New("io: sidecar sha256 does not match content")
 	ErrRegistryCASMismatch      = errors.New("io: registry compare-and-swap failed")
 	ErrRegistryUnsupportedKind  = errors.New("io: unsupported registry entry kind")

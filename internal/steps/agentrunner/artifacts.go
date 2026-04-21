@@ -18,7 +18,11 @@ import (
 
 const maxSuccessDiffBytes = 16 << 20
 
-var truncatedDiffWarning = []byte("\n# auto-improve: diff truncated at 16777216 bytes\n")
+var (
+	ErrSuccessDiffOverflow   = errors.New("agentrunner: success diff exceeded 16MB limit")
+	ErrArtifactNotRegular    = errors.New("agentrunner: artifact path is not a regular file")
+	ErrArtifactCollectionTTL = errors.New("agentrunner: artifact collection deadline exceeded")
+)
 
 func SuccessDiffBytes(ctx context.Context, worktreePath, baseSHA, errPrefix string) ([]byte, error) {
 	tempDir, err := os.MkdirTemp("", "auto-improve-diff-*")
@@ -42,7 +46,7 @@ func WriteSuccessDiff(ctx context.Context, worktreePath, baseSHA, errPrefix, des
 		return err
 	}
 	tempPath := tempFile.Name()
-	writer := newCappedDiffWriter(tempFile, maxSuccessDiffBytes-int64(len(truncatedDiffWarning)))
+	writer := newCappedDiffWriter(tempFile, maxSuccessDiffBytes)
 
 	closeWithErr := func(err error) error {
 		_ = tempFile.Close()
@@ -59,6 +63,8 @@ func WriteSuccessDiff(ctx context.Context, worktreePath, baseSHA, errPrefix, des
 		"diff",
 		baseSHA,
 		"--binary",
+		"--no-ext-diff",
+		"--no-textconv",
 		"--",
 		".",
 		":(exclude)checklist-result.json",
@@ -66,13 +72,7 @@ func WriteSuccessDiff(ctx context.Context, worktreePath, baseSHA, errPrefix, des
 		return closeWithErr(err)
 	}
 	if writer.truncated {
-		if _, err := tempFile.Write(truncatedDiffWarning); err != nil {
-			return closeWithErr(err)
-		}
-		if err := tempFile.Close(); err != nil {
-			return closeWithErr(err)
-		}
-		return os.Rename(tempPath, destPath)
+		return closeWithErr(fmt.Errorf("%w: worktree=%s", ErrSuccessDiffOverflow, worktreePath))
 	}
 
 	untrackedList, err := gitOutputBytesContext(ctx, worktreePath, errPrefix, "ls-files", "--others", "--exclude-standard", "-z")
@@ -90,16 +90,14 @@ func WriteSuccessDiff(ctx context.Context, worktreePath, baseSHA, errPrefix, des
 		if err := contracts.EnsureCleanRelativePath(entry); err != nil {
 			return closeWithErr(err)
 		}
+		if err := ensureArtifactSourceRegular(filepath.Join(worktreePath, filepath.FromSlash(entry))); err != nil {
+			return closeWithErr(err)
+		}
 		if err := streamGitNoIndexDiffContext(ctx, worktreePath, entry, errPrefix, writer); err != nil {
 			return closeWithErr(err)
 		}
 		if writer.truncated {
-			break
-		}
-	}
-	if writer.truncated {
-		if _, err := tempFile.Write(truncatedDiffWarning); err != nil {
-			return closeWithErr(err)
+			return closeWithErr(fmt.Errorf("%w: worktree=%s entry=%s", ErrSuccessDiffOverflow, worktreePath, entry))
 		}
 	}
 	if err := tempFile.Close(); err != nil {
@@ -109,11 +107,21 @@ func WriteSuccessDiff(ctx context.Context, worktreePath, baseSHA, errPrefix, des
 }
 
 func LoadChecklistArtifact(worktreePath, filename, errPrefix string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {
+	return LoadChecklistArtifactContext(context.Background(), worktreePath, filename, errPrefix, runID, pass, agent)
+}
+
+func LoadChecklistArtifactContext(ctx context.Context, worktreePath, filename, errPrefix string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {
+	if err := artifactCollectionDeadline(ctx); err != nil {
+		return contracts.ChecklistResult{}, err
+	}
 	sourcePath := filepath.Join(worktreePath, filename)
-	if _, err := os.Stat(sourcePath); err != nil {
+	if err := ensureArtifactSourceRegular(sourcePath); err != nil {
 		if os.IsNotExist(err) {
 			return contracts.ChecklistResult{}, fmt.Errorf("%s: missing checklist artifact: %s", errPrefix, sourcePath)
 		}
+		return contracts.ChecklistResult{}, err
+	}
+	if err := artifactCollectionDeadline(ctx); err != nil {
 		return contracts.ChecklistResult{}, err
 	}
 	checklist, err := internalio.ReadJSON[contracts.ChecklistResult](sourcePath)
@@ -156,7 +164,7 @@ func gitOutputContext(ctx context.Context, mapFn func(string) string, worktreePa
 }
 
 func gitNoIndexDiffContext(ctx context.Context, worktreePath, relativePath, errPrefix string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", "diff", "--binary", "--no-index", "--", "/dev/null", relativePath)
+	cmd := exec.CommandContext(ctx, "git", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", relativePath)
 	cmd.Dir = worktreePath
 	cmd.Env = processenv.Sanitize()
 	output, err := cmd.CombinedOutput()
@@ -193,7 +201,7 @@ func streamGitCommandContext(ctx context.Context, worktreePath, errPrefix string
 }
 
 func streamGitNoIndexDiffContext(ctx context.Context, worktreePath, relativePath, errPrefix string, writer io.Writer) error {
-	cmd := exec.CommandContext(ctx, "git", "diff", "--binary", "--no-index", "--", "/dev/null", relativePath)
+	cmd := exec.CommandContext(ctx, "git", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", relativePath)
 	cmd.Dir = worktreePath
 	cmd.Env = processenv.Sanitize()
 	cmd.Stdout = writer
@@ -249,4 +257,38 @@ func (w *cappedDiffWriter) Write(p []byte) (int, error) {
 		w.truncated = true
 	}
 	return len(p), nil
+}
+
+func ensureArtifactSourceRegular(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		targetInfo, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if targetInfo.Mode().IsRegular() {
+			return nil
+		}
+		return fmt.Errorf("%w: %s", ErrArtifactNotRegular, path)
+	}
+	if info.Mode().IsRegular() {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrArtifactNotRegular, path)
+}
+
+func artifactCollectionDeadline(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("%w: %w", ErrArtifactCollectionTTL, err)
+		}
+		return err
+	}
+	return nil
 }

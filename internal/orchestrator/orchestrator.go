@@ -375,7 +375,7 @@ func (o *Orchestrator) selectRun(pr int, opts RunOptions) (runSelection, error) 
 		return newFreshSelection(pr, opts, runsBase, worktreeBase)
 	}
 
-	action := state.NextActionForEntry(latest.LastEvent)
+	action := latest.Action
 	switch action {
 	case state.NextActionResume:
 		runID, ok := stateRunID(*latest.LastEvent)
@@ -1241,6 +1241,21 @@ func ensureNeedsRecoverySentinel(runCtx internalio.RunContext, pr int, runID con
 }
 
 func firstNeedsRecoverySentinel(runsBase string) (contracts.NeedsRecoverySentinel, bool, error) {
+	processedPath := filepath.Join(runsBase, "processed.jsonl")
+	manualRuns, err := state.NeedsManualRecoveryRunsPath(processedPath)
+	if err != nil {
+		return contracts.NeedsRecoverySentinel{}, false, err
+	}
+	for _, run := range manualRuns {
+		sentinel, ok, err := ensureNeedsRecoverySentinelFromLatestRun(runsBase, run)
+		if err != nil {
+			return contracts.NeedsRecoverySentinel{}, false, err
+		}
+		if ok {
+			return sentinel, true, nil
+		}
+	}
+
 	dir := filepath.Join(runsBase, "needs-recovery")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -1268,6 +1283,58 @@ func firstNeedsRecoverySentinel(runsBase string) (contracts.NeedsRecoverySentine
 		return sentinel, true, nil
 	}
 	return contracts.NeedsRecoverySentinel{}, false, nil
+}
+
+func ensureNeedsRecoverySentinelFromLatestRun(runsBase string, latest state.LatestRun) (contracts.NeedsRecoverySentinel, bool, error) {
+	if latest.LastEvent == nil || latest.Action != state.NextActionNeedsManualRecovery {
+		return contracts.NeedsRecoverySentinel{}, false, nil
+	}
+	var sentinel contracts.NeedsRecoverySentinel
+	switch value := latest.LastEvent.Value.(type) {
+	case contracts.StateEntryNeedsManualRecovery:
+		if value.Step != contracts.FailedStep70 || value.Reason == contracts.RollbackReasonWorktreeRescueLoop {
+			return contracts.NeedsRecoverySentinel{}, false, nil
+		}
+		sentinel = contracts.NeedsRecoverySentinel{
+			RunID:      value.RunID,
+			PR:         value.PR,
+			Reason:     value.Reason,
+			FailedStep: value.FailedStep,
+			CreatedAt:  value.At,
+		}
+	case *contracts.StateEntryNeedsManualRecovery:
+		if value == nil {
+			return contracts.NeedsRecoverySentinel{}, false, nil
+		}
+		if value.Step != contracts.FailedStep70 || value.Reason == contracts.RollbackReasonWorktreeRescueLoop {
+			return contracts.NeedsRecoverySentinel{}, false, nil
+		}
+		sentinel = contracts.NeedsRecoverySentinel{
+			RunID:      value.RunID,
+			PR:         value.PR,
+			Reason:     value.Reason,
+			FailedStep: value.FailedStep,
+			CreatedAt:  value.At,
+		}
+	default:
+		return contracts.NeedsRecoverySentinel{}, false, nil
+	}
+	if err := sentinel.Validate(); err != nil {
+		return contracts.NeedsRecoverySentinel{}, false, err
+	}
+	path := filepath.Join(runsBase, "needs-recovery", string(sentinel.RunID)+".json")
+	if _, err := os.Stat(path); err != nil {
+		if !os.IsNotExist(err) {
+			return contracts.NeedsRecoverySentinel{}, false, err
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return contracts.NeedsRecoverySentinel{}, false, err
+		}
+		if err := internalio.WriteJSONAtomic(path, sentinel); err != nil {
+			return contracts.NeedsRecoverySentinel{}, false, err
+		}
+	}
+	return sentinel, true, nil
 }
 
 func hasTerminalEvent(runCtx internalio.RunContext, runID contracts.RunID) (bool, error) {

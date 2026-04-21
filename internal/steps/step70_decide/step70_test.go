@@ -57,6 +57,67 @@ func TestRun_DuplicateOnlyCandidatesEmitNoop(t *testing.T) {
 	assert.Equal(t, contracts.DecisionActionNoop, readDecision(t, runCtx).Action)
 }
 
+func TestFilesystemResolver_LeaseFailureLeavesCanonicalRuleUntouched(t *testing.T) {
+	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
+	rulePath := filepath.Join(runCtx.RunsBase, "rules", "r-cand-1.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rulePath), 0o755))
+	require.NoError(t, os.WriteFile(rulePath, []byte("canonical-before\n"), 0o644))
+
+	resolver := FilesystemResolver{
+		RepoDir: runCtx.RunsBase,
+		Now:     fixedNow(),
+	}
+	target, ok, err := resolver.Resolve(runCtx, pkg, candidates)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	before, err := os.ReadFile(rulePath)
+	require.NoError(t, err)
+	assert.Equal(t, "canonical-before\n", string(before))
+
+	store := newMemStore(intentionPath(t, runCtx))
+	git := &fakeGit{head: strings.Repeat("1", 40), pushErr: ErrLeaseFailure}
+	require.NoError(t, Run(context.Background(), 42, runCtx, pkg, candidates, store, Deps{
+		Git:      git,
+		Resolver: &fixtureResolver{target: target},
+		Now:      fixedNow(),
+	}))
+
+	after, err := os.ReadFile(rulePath)
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, "rules/r-cand-1.md"))
+}
+
+func TestFilesystemResolver_AdoptPromotesExactSidecarBytes(t *testing.T) {
+	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
+	resolver := FilesystemResolver{
+		RepoDir: runCtx.RunsBase,
+		Now:     fixedNow(),
+	}
+	target, ok, err := resolver.Resolve(runCtx, pkg, candidates)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	store := newMemStore(intentionPath(t, runCtx))
+	git := &fakeGit{head: strings.Repeat("1", 40)}
+	require.NoError(t, Run(context.Background(), 42, runCtx, pkg, candidates, store, Deps{
+		Git:      git,
+		Resolver: &fixtureResolver{target: target},
+		Now:      fixedNow(),
+	}))
+
+	rulePath := filepath.Join(runCtx.RunsBase, "rules", "r-cand-1.md")
+	ruleBytes, err := os.ReadFile(rulePath)
+	require.NoError(t, err)
+	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	require.Len(t, lines, 1)
+	added := lines[0].Entry.Value.(contracts.RuleRegistryAdded)
+	assert.Equal(t, added.Sha256, sha256String(string(ruleBytes)))
+	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, "rules/r-cand-1.md"))
+}
+
 func TestRun_AdoptHappyPath(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR2")
 	git := &fakeGit{head: resolver.target.BestShaBefore}
@@ -88,6 +149,17 @@ func TestRun_SentinelBlocksExecution(t *testing.T) {
 	require.ErrorIs(t, Run(context.Background(), 3, runCtx, pkg, candidates, store, Deps{Now: fixedNow()}), ErrBlockedBySentinel)
 
 	// No decision written.
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	assert.NoFileExists(t, decisionPath)
+}
+
+func TestRun_SunsetMarkerBlocksExecution(t *testing.T) {
+	runCtx, pkg, candidates, store, _ := newFixture(t, "PR303")
+	require.NoError(t, os.WriteFile(filepath.Join(runCtx.RunsBase, sunsetMarkerFile), []byte("{}"), 0o644))
+
+	require.ErrorIs(t, Run(context.Background(), 3, runCtx, pkg, candidates, store, Deps{Now: fixedNow()}), ErrBlockedBySentinel)
+
 	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
 	require.NoError(t, err)
 	assert.NoFileExists(t, decisionPath)
@@ -1211,6 +1283,94 @@ func newFixture(t *testing.T, prLabel string) (internalio.RunContext, *contracts
 	return runCtx, &pkg, &candidates, store, &fixtureResolver{}
 }
 
+func seedFilesystemResolverFixture(t *testing.T) (internalio.RunContext, *contracts.TaskPackage, *contracts.Candidates) {
+	t.Helper()
+	runCtx, pkg, _, _, _ := newFixture(t, "PR420")
+	runID := runCtx.RunID
+	manifestPath, err := runCtx.ManifestPath(2, "a1")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(manifestPath, contracts.Manifest{
+		Kind: contracts.ManifestKindSuccess,
+		Value: contracts.ManifestSuccess{
+			Kind:          contracts.ManifestKindSuccess,
+			SchemaVersion: "1",
+			RunID:         runID,
+			Pass:          2,
+			Agent:         "a1",
+			BranchName:    pkg.Worktrees[3].Branch,
+			HeadSHA:       strings.Repeat("2", 40),
+			BaseSHA:       strings.Repeat("a", 40),
+			DiffPath:      "50-pass2/a1/diff.patch",
+			SessionPath:   "50-pass2/a1/session.jsonl",
+			ChecklistPath: "50-pass2/a1/checklist-result.json",
+			PromptVersion: "stub",
+			StartedAt:     time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+			FinishedAt:    time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC),
+		},
+	}))
+
+	pairwisePath, err := runCtx.ResolveRunRelative("60/pairwise.jsonl")
+	require.NoError(t, err)
+	require.NoError(t, internalio.AppendJSONL(pairwisePath, contracts.PairwiseEntry{
+		SchemaVersion: "1",
+		RunID:         runID,
+		AgentA:        "a1",
+		AgentB:        "a1",
+		Winner:        contracts.PairwiseWinnerB,
+		Margin:        contracts.PairwiseMarginClear,
+		Justification: "resolver fixture",
+		VerdictPath:   contracts.VerdictPathAgreement,
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+	}))
+	scorePath, err := runCtx.ResolveRunRelative("60/scores-B.jsonl")
+	require.NoError(t, err)
+	require.NoError(t, internalio.AppendJSONL(scorePath, contracts.ScoreEntry{
+		SchemaVersion: "1",
+		RunID:         runID,
+		Pass:          2,
+		Agent:         "a1",
+		Dimension:     contracts.DimensionFidelity,
+		Score:         90,
+		Reasons:       "resolver fixture",
+		VerdictPath:   contracts.VerdictPathAgreement,
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+	}))
+
+	body := "# Candidate body\n- exact bytes only\n"
+	candidate := contracts.Candidate{
+		CandidateID:        "cand-1",
+		Kind:               contracts.CandidateKindNew,
+		Title:              "Candidate body",
+		Problem:            "problem",
+		Rationale:          "rationale",
+		ProposedBodyPath:   "40/candidates/cand-1.md",
+		ProposedBodySha256: sha256String(body),
+	}
+	bodyPath, err := runCtx.ResolveRunRelative(candidate.ProposedBodyPath)
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteAtomic(bodyPath, []byte(body)))
+
+	candidates := &contracts.Candidates{
+		SchemaVersion:  "1",
+		RunID:          runID,
+		Candidates:     []contracts.Candidate{candidate},
+		CandidatesHash: contracts.CanonicalCandidatesHash([]contracts.Candidate{candidate}),
+		CreatedAt:      time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+	}
+	return runCtx, pkg, candidates
+}
+
+func mustStagedRulePath(t *testing.T, runCtx internalio.RunContext, rulePath string) string {
+	t.Helper()
+	path, err := stagedRuleSidecarPath(runCtx, rulePath)
+	require.NoError(t, err)
+	return path
+}
+
 func newFixtureWithResolver(t *testing.T, prLabel string) (internalio.RunContext, *contracts.TaskPackage, *contracts.Candidates, IntentionWriter, *fixtureResolver) {
 	runCtx, pkg, candidates, store, resolver := newFixture(t, prLabel)
 	resolver.target = Target{
@@ -1377,7 +1537,7 @@ func validTaskPackage(runID contracts.RunID, worktreeBase string) contracts.Task
 			worktrees = append(worktrees, contracts.WorktreeAllocation{
 				Agent:   agent,
 				Pass:    pass,
-				Path:    filepath.Join(worktreeBase, string(runID), string(agent), pad(pass)),
+				Path:    filepath.Join(worktreeBase, fmt.Sprintf("%s-pass%d-%s", runID, pass, agent)),
 				Branch:  "auto-improve/" + string(runID) + "/pass" + pad(pass) + "/" + string(agent),
 				BaseSHA: base,
 				HeadSHA: base,

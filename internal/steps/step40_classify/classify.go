@@ -344,7 +344,10 @@ func activeRuleBodiesFromRegistry(entries []contracts.RuleRegistryEntry, registr
 		}
 		body, err := os.ReadFile(filepath.Join(registryBase, state.RulePath))
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("step40_classify: read rule sidecar rule_id=%s: %w", ruleID, err)
+		}
+		if got := sha256Hex(body); got != state.Sha256 {
+			return nil, fmt.Errorf("step40_classify: rule sidecar sha mismatch: rule_id=%s got=%s want=%s", ruleID, got, state.Sha256)
 		}
 		bodies[ruleID] = string(body)
 	}

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -43,6 +44,17 @@ func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation co
 	}
 	if state.ExpectedBaseSHA != allocation.BaseSHA {
 		return 0, fmt.Errorf("step50: resume state base mismatch: expected=%s got=%s", state.ExpectedBaseSHA, allocation.BaseSHA)
+	}
+	if state.Pid == 0 {
+		if state.RetryCount >= rescueMaxRetries(run.Config, s.cfg) {
+			return 0, &RescueExhaustedError{
+				Rescue: stepio.RescueExhausted{
+					Agent:      run.Agent,
+					RetryCount: state.RetryCount,
+				},
+			}
+		}
+		return state.RetryCount, nil
 	}
 
 	stale, _, err := heartbeatStale(agentDir, s.staleAfter, s.now().UTC())
@@ -119,7 +131,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary"); err != nil {
+	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv"); err != nil {
 		return 0, err
 	}
 	if digest, err := fileDigest(filepath.Join(rescueDir, "tracked.patch")); err == nil {
@@ -131,7 +143,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary"); err != nil {
+	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"); err != nil {
 		return 0, err
 	}
 	if digest, err := fileDigest(filepath.Join(rescueDir, "staged.patch")); err == nil {
@@ -193,9 +205,11 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	}
 
 	state.RetryCount = nextRetry
-	state.StartedAt = s.now().UTC()
-	state.LastHeartbeat = state.StartedAt
-	if err := touchHeartbeat(agentDir, state.LastHeartbeat); err != nil {
+	state.StartedAt = time.Time{}
+	state.LastHeartbeat = time.Time{}
+	state.Pid = 0
+	state.Pgid = 0
+	if err := os.Remove(heartbeatPath(agentDir)); err != nil && !os.IsNotExist(err) {
 		return 0, err
 	}
 	if err := saveResumeState(agentDir, state); err != nil {

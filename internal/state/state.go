@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"unicode/utf8"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -152,10 +153,11 @@ func ScanEventsForRun(ctx internalio.RunContext, runID contracts.RunID) ([]contr
 }
 
 func LatestRunForPR(ctx internalio.RunContext, pr int) (LatestRun, error) {
-	last, err := LastEventForPR(ctx, pr)
+	entries, err := eventsForPRPath(ctx.ProcessedPath(), pr)
 	if err != nil {
 		return LatestRun{}, err
 	}
+	last := latestActionEntry(entries)
 	result := LatestRun{
 		PR:        pr,
 		LastEvent: last,
@@ -174,29 +176,72 @@ func LatestRunForPR(ctx internalio.RunContext, pr int) (LatestRun, error) {
 	return result, nil
 }
 
-func ResumeTarget(entries []contracts.StateEntry) []ResumeRequest {
-	filtered := make([]contracts.StateEntry, 0, len(entries))
-	for _, entry := range entries {
-		if _, ok := stateEntryPR(entry); !ok {
-			continue
-		}
-		filtered = append(filtered, entry)
+func NeedsManualRecoveryRunsPath(path string) ([]LatestRun, error) {
+	latest, err := latestEntriesByPRPath(path)
+	if err != nil {
+		return nil, err
 	}
-	collapsed := internalio.CollapseByKey(filtered, func(entry contracts.StateEntry) int {
-		pr, _ := stateEntryPR(entry)
-		return pr
-	})
-	requests := make([]ResumeRequest, 0, len(collapsed))
-	for _, entry := range collapsed {
-		if ClassifyNextAction(entry.Kind) != NextActionResume {
+	if len(latest) == 0 {
+		return nil, nil
+	}
+	prs := make([]int, 0, len(latest))
+	for pr := range latest {
+		prs = append(prs, pr)
+	}
+	sort.Ints(prs)
+	runs := make([]LatestRun, 0, len(prs))
+	for _, pr := range prs {
+		entry := latest[pr]
+		if NextActionForEntry(&entry) != NextActionNeedsManualRecovery {
 			continue
 		}
-		pr, _ := stateEntryPR(entry)
-		runID, ok := stateEntryRunID(entry)
+		run := LatestRun{
+			PR:        pr,
+			LastEvent: &entry,
+			Action:    NextActionNeedsManualRecovery,
+		}
+		if runID, ok := stateEntryRunID(entry); ok {
+			run.RunID = runID
+		}
+		if step, ok := stateEntryStep(entry); ok {
+			run.Step = step
+		}
+		runs = append(runs, run)
+	}
+	if len(runs) == 0 {
+		return nil, nil
+	}
+	return runs, nil
+}
+
+func ResumeTarget(entries []contracts.StateEntry) []ResumeRequest {
+	grouped := make(map[int][]contracts.StateEntry)
+	for _, entry := range entries {
+		pr, ok := stateEntryPR(entry)
 		if !ok {
 			continue
 		}
-		step, ok := stateEntryStep(entry)
+		grouped[pr] = append(grouped[pr], entry)
+	}
+	if len(grouped) == 0 {
+		return nil
+	}
+	prs := make([]int, 0, len(grouped))
+	for pr := range grouped {
+		prs = append(prs, pr)
+	}
+	sort.Ints(prs)
+	requests := make([]ResumeRequest, 0, len(prs))
+	for _, pr := range prs {
+		entry := latestActionEntry(grouped[pr])
+		if entry == nil || NextActionForEntry(entry) != NextActionResume {
+			continue
+		}
+		runID, ok := stateEntryRunID(*entry)
+		if !ok {
+			continue
+		}
+		step, ok := stateEntryStep(*entry)
 		if !ok {
 			continue
 		}
@@ -212,7 +257,11 @@ func ResumeTarget(entries []contracts.StateEntry) []ResumeRequest {
 	return requests
 }
 
-func ClassifyNextAction(kind contracts.StateKind) NextAction {
+func ClassifyNextAction(entries []contracts.StateEntry) NextAction {
+	return NextActionForEntry(latestActionEntry(entries))
+}
+
+func classifyNextActionKind(kind contracts.StateKind) NextAction {
 	switch kind {
 	case contracts.StateKindStarted,
 		contracts.StateKindStepDone,
@@ -233,7 +282,7 @@ func NextActionForEntry(entry *contracts.StateEntry) NextAction {
 	if entry == nil {
 		return NextActionFreshStart
 	}
-	return ClassifyNextAction(entry.Kind)
+	return classifyNextActionKind(entry.Kind)
 }
 
 func (r Reader) LatestForPR(pr int) (*contracts.StateEntry, error) {
@@ -303,7 +352,7 @@ func latestEntriesByPRPath(path string) (map[int]contracts.StateEntry, error) {
 	if len(lines) == 0 {
 		return nil, nil
 	}
-	latest := make(map[int]contracts.StateEntry, len(lines))
+	grouped := make(map[int][]contracts.StateEntry)
 	for _, line := range lines {
 		entry, err := decodeStateLine(line)
 		if err != nil {
@@ -313,12 +362,59 @@ func latestEntriesByPRPath(path string) (map[int]contracts.StateEntry, error) {
 		if !ok {
 			continue
 		}
-		latest[pr] = entry
+		grouped[pr] = append(grouped[pr], entry)
+	}
+	latest := make(map[int]contracts.StateEntry, len(grouped))
+	for pr, entries := range grouped {
+		entry := latestActionEntry(entries)
+		if entry == nil {
+			continue
+		}
+		latest[pr] = *entry
 	}
 	if len(latest) == 0 {
 		return nil, nil
 	}
 	return latest, nil
+}
+
+func eventsForPRPath(path string, pr int) ([]contracts.StateEntry, error) {
+	if pr <= 0 {
+		return nil, fmt.Errorf("state: pr must be > 0: pr=%d", pr)
+	}
+	lines, err := readProcessedLines(path)
+	if err != nil {
+		return nil, err
+	}
+	events := make([]contracts.StateEntry, 0, len(lines))
+	for _, line := range lines {
+		entry, err := decodeStateLine(line)
+		if err != nil {
+			return nil, err
+		}
+		entryPR, ok := stateEntryPR(entry)
+		if ok && entryPR == pr {
+			events = append(events, entry)
+		}
+	}
+	return events, nil
+}
+
+func latestActionEntry(entries []contracts.StateEntry) *contracts.StateEntry {
+	var latestWarning *contracts.StateEntry
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if entry.Kind.IsWarning() {
+			if latestWarning == nil {
+				candidate := entry
+				latestWarning = &candidate
+			}
+			continue
+		}
+		candidate := entry
+		return &candidate
+	}
+	return latestWarning
 }
 
 func readProcessedLines(path string) ([]processedLine, error) {

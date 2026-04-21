@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -474,6 +476,94 @@ func TestStepRun_RejectsDetachedForeignHead(t *testing.T) {
 	require.ErrorContains(t, err, "current branch mismatch")
 }
 
+func TestStepRun_GitCommandsIgnoreInheritedGitDir(t *testing.T) {
+	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
+	t.Setenv("FAKE_AGENT", "a1")
+
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	otherRepo := filepath.Join(t.TempDir(), "other-repo")
+	initGitRepoWithWorktree(t, otherRepo, filepath.Join(t.TempDir(), "other-pass2-a1"))
+	runCommand(t, otherRepo, "git", "commit", "--allow-empty", "-m", "other-head")
+	otherHead := strings.TrimSpace(runCommand(t, otherRepo, "git", "rev-parse", "HEAD"))
+
+	t.Setenv("GIT_DIR", filepath.Join(otherRepo, ".git"))
+	t.Setenv("GIT_WORK_TREE", otherRepo)
+
+	require.NoError(t, (Step{}).Run(context.Background(), env.run))
+
+	manifest := readManifest(t, env.manifestPath)
+	success := manifest.Value.(contracts.ManifestSuccess)
+	assert.Equal(t, env.run.TaskPackage.BaseSHA, success.BaseSHA)
+	assert.NotEqual(t, otherHead, success.HeadSHA)
+}
+
+func TestStepRun_RescueStartFailureLeavesNoPhantomLease(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	require.NoError(t, saveResumeState(agentDir, resumeState{
+		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
+		StartedAt:       time.Time{},
+		Pid:             0,
+		Pgid:            0,
+		RetryCount:      1,
+		LastHeartbeat:   time.Time{},
+	}))
+
+	failing := newStep(env.run.Config, stepOptions{
+		now:               time.Now,
+		heartbeatInterval: 10 * time.Millisecond,
+		staleAfter:        time.Second,
+		runner:            failBeforeStartRunner{},
+	})
+	err = failing.Run(context.Background(), env.run)
+	require.ErrorContains(t, err, "synthetic start failure")
+
+	state, ok, err := loadResumeState(agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, 1, state.RetryCount)
+	assert.Zero(t, state.Pid)
+	assert.Zero(t, state.Pgid)
+
+	_, statErr := os.Stat(heartbeatPath(agentDir))
+	require.Error(t, statErr)
+	assert.True(t, os.IsNotExist(statErr))
+
+	require.NoError(t, (Step{}).Run(context.Background(), env.run))
+}
+
+func TestStepRun_KillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
+	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
+	t.Setenv("FAKE_AGENT", "a1")
+
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	helperPath := writeDetachedSleepHelper(t, t.TempDir())
+	pidPath := filepath.Join(t.TempDir(), "detached-child.pid")
+	t.Setenv("FAKE_DETACH_HELPER", helperPath)
+	t.Setenv("FAKE_DETACHED_PID_PATH", pidPath)
+	t.Setenv("FAKE_DETACH_DELAY", "250ms")
+
+	require.NoError(t, (Step{}).Run(context.Background(), env.run))
+
+	pidBytes, err := os.ReadFile(pidPath)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return processDead(pid)
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+type failBeforeStartRunner struct{}
+
+func (failBeforeStartRunner) Run(context.Context, runnerRequest) (runnerResult, error) {
+	return runnerResult{}, errors.New("synthetic start failure")
+}
+
 type stepTestEnv struct {
 	run          RunContext
 	manifestPath string
@@ -566,6 +656,61 @@ func runCommand(t *testing.T, dir string, name string, args ...string) string {
 	output, err := cmd.CombinedOutput()
 	require.NoErrorf(t, err, "%s %s failed: %s", name, strings.Join(args, " "), string(output))
 	return string(output)
+}
+
+func writeDetachedSleepHelper(t *testing.T, dir string) string {
+	t.Helper()
+	sourcePath := filepath.Join(dir, "detached_sleep_helper.go")
+	binaryPath := filepath.Join(dir, "detached-sleep-helper")
+	source := `package main
+
+import (
+	"os"
+	"os/exec"
+	"strconv"
+	"syscall"
+	"time"
+)
+
+func main() {
+	if len(os.Args) < 3 {
+		os.Exit(2)
+	}
+	if os.Getenv("DETACHED_SLEEP_CHILD") == "1" {
+		if err := os.WriteFile(os.Args[1], []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+			os.Exit(1)
+		}
+		time.Sleep(60 * time.Second)
+		return
+	}
+
+	delay, err := time.ParseDuration(os.Args[2])
+	if err != nil {
+		os.Exit(2)
+	}
+	cmd := exec.Command(os.Args[0], os.Args[1], os.Args[2])
+	cmd.Env = append(os.Environ(), "DETACHED_SLEEP_CHILD=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		os.Exit(1)
+	}
+	time.Sleep(delay)
+}
+`
+	require.NoError(t, os.WriteFile(sourcePath, []byte(source), 0o644))
+
+	cmd := exec.Command("go", "build", "-o", binaryPath, sourcePath)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+	return binaryPath
+}
+
+func processDead(pid int) bool {
+	if pid <= 0 {
+		return true
+	}
+	err := syscall.Kill(pid, 0)
+	return errors.Is(err, syscall.ESRCH)
 }
 
 func readManifest(t *testing.T, path string) contracts.Manifest {

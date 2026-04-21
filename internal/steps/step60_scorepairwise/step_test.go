@@ -434,6 +434,80 @@ func TestRun_RerunWithoutMarker_RebuildsFromRawWithoutRejudging(t *testing.T) {
 	assert.False(t, called)
 }
 
+func TestRun_RerunsWhenRubricVersionChanges(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+	now := time.Date(2026, 4, 21, 11, 30, 0, 0, time.UTC)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:            runIO,
+		TaskPackage:   &pkg,
+		RubricVersion: "rubric-v1",
+		PromptVersion: "prompt-v1",
+		Primary:       judges.NewPrimaryStub(),
+		Secondary:     judges.NewSecondaryStub(),
+		Arbiter:       judges.NewArbiterStub(),
+		Now:           func() time.Time { return now },
+	}))
+
+	var called bool
+	noJudge := unexpectedCallJudge{called: &called}
+	err := Run(context.Background(), Input{
+		IO:            runIO,
+		TaskPackage:   &pkg,
+		RubricVersion: "rubric-v2",
+		PromptVersion: "prompt-v1",
+		Primary:       noJudge,
+		Secondary:     noJudge,
+		Arbiter:       noJudge,
+		Now:           func() time.Time { return now },
+	})
+	require.ErrorContains(t, err, "unexpected judge call")
+	assert.True(t, called)
+}
+
+func TestRun_RerunsWhenRawComplianceCoverageIsMissing(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	now := time.Date(2026, 4, 21, 11, 30, 0, 0, time.UTC)
+	primary := scriptedJudge{score: 80, reasonPrefix: "primary", compliance: map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant}}
+	secondary := scriptedJudge{score: 79, reasonPrefix: "secondary", compliance: map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant}}
+	arbiter := scriptedJudge{score: 78, reasonPrefix: "arbiter", compliance: map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant}}
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     arbiter,
+		Now:         func() time.Time { return now },
+	}))
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/compliance-B-raw.jsonl")))
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
+
+	counter := &blockingJudge{
+		delegate: primary,
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	go func() {
+		<-counter.started
+		close(counter.release)
+	}()
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     counter,
+		Secondary:   counter,
+		Arbiter:     counter,
+		Now:         func() time.Time { return now },
+	}))
+	assert.Greater(t, counter.callCount(), int32(0))
+}
+
 func TestRun_NoScorableAgentsReturnsTypedError(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a1": true, "a2": true, "a3": true},
@@ -1063,15 +1137,14 @@ func seedStep60Fixture(t *testing.T, opts fixtureOptions) (internalio.RunContext
 
 	worktrees := make([]contracts.WorktreeAllocation, 0, len(agents)*2)
 	for pass := 1; pass <= 2; pass++ {
-		passDir := fmt.Sprintf("pass%d", pass)
 		for _, agent := range agents {
-			path := filepath.Join(worktreeBase, string(runID), passDir, string(agent))
+			path := filepath.Join(worktreeBase, fmt.Sprintf("%s-pass%d-%s", runID, pass, agent))
 			require.NoError(t, os.MkdirAll(path, 0o755))
 			worktrees = append(worktrees, contracts.WorktreeAllocation{
 				Agent:   agent,
 				Pass:    pass,
 				Path:    path,
-				Branch:  filepath.ToSlash(filepath.Join("auto-improve", string(runID), passDir, string(agent))),
+				Branch:  filepath.ToSlash(filepath.Join("auto-improve", string(runID), fmt.Sprintf("pass%d", pass), string(agent))),
 				BaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				HeadSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 			})

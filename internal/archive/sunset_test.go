@@ -13,6 +13,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/state"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -104,6 +105,73 @@ func TestRunSunsetWithLock_ReconcilesInterruptedMarker(t *testing.T) {
 	require.Len(t, lines, 2)
 	assert.Equal(t, ComputeOpID(staleRunID, first.RuleID, transitionKey(first)), opIDFromEntry(lines[0].Entry))
 	assert.Equal(t, ComputeOpID(staleRunID, second.RuleID, transitionKey(second)), opIDFromEntry(lines[1].Entry))
+}
+
+func TestRunSunsetWithLock_DetectsStaleMarkerRegistryDivergence(t *testing.T) {
+	runsBase := t.TempDir()
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	staleRunID := "stale-run"
+	first := deprecateTransition("rule-1")
+	second := archiveTransition("rule-1", contracts.RuleStatusDeprecated)
+
+	initialAdd := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         fmt.Sprintf("%064x", 1),
+			IdempotencyKey: fmt.Sprintf("%064x", 1001),
+			VersionSeq:     1,
+			ByRunID:        "2026-04-21-PR1-aaaaaaa",
+			At:             time.Date(2026, 4, 21, 8, 0, 0, 0, time.UTC),
+		},
+	}
+	_, err := internalio.AppendRegistryEntry(registryPath, initialAdd)
+	require.NoError(t, err)
+
+	require.NoError(t, writeMarker(Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: staleRunID,
+		Transitions: []Transition{first, second},
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC) },
+	}))
+
+	entry, err := buildRegistryEntry(registryPath, first, staleRunID, ComputeOpID(staleRunID, first.RuleID, transitionKey(first)), time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	_, err = internalio.AppendRegistryEntry(registryPath, entry)
+	require.NoError(t, err)
+
+	update := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindUpdated,
+		Value: contracts.RuleRegistryUpdated{
+			Kind:           contracts.RegistryKindUpdated,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         fmt.Sprintf("%064x", 2),
+			PrevSha256:     fmt.Sprintf("%064x", 1),
+			IdempotencyKey: fmt.Sprintf("%064x", 1002),
+			VersionSeq:     3,
+			PrevHash:       readRegistryLinesForTest(t, registryPath)[1].Sha256,
+			ByRunID:        "2026-04-21-PR2-bbbbbbb",
+			At:             time.Date(2026, 4, 21, 9, 30, 0, 0, time.UTC),
+		},
+	}
+	_, err = internalio.AppendRegistryEntry(registryPath, update)
+	require.NoError(t, err)
+
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "current-run",
+		Transitions: []Transition{first, second},
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+	})
+	require.ErrorIs(t, err, ErrStaleMarkerDiverged)
+	assert.Empty(t, result.AppendedOpIDs)
+	assert.FileExists(t, filepath.Join(runsBase, markerFilename))
+	assert.Len(t, readRegistryLinesForTest(t, registryPath), 3)
 }
 
 func TestRunSunsetWithLock_ReconcilesUsingPersistedTransitionPlan(t *testing.T) {
@@ -239,6 +307,37 @@ func TestRunSunsetWithLock_AutoTickTimesOutOnPromotionLock(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, result.AppendedOpIDs)
 	assert.Less(t, time.Since(start), time.Second)
+}
+
+func TestRunSunsetWithLock_BlocksOnNeedsManualRecoveryStateWithoutSentinelFile(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR77-deadbee", runsBase, worktreeBase)
+	require.NoError(t, err)
+	writer, err := state.NewWriterPath(filepath.Join(runsBase, "processed.jsonl"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Append(contracts.StateEntry{
+		Kind: contracts.StateKindNeedsManualRecovery,
+		Value: contracts.StateEntryNeedsManualRecovery{
+			Kind:       contracts.StateKindNeedsManualRecovery,
+			PR:         77,
+			RunID:      runCtx.RunID,
+			Step:       contracts.FailedStep70,
+			Reason:     contracts.RollbackReasonTransactionalFailure,
+			FailedStep: contracts.FailedStep70,
+			At:         time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}))
+
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "sunset-blocked",
+		Transitions: []Transition{deprecateTransition("rule-1")},
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 13, 0, 0, 0, time.UTC) },
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.AppendedOpIDs)
+	assert.NoFileExists(t, filepath.Join(runsBase, "rules-registry.jsonl"))
 }
 
 func TestRunSunsetWithLock_StopsMutatingWhenSentinelAppearsMidRun(t *testing.T) {

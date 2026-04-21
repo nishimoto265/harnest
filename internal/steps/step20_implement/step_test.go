@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -401,16 +403,26 @@ if [[ "${FAKE_CLAUDE_STDERR:-}" != "" ]]; then
 fi
 if [[ "${FAKE_CLAUDE_CHECKLIST_JSON:-}" != "" ]]; then
   printf '%s' "${FAKE_CLAUDE_CHECKLIST_JSON}" > checklist-result.json
+elif [[ "${FAKE_CLAUDE_MKFIFO_CHECKLIST:-0}" == "1" ]]; then
+  rm -f checklist-result.json
+  mkfifo checklist-result.json
 elif [[ "${FAKE_SKIP_CHECKLIST:-0}" != "1" ]]; then
   cat > checklist-result.json <<EOF
 {"schema_version":"1","run_id":"${FAKE_RUN_ID:-2026-04-21-PR42-abcdef0}","pass":1,"agent":"${FAKE_AGENT:-a1}","items":[]}
 EOF
 fi
 if [[ "${FAKE_CLAUDE_WRITE_FILE:-}" != "" ]]; then
-  printf 'dirty worktree\n' > "${FAKE_CLAUDE_WRITE_FILE}"
+  if [[ "${FAKE_CLAUDE_WRITE_SIZE:-0}" != "0" ]]; then
+    head -c "${FAKE_CLAUDE_WRITE_SIZE}" /dev/zero | tr '\0' 'x' > "${FAKE_CLAUDE_WRITE_FILE}"
+  else
+    printf 'dirty worktree\n' > "${FAKE_CLAUDE_WRITE_FILE}"
+  fi
 fi
 if [[ "${FAKE_CLAUDE_COMMIT:-}" == "1" ]]; then
   git commit --allow-empty -m test >/dev/null 2>&1
+fi
+if [[ "${FAKE_CLAUDE_CHECKOUT_REF_BEFORE_EXIT:-}" != "" ]]; then
+  git checkout "${FAKE_CLAUDE_CHECKOUT_REF_BEFORE_EXIT}" >/dev/null 2>&1
 fi
 if [[ "${FAKE_CLAUDE_FORK_SESSION_WRITER:-}" == "1" ]]; then
   (
@@ -424,6 +436,11 @@ if [[ "${FAKE_CLAUDE_BACKGROUND_SENTINEL_HELPER:-}" != "" ]]; then
   "${FAKE_CLAUDE_BACKGROUND_SENTINEL_HELPER}" \
     "${FAKE_CLAUDE_BACKGROUND_SENTINEL_PATH}" \
     "${FAKE_CLAUDE_BACKGROUND_SENTINEL_DELAY:-200ms}"
+fi
+if [[ "${FAKE_CLAUDE_DETACH_HELPER:-}" != "" ]]; then
+  "${FAKE_CLAUDE_DETACH_HELPER}" \
+    "${FAKE_CLAUDE_DETACHED_PID_PATH}" \
+    "${FAKE_CLAUDE_DETACH_DELAY:-200ms}"
 fi
 if [[ "${FAKE_CLAUDE_SLEEP_SECONDS:-0}" != "0" ]]; then
   sleep "${FAKE_CLAUDE_SLEEP_SECONDS}"
@@ -467,6 +484,53 @@ func main() {
 	if err := cmd.Start(); err != nil {
 		os.Exit(1)
 	}
+}
+`
+	require.NoError(t, os.WriteFile(sourcePath, []byte(source), 0o644))
+
+	cmd := exec.Command("go", "build", "-o", binaryPath, sourcePath)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return binaryPath
+}
+
+func writeDetachedSleepHelper(t *testing.T, dir string) string {
+	t.Helper()
+	sourcePath := filepath.Join(dir, "detached_sleep_helper.go")
+	binaryPath := filepath.Join(dir, "detached-sleep-helper")
+	source := `package main
+
+import (
+	"os"
+	"os/exec"
+	"strconv"
+	"syscall"
+	"time"
+)
+
+func main() {
+	if len(os.Args) < 3 {
+		os.Exit(2)
+	}
+	if os.Getenv("DETACHED_SLEEP_CHILD") == "1" {
+		if err := os.WriteFile(os.Args[1], []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+			os.Exit(1)
+		}
+		time.Sleep(60 * time.Second)
+		return
+	}
+
+	delay, err := time.ParseDuration(os.Args[2])
+	if err != nil {
+		os.Exit(2)
+	}
+	cmd := exec.Command(os.Args[0], os.Args[1], os.Args[2])
+	cmd.Env = append(os.Environ(), "DETACHED_SLEEP_CHILD=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		os.Exit(1)
+	}
+	time.Sleep(delay)
 }
 `
 	require.NoError(t, os.WriteFile(sourcePath, []byte(source), 0o644))
@@ -617,7 +681,7 @@ func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
 	writeFakeGitWrapper(t, wrapperDir)
 	t.Setenv("REAL_GIT", realGit)
 	t.Setenv("FAKE_GIT_LOG", logPath)
-	t.Setenv("FAKE_GIT_SLEEP_ON_PREFIX", "diff HEAD --binary")
+	t.Setenv("FAKE_GIT_SLEEP_ON_PREFIX", "diff HEAD --binary --no-ext-diff --no-textconv")
 	t.Setenv("FAKE_GIT_SLEEP_SECONDS", "5")
 	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -634,7 +698,7 @@ func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
 		if readErr != nil {
 			return false
 		}
-		return strings.Contains(string(logBytes), "diff HEAD --binary")
+		return strings.Contains(string(logBytes), "diff HEAD --binary --no-ext-diff --no-textconv")
 	}, time.Second, 10*time.Millisecond)
 
 	cancel()
@@ -712,6 +776,63 @@ func TestStepRunSweepsGrandchildrenAfterSuccessfulExit(t *testing.T) {
 	manifest := fx.readManifest(t)
 	_, ok := manifest.Value.(contracts.ManifestSuccess)
 	require.True(t, ok)
+}
+
+func TestStepRunKillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	helperPath := writeDetachedSleepHelper(t, t.TempDir())
+	pidPath := filepath.Join(t.TempDir(), "detached-child.pid")
+	t.Setenv("FAKE_CLAUDE_DETACH_HELPER", helperPath)
+	t.Setenv("FAKE_CLAUDE_DETACHED_PID_PATH", pidPath)
+	t.Setenv("FAKE_CLAUDE_DETACH_DELAY", "250ms")
+
+	require.NoError(t, fx.step.Run(context.Background(), fx.run))
+
+	pidBytes, err := os.ReadFile(pidPath)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return !pidAlive(pid)
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestStepRun_FailsWhenSuccessDiffOverflows(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "huge.bin"))
+	t.Setenv("FAKE_CLAUDE_WRITE_SIZE", fmt.Sprintf("%d", (16<<20)+1))
+
+	err := fx.step.Run(context.Background(), fx.run)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agentrunner.ErrSuccessDiffOverflow)
+	assert.NoFileExists(t, fx.manifestPath())
+}
+
+func TestStepRun_FailsClosedOnFIFOChecklist(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	t.Setenv("FAKE_SKIP_CHECKLIST", "1")
+	t.Setenv("FAKE_CLAUDE_MKFIFO_CHECKLIST", "1")
+
+	err := fx.step.Run(context.Background(), fx.run)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agentrunner.ErrArtifactNotRegular)
+	assert.NoFileExists(t, fx.manifestPath())
+}
+
+func TestStepRun_RejectsForeignDetachedHead(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	runGit(t, fx.worktree, "checkout", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, "foreign.txt"), []byte("foreign\n"), 0o644))
+	runGit(t, fx.worktree, "add", "foreign.txt")
+	runGit(t, fx.worktree, "commit", "-m", "foreign commit")
+	foreignSHA := strings.TrimSpace(runGit(t, fx.worktree, "rev-parse", "HEAD"))
+	runGit(t, fx.worktree, "checkout", "auto-improve/"+string(fx.run.IO.RunID)+"/pass1/a1")
+
+	t.Setenv("FAKE_CLAUDE_CHECKOUT_REF_BEFORE_EXIT", foreignSHA)
+
+	err := fx.step.Run(context.Background(), fx.run)
+	require.ErrorContains(t, err, "current branch mismatch")
 }
 
 func TestStepRunSuccessArtifactsHonorContextCancellation(t *testing.T) {

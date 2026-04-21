@@ -231,6 +231,17 @@ func materializeRuleSidecar(runCtx internalio.RunContext, candidate contracts.Ca
 	if got := hex.EncodeToString(sum[:]); got != candidate.ProposedBodySha256 {
 		return fmt.Errorf("step70: candidate body sha256 mismatch: candidate_id=%s got=%s want=%s", candidate.CandidateID, got, candidate.ProposedBodySha256)
 	}
-	dstPath := filepath.Join(runCtx.RunsBase, rulePath)
-	return internalio.WriteAtomic(dstPath, append(body, '\n'))
+	dstPath, err := stagedRuleSidecarPath(runCtx, rulePath)
+	if err != nil {
+		return err
+	}
+	// Persist the exact bytes hashed into candidate.ProposedBodySha256.
+	return internalio.WriteAtomic(dstPath, body)
+}
+
+func stagedRuleSidecarPath(runCtx internalio.RunContext, rulePath string) (string, error) {
+	if err := contracts.ValidateRulePath(rulePath); err != nil {
+		return "", err
+	}
+	return runCtx.ResolveRunRelative(filepath.Join("staging", filepath.FromSlash(rulePath)))
 }

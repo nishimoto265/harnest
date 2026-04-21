@@ -142,9 +142,54 @@ func TestClassifyNextAction_CoversAllStateKinds(t *testing.T) {
 	}
 
 	for kind, want := range tests {
-		assert.Equal(t, want, ClassifyNextAction(kind), string(kind))
+		assert.Equal(t, want, NextActionForEntry(&contracts.StateEntry{Kind: kind}), string(kind))
 	}
 	assert.Equal(t, NextActionFreshStart, NextActionForEntry(nil))
+}
+
+func TestClassifyNextAction_PrefersTerminalBeforeTrailingWarnings(t *testing.T) {
+	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
+	pr := 42
+	step := contracts.FailedStep20
+	events := []contracts.StateEntry{
+		{
+			Kind: contracts.StateKindWarningRescueRetry,
+			Value: contracts.StateEntryWarning{
+				Kind:  contracts.StateKindWarningRescueRetry,
+				PR:    &pr,
+				RunID: &runID,
+				Step:  &step,
+				At:    time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+			},
+		},
+		{
+			Kind: contracts.StateKindNeedsManualRecovery,
+			Value: contracts.StateEntryNeedsManualRecovery{
+				Kind:       contracts.StateKindNeedsManualRecovery,
+				PR:         pr,
+				RunID:      runID,
+				Step:       contracts.FailedStep50,
+				Reason:     contracts.RollbackReasonWorktreeRescueLoop,
+				FailedStep: contracts.FailedStep50,
+				At:         time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC),
+			},
+		},
+		{
+			Kind: contracts.StateKindWarningRescueRetry,
+			Value: contracts.StateEntryWarning{
+				Kind:  contracts.StateKindWarningRescueRetry,
+				PR:    &pr,
+				RunID: &runID,
+				Step:  &step,
+				At:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+			},
+		},
+	}
+
+	assert.Equal(t, NextActionNeedsManualRecovery, ClassifyNextAction(events))
+
+	targets := ResumeTarget(events)
+	assert.Nil(t, targets)
 }
 
 func TestAppend_WritesDetailOverflowSidecar(t *testing.T) {

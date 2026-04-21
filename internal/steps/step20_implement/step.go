@@ -22,6 +22,7 @@ const (
 	defaultHeartbeatInterval = 60 * time.Second
 	defaultStaleAfter        = 5 * time.Minute
 	defaultRescueMaxRetries  = 3
+	successCollectTTL        = 10 * time.Second
 
 	resumeStateFileName = ".resume-state.json"
 	heartbeatFileName   = ".heartbeat"
@@ -224,15 +225,21 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	if err := run.IO.ValidateWorktreeAllocation(allocation); err != nil {
 		return err
 	}
-	headSHA, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
+	collectCtx, cancel := context.WithTimeout(ctx, successCollectTTL)
+	defer cancel()
+
+	headSHA, err := gitOutputContext(collectCtx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
+		return err
+	}
+	if err := agentrunner.ValidateSuccessHead(collectCtx, allocation, headSHA, "step20"); err != nil {
 		return err
 	}
 	diffPath, err := artifactPath(run.IO, run.Pass, run.Agent, diffFileName)
 	if err != nil {
 		return err
 	}
-	if err := agentrunner.WriteSuccessDiff(ctx, allocation.Path, allocation.BaseSHA, "step20", diffPath); err != nil {
+	if err := agentrunner.WriteSuccessDiff(collectCtx, allocation.Path, allocation.BaseSHA, "step20", diffPath); err != nil {
 		return err
 	}
 
@@ -240,7 +247,7 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	if err != nil {
 		return err
 	}
-	checklist, err := loadChecklistArtifact(allocation.Path, run.IO.RunID, run.Pass, run.Agent)
+	checklist, err := loadChecklistArtifact(collectCtx, allocation.Path, run.IO.RunID, run.Pass, run.Agent)
 	if err != nil {
 		return err
 	}
@@ -397,6 +404,6 @@ func renderPrompt(cfg *config.Config, data promptData) (string, error) {
 	return out.String(), nil
 }
 
-func loadChecklistArtifact(worktreePath string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {
-	return agentrunner.LoadChecklistArtifact(worktreePath, checklistFileName, "step20", runID, pass, agent)
+func loadChecklistArtifact(ctx context.Context, worktreePath string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {
+	return agentrunner.LoadChecklistArtifactContext(ctx, worktreePath, checklistFileName, "step20", runID, pass, agent)
 }

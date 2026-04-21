@@ -12,7 +12,10 @@ import (
 )
 
 // needsRecoveryDir is the directory holding durable needs-recovery sentinels.
-const needsRecoveryDir = "needs-recovery"
+const (
+	needsRecoveryDir = "needs-recovery"
+	sunsetMarkerFile = "sunset-running.marker"
+)
 
 // SentinelExists reports whether any `.json` or `.aborted.json` sentinel is
 // present under <runs_base>/needs-recovery/. A single sentinel anywhere blocks
@@ -29,24 +32,29 @@ func sentinelExistsExceptRun(runsBase string, ignoreRunID contracts.RunID) (bool
 	dir := filepath.Join(runsBase, needsRecoveryDir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
+		if !os.IsNotExist(err) {
+			return false, err
 		}
-		return false, err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if ignoreRunID != "" {
-			if name == string(ignoreRunID)+".json" || name == string(ignoreRunID)+".aborted.json" {
+	} else {
+		for _, entry := range entries {
+			if entry.IsDir() {
 				continue
 			}
+			name := entry.Name()
+			if ignoreRunID != "" {
+				if name == string(ignoreRunID)+".json" || name == string(ignoreRunID)+".aborted.json" {
+					continue
+				}
+			}
+			if strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".aborted.json") {
+				return true, nil
+			}
 		}
-		if strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".aborted.json") {
-			return true, nil
-		}
+	}
+	if _, err := os.Stat(filepath.Join(runsBase, sunsetMarkerFile)); err == nil {
+		return true, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return false, err
 	}
 	return false, nil
 }

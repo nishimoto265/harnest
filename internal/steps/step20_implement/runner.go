@@ -13,6 +13,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/interruption"
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
@@ -62,9 +63,9 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 
 	cmd := exec.CommandContext(timeoutCtx, req.Binary)
 	cmd.Dir = req.Workdir
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin = strings.NewReader(req.Prompt)
-	cmd.Env = append(os.Environ(), req.Env...)
+	cmd.Env = processenv.Sanitize(req.Env...)
 
 	stdoutTail := newTailBuffer(8 << 10)
 	stderrTail := newTailBuffer(8 << 10)
@@ -81,10 +82,15 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 		_ = cmd.Wait()
 		return runnerResult{}, err
 	}
+	tracker := agentrunner.StartDescendantTracker(lease.PID, 25*time.Millisecond)
 	result.Lease = lease
 	if req.OnStart != nil {
 		if err := req.OnStart(lease, result.StartedAt); err != nil {
-			_ = agentrunner.KillProcessGroup(lease.PGID)
+			if tracker != nil {
+				tracker.Stop()
+				defer func() { tracker = nil }()
+			}
+			_ = agentrunner.CleanupProcessTree(lease, lease.PID, tracker)
 			_ = cmd.Wait()
 			return runnerResult{}, err
 		}
@@ -101,7 +107,10 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 
 	waitErr := cmd.Wait()
 	close(groupKillDone)
-	_ = killProcessGroup(lease.PGID)
+	if tracker != nil {
+		tracker.Stop()
+	}
+	_ = agentrunner.CleanupProcessTree(lease, lease.PID, tracker)
 	result.FinishedAt = r.now().UTC()
 	result.StdoutSnippet = stdoutTail.Bytes()
 	result.StderrSnippet = stderrTail.Bytes()
