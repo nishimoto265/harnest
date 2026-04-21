@@ -11,6 +11,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/steps/step40_classify"
 )
 
 func defaultSteps() Steps {
@@ -138,22 +139,15 @@ func (s stubMarkerStep) Run(ctx context.Context, run *StepRunContext) error {
 type stubStep40 struct{}
 
 func (stubStep40) Run(ctx context.Context, run *StepRunContext) error {
-	_ = ctx
-	candidates := contracts.Candidates{
-		SchemaVersion:  "1",
-		RunID:          run.IO.RunID,
-		Candidates:     []contracts.Candidate{},
-		CandidatesHash: contracts.CanonicalCandidatesHash(nil),
-		CreatedAt:      time.Now().UTC(),
-	}
-	path, err := run.IO.ResolveRunRelative("40/candidates.json")
+	candidates, err := step40_classify.Run(ctx, step40_classify.Config{
+		IO:           run.IO,
+		RegistryPath: run.IO.RulesRegistryPath(),
+		TaskPackage:  run.TaskPackage,
+	})
 	if err != nil {
 		return err
 	}
-	if err := internalio.WriteJSONAtomic(path, candidates); err != nil {
-		return err
-	}
-	run.Candidates = &candidates
+	run.Candidates = candidates
 	return nil
 }
 
