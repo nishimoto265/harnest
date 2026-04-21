@@ -108,8 +108,7 @@ func (r IntentionRecord) Validate() error {
 	switch r.Stage {
 	case IntentionStageRegistryAppended,
 		IntentionStageDecisionWritten,
-		IntentionStageRollingBackRegistryAppended,
-		IntentionStageRollingBackDecisionWritten:
+		IntentionStageRollingBackRegistryAppended:
 		if r.RegistryAppendResult == nil {
 			return ErrIntentionMissingRegistryAppendResult
 		}

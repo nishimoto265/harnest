@@ -275,6 +275,13 @@ func (w Writer) Append(entry contracts.StateEntry) error {
 	if err != nil {
 		return err
 	}
+	lock, err := internalio.AcquireFileLock(filepath.Join(filepath.Dir(w.path), "state.lock"))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = lock.Unlock()
+	}()
 	return internalio.AppendJSONL(w.path, normalized)
 }
 

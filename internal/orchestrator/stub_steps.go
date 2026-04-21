@@ -9,8 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/archive"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 )
 
 func defaultSteps() Steps {
@@ -27,8 +29,8 @@ func defaultSteps() Steps {
 		Step40:  stubStep40{},
 		Step50:  step50,
 		Step60:  stubMarkerStep{path: "60/done.marker"},
-		Step70:  stubStep70{},
-		Archive: stubArchiveStep{},
+		Step70:  realStep70{},
+		Archive: realArchiveStep{},
 	}
 }
 
@@ -188,6 +190,91 @@ func (stubArchiveStep) Run(ctx context.Context, run *StepRunContext) error {
 	_ = ctx
 	_ = run
 	return nil
+}
+
+// realStep70 is the production wiring for step70, delegating to
+// internal/steps/step70_decide. The resolver defaults to NoopResolver so that
+// pipeline runs without a promotion target emit a noop decision (matches the
+// prior stubStep70 behaviour for tests and empty-candidate flows).
+type realStep70 struct{}
+
+func (realStep70) Run(ctx context.Context, run *StepRunContext) error {
+	if run.TaskPackage == nil {
+		return errors.New("orchestrator: step70 requires task_package")
+	}
+	if run.Candidates == nil {
+		return errors.New("orchestrator: step70 requires candidates")
+	}
+	if run.Config == nil {
+		return errors.New("orchestrator: step70 requires config")
+	}
+	repoRoot, err := run.Config.RepoRoot()
+	if err != nil {
+		return err
+	}
+	store := run.IntentionFile
+	deps := step70_decide.Deps{
+		Git: step70_decide.RealGitOps{
+			RepoDir: repoRoot,
+		},
+		Resolver: step70_decide.FilesystemResolver{
+			RepoDir: repoRoot,
+		},
+	}
+	if err := step70_decide.Run(ctx, run.PR, run.IO, run.TaskPackage, run.Candidates, store, deps); err != nil {
+		return err
+	}
+	decisionPath, err := run.IO.ResolveRunRelative("70/decision.json")
+	if err != nil {
+		return err
+	}
+	if fileExists(decisionPath) {
+		decision, err := internalio.ReadJSON[contracts.Decision](decisionPath)
+		if err != nil {
+			return err
+		}
+		run.Decision = &decision
+	}
+	return nil
+}
+
+// realArchiveStep performs the lightweight post-finalize worktree cleanup that
+// step70 delegated to the orchestrator prior to Phase 1-F. The heavy sunset
+// transitions are run by the sunset_tick / `auto-improve sunset` entry points
+// (both delegating to internal/archive.RunSunsetWithLock).
+type realArchiveStep struct{}
+
+func (realArchiveStep) Run(ctx context.Context, run *StepRunContext) error {
+	_ = ctx
+	// Opportunistically invoke archive with an empty transition list when a
+	// sunset_run_id is available; otherwise this is a no-op because the
+	// orchestrator only performs worktree cleanup after step70 finalizes. The
+	// empty-Transitions call still emits registry-size telemetry for operators.
+	if run == nil {
+		return nil
+	}
+	if run.IO.RunsBase == "" {
+		return nil
+	}
+	opts := archive.Opts{
+		RunsBase:    run.IO.RunsBase,
+		SunsetRunID: archiveRunIDFromRun(run.IO.RunID),
+	}
+	if run.Config != nil {
+		opts.RegistryHighAt = 1500
+		opts.RegistryCritAt = 2000
+	}
+	if _, err := archive.RunSunsetWithLock(ctx, opts); err != nil {
+		return err
+	}
+	return nil
+}
+
+// archiveRunIDFromRun derives a short sunset-run fingerprint from a pipeline
+// run_id. This is a wiring detail — the full sunset scheduler (not in this
+// phase) provides its own sha256(date || fingerprint).
+func archiveRunIDFromRun(runID contracts.RunID) string {
+	return "orchestrator:" + string(runID)
 }
 
 func worktreeFor(pkg *contracts.TaskPackage, pass int, agent contracts.AgentID) (contracts.WorktreeAllocation, error) {

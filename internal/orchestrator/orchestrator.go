@@ -487,8 +487,10 @@ func (o *Orchestrator) appendTerminalDecision(run *StepRunContext) error {
 	if err != nil {
 		return err
 	}
-	if n := len(entries); n > 0 && entries[n-1].Kind.IsTerminal() {
-		return nil
+	for _, entry := range entries {
+		if entry.Kind.IsTerminal() {
+			return nil
+		}
 	}
 
 	now := time.Now().UTC()

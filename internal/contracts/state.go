@@ -193,8 +193,8 @@ var (
 	ErrStateWarningRegistryStepForbidden = errors.New("contracts: state warning: registry size warnings from sunset_tick must omit step")
 	ErrStateWarningRegistryStep70Scope   = errors.New("contracts: state warning: registry size warnings from step70 require pr and run_id")
 	ErrStateWarningRegistrySunsetScope   = errors.New("contracts: state warning: registry size warnings from sunset_tick must be global telemetry")
-	ErrStateWarningRegistryHighMinimum   = errors.New("contracts: state warning: registry_size_high count must be >= 1501")
-	ErrStateWarningRegistryCriticalMin   = errors.New("contracts: state warning: registry_size_critical count must be >= 2001")
+	ErrStateWarningRegistryHighMinimum   = errors.New("contracts: state warning: registry_size_high count must be >= 1500")
+	ErrStateWarningRegistryCriticalMin   = errors.New("contracts: state warning: registry_size_critical count must be >= 2000")
 	ErrStateVariantTypeMismatch          = errors.New("contracts: state: kind does not match variant type")
 	ErrStateVariantKindMismatch          = errors.New("contracts: state: kind does not match inner kind field")
 )
@@ -245,10 +245,10 @@ func (e StateEntryWarning) Validate() error {
 		default:
 			return ErrStateWarningRegistrySource
 		}
-		if e.Kind == StateKindWarningRegistrySizeHigh && *e.Count < 1501 {
+		if e.Kind == StateKindWarningRegistrySizeHigh && *e.Count < 1500 {
 			return fmt.Errorf("%w: count=%d", ErrStateWarningRegistryHighMinimum, *e.Count)
 		}
-		if e.Kind == StateKindWarningRegistrySizeCritical && *e.Count < 2001 {
+		if e.Kind == StateKindWarningRegistrySizeCritical && *e.Count < 2000 {
 			return fmt.Errorf("%w: count=%d", ErrStateWarningRegistryCriticalMin, *e.Count)
 		}
 	default:

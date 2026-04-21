@@ -68,7 +68,7 @@ func TestState_Warning_RejectsRegistryWarningWithoutCount(t *testing.T) {
 }
 
 func TestState_Warning_RejectsRegistrySizeHighBelowMinimum(t *testing.T) {
-	data := `{"kind":"registry_size_high","source":"step70","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","count":1500,"at":"2026-04-20T12:00:00Z"}`
+	data := `{"kind":"registry_size_high","source":"step70","pr":42,"run_id":"2026-04-20-PR42-abcdef0","step":"70","count":1499,"at":"2026-04-20T12:00:00Z"}`
 	var e StateEntry
 	err := json.Unmarshal([]byte(data), &e)
 	require.Error(t, err)
@@ -76,7 +76,7 @@ func TestState_Warning_RejectsRegistrySizeHighBelowMinimum(t *testing.T) {
 }
 
 func TestState_Warning_RejectsRegistrySizeCriticalBelowMinimum(t *testing.T) {
-	data := `{"kind":"registry_size_critical","source":"sunset_tick","count":2000,"at":"2026-04-20T12:00:00Z"}`
+	data := `{"kind":"registry_size_critical","source":"sunset_tick","count":1999,"at":"2026-04-20T12:00:00Z"}`
 	var e StateEntry
 	err := json.Unmarshal([]byte(data), &e)
 	require.Error(t, err)

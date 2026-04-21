@@ -600,7 +600,7 @@ func TestIntentionRecord_Validate_RollingBackDecisionWritten_RequiresAll(t *test
 	r.Stage = IntentionStageRollingBackDecisionWritten
 	err := r.Validate()
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrIntentionMissingRegistryAppendResult)
+	assert.ErrorIs(t, err, ErrIntentionMissingRecoveryReason)
 }
 
 func TestIntentionRecord_Validate_RollingBackBranchReverted_RequiresRecovery(t *testing.T) {
