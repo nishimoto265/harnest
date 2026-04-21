@@ -84,7 +84,7 @@ func NewOrchestrator(cfg *config.Config) (*Orchestrator, error) {
 		cfg:      cfg,
 		logger:   ilog.New(slog.LevelInfo),
 		decoders: ContractDecoders{},
-		steps:    defaultSteps(),
+		steps:    defaultSteps(cfg),
 	}, nil
 }
 
