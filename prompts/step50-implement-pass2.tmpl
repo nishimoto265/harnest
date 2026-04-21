@@ -1,11 +1,40 @@
-{{/* Phase 0 skeleton for step50 implement. Phase 1 will replace this with the full prompt. */}}
 # Step 50 Implement Pass 2
 
-Inputs
+Run
 - run_id: {{ .TaskPackage.RunID }}
-- pass: 2
+- pass: {{ .Pass }}
 - agent: {{ .Agent }}
-- candidate_rule_ids: {{ .CandidateRuleIDs }}
+- worktree_path: {{ .WorktreePath }}
+
+Task Prompt
+
+{{ .TaskPackage.ReconstructedTaskPrompt }}
+
+Candidate Rule IDs
+{{- if .CandidateRuleIDs }}
+{{- range .CandidateRuleIDs }}
+- {{ . }}
+{{- end }}
+{{- else }}
+- none
+{{- end }}
+
+Candidate Rule Payloads
+{{- if .RulePayloads }}
+{{- range .RulePayloads }}
+
+## {{ .ID }}
+{{- if .Text }}
+
+{{ .Text }}
+{{- else }}
+
+(no sidecar payload found)
+{{- end }}
+{{- end }}
+{{- else }}
+- none
+{{- end }}
 
 Expected artifacts
 - manifest.json
