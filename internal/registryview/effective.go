@@ -107,6 +107,9 @@ func Build(entries []contracts.RuleRegistryEntry) (map[string]RuleState, error) 
 			if err != nil {
 				return nil, err
 			}
+			if !hadPrevious || previous.Sha256 != v.PrevSha256 {
+				return nil, fmt.Errorf("registryview: update prev_sha256 mismatch: rule_id=%s prev_sha256=%s effective_sha256=%s", v.RuleID, v.PrevSha256, previous.Sha256)
+			}
 			status := contracts.RuleStatusActive
 			if hadPrevious && previous.Status != "" {
 				status = previous.Status
@@ -140,6 +143,9 @@ func Build(entries []contracts.RuleRegistryEntry) (map[string]RuleState, error) 
 			previous, hadPrevious, err := previousState(states, v.RuleID)
 			if err != nil {
 				return nil, err
+			}
+			if !hadPrevious || previous.Sha256 != v.PrevSha256 {
+				return nil, fmt.Errorf("registryview: update prev_sha256 mismatch: rule_id=%s prev_sha256=%s effective_sha256=%s", v.RuleID, v.PrevSha256, previous.Sha256)
 			}
 			status := contracts.RuleStatusActive
 			if hadPrevious && previous.Status != "" {

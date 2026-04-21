@@ -140,9 +140,9 @@ func (g gitCLI) currentBranch(ctx context.Context, repoRoot string) (string, err
 }
 
 func (g gitCLI) worktreeClean(ctx context.Context, repoRoot string) (bool, error) {
-	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "status", "--porcelain")
+	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "status", "--porcelain", "--ignored")
 	if err != nil {
-		return false, formatCommandFailure(fmt.Sprintf("step10: git status --porcelain (in %s)", repoRoot), err, out, stderr)
+		return false, formatCommandFailure(fmt.Sprintf("step10: git status --porcelain --ignored (in %s)", repoRoot), err, out, stderr)
 	}
 	return strings.TrimSpace(string(out)) == "", nil
 }

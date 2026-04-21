@@ -20,7 +20,17 @@ type DescendantTracker struct {
 	done    chan struct{}
 
 	mu   sync.Mutex
-	seen map[int]struct{}
+	seen map[int]string
+}
+
+type processIdentity struct {
+	pid       int
+	startTime string
+}
+
+var lookupProcessStartTime = processStartTime
+var killPIDSignal = func(pid int, sig syscall.Signal) error {
+	return syscall.Kill(pid, sig)
 }
 
 func StartDescendantTracker(rootPID int, interval time.Duration) *DescendantTracker {
@@ -34,7 +44,7 @@ func StartDescendantTracker(rootPID int, interval time.Duration) *DescendantTrac
 		rootPID: rootPID,
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
-		seen:    map[int]struct{}{},
+		seen:    map[int]string{},
 	}
 	go tracker.run(interval)
 	return tracker
@@ -66,9 +76,17 @@ func (t *DescendantTracker) capture() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, pid := range descendants {
-		if pid > 0 {
-			t.seen[pid] = struct{}{}
+		if pid <= 0 {
+			continue
 		}
+		if _, ok := t.seen[pid]; ok {
+			continue
+		}
+		startTime, err := lookupProcessStartTime(pid)
+		if err != nil {
+			startTime = ""
+		}
+		t.seen[pid] = startTime
 	}
 }
 
@@ -103,6 +121,19 @@ func (t *DescendantTracker) Snapshot() []int {
 	out := make([]int, 0, len(t.seen))
 	for pid := range t.seen {
 		out = append(out, pid)
+	}
+	return out
+}
+
+func (t *DescendantTracker) snapshotIdentities() []processIdentity {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]processIdentity, 0, len(t.seen))
+	for pid, startTime := range t.seen {
+		out = append(out, processIdentity{pid: pid, startTime: startTime})
 	}
 	return out
 }
@@ -170,9 +201,10 @@ func CleanupProcessTree(lease ProcessLease, sessionID int, tracker *DescendantTr
 		errs = append(errs, err)
 	}
 	if tracker != nil {
+		tracker.CaptureBurst(250 * time.Millisecond)
 		tracker.CaptureUntilStable(500*time.Millisecond, 25*time.Millisecond)
 	}
-	if err := killPIDs(tracker.Snapshot()); err != nil {
+	if err := killTrackedPIDs(tracker.snapshotIdentities()); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
@@ -392,4 +424,53 @@ func killPIDs(pids []int) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func killTrackedPIDs(ids []processIdentity) error {
+	seen := map[int]struct{}{}
+	errs := make([]error, 0, len(ids))
+	for _, id := range ids {
+		if id.pid <= 0 {
+			continue
+		}
+		if _, ok := seen[id.pid]; ok {
+			continue
+		}
+		seen[id.pid] = struct{}{}
+		if id.startTime != "" {
+			currentStartTime, err := lookupProcessStartTime(id.pid)
+			switch {
+			case errors.Is(err, syscall.ESRCH):
+				continue
+			case err != nil:
+				errs = append(errs, err)
+				continue
+			case currentStartTime != id.startTime:
+				continue
+			}
+		}
+		if err := killPIDSignal(id.pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func processStartTime(pid int) (string, error) {
+	if pid <= 0 {
+		return "", syscall.ESRCH
+	}
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return "", syscall.ESRCH
+		}
+		return "", err
+	}
+	startTime := strings.TrimSpace(string(output))
+	if startTime == "" {
+		return "", syscall.ESRCH
+	}
+	return startTime, nil
 }

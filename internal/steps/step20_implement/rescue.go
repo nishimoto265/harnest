@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -108,6 +109,26 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := run.IO.ValidateWorktreeAllocation(allocation); err != nil {
 		return 0, err
 	}
+	if quiesced, err := ensureRescueLeaseQuiesced(ctx, allocation.Path, state); err != nil {
+		return 0, err
+	} else if !quiesced {
+		nextRetry := state.RetryCount + 1
+		if err := restoreAllocationWorktree(ctx, allocation, state.ExpectedBaseSHA); err != nil {
+			return 0, err
+		}
+		return finishRescueState(agentDir, state, nextRetry)
+	}
+	currentBranch, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "branch", "--show-current")
+	if err != nil {
+		return 0, err
+	}
+	if currentBranch == "" || currentBranch != allocation.Branch {
+		nextRetry := state.RetryCount + 1
+		if err := restoreAllocationWorktree(ctx, allocation, state.ExpectedBaseSHA); err != nil {
+			return 0, err
+		}
+		return finishRescueState(agentDir, state, nextRetry)
+	}
 	rescueID := fmt.Sprintf("%s-%s-rescue-%d-%d", run.IO.RunID, run.Agent, state.RetryCount+1, s.now().UTC().Unix())
 	rescueDir := filepath.Join(agentDir, rescuedDirName, rescueID)
 	if err := ensureDir(filepath.Join(rescueDir, "untracked")); err != nil {
@@ -202,22 +223,11 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-fd"); err != nil {
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-ffdx"); err != nil {
 		return 0, err
 	}
 
-	state.RetryCount = nextRetry
-	state.StartedAt = time.Time{}
-	state.LastHeartbeat = time.Time{}
-	state.Pid = 0
-	state.Pgid = 0
-	if err := os.Remove(heartbeatPath(agentDir)); err != nil && !os.IsNotExist(err) {
-		return 0, err
-	}
-	if err := saveResumeState(agentDir, state); err != nil {
-		return 0, err
-	}
-	return nextRetry, nil
+	return finishRescueState(agentDir, state, nextRetry)
 }
 
 type rescueLock struct {
@@ -504,6 +514,158 @@ func commitCountForRevision(ctx context.Context, worktreePath, rev string) (int,
 
 func identity(s string) string {
 	return s
+}
+
+func restoreAllocationWorktree(ctx context.Context, allocation contracts.WorktreeAllocation, expectedBaseSHA string) error {
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "checkout", "--force", "-B", allocation.Branch, expectedBaseSHA); err != nil {
+		return err
+	}
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "reset", "--hard", expectedBaseSHA); err != nil {
+		return err
+	}
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-ffdx"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func finishRescueState(agentDir string, state resumeState, nextRetry int) (int, error) {
+	state.RetryCount = nextRetry
+	state.StartedAt = time.Time{}
+	state.LastHeartbeat = time.Time{}
+	state.Pid = 0
+	state.Pgid = 0
+	if err := os.Remove(heartbeatPath(agentDir)); err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	if err := saveResumeState(agentDir, state); err != nil {
+		return 0, err
+	}
+	return nextRetry, nil
+}
+
+func ensureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state resumeState) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if state.Pgid > 0 {
+		_ = agentrunner.KillProcessGroupUntilGone(state.Pgid, 500*time.Millisecond, 25*time.Millisecond)
+	}
+	deadline := time.Now().Add(750 * time.Millisecond)
+	emptyChecks := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		pids, err := worktreeProcessIDs(ctx, worktreePath)
+		if err != nil {
+			return false, nil
+		}
+		if len(pids) == 0 {
+			emptyChecks++
+			if emptyChecks >= 2 {
+				return true, nil
+			}
+		} else {
+			emptyChecks = 0
+			for _, pid := range pids {
+				if pid <= 0 || pid == os.Getpid() {
+					continue
+				}
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return false, nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func worktreeProcessIDs(ctx context.Context, worktreePath string) ([]int, error) {
+	pids, err := worktreeProcessIDsFromPS(ctx, worktreePath)
+	if err != nil {
+		return nil, err
+	}
+	if lsofPath, err := exec.LookPath("lsof"); err == nil {
+		cmd := exec.CommandContext(ctx, lsofPath, "-t", "+D", worktreePath)
+		output, err := cmd.Output()
+		if err == nil {
+			return appendUniquePIDs(pids, parsePIDList(string(output))...), nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return pids, nil
+		}
+		return pids, nil
+	}
+	return pids, nil
+}
+
+func worktreeProcessIDsFromPS(ctx context.Context, worktreePath string) ([]int, error) {
+	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,command=")
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+	pids := make([]int, 0)
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid <= 0 || pid == os.Getpid() {
+			continue
+		}
+		if strings.Contains(line, worktreePath) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}
+
+func appendUniquePIDs(base []int, extra ...int) []int {
+	seen := make(map[int]struct{}, len(base)+len(extra))
+	out := make([]int, 0, len(base)+len(extra))
+	for _, pid := range append(base, extra...) {
+		if pid <= 0 {
+			continue
+		}
+		if _, ok := seen[pid]; ok {
+			continue
+		}
+		seen[pid] = struct{}{}
+		out = append(out, pid)
+	}
+	return out
+}
+
+func parsePIDList(output string) []int {
+	seen := make(map[int]struct{})
+	pids := make([]int, 0)
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pid, err := strconv.Atoi(line)
+		if err != nil || pid <= 0 {
+			continue
+		}
+		if _, ok := seen[pid]; ok {
+			continue
+		}
+		seen[pid] = struct{}{}
+		pids = append(pids, pid)
+	}
+	return pids
 }
 
 func syncDir(path string) error {

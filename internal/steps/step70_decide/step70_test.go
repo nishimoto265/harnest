@@ -174,8 +174,8 @@ func TestRun_DivergedSunsetMarkerDoesNotBlockExecution(t *testing.T) {
 		Resolver: resolver,
 		Now:      fixedNow(),
 	})
-	require.NoError(t, err)
-	assert.Equal(t, contracts.DecisionActionAdopt, readDecision(t, runCtx).Action)
+	require.ErrorIs(t, err, ErrBlockedBySentinel)
+	assert.Contains(t, err.Error(), sunsetMarkerFile+".diverged")
 }
 
 func TestNextRegistryVersionForRule_IsChainScoped(t *testing.T) {
@@ -598,21 +598,20 @@ func TestRun_ResumeFromPersistedDecisionRepublishesMissingRuleBodies(t *testing.
 		Resolver: unexpectedResolver{t: t},
 		Now:      fixedNow(),
 	})
-	require.ErrorContains(t, err, "synthetic crash")
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
+	assert.Equal(t, "rule_publish_failure", recovery.Detail)
 
 	promoteRuleSidecarFn = originalPromote
 	t.Cleanup(func() {
 		promoteRuleSidecarFn = originalPromote
 	})
-	require.NoError(t, Run(context.Background(), 411, runCtx, pkg, candidates, store, Deps{
-		Git:      &fakeGit{head: resolver.target.TargetSHA},
-		Resolver: unexpectedResolver{t: t},
-		Now:      fixedNow(),
-	}))
-
 	assert.FileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-a.md"))
-	assert.FileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-b.md"))
-	assert.NoFileExists(t, intentionPath(t, runCtx))
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-b.md"))
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+	assert.FileExists(t, intentionPath(t, runCtx))
 }
 
 func TestRun_RulePublishConflictTransitionsToManualRecovery(t *testing.T) {
@@ -651,6 +650,90 @@ func TestRun_RulePublishConflictTransitionsToManualRecovery(t *testing.T) {
 	require.NotEmpty(t, events)
 	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
 	assert.Equal(t, "rule_publish_conflict", recovery.Detail)
+}
+
+func TestRun_RejectsCandidatesHashMismatchAtEntry(t *testing.T) {
+	runCtx, pkg, candidates, store, _ := newFixture(t, "PR430")
+	candidates.CandidatesHash = strings.Repeat("f", 64)
+
+	err := Run(context.Background(), 430, runCtx, pkg, candidates, store, Deps{Now: fixedNow()})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "candidates invalid")
+
+	decisionPath, pathErr := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, pathErr)
+	assert.NoFileExists(t, decisionPath)
+}
+
+func TestRun_RulePublishIntegrityFailuresTransitionToManualRecovery(t *testing.T) {
+	cases := []struct {
+		name       string
+		prLabel    string
+		setup      func(t *testing.T, stagedPath, dstPath string)
+		wantDetail string
+	}{
+		{
+			name:    "staged_integrity",
+			prLabel: "PR413",
+			setup: func(t *testing.T, stagedPath, dstPath string) {
+				require.NoError(t, internalio.WriteAtomic(stagedPath, []byte("corrupted body\n")))
+			},
+			wantDetail: "rule_publish_integrity",
+		},
+		{
+			name:    "destination_type",
+			prLabel: "PR414",
+			setup: func(t *testing.T, stagedPath, dstPath string) {
+				require.NoError(t, internalio.WriteAtomic(stagedPath, []byte("expected body\n")))
+				require.NoError(t, os.MkdirAll(dstPath, 0o755))
+			},
+			wantDetail: "rule_publish_destination_type",
+		},
+		{
+			name:    "staged_missing",
+			prLabel: "PR415",
+			setup: func(t *testing.T, stagedPath, dstPath string) {
+				require.NoError(t, os.MkdirAll(filepath.Dir(stagedPath), 0o755))
+			},
+			wantDetail: "rule_publish_staged_missing",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, tc.prLabel)
+			resolver.target.RulesToAppend = []contracts.RuleRegistryEntry{
+				adoptAddedEntryWithBody(runCtx.RunID, "rule-publish", "expected body\n"),
+			}
+
+			intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+			intention.Stage = contracts.IntentionStageRegistryAppended
+			entries, err := registryEntriesFromPlannedAdoption(intention, fixedNow()())
+			require.NoError(t, err)
+			entry, err := deriveRegistryChain(entries[0], runCtx.RulesRegistryPath())
+			require.NoError(t, err)
+			appendResult, err := internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), entry)
+			require.NoError(t, err)
+			intention.RegistryAppendResult = &appendResult
+			require.NoError(t, store.Save(intention))
+
+			stagedPath := mustStagedRulePath(t, runCtx, "rules/rule-publish.md")
+			dstPath := filepath.Join(runCtx.RunsBase, "rules", "rule-publish.md")
+			tc.setup(t, stagedPath, dstPath)
+
+			err = Run(context.Background(), 412, runCtx, pkg, candidates, store, Deps{
+				Git:      &fakeGit{head: resolver.target.TargetSHA},
+				Resolver: unexpectedResolver{t: t},
+				Now:      fixedNow(),
+			})
+			require.ErrorIs(t, err, ErrNeedsManualRecovery)
+
+			events := readStateEvents(t, runCtx)
+			require.NotEmpty(t, events)
+			recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
+			assert.Equal(t, tc.wantDetail, recovery.Detail)
+		})
+	}
 }
 
 func TestRun_ResumeFromDecisionWritten(t *testing.T) {
@@ -1050,6 +1133,7 @@ func TestRun_NeedsManualRecoveryStageRequiresExplicitCleanup(t *testing.T) {
 
 	require.NoError(t, FinalizeCleanup(runCtx, store))
 	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelClearedFilename(runCtx.RunID)))
 	assert.NoFileExists(t, intentionPath(t, runCtx))
 
 	deps = Deps{Git: &fakeGit{head: resolver.target.BestShaBefore}, Resolver: resolver, Now: fixedNow()}

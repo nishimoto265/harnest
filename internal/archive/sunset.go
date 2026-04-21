@@ -567,12 +567,26 @@ func emitSizeWarnings(opts Opts) error {
 }
 
 func sentinelExists(runsBase string) (bool, error) {
+	if blocked, err := sunsetDivergedBlockExists(runsBase); err != nil {
+		return false, err
+	} else if blocked {
+		return true, nil
+	}
 	processedPath := filepath.Join(runsBase, "processed.jsonl")
 	latestRuns, err := state.NeedsManualRecoveryRunsPath(processedPath)
 	if err != nil {
 		return false, err
 	}
 	for _, latest := range latestRuns {
+		if latest.RunID != "" {
+			suppressed, err := needsRecoveryClearedMarkerExists(runsBase, latest.RunID)
+			if err != nil {
+				return false, err
+			}
+			if suppressed {
+				continue
+			}
+		}
 		switch value := latest.LastEvent.Value.(type) {
 		case contracts.StateEntryNeedsManualRecovery:
 			if value.Step == contracts.FailedStep70 && value.Reason != contracts.RollbackReasonWorktreeRescueLoop {
@@ -604,6 +618,28 @@ func sentinelExists(runsBase string) (bool, error) {
 	return false, nil
 }
 
+func needsRecoveryClearedMarkerExists(runsBase string, runID contracts.RunID) (bool, error) {
+	if runID == "" {
+		return false, nil
+	}
+	path := filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelClearedFilename(runID))
+	if _, err := os.Stat(path); err == nil {
+		return true, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	return false, nil
+}
+
+func sunsetDivergedBlockExists(runsBase string) (bool, error) {
+	if _, err := os.Stat(filepath.Join(runsBase, divergedMarkerFile)); err == nil {
+		return true, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	return false, nil
+}
+
 func markStaleMarkerDiverged(runsBase string) error {
 	from := filepath.Join(runsBase, markerFilename)
 	to := filepath.Join(runsBase, divergedMarkerFile)
@@ -623,6 +659,15 @@ func divergedMarkerExists(runsBase string) (bool, error) {
 		return false, err
 	}
 	return false, nil
+}
+
+// ClearDivergedMarker removes the durable sunset divergence block after an
+// operator has explicitly reconciled the stale sunset marker.
+func ClearDivergedMarker(runsBase string) error {
+	if err := os.Remove(filepath.Join(runsBase, divergedMarkerFile)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func markerSnapshot(runsBase string, transitions []Transition) (string, map[string]int, error) {

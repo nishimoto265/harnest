@@ -658,7 +658,7 @@ func TestGitCLIWorktreeAdd_RecreatesDirtyExistingWorktree(t *testing.T) {
 				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", path, "branch", "--show-current"}):
 				return []byte(branch + "\n"), nil, nil
-			case slices.Equal(args, []string{"-C", path, "status", "--porcelain"}):
+			case slices.Equal(args, []string{"-C", path, "status", "--porcelain", "--ignored"}):
 				return []byte(" M README.md\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "remove", "--force", path}):
 				require.NoError(t, os.RemoveAll(path))
@@ -679,12 +679,49 @@ func TestGitCLIWorktreeAdd_RecreatesDirtyExistingWorktree(t *testing.T) {
 			{"-C", repoRoot, "worktree", "list", "--porcelain"},
 			{"-C", path, "rev-parse", "HEAD"},
 			{"-C", path, "branch", "--show-current"},
-			{"-C", path, "status", "--porcelain"},
+			{"-C", path, "status", "--porcelain", "--ignored"},
 			{"-C", repoRoot, "worktree", "remove", "--force", path},
 			{"-C", repoRoot, "worktree", "add", "-b", branch, path, testBaseSHA},
 		},
 		calls,
 	)
+}
+
+func TestGitCLIWorktreeAdd_RecreatesIgnoredExistingWorktree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worktree")
+	repoRoot := t.TempDir()
+	branch := "auto-improve/run/pass1/a1"
+	require.NoError(t, os.MkdirAll(path, 0o755))
+
+	var calls [][]string
+	git := gitCLI{
+		stat: os.Stat,
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+			calls = append(calls, append([]string(nil), args...))
+			switch {
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "list", "--porcelain"}):
+				return []byte("worktree " + path + "\n\n"), nil, nil
+			case slices.Equal(args, []string{"-C", path, "rev-parse", "HEAD"}):
+				return []byte(testBaseSHA + "\n"), nil, nil
+			case slices.Equal(args, []string{"-C", path, "branch", "--show-current"}):
+				return []byte(branch + "\n"), nil, nil
+			case slices.Equal(args, []string{"-C", path, "status", "--porcelain", "--ignored"}):
+				return []byte("!! .env.local\n"), nil, nil
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "remove", "--force", path}):
+				require.NoError(t, os.RemoveAll(path))
+				return []byte("Removed\n"), nil, nil
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", branch, path, testBaseSHA}):
+				return []byte("Preparing worktree\n"), nil, nil
+			default:
+				return nil, nil, fmt.Errorf("unexpected git args: %v", args)
+			}
+		},
+	}
+
+	created, err := git.WorktreeAdd(context.Background(), repoRoot, path, branch, testBaseSHA)
+	require.NoError(t, err)
+	assert.True(t, created)
+	assert.Contains(t, calls, []string{"-C", path, "status", "--porcelain", "--ignored"})
 }
 
 func TestGitCLIWorktreeAdd_ExistingPathRequiresRegisteredWorktree(t *testing.T) {

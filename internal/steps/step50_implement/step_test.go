@@ -164,12 +164,14 @@ func TestResumeIfNeeded_RequiresDeadPIDAsWellAsStaleHeartbeat(t *testing.T) {
 	require.NoError(t, err)
 
 	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	currentPGID, err := syscall.Getpgid(os.Getpid())
+	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(agentDir, 0o755))
 	require.NoError(t, saveResumeState(agentDir, resumeState{
 		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
 		StartedAt:       oldTime,
 		Pid:             os.Getpid(),
-		Pgid:            os.Getpid(),
+		Pgid:            currentPGID,
 		RetryCount:      1,
 		LastHeartbeat:   oldTime,
 	}))
@@ -186,18 +188,38 @@ func TestResumeIfNeeded_RequiresDeadPIDAsWellAsStaleHeartbeat(t *testing.T) {
 	require.ErrorIs(t, err, ErrRescueAbortedLeaseActive)
 }
 
+func TestShouldAttemptRescue_RequiresMatchingPGID(t *testing.T) {
+	originalKill := killProcess
+	originalGetpgid := getProcessGroupID
+	killProcess = func(pid int, sig syscall.Signal) error {
+		return nil
+	}
+	getProcessGroupID = func(pid int) (int, error) {
+		return pid + 1, nil
+	}
+	t.Cleanup(func() {
+		killProcess = originalKill
+		getProcessGroupID = originalGetpgid
+	})
+
+	assert.False(t, shouldAttemptRescue(true, 12345, 12346))
+	assert.True(t, shouldAttemptRescue(true, 12345, 12345))
+}
+
 func TestStepRun_ZeroValuePreservesCustomStaleAfter(t *testing.T) {
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
 	agentDir, err := agentDir(env.run.IO, 2, "a1")
 	require.NoError(t, err)
 
 	oldTime := time.Now().Add(-2 * time.Second).UTC()
+	currentPGID, err := syscall.Getpgid(os.Getpid())
+	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(agentDir, 0o755))
 	require.NoError(t, saveResumeState(agentDir, resumeState{
 		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
 		StartedAt:       oldTime,
 		Pid:             os.Getpid(),
-		Pgid:            os.Getpid(),
+		Pgid:            currentPGID,
 		RetryCount:      1,
 		LastHeartbeat:   oldTime,
 	}))
@@ -584,6 +606,32 @@ func TestStepRun_RescueStartFailureLeavesNoPhantomLease(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr))
 
 	require.NoError(t, (Step{}).Run(context.Background(), env.run))
+}
+
+func TestPerformRescue_CleansIgnoredFilesWithCleanX(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ".gitignore"), []byte(".env.local\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ".env.local"), []byte("secret\n"), 0o644))
+
+	step := newStep(env.run.Config, stepOptions{
+		now:               time.Now,
+		heartbeatInterval: 10 * time.Millisecond,
+		staleAfter:        time.Second,
+	})
+	_, err = step.performRescue(context.Background(), env.run, allocation, agentDir, resumeState{
+		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
+		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
+		Pid:             999999,
+		RetryCount:      0,
+		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
+	})
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(allocation.Path, ".env.local"))
 }
 
 func TestStepRun_KillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {

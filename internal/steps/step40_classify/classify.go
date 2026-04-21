@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -48,7 +49,7 @@ func Run(ctx context.Context, cfg Config) (*contracts.Candidates, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	if valid, err := step30Ready(cfg.IO); err != nil {
+	if valid, err := step30Ready(cfg.IO, cfg.TaskPackage); err != nil {
 		return nil, err
 	} else if !valid {
 		return nil, errors.New("step40_classify: step30 done.marker is missing or invalid")
@@ -148,7 +149,25 @@ func readJSONLAt[T any](runIO internalio.RunContext, rel string) ([]T, error) {
 	return internalio.ReadJSONL[T](path)
 }
 
-func step30Ready(runIO internalio.RunContext) (bool, error) {
+func step30Ready(runIO internalio.RunContext, pkg *contracts.TaskPackage) (bool, error) {
+	expectedAgents, known, err := currentPass1ScorableAgents(runIO, pkg)
+	if err != nil {
+		return false, err
+	}
+	markerPath, err := runIO.ResolveRunRelative("30/done.marker")
+	if err != nil {
+		return false, err
+	}
+	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
+	if err != nil {
+		return false, nil
+	}
+	if err := marker.Validate(); err != nil {
+		return false, nil
+	}
+	if known && !slices.Equal(marker.CompletedAgents, expectedAgents) {
+		return false, nil
+	}
 	scoreFinal, err := runIO.ResolveRunRelative(scoresPath)
 	if err != nil {
 		return false, err
@@ -171,6 +190,46 @@ func step30Ready(runIO internalio.RunContext) (bool, error) {
 		ScoreRaw:        scoreRaw,
 		ComplianceRaw:   complianceRaw,
 	})
+}
+
+func currentPass1ScorableAgents(runIO internalio.RunContext, pkg *contracts.TaskPackage) ([]contracts.AgentID, bool, error) {
+	if pkg == nil {
+		return nil, false, ErrTaskPackageRequired
+	}
+	agents := make([]contracts.AgentID, 0, len(pkg.Worktrees)/2)
+	seen := make(map[contracts.AgentID]struct{}, len(pkg.Worktrees))
+	manifestCount := 0
+	for _, wt := range pkg.Worktrees {
+		if wt.Pass != 1 {
+			continue
+		}
+		if _, dup := seen[wt.Agent]; dup {
+			continue
+		}
+		manifestPath, err := runIO.ManifestPath(1, wt.Agent)
+		if err != nil {
+			return nil, false, err
+		}
+		if _, err := os.Stat(manifestPath); err == nil {
+			manifestCount++
+		} else if err != nil && !os.IsNotExist(err) {
+			return nil, false, fmt.Errorf("step40_classify: stat pass1 manifest for agent=%s: %w", wt.Agent, err)
+		}
+		manifest, err := internalio.LoadScorableManifest(runIO, 1, wt.Agent)
+		if err != nil {
+			if errors.Is(err, internalio.ErrNotScorable) || os.IsNotExist(err) {
+				continue
+			}
+			return nil, false, fmt.Errorf("step40_classify: load pass1 manifest for agent=%s: %w", wt.Agent, err)
+		}
+		if manifest == nil {
+			continue
+		}
+		seen[wt.Agent] = struct{}{}
+		agents = append(agents, wt.Agent)
+	}
+	sort.Slice(agents, func(i, j int) bool { return agents[i] < agents[j] })
+	return agents, manifestCount > 0, nil
 }
 
 func buildCandidates(runID contracts.RunID, now time.Time, scores []contracts.ScoreEntry, compliance []contracts.ComplianceEntry, registry []contracts.RuleRegistryEntry, registryBase string) ([]builtCandidate, error) {

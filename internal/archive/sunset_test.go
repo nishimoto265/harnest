@@ -214,7 +214,7 @@ func TestRunSunsetWithLock_DetectsStaleMarkerRegistryDivergence(t *testing.T) {
 	assert.FileExists(t, filepath.Join(runsBase, divergedMarkerFile))
 	blocked, sentinelErr := step70_decide.SentinelExists(runsBase)
 	require.NoError(t, sentinelErr)
-	assert.False(t, blocked)
+	assert.True(t, blocked)
 	assert.Len(t, readRegistryLinesForTest(t, registryPath), 3)
 }
 
@@ -382,6 +382,38 @@ func TestRunSunsetWithLock_BlocksOnNeedsManualRecoveryStateWithoutSentinelFile(t
 	require.NoError(t, err)
 	assert.Empty(t, result.AppendedOpIDs)
 	assert.NoFileExists(t, filepath.Join(runsBase, "rules-registry.jsonl"))
+}
+
+func TestRunSunsetWithLock_ProceedsAfterFinalizeCleanupWritesClearedMarker(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR78-deadbee", runsBase, worktreeBase)
+	require.NoError(t, err)
+	writer, err := state.NewWriterPath(filepath.Join(runsBase, "processed.jsonl"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Append(contracts.StateEntry{
+		Kind: contracts.StateKindNeedsManualRecovery,
+		Value: contracts.StateEntryNeedsManualRecovery{
+			Kind:       contracts.StateKindNeedsManualRecovery,
+			PR:         78,
+			RunID:      runCtx.RunID,
+			Step:       contracts.FailedStep70,
+			Reason:     contracts.RollbackReasonTransactionalFailure,
+			FailedStep: contracts.FailedStep70,
+			At:         time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}))
+	require.NoError(t, step70_decide.FinalizeCleanup(runCtx, nil))
+
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "sunset-cleared",
+		Transitions: []Transition{deprecateTransition("rule-1")},
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 13, 0, 0, 0, time.UTC) },
+	})
+	require.NoError(t, err)
+	require.Len(t, result.AppendedOpIDs, 1)
+	assert.FileExists(t, filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelClearedFilename(runCtx.RunID)))
 }
 
 func TestRunSunsetWithLock_StopsMutatingWhenSentinelAppearsMidRun(t *testing.T) {

@@ -25,11 +25,12 @@ const (
 )
 
 var (
-	ErrUnknownJudgeRole          = errors.New("judges: unknown judge role")
-	ErrJudgeOutputMissingScores  = errors.New("judges: output must contain one score per dimension")
-	ErrJudgeOutputDuplicateScore = errors.New("judges: output contains duplicate dimension score")
-	ErrJudgeOutputIdentity       = errors.New("judges: output row identity mismatch")
-	ErrJudgeOutputMissingInput   = errors.New("judges: output does not match input")
+	ErrUnknownJudgeRole               = errors.New("judges: unknown judge role")
+	ErrJudgeOutputMissingScores       = errors.New("judges: output must contain one score per dimension")
+	ErrJudgeOutputDuplicateScore      = errors.New("judges: output contains duplicate dimension score")
+	ErrJudgeOutputDuplicateCompliance = errors.New("judges: output contains duplicate compliance rule")
+	ErrJudgeOutputIdentity            = errors.New("judges: output row identity mismatch")
+	ErrJudgeOutputMissingInput        = errors.New("judges: output does not match input")
 )
 
 var (
@@ -111,6 +112,7 @@ func (out JudgeOutput) Validate() error {
 			return fmt.Errorf("%w: dimension=%s", ErrJudgeOutputMissingScores, dimension)
 		}
 	}
+	complianceRuleIDs := make(map[string]struct{}, len(out.Compliance))
 	for _, compliance := range out.Compliance {
 		if err := compliance.Validate(); err != nil {
 			return err
@@ -118,6 +120,10 @@ func (out JudgeOutput) Validate() error {
 		if compliance.RunID != runID || compliance.Pass != pass || compliance.Agent != agent {
 			return fmt.Errorf("%w: compliance rule_id=%s", ErrJudgeOutputIdentity, compliance.RuleID)
 		}
+		if _, exists := complianceRuleIDs[compliance.RuleID]; exists {
+			return fmt.Errorf("%w: rule_id=%s", ErrJudgeOutputDuplicateCompliance, compliance.RuleID)
+		}
+		complianceRuleIDs[compliance.RuleID] = struct{}{}
 	}
 	return nil
 }

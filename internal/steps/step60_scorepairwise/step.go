@@ -33,8 +33,9 @@ type Input struct {
 }
 
 var (
-	ErrNoScorablePass2Agents = errors.New("step60: no scorable pass2 agents found")
-	ErrPass1ScoresIncomplete = errors.New("step60: pass1 scores incomplete")
+	ErrNoScorablePass2Agents     = errors.New("step60: no scorable pass2 agents found")
+	ErrPass1ScoresIncomplete     = errors.New("step60: pass1 scores incomplete")
+	ErrDuplicateComplianceRuleID = errors.New("step60: duplicate compliance rule_id")
 )
 
 var canonicalDimensions = []contracts.Dimension{
@@ -112,9 +113,14 @@ func Run(ctx context.Context, in Input) error {
 	defer func() {
 		_ = lock.Unlock()
 	}()
+	scorableRuns, err := collectScorableAgentRuns(in, declaredScorableAgents(in), len(in.ScorableAgents) > 0)
+	if err != nil {
+		return err
+	}
+	expectedAgents := scorableAgentsFromRuns(scorableRuns)
 	resetOutputs := false
 	if _, err := os.Stat(paths.Done); err == nil {
-		matches, err := doneMarkerMatchesCurrentState(in.IO, paths)
+		matches, err := doneMarkerMatchesCurrentState(in.IO, paths, expectedAgents)
 		if err != nil {
 			return err
 		}
@@ -143,14 +149,9 @@ func Run(ctx context.Context, in Input) error {
 	if err != nil {
 		return err
 	}
-
-	scorableRuns, err := collectScorableAgentRuns(in, declaredScorableAgents(in), len(in.ScorableAgents) > 0)
-	if err != nil {
-		return err
-	}
 	request := stepio.Step60Request{
 		TaskPackage:    *in.TaskPackage,
-		ScorableAgents: scorableAgentsFromRuns(scorableRuns),
+		ScorableAgents: expectedAgents,
 		RubricVersion:  in.RubricVersion,
 		PromptVersion:  in.PromptVersion,
 	}
@@ -563,6 +564,9 @@ func normalizeCompliance(runIO internalio.RunContext, entries []contracts.Compli
 		if err != nil {
 			return nil, err
 		}
+		if _, exists := out[entry.RuleID]; exists {
+			return nil, fmt.Errorf("%w: rule_id=%s", ErrDuplicateComplianceRuleID, entry.RuleID)
+		}
 		out[entry.RuleID] = entry
 	}
 	return out, nil
@@ -687,6 +691,13 @@ func emitCompliance(
 	if !complianceRuleSetsMatch(primary, secondary) {
 		return nil, fmt.Errorf("step60: compliance rule-set mismatch agent=%s", agent)
 	}
+	if err := scorecore.ValidateArbiterComplianceRuleCoverage(
+		disputedComplianceRuleIDs(primary, secondary),
+		disputedComplianceRuleIDs(primary, secondary),
+		sortedComplianceRuleIDs(arbiter),
+	); err != nil && len(arbiter) > 0 {
+		return nil, fmt.Errorf("step60: agent=%s: %w", agent, err)
+	}
 	ruleIDs := complianceRuleIDs(primary, secondary, arbiter)
 	finalEntries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
 	for _, ruleID := range ruleIDs {
@@ -724,21 +735,6 @@ func emitCompliance(
 
 		var finalEntry contracts.ComplianceEntry
 		switch {
-		case arbiterOK && !primaryOK && !secondaryOK:
-			// RawJudgeRef requires both refs for judge_role=arbiter. When only the arbiter
-			// emitted a rule, persist it as a single-source raw row under the canonical
-			// primary slot so compliance-B-raw.jsonl still retains traceable provenance.
-			if err := appendJSONLWithParentDirSync(paths.ComplianceRaw, makeRawComplianceEntry(
-				arbiterEntry,
-				contracts.JudgeRolePrimary,
-				outputHash,
-				nil,
-				nil,
-				meta.ResolvedAt,
-			)); err != nil {
-				return nil, fmt.Errorf("step60: append arbiter-only raw compliance rule=%s agent=%s: %w", ruleID, agent, err)
-			}
-			finalEntry = finalizeCompliance(meta, arbiterEntry, contracts.VerdictPathSingle)
 		case primaryDecision.Verdict == secondaryDecision.Verdict:
 			finalEntry = finalizeCompliance(meta, preferredComplianceAgreementSource(primaryDecision, secondaryDecision, primaryOK, secondaryOK), contracts.VerdictPathAgreement)
 		case !primaryOK || !secondaryOK:
@@ -770,15 +766,20 @@ func emitCompliance(
 	return finalEntries, nil
 }
 
-func doneMarkerMatchesCurrentState(runIO internalio.RunContext, paths step60Paths) (bool, error) {
+func doneMarkerMatchesCurrentState(runIO internalio.RunContext, paths step60Paths, expectedAgents []contracts.AgentID) (bool, error) {
 	marker, err := internalio.ReadJSON[contracts.Step60DoneMarker](paths.Done)
 	if err != nil {
-		return false, fmt.Errorf("step60: read done marker: %w", err)
+		return false, nil
 	}
 	if err := marker.Validate(); err != nil {
 		return false, nil
 	}
 	if !slices.Equal(marker.Dimensions, canonicalDimensions) {
+		return false, nil
+	}
+	normalizedExpectedAgents := append([]contracts.AgentID(nil), expectedAgents...)
+	sort.Slice(normalizedExpectedAgents, func(i, j int) bool { return normalizedExpectedAgents[i] < normalizedExpectedAgents[j] })
+	if !slices.Equal(marker.CompletedAgents, normalizedExpectedAgents) {
 		return false, nil
 	}
 
@@ -1143,12 +1144,12 @@ func step60VersionsMatch(paths step60Paths, rubricVersion, promptVersion string)
 	if err != nil {
 		return false, err
 	}
-	for _, row := range scoreRaw {
+	for _, row := range reduceRawScores(scoreRaw) {
 		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
 			return false, nil
 		}
 	}
-	for _, row := range complianceRaw {
+	for _, row := range reduceRawCompliance(complianceRaw) {
 		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
 			return false, nil
 		}
@@ -1422,20 +1423,39 @@ func complianceVerdictPath(primary, secondary, arbiter contracts.ComplianceEntry
 func complianceRuleIDs(
 	primary map[string]contracts.ComplianceEntry,
 	secondary map[string]contracts.ComplianceEntry,
-	arbiter map[string]contracts.ComplianceEntry,
+	_ map[string]contracts.ComplianceEntry,
 ) []string {
-	set := make(map[string]struct{}, len(primary)+len(secondary)+len(arbiter))
+	set := make(map[string]struct{}, len(primary)+len(secondary))
 	for ruleID := range primary {
 		set[ruleID] = struct{}{}
 	}
 	for ruleID := range secondary {
 		set[ruleID] = struct{}{}
 	}
-	for ruleID := range arbiter {
-		set[ruleID] = struct{}{}
-	}
 	ruleIDs := make([]string, 0, len(set))
 	for ruleID := range set {
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	sort.Strings(ruleIDs)
+	return ruleIDs
+}
+
+func disputedComplianceRuleIDs(primary, secondary map[string]contracts.ComplianceEntry) []string {
+	ruleIDs := make([]string, 0, minInt(len(primary), len(secondary)))
+	for ruleID, primaryEntry := range primary {
+		secondaryEntry, ok := secondary[ruleID]
+		if !ok || primaryEntry.Verdict == secondaryEntry.Verdict {
+			continue
+		}
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	sort.Strings(ruleIDs)
+	return ruleIDs
+}
+
+func sortedComplianceRuleIDs(entries map[string]contracts.ComplianceEntry) []string {
+	ruleIDs := make([]string, 0, len(entries))
+	for ruleID := range entries {
 		ruleIDs = append(ruleIDs, ruleID)
 	}
 	sort.Strings(ruleIDs)

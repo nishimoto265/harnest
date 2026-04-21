@@ -63,7 +63,7 @@ func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation co
 	if err != nil {
 		return 0, err
 	}
-	if !shouldAttemptRescue(stale, state.Pid) {
+	if !shouldAttemptRescue(stale, state.Pid, state.Pgid) {
 		return 0, fmt.Errorf("%w: agent %s", ErrRescueAbortedLeaseActive, run.Agent)
 	}
 	if state.RetryCount >= rescueMaxRetries(run.Config, s.cfg) {
@@ -202,7 +202,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-fd"); err != nil {
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-ffdx"); err != nil {
 		return 0, err
 	}
 

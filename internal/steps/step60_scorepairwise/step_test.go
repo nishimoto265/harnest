@@ -16,6 +16,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
+	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -237,6 +238,36 @@ func TestRun_RebuildsWhenDoneMarkerDimensionsAreNonCanonical(t *testing.T) {
 	assert.Equal(t, freshMarker.RawHashes, rebuiltMarker.RawHashes)
 }
 
+func TestRun_RebuildsWhenDoneMarkerJSONIsMalformed(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		agents:          []contracts.AgentID{"a1", "a2", "a3"},
+		writePass1Score: true,
+	})
+	now := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+	require.NoError(t, os.WriteFile(mustResolve(t, runIO, "60/done.marker"), []byte("{"), 0o644))
+
+	var called bool
+	noJudge := unexpectedCallJudge{called: &called}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     noJudge,
+		Secondary:   noJudge,
+		Arbiter:     noJudge,
+		Now:         func() time.Time { return now },
+	}))
+	assert.False(t, called)
+	require.NoError(t, mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker")).Validate())
+}
+
 func TestRun_RebuildDropsStaleRowsForAgentsNoLongerScorable(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		agents:          []contracts.AgentID{"a1", "a2", "a3"},
@@ -344,6 +375,37 @@ func TestRun_SkipsNonScorablePass2Agent(t *testing.T) {
 	assert.EqualValues(t, 10, marker.ExpectedCounts.Scores)
 	assert.EqualValues(t, 2, marker.ExpectedCounts.Compliance)
 	assert.EqualValues(t, 2, marker.ExpectedCounts.Pairwise)
+}
+
+func TestRun_RebuildsWhenCompletedAgentsNoLongerMatchCurrentScorableSet(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+	now := time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+	writeManifestError(t, runIO, pkg.RunID, 2, "a3")
+
+	var called bool
+	noJudge := unexpectedCallJudge{called: &called}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     noJudge,
+		Secondary:   noJudge,
+		Arbiter:     noJudge,
+		Now:         func() time.Time { return now },
+	}))
+	assert.False(t, called)
+
+	marker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
+	assert.Equal(t, []contracts.AgentID{"a1", "a2"}, marker.CompletedAgents)
 }
 
 func TestRun_FreshRunsAreByteIdentical(t *testing.T) {
@@ -529,6 +591,48 @@ func TestRun_RerunsWhenRubricVersionChanges(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "unexpected judge call")
 	assert.True(t, called)
+}
+
+func TestRun_IgnoresHistoricalRawVersionsAfterMigration(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+	now := time.Date(2026, 4, 21, 11, 30, 0, 0, time.UTC)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:            runIO,
+		TaskPackage:   &pkg,
+		RubricVersion: "rubric-v1",
+		PromptVersion: "prompt-v1",
+		Primary:       judges.NewPrimaryStub(),
+		Secondary:     judges.NewSecondaryStub(),
+		Arbiter:       judges.NewArbiterStub(),
+		Now:           func() time.Time { return now },
+	}))
+	require.NoError(t, Run(context.Background(), Input{
+		IO:            runIO,
+		TaskPackage:   &pkg,
+		RubricVersion: "rubric-v2",
+		PromptVersion: "prompt-v2",
+		Primary:       judges.NewPrimaryStub(),
+		Secondary:     judges.NewSecondaryStub(),
+		Arbiter:       judges.NewArbiterStub(),
+		Now:           func() time.Time { return now.Add(time.Hour) },
+	}))
+
+	var called bool
+	noJudge := unexpectedCallJudge{called: &called}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:            runIO,
+		TaskPackage:   &pkg,
+		RubricVersion: "rubric-v2",
+		PromptVersion: "prompt-v2",
+		Primary:       noJudge,
+		Secondary:     noJudge,
+		Arbiter:       noJudge,
+		Now:           func() time.Time { return now.Add(2 * time.Hour) },
+	}))
+	assert.False(t, called)
 }
 
 func TestRun_RerunsWhenRawComplianceCoverageIsMissing(t *testing.T) {
@@ -847,6 +951,90 @@ func TestRun_FailsClosedOnComplianceRuleSetMismatch(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rule-set mismatch")
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
+}
+
+func TestRun_RejectsDuplicateComplianceRuleIDsFromJudgeOutput(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	err := Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     duplicateComplianceJudge{},
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 17, 50, 0, 0, time.UTC) },
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, judges.ErrJudgeOutputDuplicateCompliance)
+}
+
+func TestNormalizeCompliance_RejectsDuplicateRuleIDs(t *testing.T) {
+	runIO, _ := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+	_, err := normalizeCompliance(runIO, []contracts.ComplianceEntry{
+		{
+			SchemaVersion: "1",
+			RunID:         runIO.RunID,
+			Pass:          2,
+			Agent:         "a1",
+			RuleID:        "rule-x",
+			Verdict:       contracts.ComplianceVerdictViolated,
+			Rationale:     "first",
+			VerdictPath:   contracts.VerdictPathSingle,
+			RubricVersion: "r1",
+			PromptVersion: "p1",
+			ResolvedAt:    time.Date(2026, 4, 21, 17, 51, 0, 0, time.UTC),
+		},
+		{
+			SchemaVersion: "1",
+			RunID:         runIO.RunID,
+			Pass:          2,
+			Agent:         "a1",
+			RuleID:        "rule-x",
+			Verdict:       contracts.ComplianceVerdictCompliant,
+			Rationale:     "second",
+			VerdictPath:   contracts.VerdictPathSingle,
+			RubricVersion: "r1",
+			PromptVersion: "p1",
+			ResolvedAt:    time.Date(2026, 4, 21, 17, 52, 0, 0, time.UTC),
+		},
+	}, "rubric-v1", "prompt-v1")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicateComplianceRuleID)
+}
+
+func TestRun_RejectsArbiterOnlyComplianceRulesOutsideDisputedSet(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	err := Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary: scriptedJudge{
+			score:        80,
+			reasonPrefix: "primary",
+			compliance:   map[string]contracts.ComplianceVerdict{},
+		},
+		Secondary: scriptedJudge{
+			score:        70,
+			reasonPrefix: "secondary",
+			compliance:   map[string]contracts.ComplianceVerdict{},
+		},
+		Arbiter: scriptedJudge{
+			score:        75,
+			reasonPrefix: "arbiter",
+			compliance: map[string]contracts.ComplianceVerdict{
+				"rule-x": contracts.ComplianceVerdictViolated,
+			},
+		},
+		Now: func() time.Time { return time.Date(2026, 4, 21, 17, 55, 0, 0, time.UTC) },
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, scorecore.ErrPanelArbiterRuleCoverage)
 }
 
 func TestRun_NormalizesRawResolvedAtToRunSnapshot(t *testing.T) {
@@ -1179,6 +1367,7 @@ type scriptedJudge struct {
 }
 
 type overflowRefJudge struct{}
+type duplicateComplianceJudge struct{}
 
 func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
 	if err := input.Validate(); err != nil {
@@ -1286,6 +1475,22 @@ func (overflowRefJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput
 		ResolvedAt:           time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
 	}}
 	output := judges.JudgeOutput{Scores: scores, Compliance: compliance}
+	return output, output.ValidateFor(input)
+}
+
+func (duplicateComplianceJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	output, err := scriptedJudge{
+		score:        80,
+		reasonPrefix: "duplicate",
+		compliance:   map[string]contracts.ComplianceVerdict{"rule-x": contracts.ComplianceVerdictViolated},
+	}.ScoreOutput(ctx, input)
+	if err != nil {
+		return judges.JudgeOutput{}, err
+	}
+	duplicate := output.Compliance[0]
+	duplicate.Verdict = contracts.ComplianceVerdictCompliant
+	duplicate.ResolvedAt = duplicate.ResolvedAt.Add(time.Second)
+	output.Compliance = append(output.Compliance, duplicate)
 	return output, output.ValidateFor(input)
 }
 

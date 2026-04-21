@@ -3,7 +3,9 @@ package judges
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,4 +45,26 @@ func TestStubJudgeScoreOutputReturnsValidFixture(t *testing.T) {
 			assert.Equal(t, tt.wantArbiter, output.Arbiter)
 		})
 	}
+}
+
+func TestJudgeOutputValidate_RejectsDuplicateComplianceRuleIDs(t *testing.T) {
+	input := JudgeInput{
+		RunID:      "2026-04-21-PR42-abcdef0",
+		Pass:       1,
+		Agent:      "a1",
+		OutputPath: "/tmp/auto-improve/output.patch",
+		RubricPath: "/tmp/auto-improve/rubrics/default.md",
+	}
+	output, err := NewPrimaryStub().ScoreOutput(context.Background(), input)
+	require.NoError(t, err)
+	require.Len(t, output.Compliance, 1)
+
+	duplicate := output.Compliance[0]
+	duplicate.Verdict = contracts.ComplianceVerdictViolated
+	duplicate.ResolvedAt = duplicate.ResolvedAt.Add(time.Second)
+	output.Compliance = append(output.Compliance, duplicate)
+
+	err = output.ValidateFor(input)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrJudgeOutputDuplicateCompliance)
 }

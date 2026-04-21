@@ -313,7 +313,7 @@ func loadChecklistArtifactFileContext(ctx context.Context, path string) (contrac
 }
 
 func snapshotDiffableArtifact(ctx context.Context, sourcePath, tempDir, relativePath string) (string, bool, error) {
-	file, _, _, err := OpenValidatedRegularFile(sourcePath)
+	file, perm, size, err := OpenValidatedRegularFile(sourcePath)
 	if err != nil {
 		if errors.Is(err, ErrArtifactNotRegular) {
 			return "", false, nil
@@ -321,6 +321,9 @@ func snapshotDiffableArtifact(ctx context.Context, sourcePath, tempDir, relative
 		return "", false, err
 	}
 	defer file.Close()
+	if size > maxSuccessDiffBytes {
+		return "", false, fmt.Errorf("%w: path=%s size=%d limit=%d", ErrSuccessDiffOverflow, sourcePath, size, maxSuccessDiffBytes)
+	}
 
 	snapshotRoot, err := os.MkdirTemp(tempDir, "success-diff-snapshot-*")
 	if err != nil {
@@ -340,6 +343,9 @@ func snapshotDiffableArtifact(ctx context.Context, sourcePath, tempDir, relative
 		_ = tempFile.Close()
 		_ = os.RemoveAll(snapshotRoot)
 		return "", false, err
+	}
+	if err := tempFile.Chmod(perm); err != nil {
+		return cleanup(err)
 	}
 	if _, err := io.Copy(tempFile, &contextReader{ctx: ctx, reader: file}); err != nil {
 		return cleanup(err)

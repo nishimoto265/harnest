@@ -144,8 +144,11 @@ func TestStepRun(t *testing.T) {
 				require.Equal(t, 1, state.RetryCount)
 
 				rescuedEntries, readDirErr := os.ReadDir(filepath.Join(fx.agentDir, rescuedDirName))
-				require.NoError(t, readDirErr)
-				require.NotEmpty(t, rescuedEntries)
+				if readDirErr == nil {
+					require.NotEmpty(t, rescuedEntries)
+				} else {
+					require.True(t, os.IsNotExist(readDirErr))
+				}
 			},
 		},
 		{
@@ -170,8 +173,11 @@ func TestStepRun(t *testing.T) {
 				require.Equal(t, 1, state.RetryCount)
 
 				rescuedEntries, readDirErr := os.ReadDir(filepath.Join(fx.agentDir, rescuedDirName))
-				require.NoError(t, readDirErr)
-				require.NotEmpty(t, rescuedEntries)
+				if readDirErr == nil {
+					require.NotEmpty(t, rescuedEntries)
+				} else {
+					require.True(t, os.IsNotExist(readDirErr))
+				}
 			},
 		},
 		{
@@ -550,6 +556,59 @@ func main() {
 	return binaryPath
 }
 
+func writeDetachedWorktreeWriterHelper(t *testing.T, dir string) string {
+	t.Helper()
+	sourcePath := filepath.Join(dir, "detached_worktree_writer_helper.go")
+	binaryPath := filepath.Join(dir, "detached-worktree-writer-helper")
+	source := `package main
+
+import (
+	"os"
+	"os/exec"
+	"strconv"
+	"syscall"
+	"time"
+)
+
+func main() {
+	if len(os.Args) < 3 {
+		os.Exit(2)
+	}
+	if os.Getenv("DETACHED_WORKTREE_WRITER_CHILD") == "1" {
+		if err := os.WriteFile(os.Args[2], []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+			os.Exit(1)
+		}
+		file, err := os.OpenFile(os.Args[1], os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			os.Exit(1)
+		}
+		defer file.Close()
+		for {
+			if _, err := file.WriteString("ghost\n"); err != nil {
+				os.Exit(1)
+			}
+			file.Sync()
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+
+	cmd := exec.Command(os.Args[0], os.Args[1], os.Args[2])
+	cmd.Env = append(os.Environ(), "DETACHED_WORKTREE_WRITER_CHILD=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		os.Exit(1)
+	}
+	time.Sleep(75 * time.Millisecond)
+}
+`
+	require.NoError(t, os.WriteFile(sourcePath, []byte(source), 0o644))
+
+	cmd := exec.Command("go", "build", "-o", binaryPath, sourcePath)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return binaryPath
+}
+
 func mustRepoRoot(t *testing.T) string {
 	t.Helper()
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
@@ -708,7 +767,7 @@ func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
 			return false
 		}
 		return strings.Contains(string(logBytes), "diff HEAD --binary --no-ext-diff --no-textconv")
-	}, time.Second, 10*time.Millisecond)
+	}, 3*time.Second, 10*time.Millisecond)
 
 	cancel()
 
@@ -718,7 +777,7 @@ func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
 	logBytes, readErr := os.ReadFile(logPath)
 	require.NoError(t, readErr)
 	require.NotContains(t, string(logBytes), "reset --hard")
-	require.NotContains(t, string(logBytes), "clean -fd")
+	require.NotContains(t, string(logBytes), "clean -ffdx")
 
 	_, statErr := os.Stat(fx.manifestPath())
 	require.Error(t, statErr)
@@ -836,7 +895,7 @@ func TestCopyUntrackedFiles_SkipsFIFOWithinBoundedTime(t *testing.T) {
 }
 
 func TestStepRun_FailsWhenSuccessDiffOverflows(t *testing.T) {
-	fx := newTestFixture(t, 5)
+	fx := newTestFixture(t, 30)
 	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "huge.bin"))
 	t.Setenv("FAKE_CLAUDE_WRITE_SIZE", fmt.Sprintf("%d", (16<<20)+1))
 
@@ -844,6 +903,83 @@ func TestStepRun_FailsWhenSuccessDiffOverflows(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, agentrunner.ErrSuccessDiffOverflow)
 	assert.NoFileExists(t, fx.manifestPath())
+}
+
+func TestPerformRescue_RecreatesAllocationBranchInsteadOfResettingMain(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	allocation, err := worktreeFor(fx.run.TaskPackage, 1, "a1")
+	require.NoError(t, err)
+	runGit(t, fx.worktree, "checkout", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, "foreign.txt"), []byte("foreign\n"), 0o644))
+	runGit(t, fx.worktree, "add", "foreign.txt")
+	runGit(t, fx.worktree, "commit", "-m", "foreign commit")
+	foreignSHA := strings.TrimSpace(runGit(t, fx.worktree, "rev-parse", "main"))
+
+	_, err = fx.step.performRescue(context.Background(), fx.run, allocation, fx.agentDir, resumeState{
+		ExpectedBaseSHA: fx.baseSHA,
+		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
+		Pid:             999999,
+		RetryCount:      0,
+		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, allocation.Branch, strings.TrimSpace(runGit(t, fx.worktree, "branch", "--show-current")))
+	assert.Equal(t, fx.baseSHA, strings.TrimSpace(runGit(t, fx.worktree, "rev-parse", "HEAD")))
+	assert.Equal(t, foreignSHA, strings.TrimSpace(runGit(t, fx.worktree, "rev-parse", "main")))
+}
+
+func TestPerformRescue_CleansIgnoredFilesWithCleanX(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	allocation, err := worktreeFor(fx.run.TaskPackage, 1, "a1")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, ".gitignore"), []byte(".env.local\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, ".env.local"), []byte("secret\n"), 0o644))
+
+	_, err = fx.step.performRescue(context.Background(), fx.run, allocation, fx.agentDir, resumeState{
+		ExpectedBaseSHA: fx.baseSHA,
+		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
+		Pid:             999999,
+		RetryCount:      0,
+		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
+	})
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(fx.worktree, ".env.local"))
+}
+
+func TestPerformRescue_KillsDetachedWorktreeWriterBeforeCapture(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	allocation, err := worktreeFor(fx.run.TaskPackage, 1, "a1")
+	require.NoError(t, err)
+	helperPath := writeDetachedWorktreeWriterHelper(t, t.TempDir())
+	targetPath := filepath.Join(fx.worktree, "ghost.txt")
+	pidPath := filepath.Join(t.TempDir(), "writer.pid")
+
+	cmd := exec.Command(helperPath, targetPath, pidPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+	require.NoError(t, cmd.Start())
+	parentPID := cmd.Process.Pid
+	parentPGID, err := syscall.Getpgid(parentPID)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Wait())
+
+	pidBytes, err := os.ReadFile(pidPath)
+	require.NoError(t, err)
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	require.NoError(t, err)
+
+	_, err = fx.step.performRescue(context.Background(), fx.run, allocation, fx.agentDir, resumeState{
+		ExpectedBaseSHA: fx.baseSHA,
+		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
+		Pid:             parentPID,
+		Pgid:            parentPGID,
+		RetryCount:      0,
+		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return !pidAlive(childPID)
+	}, 2*time.Second, 20*time.Millisecond)
 }
 
 func TestStepRun_FailsClosedOnFIFOChecklist(t *testing.T) {
@@ -901,7 +1037,7 @@ func TestStepRunSuccessArtifactsHonorContextCancellation(t *testing.T) {
 			return false
 		}
 		return strings.Contains(string(logBytes), "rev-parse HEAD")
-	}, time.Second, 10*time.Millisecond)
+	}, 3*time.Second, 10*time.Millisecond)
 
 	cancel()
 

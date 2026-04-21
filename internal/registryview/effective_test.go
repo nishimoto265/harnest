@@ -116,3 +116,41 @@ func TestBuild_RollbackFailsWhenTargetOpIDDoesNotExist(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "target op_id not found")
 }
+
+func TestBuild_UpdateRequiresMatchingPrevSHA256(t *testing.T) {
+	_, err := Build([]contracts.RuleRegistryEntry{
+		{
+			Kind: contracts.RegistryKindAdded,
+			Value: contracts.RuleRegistryAdded{
+				Kind:           contracts.RegistryKindAdded,
+				SchemaVersion:  "1",
+				RuleID:         "rule-1",
+				RulePath:       "rules/rule-1.md",
+				Sha256:         strings.Repeat("1", 64),
+				IdempotencyKey: strings.Repeat("2", 64),
+				VersionSeq:     1,
+				PrevHash:       "",
+				ByRunID:        "2026-04-21-PR1-abcdef0",
+				At:             time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+			},
+		},
+		{
+			Kind: contracts.RegistryKindUpdated,
+			Value: contracts.RuleRegistryUpdated{
+				Kind:           contracts.RegistryKindUpdated,
+				SchemaVersion:  "1",
+				RuleID:         "rule-1",
+				RulePath:       "rules/rule-1.md",
+				Sha256:         strings.Repeat("3", 64),
+				PrevSha256:     strings.Repeat("9", 64),
+				IdempotencyKey: strings.Repeat("4", 64),
+				VersionSeq:     2,
+				PrevHash:       strings.Repeat("5", 64),
+				ByRunID:        "2026-04-21-PR2-bcdef01",
+				At:             time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC),
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "prev_sha256 mismatch")
+}

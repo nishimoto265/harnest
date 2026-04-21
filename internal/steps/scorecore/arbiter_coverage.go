@@ -12,8 +12,14 @@ func validateArbiterComplianceCoverage(
 	secondary []contracts.RawComplianceEntry,
 	arbiter []contracts.RawComplianceEntry,
 ) error {
-	primaryRuleIDs := uniqueSortedComplianceRuleIDs(primary)
-	secondaryRuleIDs := uniqueSortedComplianceRuleIDs(secondary)
+	return ValidateArbiterComplianceRuleCoverage(
+		uniqueSortedComplianceRuleIDs(primary),
+		uniqueSortedComplianceRuleIDs(secondary),
+		uniqueSortedComplianceRuleIDs(arbiter),
+	)
+}
+
+func ValidateArbiterComplianceRuleCoverage(primaryRuleIDs, secondaryRuleIDs, arbiterRuleIDs []string) error {
 	if !equalRuleIDSets(primaryRuleIDs, secondaryRuleIDs) {
 		return fmt.Errorf(
 			"%w: primary=%v secondary=%v",
@@ -22,8 +28,6 @@ func validateArbiterComplianceCoverage(
 			secondaryRuleIDs,
 		)
 	}
-
-	arbiterRuleIDs := uniqueSortedComplianceRuleIDs(arbiter)
 	if !equalRuleIDSets(primaryRuleIDs, arbiterRuleIDs) {
 		return fmt.Errorf(
 			"%w: expected=%v arbiter=%v",

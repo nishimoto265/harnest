@@ -44,6 +44,31 @@ func TestCleanupProcessTree_KillsDetachedGrandchildSpawnedAfterRootExit(t *testi
 	}, 2*time.Second, 20*time.Millisecond)
 }
 
+func TestKillTrackedPIDs_SkipsRecycledPIDWhenStartTimeDiffers(t *testing.T) {
+	originalLookup := lookupProcessStartTime
+	originalKill := killPIDSignal
+	t.Cleanup(func() {
+		lookupProcessStartTime = originalLookup
+		killPIDSignal = originalKill
+	})
+
+	var killed []int
+	lookupProcessStartTime = func(pid int) (string, error) {
+		if pid == 4242 {
+			return "Tue Apr 22 10:00:01 2026", nil
+		}
+		return "", syscall.ESRCH
+	}
+	killPIDSignal = func(pid int, sig syscall.Signal) error {
+		killed = append(killed, pid)
+		return nil
+	}
+
+	err := killTrackedPIDs([]processIdentity{{pid: 4242, startTime: "Tue Apr 22 10:00:00 2026"}})
+	require.NoError(t, err)
+	require.Empty(t, killed)
+}
+
 func writeDetachedGrandchildHelper(t *testing.T, dir string) string {
 	t.Helper()
 	sourcePath := filepath.Join(dir, "detached_grandchild_helper.go")

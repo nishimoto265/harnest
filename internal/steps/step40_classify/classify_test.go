@@ -196,6 +196,7 @@ func TestRun_RerunKeepsCandidatesHashStable(t *testing.T) {
 		testComplianceEntry(cfg.IO.RunID, "rule-added", contracts.ComplianceVerdictMissed),
 	)
 	writeRegistry(t, cfg.registryPath(),
+		registryAdded("rule-updated", strings.Repeat("4", 64)),
 		registryUpdated("rule-updated", strings.Repeat("5", 64)),
 		registryAdded("rule-added", strings.Repeat("6", 64)),
 	)
@@ -246,6 +247,7 @@ func TestRun_RegistryVariantsProduceExpectedCandidateKinds(t *testing.T) {
 		testComplianceEntry(cfg.IO.RunID, "rule-status-active", contracts.ComplianceVerdictMissed),
 		testComplianceEntry(cfg.IO.RunID, "rule-rolled-back", contracts.ComplianceVerdictInvalidException),
 	)
+	updatedAdded := registryAdded("rule-updated", strings.Repeat("7", 64))
 	updated := registryUpdated("rule-updated", strings.Repeat("7", 64))
 	statusAdded := registryAdded("rule-status-active", strings.Repeat("6", 64))
 	statusDeprecated := registryStatusChanged(
@@ -257,11 +259,12 @@ func TestRun_RegistryVariantsProduceExpectedCandidateKinds(t *testing.T) {
 	)
 	rolledBack := registryAdded("rule-rolled-back", strings.Repeat("9", 64))
 	writeRegistry(t, cfg.registryPath(),
+		updatedAdded,
 		updated,
 		statusAdded,
 		statusDeprecated,
 		rolledBack,
-		registryRolledBackForEntries(t, cfg.registryPath(), []contracts.RuleRegistryEntry{updated, statusAdded, statusDeprecated, rolledBack}, strings.Repeat("9", 64)),
+		registryRolledBackForEntries(t, cfg.registryPath(), []contracts.RuleRegistryEntry{updatedAdded, updated, statusAdded, statusDeprecated, rolledBack}, strings.Repeat("9", 64)),
 	)
 
 	got, err := Run(context.Background(), cfg)
@@ -335,6 +338,21 @@ func TestRun_RejectsPartialStep30WithoutDoneMarker(t *testing.T) {
 	require.ErrorContains(t, err, "step30 done.marker is missing or invalid")
 }
 
+func TestRun_RejectsStaleStep30DoneMarkerWhenCurrentScorableSetShrinks(t *testing.T) {
+	cfg := newTestConfig(t)
+	now := time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC)
+	writeScores(t, cfg.IO,
+		contracts.ScoreEntry{SchemaVersion: "1", RunID: cfg.IO.RunID, Pass: 1, Agent: "a1", Dimension: contracts.DimensionFidelity, Score: 80, Reasons: "a1", VerdictPath: contracts.VerdictPathSingle, RubricVersion: "default", PromptVersion: "phase0", ResolvedAt: now},
+		contracts.ScoreEntry{SchemaVersion: "1", RunID: cfg.IO.RunID, Pass: 1, Agent: "a2", Dimension: contracts.DimensionFidelity, Score: 80, Reasons: "a2", VerdictPath: contracts.VerdictPathSingle, RubricVersion: "default", PromptVersion: "phase0", ResolvedAt: now},
+		contracts.ScoreEntry{SchemaVersion: "1", RunID: cfg.IO.RunID, Pass: 1, Agent: "a3", Dimension: contracts.DimensionFidelity, Score: 80, Reasons: "a3", VerdictPath: contracts.VerdictPathSingle, RubricVersion: "default", PromptVersion: "phase0", ResolvedAt: now},
+	)
+	writeCompliance(t, cfg.IO, testComplianceEntry(cfg.IO.RunID, "rule-a", contracts.ComplianceVerdictViolated))
+	writePass1Manifest(t, cfg.IO, cfg.IO.RunID, "a3", false)
+
+	_, err := Run(context.Background(), cfg)
+	require.ErrorContains(t, err, "step30 done.marker is missing or invalid")
+}
+
 func TestRun_RejectsInvalidExistingRulePath(t *testing.T) {
 	cfg := newTestConfig(t)
 	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
@@ -377,6 +395,7 @@ func TestRun_DuplicateClassifierIgnoresRolledBackRuleBody(t *testing.T) {
 func TestActiveRulesFromRegistry_Variants(t *testing.T) {
 	t.Run("updated entry keeps rule active", func(t *testing.T) {
 		active, err := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
+			registryAdded("rule-updated", strings.Repeat("0", 64)),
 			registryUpdated("rule-updated", strings.Repeat("a", 64)),
 		})
 		require.NoError(t, err)
@@ -522,15 +541,12 @@ func writeRegistry(t *testing.T, path string, entries ...contracts.RuleRegistryE
 			lastSha[value.RuleID] = value.Sha256
 			entry = contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
 		case contracts.RuleRegistryUpdated:
-			absPath := filepath.Join(registryBase, value.RulePath)
-			if _, err := os.Stat(absPath); os.IsNotExist(err) {
-				body := fmt.Sprintf("# %s updated\n", value.RuleID)
-				if prev, ok := lastSha[value.RuleID]; ok {
-					value.PrevSha256 = prev
-				}
-				value.Sha256 = sha256String(body)
-				writeRegistryRuleSidecar(t, registryBase, value.RulePath, body)
+			body := fmt.Sprintf("# %s updated\n", value.RuleID)
+			if prev, ok := lastSha[value.RuleID]; ok {
+				value.PrevSha256 = prev
 			}
+			value.Sha256 = sha256String(body)
+			writeRegistryRuleSidecar(t, registryBase, value.RulePath, body)
 			lastSha[value.RuleID] = value.Sha256
 			entry = contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
 		}
@@ -645,6 +661,7 @@ func refreshStep30Marker(t *testing.T, runIO internalio.RunContext) {
 		seen[row.Agent] = struct{}{}
 		agents = append(agents, row.Agent)
 	}
+	syncPass1Manifests(t, runIO, agents)
 	if len(agents) == 0 {
 		return
 	}
@@ -660,6 +677,60 @@ func refreshStep30Marker(t *testing.T, runIO internalio.RunContext) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, scorecore.WriteStep30DoneMarker(runIO, marker))
+}
+
+func syncPass1Manifests(t *testing.T, runIO internalio.RunContext, scorableAgents []contracts.AgentID) {
+	t.Helper()
+	scorable := make(map[contracts.AgentID]bool, len(scorableAgents))
+	for _, agent := range scorableAgents {
+		scorable[agent] = true
+	}
+	for _, agent := range []contracts.AgentID{"a1", "a2", "a3"} {
+		writePass1Manifest(t, runIO, runIO.RunID, agent, scorable[agent])
+	}
+}
+
+func writePass1Manifest(t *testing.T, runIO internalio.RunContext, runID contracts.RunID, agent contracts.AgentID, success bool) {
+	t.Helper()
+	path, err := runIO.ManifestPath(1, agent)
+	require.NoError(t, err)
+	if success {
+		require.NoError(t, internalio.WriteJSONAtomic(path, contracts.Manifest{
+			Kind: contracts.ManifestKindSuccess,
+			Value: contracts.ManifestSuccess{
+				Kind:          contracts.ManifestKindSuccess,
+				SchemaVersion: "1",
+				RunID:         runID,
+				Pass:          1,
+				Agent:         agent,
+				BranchName:    "auto-improve/fixture",
+				HeadSHA:       strings.Repeat("b", 40),
+				BaseSHA:       strings.Repeat("a", 40),
+				DiffPath:      filepath.ToSlash(filepath.Join("20-pass1", string(agent), "diff.patch")),
+				SessionPath:   filepath.ToSlash(filepath.Join("20-pass1", string(agent), "session.jsonl")),
+				ChecklistPath: filepath.ToSlash(filepath.Join("20-pass1", string(agent), "checklist-result.json")),
+				PromptVersion: "phase0",
+				StartedAt:     time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+				FinishedAt:    time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC),
+			},
+		}))
+		return
+	}
+	require.NoError(t, internalio.WriteJSONAtomic(path, contracts.Manifest{
+		Kind: contracts.ManifestKindError,
+		Value: contracts.ManifestError{
+			Kind:          contracts.ManifestKindError,
+			SchemaVersion: "1",
+			RunID:         runID,
+			Pass:          1,
+			Agent:         agent,
+			ExitCode:      1,
+			Reason:        "unknown",
+			Detail:        "fixture non-scorable manifest",
+			StartedAt:     time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+			FinishedAt:    time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC),
+		},
+	}))
 }
 
 func assertCandidateBodies(t *testing.T, runIO internalio.RunContext, candidates []contracts.Candidate) {
@@ -714,6 +785,7 @@ func testComplianceEntry(runID contracts.RunID, ruleID string, verdict contracts
 }
 
 func registryAdded(ruleID, idempotencyKey string) contracts.RuleRegistryEntry {
+	body := fmt.Sprintf("# %s added\n", ruleID)
 	return contracts.RuleRegistryEntry{
 		Kind: contracts.RegistryKindAdded,
 		Value: contracts.RuleRegistryAdded{
@@ -721,7 +793,7 @@ func registryAdded(ruleID, idempotencyKey string) contracts.RuleRegistryEntry {
 			SchemaVersion:  "1",
 			RuleID:         ruleID,
 			RulePath:       filepath.Join("rules", ruleID+".md"),
-			Sha256:         strings.Repeat("a", 64),
+			Sha256:         sha256String(body),
 			IdempotencyKey: idempotencyKey,
 			VersionSeq:     1,
 			ByRunID:        "2026-04-20-PR1-aaaaaaa",
@@ -731,6 +803,7 @@ func registryAdded(ruleID, idempotencyKey string) contracts.RuleRegistryEntry {
 }
 
 func registryUpdated(ruleID, idempotencyKey string) contracts.RuleRegistryEntry {
+	prevBody := fmt.Sprintf("# %s added\n", ruleID)
 	return contracts.RuleRegistryEntry{
 		Kind: contracts.RegistryKindUpdated,
 		Value: contracts.RuleRegistryUpdated{
@@ -739,7 +812,7 @@ func registryUpdated(ruleID, idempotencyKey string) contracts.RuleRegistryEntry 
 			RuleID:         ruleID,
 			RulePath:       filepath.Join("rules", ruleID+".md"),
 			Sha256:         strings.Repeat("b", 64),
-			PrevSha256:     strings.Repeat("a", 64),
+			PrevSha256:     sha256String(prevBody),
 			IdempotencyKey: idempotencyKey,
 			VersionSeq:     2,
 			PrevHash:       strings.Repeat("c", 64),
@@ -789,26 +862,19 @@ func registryRolledBackForEntries(t *testing.T, registryPath string, entries []c
 	normalized := append([]contracts.RuleRegistryEntry(nil), entries...)
 	if registryPath != "" {
 		lastSha := make(map[string]string)
-		registryBase := filepath.Dir(registryPath)
 		for idx, entry := range normalized {
 			switch value := entry.Value.(type) {
 			case contracts.RuleRegistryAdded:
-				absPath := filepath.Join(registryBase, value.RulePath)
-				if _, err := os.Stat(absPath); os.IsNotExist(err) {
-					body := fmt.Sprintf("# %s added\n", value.RuleID)
-					value.Sha256 = sha256String(body)
-				}
+				body := fmt.Sprintf("# %s added\n", value.RuleID)
+				value.Sha256 = sha256String(body)
 				lastSha[value.RuleID] = value.Sha256
 				normalized[idx] = contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
 			case contracts.RuleRegistryUpdated:
-				absPath := filepath.Join(registryBase, value.RulePath)
-				if _, err := os.Stat(absPath); os.IsNotExist(err) {
-					body := fmt.Sprintf("# %s updated\n", value.RuleID)
-					if prev, ok := lastSha[value.RuleID]; ok {
-						value.PrevSha256 = prev
-					}
-					value.Sha256 = sha256String(body)
+				body := fmt.Sprintf("# %s updated\n", value.RuleID)
+				if prev, ok := lastSha[value.RuleID]; ok {
+					value.PrevSha256 = prev
 				}
+				value.Sha256 = sha256String(body)
 				lastSha[value.RuleID] = value.Sha256
 				normalized[idx] = contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
 			}

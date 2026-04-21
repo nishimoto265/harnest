@@ -12,27 +12,35 @@ import (
 
 // needsRecoveryDir is the directory holding durable needs-recovery sentinels.
 const (
-	needsRecoveryDir = "needs-recovery"
-	sunsetMarkerFile = "sunset-running.marker"
+	needsRecoveryDir   = "needs-recovery"
+	sunsetMarkerFile   = "sunset-running.marker"
+	sunsetDivergedFile = sunsetMarkerFile + ".diverged"
 )
 
 // SentinelExists reports whether any `.json` or `.aborted.json` sentinel is
 // present under <runs_base>/needs-recovery/. A single sentinel anywhere blocks
 // every step70/sunset run.
 func SentinelExists(runsBase string) (bool, error) {
-	return sentinelExistsExceptRun(runsBase, "")
+	blocked, _, err := globalBlockReason(runsBase, "")
+	return blocked, err
 }
 
 func SentinelExistsExceptRun(runsBase string, runID contracts.RunID) (bool, error) {
-	return sentinelExistsExceptRun(runsBase, runID)
+	blocked, _, err := globalBlockReason(runsBase, runID)
+	return blocked, err
 }
 
 func sentinelExistsExceptRun(runsBase string, ignoreRunID contracts.RunID) (bool, error) {
+	blocked, _, err := globalBlockReason(runsBase, ignoreRunID)
+	return blocked, err
+}
+
+func globalBlockReason(runsBase string, ignoreRunID contracts.RunID) (bool, string, error) {
 	dir := filepath.Join(runsBase, needsRecoveryDir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			return false, err
+			return false, "", err
 		}
 	} else {
 		for _, entry := range entries {
@@ -46,16 +54,21 @@ func sentinelExistsExceptRun(runsBase string, ignoreRunID contracts.RunID) (bool
 				}
 			}
 			if contracts.IsNeedsRecoverySentinelFilename(name) {
-				return true, nil
+				return true, filepath.Join(needsRecoveryDir, name), nil
 			}
 		}
 	}
-	if _, err := os.Stat(filepath.Join(runsBase, sunsetMarkerFile)); err == nil {
-		return true, nil
+	if _, err := os.Stat(filepath.Join(runsBase, sunsetDivergedFile)); err == nil {
+		return true, sunsetDivergedFile, nil
 	} else if err != nil && !os.IsNotExist(err) {
-		return false, err
+		return false, "", err
 	}
-	return false, nil
+	if _, err := os.Stat(filepath.Join(runsBase, sunsetMarkerFile)); err == nil {
+		return true, sunsetMarkerFile, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return false, "", err
+	}
+	return false, "", nil
 }
 
 // writeSentinel atomically writes <runs_base>/needs-recovery/<run_id>.json with
@@ -75,7 +88,26 @@ func writeSentinel(runsBase string, runID contracts.RunID, pr int, reason contra
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	if err := os.Remove(filepath.Join(runsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelClearedFilename(runID))); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	return internalio.WriteJSONAtomic(path, sentinel)
+}
+
+type clearedNeedsRecoveryMarker struct {
+	RunID contracts.RunID `json:"run_id"`
+	State string          `json:"state"`
+}
+
+func writeClearedMarker(runsBase string, runID contracts.RunID) error {
+	path := filepath.Join(runsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelClearedFilename(runID))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return internalio.WriteJSONAtomic(path, clearedNeedsRecoveryMarker{
+		RunID: runID,
+		State: "cleared",
+	})
 }
 
 // FinalizeCleanup clears the durable manual-recovery block for a run after an
@@ -89,11 +121,10 @@ func FinalizeCleanup(runCtx internalio.RunContext, store IntentionWriter) error 
 	for _, path := range []string{
 		filepath.Join(runCtx.RunsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelFilename(runCtx.RunID)),
 		filepath.Join(runCtx.RunsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelAbortedFilename(runCtx.RunID)),
-		filepath.Join(runCtx.RunsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelClearedFilename(runCtx.RunID)),
 	} {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
-	return nil
+	return writeClearedMarker(runCtx.RunsBase, runCtx.RunID)
 }

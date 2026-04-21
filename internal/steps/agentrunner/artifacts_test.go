@@ -71,6 +71,34 @@ func TestWriteSuccessDiff_CapsHugeUntrackedPatch(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr))
 }
 
+func TestWriteSuccessDiff_RejectsOversizedUntrackedFileBeforeSnapshotCopy(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, "", "git", "init", "-b", "main", repoDir)
+	runGit(t, repoDir, "git", "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "git", "config", "user.name", "Agent Runner Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repoDir, "git", "add", "README.md")
+	runGit(t, repoDir, "git", "commit", "-m", "base")
+
+	baseSHA := strings.TrimSpace(runGit(t, repoDir, "git", "rev-parse", "HEAD"))
+	hugePath := filepath.Join(repoDir, "oversized.bin")
+	file, err := os.Create(hugePath)
+	require.NoError(t, err)
+	require.NoError(t, file.Truncate(100<<20))
+	require.NoError(t, file.Close())
+
+	destDir := t.TempDir()
+	destPath := filepath.Join(destDir, "diff.patch")
+	start := time.Now()
+	err = WriteSuccessDiff(context.Background(), repoDir, baseSHA, "test", destPath)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrSuccessDiffOverflow)
+	assert.Less(t, time.Since(start), 2*time.Second)
+	entries, readErr := os.ReadDir(destDir)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries)
+}
+
 func TestWriteSuccessDiff_SkipsSymlinkedUntrackedFile(t *testing.T) {
 	repoDir := t.TempDir()
 	runGit(t, "", "git", "init", "-b", "main", repoDir)
@@ -106,6 +134,24 @@ func TestWriteSuccessDiff_SkipsHardlinkedUntrackedFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(diff), "top-secret")
 	assert.NotContains(t, string(diff), "loot")
+}
+
+func TestWriteSuccessDiff_PreservesExecutableBitForUntrackedFile(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, "", "git", "init", "-b", "main", repoDir)
+	runGit(t, repoDir, "git", "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "git", "config", "user.name", "Agent Runner Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repoDir, "git", "add", "README.md")
+	runGit(t, repoDir, "git", "commit", "-m", "base")
+
+	baseSHA := strings.TrimSpace(runGit(t, repoDir, "git", "rev-parse", "HEAD"))
+	scriptPath := filepath.Join(repoDir, "script.sh")
+	require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\necho hi\n"), 0o755))
+
+	diff, err := SuccessDiffBytes(context.Background(), repoDir, baseSHA, "test")
+	require.NoError(t, err)
+	assert.Contains(t, string(diff), "new file mode 100755")
 }
 
 func TestLoadChecklistArtifact_RejectsFIFO(t *testing.T) {

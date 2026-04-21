@@ -34,6 +34,9 @@ var promoteRuleSidecarFn = promoteRuleSidecar
 var syncStagingParentDir = syncDir
 
 var errRulePublishConflict = errors.New("step70: canonical rule sidecar conflict")
+var errRulePublishIntegrity = errors.New("step70: canonical rule sidecar integrity failure")
+var errRulePublishDestinationType = errors.New("step70: canonical rule sidecar destination type mismatch")
+var errRulePublishStagedMissing = errors.New("step70: canonical rule sidecar staged file missing")
 
 // TargetResolver is injected by the caller (orchestrator) to derive the
 // promotion target (best candidate head) from candidates + manifests.
@@ -92,12 +95,24 @@ func Run(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contrac
 	if candidates == nil {
 		return errors.New("step70: candidates are required")
 	}
+	if err := pkg.Validate(); err != nil {
+		return fmt.Errorf("step70: task_package invalid: %w", err)
+	}
+	if pkg.RunID != runCtx.RunID {
+		return fmt.Errorf("step70: task_package run_id mismatch: task_package=%s io=%s", pkg.RunID, runCtx.RunID)
+	}
+	if err := candidates.Validate(); err != nil {
+		return fmt.Errorf("step70: candidates invalid: %w", err)
+	}
+	if candidates.RunID != runCtx.RunID {
+		return fmt.Errorf("step70: candidates run_id mismatch: candidates=%s io=%s", candidates.RunID, runCtx.RunID)
+	}
 	deps = applyDepDefaults(deps)
 
-	if blocked, err := SentinelExists(runCtx.RunsBase); err != nil {
+	if blocked, reason, err := globalBlockReason(runCtx.RunsBase, ""); err != nil {
 		return fmt.Errorf("step70: sentinel scan: %w", err)
 	} else if blocked {
-		return ErrBlockedBySentinel
+		return fmt.Errorf("%w: %s", ErrBlockedBySentinel, reason)
 	}
 
 	lock, err := internalio.AcquirePromotionLock(runCtx)
@@ -110,10 +125,10 @@ func Run(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contrac
 
 	writer := state.NewWriter(runCtx)
 
-	if blocked, err := SentinelExists(runCtx.RunsBase); err != nil {
+	if blocked, reason, err := globalBlockReason(runCtx.RunsBase, ""); err != nil {
 		return err
 	} else if blocked {
-		return ErrBlockedBySentinel
+		return fmt.Errorf("%w: %s", ErrBlockedBySentinel, reason)
 	}
 
 	intention, err := store.Load()
@@ -270,10 +285,7 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if errors.Is(err, errRulePublishConflict) {
-			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, classifyRulePublishFailureDetail(err))
-		}
-		return err
+		return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, classifyRulePublishFailureDetail(err))
 	}
 	now := deps.Now()
 	decision := contracts.Decision{
@@ -312,7 +324,7 @@ func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunCon
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if intention != nil && errors.Is(err, errRulePublishConflict) {
+		if intention != nil {
 			return markManualRecoveryWithDetail(pr, runCtx, *intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, classifyRulePublishFailureDetail(err))
 		}
 		return err
@@ -1014,7 +1026,7 @@ func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
 	if info, err := os.Stat(dstPath); err == nil && info.Mode().IsRegular() {
 		data, err := os.ReadFile(dstPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: read destination=%s: %v", errRulePublishIntegrity, dstPath, err)
 		}
 		sum := sha256.Sum256(data)
 		if hex.EncodeToString(sum[:]) == wantSHA {
@@ -1024,17 +1036,22 @@ func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
 			return nil
 		}
 		return fmt.Errorf("%w: path=%s", errRulePublishConflict, dstPath)
+	} else if err == nil {
+		return fmt.Errorf("%w: path=%s", errRulePublishDestinationType, dstPath)
 	} else if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 
 	data, err := os.ReadFile(stagedPath)
 	if err != nil {
-		return err
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%w: path=%s", errRulePublishStagedMissing, stagedPath)
+		}
+		return fmt.Errorf("%w: read staged=%s: %v", errRulePublishIntegrity, stagedPath, err)
 	}
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != wantSHA {
-		return fmt.Errorf("step70: staged rule sidecar sha mismatch: path=%s", stagedPath)
+		return fmt.Errorf("%w: path=%s", errRulePublishIntegrity, stagedPath)
 	}
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 		return err
@@ -1517,6 +1534,15 @@ func classifyRulePublishFailureDetail(err error) string {
 	if errors.Is(err, errRulePublishConflict) {
 		return "rule_publish_conflict"
 	}
+	if errors.Is(err, errRulePublishIntegrity) {
+		return "rule_publish_integrity"
+	}
+	if errors.Is(err, errRulePublishDestinationType) {
+		return "rule_publish_destination_type"
+	}
+	if errors.Is(err, errRulePublishStagedMissing) {
+		return "rule_publish_staged_missing"
+	}
 	return "rule_publish_failure"
 }
 
@@ -1596,14 +1622,7 @@ func persistedDecisionCanOverride(stage contracts.IntentionStage) bool {
 }
 
 func blockOnOtherRunSentinel(runCtx internalio.RunContext) error {
-	blocked, err := SentinelExistsExceptRun(runCtx.RunsBase, runCtx.RunID)
-	if err != nil {
-		return fmt.Errorf("step70: sentinel scan: %w", err)
-	}
-	if blocked {
-		return ErrBlockedBySentinel
-	}
-	return nil
+	return blockedSentinelErr(runCtx, runCtx.RunID)
 }
 
 func abortOnOtherRunSentinel(runCtx internalio.RunContext, _ IntentionWriter) error {
@@ -1611,12 +1630,16 @@ func abortOnOtherRunSentinel(runCtx internalio.RunContext, _ IntentionWriter) er
 }
 
 func errOrNilFromBlockedSentinel(runCtx internalio.RunContext) error {
-	blocked, err := SentinelExistsExceptRun(runCtx.RunsBase, runCtx.RunID)
+	return blockedSentinelErr(runCtx, runCtx.RunID)
+}
+
+func blockedSentinelErr(runCtx internalio.RunContext, ignoreRunID contracts.RunID) error {
+	blocked, reason, err := globalBlockReason(runCtx.RunsBase, ignoreRunID)
 	if err != nil {
 		return fmt.Errorf("step70: sentinel scan: %w", err)
 	}
 	if blocked {
-		return ErrBlockedBySentinel
+		return fmt.Errorf("%w: %s", ErrBlockedBySentinel, reason)
 	}
 	return nil
 }
