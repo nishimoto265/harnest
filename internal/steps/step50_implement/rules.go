@@ -1,84 +1,87 @@
 package step50_implement
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 )
 
-// RulePayload is the prompt-ready rule body loaded from <runs_base>/rules/<id>.md.
+var promptIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+
+// RulePayload is the prompt-ready candidate rule body loaded from the run's 40/
+// sidecars.
 type RulePayload struct {
-	ID   string
-	Text string
+	ID           string
+	Kind         string
+	TargetRuleID string
+	Title        string
+	ProposedBody string
 }
 
-// LoadRulePayloads resolves candidate rule ids and reads their sidecar bodies.
-//
-// Phase 1-C note: the current frozen contracts.Candidate schema does not expose
-// a RuleID field, so candidates.json derivation falls back to TargetRuleID.
-func LoadRulePayloads(candidateRuleIDs []string, runsBase, candidatesPath string) ([]RulePayload, error) {
-	ruleIDs := dedupeRuleIDs(candidateRuleIDs)
-	if len(ruleIDs) == 0 {
-		var err error
-		ruleIDs, err = loadCandidateRuleIDsFromFile(candidatesPath)
-		if err != nil {
-			return nil, err
-		}
+// LoadRulePayloads loads prompt payloads from candidates.json and each
+// candidate's proposed_body_path sidecar under the run's 40/ directory.
+func LoadRulePayloads(candidatesPath string) ([]RulePayload, error) {
+	candidates, err := internalio.ReadJSON[contracts.Candidates](candidatesPath)
+	if err != nil {
+		return nil, fmt.Errorf("read candidates: %w", err)
+	}
+	if len(candidates.Candidates) == 0 {
+		return nil, nil
 	}
 
-	payloads := make([]RulePayload, 0, len(ruleIDs))
-	for _, ruleID := range ruleIDs {
-		rulePath := filepath.Join(runsBase, "rules", ruleID+".md")
-		body, err := os.ReadFile(rulePath)
-		switch {
-		case err == nil:
-			payloads = append(payloads, RulePayload{ID: ruleID, Text: string(body)})
-		case os.IsNotExist(err):
-			payloads = append(payloads, RulePayload{ID: ruleID, Text: ""})
-		default:
-			return nil, fmt.Errorf("read rule payload %q: %w", ruleID, err)
+	runDir := filepath.Clean(filepath.Join(filepath.Dir(candidatesPath), ".."))
+	payloads := make([]RulePayload, 0, len(candidates.Candidates))
+	for _, candidate := range candidates.Candidates {
+		if err := validatePromptIdentifier("candidate_id", candidate.CandidateID); err != nil {
+			return nil, err
 		}
+		if candidate.TargetRuleID != "" {
+			if err := validatePromptIdentifier("target_rule_id", candidate.TargetRuleID); err != nil {
+				return nil, err
+			}
+		}
+		if err := contracts.EnsureRelativePathUnderPrefix(candidate.ProposedBodyPath, "40"); err != nil {
+			return nil, fmt.Errorf("candidate %q proposed_body_path: %w", candidate.CandidateID, err)
+		}
+
+		bodyPath := filepath.Join(runDir, candidate.ProposedBodyPath)
+		body, err := os.ReadFile(bodyPath)
+		if err != nil {
+			return nil, fmt.Errorf("read candidate %q proposed body: %w", candidate.CandidateID, err)
+		}
+		if err := verifyCandidateBodySHA(body, candidate.ProposedBodySha256); err != nil {
+			return nil, fmt.Errorf("candidate %q proposed body sha256: %w", candidate.CandidateID, err)
+		}
+
+		payloads = append(payloads, RulePayload{
+			ID:           candidate.CandidateID,
+			Kind:         string(candidate.Kind),
+			TargetRuleID: candidate.TargetRuleID,
+			Title:        candidate.Title,
+			ProposedBody: string(body),
+		})
 	}
 	return payloads, nil
 }
 
-func loadCandidateRuleIDsFromFile(candidatesPath string) ([]string, error) {
-	candidates, err := internalio.ReadJSON[contracts.Candidates](candidatesPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read candidates: %w", err)
+func validatePromptIdentifier(field, value string) error {
+	if !promptIdentifierPattern.MatchString(value) {
+		return fmt.Errorf("invalid %s %q", field, value)
 	}
-
-	ids := make([]string, 0, len(candidates.Candidates))
-	for _, candidate := range candidates.Candidates {
-		if candidate.TargetRuleID == "" {
-			continue
-		}
-		ids = append(ids, candidate.TargetRuleID)
-	}
-	return dedupeRuleIDs(ids), nil
+	return nil
 }
 
-func dedupeRuleIDs(ruleIDs []string) []string {
-	if len(ruleIDs) == 0 {
-		return nil
+func verifyCandidateBodySHA(body []byte, want string) error {
+	sum := sha256.Sum256(body)
+	got := hex.EncodeToString(sum[:])
+	if got != want {
+		return fmt.Errorf("sha256 mismatch: got=%s want=%s", got, want)
 	}
-	seen := make(map[string]struct{}, len(ruleIDs))
-	out := make([]string, 0, len(ruleIDs))
-	for _, ruleID := range ruleIDs {
-		if ruleID == "" {
-			continue
-		}
-		if _, exists := seen[ruleID]; exists {
-			continue
-		}
-		seen[ruleID] = struct{}{}
-		out = append(out, ruleID)
-	}
-	return out
+	return nil
 }

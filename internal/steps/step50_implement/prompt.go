@@ -1,17 +1,19 @@
 package step50_implement
 
 import (
+	"embed"
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"text/template"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/prompt"
 )
+
+//go:embed prompts/step50-implement-pass2.tmpl
+var step50PromptFS embed.FS
+
+const step50TemplateFile = "prompts/step50-implement-pass2.tmpl"
 
 // PromptData is the render input for prompts/step50-implement-pass2.tmpl.
 type PromptData struct {
@@ -25,17 +27,7 @@ type PromptData struct {
 
 // RenderPrompt renders the step50 pass2 prompt template with sanitized text.
 func RenderPrompt(data PromptData) (string, error) {
-	tmplPath, err := step50TemplatePath()
-	if err != nil {
-		return "", err
-	}
-
-	templateBytes, err := os.ReadFile(tmplPath)
-	if err != nil {
-		return "", fmt.Errorf("read step50 template: %w", err)
-	}
-
-	tmpl, err := template.New(filepath.Base(tmplPath)).Option("missingkey=error").Parse(string(templateBytes))
+	tmpl, err := template.New("step50-implement-pass2.tmpl").Option("missingkey=error").ParseFS(step50PromptFS, step50TemplateFile)
 	if err != nil {
 		return "", fmt.Errorf("parse step50 template: %w", err)
 	}
@@ -78,8 +70,11 @@ func sanitizeRulePayloads(rulePayloads []RulePayload) []RulePayload {
 	safe := make([]RulePayload, len(rulePayloads))
 	for i, rule := range rulePayloads {
 		safe[i] = RulePayload{
-			ID:   internalio.SanitizeForPromptEmbedding(rule.ID),
-			Text: internalio.SanitizeForPromptEmbedding(rule.Text),
+			ID:           internalio.SanitizeForPromptEmbedding(rule.ID),
+			Kind:         internalio.SanitizeForPromptEmbedding(rule.Kind),
+			TargetRuleID: internalio.SanitizeForPromptEmbedding(rule.TargetRuleID),
+			Title:        internalio.SanitizeForPromptEmbedding(rule.Title),
+			ProposedBody: internalio.SanitizeForPromptEmbedding(rule.ProposedBody),
 		}
 	}
 	return safe
@@ -94,17 +89,4 @@ func sanitizeStrings(items []string) []string {
 		safe[i] = internalio.SanitizeForPromptEmbedding(item)
 	}
 	return safe
-}
-
-func step50TemplatePath() (string, error) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		return "", fmt.Errorf("resolve caller for step50 template")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
-	templatePath := filepath.Join(repoRoot, prompt.TemplateStep50Implement.RelativePath())
-	if err := contracts.EnsureCleanAbsolutePath(templatePath); err != nil {
-		return "", err
-	}
-	return templatePath, nil
 }
