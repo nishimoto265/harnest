@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	stdio "io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,43 @@ func TestAppendJSONL_SyncsParentDirectory(t *testing.T) {
 
 	require.NoError(t, AppendJSONL(path, testJSONLRecord{Name: "alpha"}))
 	require.Equal(t, []string{filepath.Dir(path)}, synced)
+}
+
+func TestAppendJSONL_RollsBackPartialWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.jsonl")
+	require.NoError(t, AppendJSONL(path, testJSONLRecord{Name: "alpha"}))
+
+	originalOpen := appendJSONLOpenFile
+	appendJSONLOpenFile = func(path string) (appendJSONLFile, error) {
+		file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, defaultFilePerm)
+		if err != nil {
+			return nil, err
+		}
+		return &failingAppendFile{
+			File:      file,
+			remaining: 2,
+			err:       errors.New("injected write failure"),
+		}, nil
+	}
+	t.Cleanup(func() {
+		appendJSONLOpenFile = originalOpen
+	})
+
+	infoBefore, err := os.Stat(path)
+	require.NoError(t, err)
+
+	err = AppendJSONL(path, testJSONLRecord{Name: "beta"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "injected write failure")
+
+	infoAfter, statErr := os.Stat(path)
+	require.NoError(t, statErr)
+	assert.Equal(t, infoBefore.Size(), infoAfter.Size())
+
+	records, readErr := ReadJSONL[testJSONLRecord](path)
+	require.NoError(t, readErr)
+	require.Len(t, records, 1)
+	assert.Equal(t, "alpha", records[0].Name)
 }
 
 func TestReadJSONL_StrictDecodeFailures(t *testing.T) {
@@ -382,3 +420,42 @@ func testTaskPackage(t *testing.T, runsBase, worktreeBase string) contracts.Task
 	require.NoError(t, pkg.Validate())
 	return pkg
 }
+
+type failingAppendFile struct {
+	*os.File
+	remaining int
+	err       error
+}
+
+func (f *failingAppendFile) Write(p []byte) (int, error) {
+	if f.remaining <= 0 {
+		return 0, f.err
+	}
+	if len(p) > f.remaining {
+		n, err := f.File.Write(p[:f.remaining])
+		f.remaining -= n
+		if err != nil {
+			return n, err
+		}
+		return n, f.err
+	}
+	n, err := f.File.Write(p)
+	f.remaining -= n
+	if err != nil {
+		return n, err
+	}
+	if f.remaining == 0 {
+		return n, f.err
+	}
+	return n, nil
+}
+
+func (f *failingAppendFile) Sync() error {
+	if f.err == nil {
+		return f.File.Sync()
+	}
+	return f.File.Sync()
+}
+
+var _ appendJSONLFile = (*failingAppendFile)(nil)
+var _ stdio.Writer = (*failingAppendFile)(nil)
