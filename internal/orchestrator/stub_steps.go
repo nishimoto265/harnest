@@ -17,6 +17,14 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
 )
 
+var stubPass1ScoreDimensions = []contracts.Dimension{
+	contracts.DimensionFidelity,
+	contracts.DimensionCorrectness,
+	contracts.DimensionMaintainability,
+	contracts.DimensionDiscipline,
+	contracts.DimensionCommunication,
+}
+
 func defaultSteps() Steps {
 	step20 := make(map[contracts.AgentID]Step, len(defaultAgents))
 	step50 := make(map[contracts.AgentID]Step, len(defaultAgents))
@@ -146,6 +154,9 @@ func (s stubMarkerStep) Run(ctx context.Context, run *StepRunContext) error {
 type step60Step struct{}
 
 func (step60Step) Run(ctx context.Context, run *StepRunContext) error {
+	if err := seedStubPass1Scores(ctx, run); err != nil {
+		return err
+	}
 	return step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
 		IO:          run.IO,
 		TaskPackage: run.TaskPackage,
@@ -160,20 +171,25 @@ func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {
 	if err != nil {
 		return fmt.Errorf("orchestrator: resolve step30 scores path: %w", err)
 	}
-	if _, err := os.Stat(scoresPath); err == nil {
-		return nil
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("orchestrator: stat step30 scores path: %w", err)
-	}
 
 	agents, err := pass1Agents(run.TaskPackage)
 	if err != nil {
 		return err
 	}
+	rebuild, err := stubPass1ScoresNeedRebuild(scoresPath, run.IO.RunID, agents)
+	if err != nil {
+		return err
+	}
+	if !rebuild {
+		return nil
+	}
+	if err := os.Remove(scoresPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("orchestrator: reset step30 scores path: %w", err)
+	}
 
 	judge := judges.NewPrimaryStub()
 	rubricPath := filepath.Join(run.IO.RunDir(), "rubrics", "default.md")
-	rows := make([]contracts.ScoreEntry, 0, len(agents)*5)
+	rows := make([]contracts.ScoreEntry, 0, len(agents)*len(stubPass1ScoreDimensions))
 	for _, agent := range agents {
 		manifest, err := internalio.LoadScorableManifest(run.IO, 1, agent)
 		if err != nil {
@@ -200,6 +216,49 @@ func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {
 		return err
 	}
 	return internalio.WriteAtomic(scoresPath, payload)
+}
+
+type stubPass1ScoreKey struct {
+	Agent     contracts.AgentID
+	Dimension contracts.Dimension
+}
+
+func stubPass1ScoresNeedRebuild(path string, runID contracts.RunID, agents []contracts.AgentID) (bool, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("orchestrator: stat step30 scores path: %w", err)
+	}
+
+	rows, err := internalio.ReadJSONL[contracts.ScoreEntry](path)
+	if err != nil {
+		return true, nil
+	}
+	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ScoreEntry) stubPass1ScoreKey {
+		return stubPass1ScoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
+	})
+
+	expected := make(map[stubPass1ScoreKey]struct{}, len(agents)*len(stubPass1ScoreDimensions))
+	for _, agent := range agents {
+		for _, dimension := range stubPass1ScoreDimensions {
+			expected[stubPass1ScoreKey{Agent: agent, Dimension: dimension}] = struct{}{}
+		}
+	}
+	if len(collapsed) != len(expected) {
+		return true, nil
+	}
+	for _, row := range collapsed {
+		if row.RunID != runID || row.Pass != 1 {
+			return true, nil
+		}
+		key := stubPass1ScoreKey{Agent: row.Agent, Dimension: row.Dimension}
+		if _, ok := expected[key]; !ok {
+			return true, nil
+		}
+		delete(expected, key)
+	}
+	return len(expected) != 0, nil
 }
 
 func pass1Agents(pkg *contracts.TaskPackage) ([]contracts.AgentID, error) {

@@ -200,6 +200,141 @@ func TestStubMarkerStep_SeedsPass1ScoresFromTaskPackageWorktrees(t *testing.T) {
 	assert.Equal(t, before, mustReadFile(t, scoresPath))
 }
 
+func TestStubMarkerStep_RebuildsPartialPass1Scores(t *testing.T) {
+	cfg := testConfig(t)
+	agents := []contracts.AgentID{"a2", "a4", "a7"}
+	runID := contracts.RunID("2026-04-21-PR67-abcdef0")
+
+	worktrees := make([]contracts.WorktreeAllocation, 0, len(agents)*2)
+	for pass := 1; pass <= 2; pass++ {
+		for _, agent := range agents {
+			worktrees = append(worktrees, contracts.WorktreeAllocation{
+				Agent:   agent,
+				Pass:    pass,
+				Path:    filepath.Join(cfg.Worktree.Base, string(runID), fmt.Sprintf("pass%d", pass), string(agent)),
+				Branch:  fmt.Sprintf("stub/%s/pass%d/%s", runID, pass, agent),
+				BaseSHA: strings.Repeat("a", 40),
+				HeadSHA: strings.Repeat("b", 40),
+			})
+		}
+	}
+	pkg := contracts.TaskPackage{
+		SchemaVersion:           "1",
+		RunID:                   runID,
+		PR:                      67,
+		Title:                   "stub partial seed",
+		BaseSHA:                 strings.Repeat("a", 40),
+		BestBranch:              "best",
+		ReconstructedTaskPrompt: "stub partial seed prompt",
+		Worktrees:               worktrees,
+		CreatedAt:               time.Now().UTC(),
+	}
+	require.NoError(t, pkg.Validate())
+
+	runCtx, err := internalio.RunContextFromTaskPackage(pkg, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
+
+	stepRun := &StepRunContext{Config: cfg, IO: runCtx, TaskPackage: &pkg}
+	for _, agent := range agents {
+		require.NoError(t, stubImplementStep{}.Run(context.Background(), &StepRunContext{
+			Config:      cfg,
+			IO:          runCtx,
+			TaskPackage: &pkg,
+			Pass:        1,
+			Agent:       agent,
+		}))
+	}
+
+	require.NoError(t, stubMarkerStep{path: "30/done.marker"}.Run(context.Background(), stepRun))
+
+	scoresPath, err := runCtx.ResolveRunRelative("30/scores-A.jsonl")
+	require.NoError(t, err)
+	allRows, err := internalio.ReadJSONL[contracts.ScoreEntry](scoresPath)
+	require.NoError(t, err)
+	require.Len(t, allRows, len(agents)*len(stubPass1ScoreDimensions))
+
+	partialRows := append([]contracts.ScoreEntry(nil), allRows[:len(allRows)-1]...)
+	payload, err := marshalScoreJSONL(partialRows)
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteAtomic(scoresPath, payload))
+
+	require.NoError(t, stubMarkerStep{path: "30/done.marker"}.Run(context.Background(), stepRun))
+
+	scores, err := internalio.ReadJSONL[contracts.ScoreEntry](scoresPath)
+	require.NoError(t, err)
+	require.Len(t, scores, len(agents)*len(stubPass1ScoreDimensions))
+	seenAgents := make(map[contracts.AgentID]int, len(agents))
+	for _, score := range scores {
+		seenAgents[score.Agent]++
+	}
+	assert.Equal(t, map[contracts.AgentID]int{"a2": 5, "a4": 5, "a7": 5}, seenAgents)
+}
+
+func TestStep60StepRun_SelfHealsLegacyMissingPass1Scores(t *testing.T) {
+	cfg := testConfig(t)
+	runID := contracts.RunID("2026-04-21-PR68-abcdef0")
+
+	worktrees := make([]contracts.WorktreeAllocation, 0, len(defaultAgents)*2)
+	for pass := 1; pass <= 2; pass++ {
+		for _, agent := range defaultAgents {
+			worktrees = append(worktrees, contracts.WorktreeAllocation{
+				Agent:   agent,
+				Pass:    pass,
+				Path:    filepath.Join(cfg.Worktree.Base, string(runID), fmt.Sprintf("pass%d", pass), string(agent)),
+				Branch:  fmt.Sprintf("stub/%s/pass%d/%s", runID, pass, agent),
+				BaseSHA: strings.Repeat("a", 40),
+				HeadSHA: strings.Repeat("b", 40),
+			})
+		}
+	}
+	pkg := contracts.TaskPackage{
+		SchemaVersion:           "1",
+		RunID:                   runID,
+		PR:                      68,
+		Title:                   "legacy self-heal",
+		BaseSHA:                 strings.Repeat("a", 40),
+		BestBranch:              "best",
+		ReconstructedTaskPrompt: "legacy self-heal prompt",
+		Worktrees:               worktrees,
+		CreatedAt:               time.Now().UTC(),
+	}
+	require.NoError(t, pkg.Validate())
+
+	runCtx, err := internalio.RunContextFromTaskPackage(pkg, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
+
+	for pass := 1; pass <= 2; pass++ {
+		for _, agent := range defaultAgents {
+			require.NoError(t, stubImplementStep{}.Run(context.Background(), &StepRunContext{
+				Config:      cfg,
+				IO:          runCtx,
+				TaskPackage: &pkg,
+				Pass:        pass,
+				Agent:       agent,
+			}))
+		}
+	}
+	require.NoError(t, writeRunText(runCtx, "30/done.marker", "stub\n"))
+
+	require.NoError(t, step60Step{}.Run(context.Background(), &StepRunContext{
+		Config:      cfg,
+		IO:          runCtx,
+		TaskPackage: &pkg,
+	}))
+
+	scoresPath, err := runCtx.ResolveRunRelative("30/scores-A.jsonl")
+	require.NoError(t, err)
+	scores, err := internalio.ReadJSONL[contracts.ScoreEntry](scoresPath)
+	require.NoError(t, err)
+	require.Len(t, scores, len(defaultAgents)*len(stubPass1ScoreDimensions))
+
+	donePath, err := runCtx.ResolveRunRelative("60/done.marker")
+	require.NoError(t, err)
+	assert.FileExists(t, donePath)
+}
+
 func TestIntentionStore_RoundTrip(t *testing.T) {
 	cfg := testConfig(t)
 	runCtx, err := internalio.NewRunContext("2026-04-21-PR88-abcdef0", cfg.Paths.Runs, cfg.Worktree.Base)
