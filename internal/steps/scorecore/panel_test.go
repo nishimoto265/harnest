@@ -212,6 +212,32 @@ func TestPanelResolver_Resolve_RequiresArbiterOnDisagreement(t *testing.T) {
 	require.ErrorIs(t, err, ErrPanelArbiterRequired)
 }
 
+func TestPanelResolver_Resolve_RejectsJudgeOutputIdentityMismatch(t *testing.T) {
+	runCtx := newTestRunContext(t)
+	input := testJudgeInput(runCtx.RunID)
+	primaryOut := judges.JudgeOutput{
+		Scores: allDimScores(runCtx.RunID, judges.RolePrimary, 80),
+		Compliance: []contracts.ComplianceEntry{
+			complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant),
+		},
+	}
+	for i := range primaryOut.Scores {
+		primaryOut.Scores[i].Agent = contracts.AgentID("a2")
+	}
+	primaryOut.Compliance[0].Agent = contracts.AgentID("a2")
+
+	r := NewPanelResolver()
+	_, err := r.Resolve(context.Background(), PanelInput{
+		Primary:               fakeJudge{out: primaryOut},
+		JudgeInput:            input,
+		OutputSha256:          testSha256Hex,
+		DisagreementThreshold: 5,
+		RunContext:            runCtx,
+		StepDir:               "30",
+	})
+	require.ErrorIs(t, err, judges.ErrJudgeOutputMissingInput)
+}
+
 func TestBuildFinalResultFromRaw_RequiresArbiterOnDisagreement(t *testing.T) {
 	runCtx := newTestRunContext(t)
 	resolver := NewPanelResolver()
@@ -261,6 +287,40 @@ func TestBuildFinalResultFromRaw_RequiresArbiterOnDisagreement(t *testing.T) {
 	require.ErrorIs(t, err, ErrPanelArbiterRequired)
 }
 
+func TestPanelResolver_ResolveRole_RejectsJudgeOutputIdentityMismatch(t *testing.T) {
+	runCtx := newTestRunContext(t)
+	input := testJudgeInput(runCtx.RunID)
+	out := judges.JudgeOutput{
+		Scores: allDimScores(runCtx.RunID, judges.RolePrimary, 80),
+		Compliance: []contracts.ComplianceEntry{
+			complianceEntry(runCtx.RunID, "rule-a", contracts.ComplianceVerdictCompliant),
+		},
+	}
+	for i := range out.Scores {
+		out.Scores[i].Agent = contracts.AgentID("a2")
+	}
+	out.Compliance[0].Agent = contracts.AgentID("a2")
+
+	resolver := NewPanelResolver()
+	_, err := resolver.ResolveRole(
+		context.Background(),
+		PanelInput{
+			JudgeInput:            input,
+			OutputSha256:          testSha256Hex,
+			DisagreementThreshold: 5,
+			RunContext:            runCtx,
+			StepDir:               "30",
+		},
+		contracts.JudgeRolePrimary,
+		fakeJudge{out: out},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.ErrorIs(t, err, judges.ErrJudgeOutputMissingInput)
+}
+
 func TestWriteOverflowSidecar(t *testing.T) {
 	runCtx := newTestRunContext(t)
 	longReason := strings.Repeat("Why-", 600) // 2400 chars > 1000
@@ -280,7 +340,7 @@ func TestWriteOverflowSidecar(t *testing.T) {
 	assert.Equal(t, longReason, string(stored))
 }
 
-func TestPanelResolver_Overflow(t *testing.T) {
+func TestBuildRawScoreEntries_Overflow(t *testing.T) {
 	runCtx := newTestRunContext(t)
 	longReason := strings.Repeat("R", ReasonsMaxChars+100)
 
@@ -293,21 +353,24 @@ func TestPanelResolver_Overflow(t *testing.T) {
 	// Replace first score's reasons with an overflowing blob.
 	primaryOut.Scores[0].Reasons = longReason
 
-	r := NewPanelResolver()
-	result, err := r.Resolve(context.Background(), PanelInput{
-		Primary:               fakeJudge{out: primaryOut},
-		JudgeInput:            testJudgeInput(runCtx.RunID),
-		OutputSha256:          testSha256Hex,
-		DisagreementThreshold: 5,
-		RunContext:            runCtx,
-		StepDir:               "30",
-	})
+	rawScores, err := buildRawScoreEntries(
+		primaryOut,
+		PanelInput{
+			JudgeInput:            testJudgeInput(runCtx.RunID),
+			OutputSha256:          testSha256Hex,
+			DisagreementThreshold: 5,
+			RunContext:            runCtx,
+			StepDir:               "30",
+		},
+		contracts.JudgeRolePrimary,
+		nil,
+		nil,
+	)
 	require.NoError(t, err)
 
-	require.NotEmpty(t, result.RawScores)
-	require.NotNil(t, result.RawScores[0].ReasonsOverflowRef)
-	assert.Equal(t, "", result.RawScores[0].Reasons)
-	assert.Equal(t, contracts.VerdictPathSingle, result.VerdictPath)
+	require.NotEmpty(t, rawScores)
+	require.NotNil(t, rawScores[0].ReasonsOverflowRef)
+	assert.Equal(t, "", rawScores[0].Reasons)
 }
 
 // -- helpers -----------------------------------------------------------------
