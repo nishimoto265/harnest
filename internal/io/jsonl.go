@@ -11,6 +11,18 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 )
 
+type appendJSONLFile interface {
+	Write([]byte) (int, error)
+	Sync() error
+	Truncate(size int64) error
+	Seek(offset int64, whence int) (int64, error)
+	Close() error
+}
+
+var appendJSONLOpenFile = func(path string) (appendJSONLFile, error) {
+	return os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, defaultFilePerm)
+}
+
 // AppendJSONL validates record, canonicalizes it, enforces the 4KB line limit,
 // and appends exactly one newline-delimited JSONL row.
 func AppendJSONL(path string, record any) error {
@@ -24,18 +36,15 @@ func AppendJSONL(path string, record any) error {
 	if err := os.MkdirAll(filepath.Dir(path), defaultDirectoryPerm); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, defaultFilePerm)
+	f, err := appendJSONLOpenFile(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if _, err := f.Write(payload); err != nil {
+	if err := appendJSONLPayload(path, f, payload); err != nil {
 		return err
 	}
-	if _, err := f.Write([]byte{'\n'}); err != nil {
-		return err
-	}
-	return f.Sync()
+	return directorySync(filepath.Dir(path))
 }
 
 // ReadJSONL strict-decodes each JSONL row via contracts.DecodeStrictJSON.
@@ -116,6 +125,51 @@ func marshalJSONLRecord(record any) ([]byte, error) {
 		return nil, ErrEntryTooLarge
 	}
 	return payload, nil
+}
+
+func appendJSONLPayload(path string, f appendJSONLFile, payload []byte) error {
+	originalSize, err := f.Seek(0, stdio.SeekEnd)
+	if err != nil {
+		return err
+	}
+
+	if err := writeAll(f, payload); err != nil {
+		rollbackAppendJSONL(path, f, originalSize)
+		return err
+	}
+	if err := writeAll(f, []byte{'\n'}); err != nil {
+		rollbackAppendJSONL(path, f, originalSize)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		rollbackAppendJSONL(path, f, originalSize)
+		return err
+	}
+	return nil
+}
+
+func rollbackAppendJSONL(path string, f appendJSONLFile, originalSize int64) {
+	if err := f.Truncate(originalSize); err != nil {
+		return
+	}
+	if err := f.Sync(); err != nil {
+		return
+	}
+	_ = directorySync(filepath.Dir(path))
+}
+
+func writeAll(w stdio.Writer, payload []byte) error {
+	for len(payload) > 0 {
+		n, err := w.Write(payload)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return stdio.ErrShortWrite
+		}
+		payload = payload[n:]
+	}
+	return nil
 }
 
 func trimJSONLLine(line []byte) []byte {

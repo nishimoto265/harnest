@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	stdio "io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,73 @@ func TestAppendJSONL_RejectsEntryTooLarge(t *testing.T) {
 	err := AppendJSONL(path, testJSONLRecord{Name: strings.Repeat("a", JSONLMaxLineBytes)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrEntryTooLarge)
+}
+
+func TestAppendJSONL_SyncsParentDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.jsonl")
+
+	originalSync := directorySync
+	var synced []string
+	directorySync = func(path string) error {
+		synced = append(synced, path)
+		return nil
+	}
+	t.Cleanup(func() {
+		directorySync = originalSync
+	})
+
+	require.NoError(t, AppendJSONL(path, testJSONLRecord{Name: "alpha"}))
+	require.Equal(t, []string{filepath.Dir(path)}, synced)
+}
+
+func TestAppendJSONL_RollsBackPartialWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.jsonl")
+	require.NoError(t, AppendJSONL(path, testJSONLRecord{Name: "alpha"}))
+
+	originalOpen := appendJSONLOpenFile
+	failFile := &failingAppendFile{
+		remaining: 2,
+		err:       errors.New("injected write failure"),
+	}
+	appendJSONLOpenFile = func(path string) (appendJSONLFile, error) {
+		file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, defaultFilePerm)
+		if err != nil {
+			return nil, err
+		}
+		failFile.File = file
+		return failFile, nil
+	}
+	t.Cleanup(func() {
+		appendJSONLOpenFile = originalOpen
+	})
+	originalDirectorySync := directorySync
+	var synced []string
+	directorySync = func(path string) error {
+		synced = append(synced, path)
+		return nil
+	}
+	t.Cleanup(func() {
+		directorySync = originalDirectorySync
+	})
+
+	infoBefore, err := os.Stat(path)
+	require.NoError(t, err)
+
+	err = AppendJSONL(path, testJSONLRecord{Name: "beta"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "injected write failure")
+
+	infoAfter, statErr := os.Stat(path)
+	require.NoError(t, statErr)
+	assert.Equal(t, infoBefore.Size(), infoAfter.Size())
+	assert.Equal(t, 1, failFile.truncateCalls)
+	assert.Equal(t, 1, failFile.syncCalls)
+	assert.Equal(t, []string{filepath.Dir(path)}, synced)
+
+	records, readErr := ReadJSONL[testJSONLRecord](path)
+	require.NoError(t, readErr)
+	require.Len(t, records, 1)
+	assert.Equal(t, "alpha", records[0].Name)
 }
 
 func TestReadJSONL_StrictDecodeFailures(t *testing.T) {
@@ -365,3 +433,47 @@ func testTaskPackage(t *testing.T, runsBase, worktreeBase string) contracts.Task
 	require.NoError(t, pkg.Validate())
 	return pkg
 }
+
+type failingAppendFile struct {
+	*os.File
+	remaining     int
+	err           error
+	syncCalls     int
+	truncateCalls int
+}
+
+func (f *failingAppendFile) Write(p []byte) (int, error) {
+	if f.remaining <= 0 {
+		return 0, f.err
+	}
+	if len(p) > f.remaining {
+		n, err := f.File.Write(p[:f.remaining])
+		f.remaining -= n
+		if err != nil {
+			return n, err
+		}
+		return n, f.err
+	}
+	n, err := f.File.Write(p)
+	f.remaining -= n
+	if err != nil {
+		return n, err
+	}
+	if f.remaining == 0 {
+		return n, f.err
+	}
+	return n, nil
+}
+
+func (f *failingAppendFile) Sync() error {
+	f.syncCalls++
+	return f.File.Sync()
+}
+
+func (f *failingAppendFile) Truncate(size int64) error {
+	f.truncateCalls++
+	return f.File.Truncate(size)
+}
+
+var _ appendJSONLFile = (*failingAppendFile)(nil)
+var _ stdio.Writer = (*failingAppendFile)(nil)
