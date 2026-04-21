@@ -11,6 +11,8 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/judges"
+	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
 )
 
 func defaultSteps() Steps {
@@ -26,7 +28,7 @@ func defaultSteps() Steps {
 		Step30:  stubMarkerStep{path: "30/done.marker"},
 		Step40:  stubStep40{},
 		Step50:  step50,
-		Step60:  stubMarkerStep{path: "60/done.marker"},
+		Step60:  step60Step{},
 		Step70:  stubStep70{},
 		Archive: stubArchiveStep{},
 	}
@@ -133,6 +135,18 @@ func (s stubMarkerStep) Run(ctx context.Context, run *StepRunContext) error {
 		return err
 	}
 	return internalio.WriteAtomic(path, []byte("stub\n"))
+}
+
+type step60Step struct{}
+
+func (step60Step) Run(ctx context.Context, run *StepRunContext) error {
+	return step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
+		IO:          run.IO,
+		TaskPackage: run.TaskPackage,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+	})
 }
 
 type stubStep40 struct{}
