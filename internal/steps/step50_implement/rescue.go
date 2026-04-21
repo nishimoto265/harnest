@@ -13,11 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
+	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
 type RescueExhaustedError struct {
@@ -168,7 +168,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		CreatedAt:       s.now().UTC(),
 		Artifacts:       artifacts,
 	}
-	if err := writeJSONAtomicImpl(filepath.Join(rescueDir, "state.json"), rescueState); err != nil {
+	if err := agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), rescueState); err != nil {
 		return 0, err
 	}
 	if err := verifyRescueState(rescueDir); err != nil {
@@ -237,36 +237,12 @@ func (l *rescueLock) Unlock() error {
 	return l.file.Close()
 }
 
-type rescueArtifactDigest struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
-}
+type rescueArtifactDigest = agentrunner.RescueArtifactDigest
 
-type rescueStateFile struct {
-	ExpectedBaseSHA string               `json:"expected_base_sha"`
-	RescuedHeadSHA  string               `json:"rescued_head_sha"`
-	RetryCount      int                  `json:"retry_count"`
-	CommitCount     int                  `json:"commit_count"`
-	BundleMode      string               `json:"bundle_mode"`
-	CreatedAt       time.Time            `json:"created_at"`
-	Artifacts       []rescueArtifactDigest `json:"artifacts"`
-}
+type rescueStateFile = agentrunner.RescueStateFile
 
 func verifyRescueState(rescueDir string) error {
-	state, err := readJSON[rescueStateFile](filepath.Join(rescueDir, "state.json"))
-	if err != nil {
-		return err
-	}
-	for _, artifact := range state.Artifacts {
-		digest, err := fileDigest(filepath.Join(rescueDir, artifact.Path))
-		if err != nil {
-			return err
-		}
-		if digest != artifact.SHA256 {
-			return fmt.Errorf("step50: rescue artifact digest mismatch: path=%s", artifact.Path)
-		}
-	}
-	return nil
+	return agentrunner.VerifyRescueState(rescueDir, fileDigest, "step50")
 }
 
 func writeCommitBundle(ctx context.Context, repoPath, rescueDir, expectedBaseSHA string) (int, string, error) {
@@ -276,7 +252,7 @@ func writeCommitBundle(ctx context.Context, repoPath, rescueDir, expectedBaseSHA
 		if err := runGitCommand(ctx, repoPath, "bundle", "create", bundlePath, expectedBaseSHA+"..HEAD"); err != nil {
 			return 0, "", err
 		}
-		return len(strings.Fields(string(revListOutput))), "reachable_range", nil
+		return len(strings.Fields(string(revListOutput))), agentrunner.RescueBundleModeRange, nil
 	}
 
 	headOutput, err := gitOutputBytesContext(ctx, repoPath, "rev-list", "HEAD")
@@ -287,7 +263,7 @@ func writeCommitBundle(ctx context.Context, repoPath, rescueDir, expectedBaseSHA
 	if err := runGitCommand(ctx, repoPath, "bundle", "create", bundlePath, "HEAD"); err != nil {
 		return 0, "", err
 	}
-	return len(strings.Fields(string(headOutput))), "full_head", nil
+	return len(strings.Fields(string(headOutput))), agentrunner.RescueBundleModeFullHead, nil
 }
 
 func runGitCommand(ctx context.Context, dir string, args ...string) error {

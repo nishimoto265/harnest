@@ -49,7 +49,7 @@ func defaultSteps(cfg *config.Config, decoders ContractDecoders) Steps {
 // step30ScoreAdapter bridges step30_score.Step to orchestrator.Step without
 // pulling the orchestrator package into step30_score (one-way import graph).
 type step30ScoreAdapter struct {
-	step *step30_score.Step
+	step   *step30_score.Step
 	decode func([]byte, any) (any, error)
 }
 
@@ -370,6 +370,10 @@ func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {
 	if err != nil {
 		return fmt.Errorf("orchestrator: resolve step30 scores path: %w", err)
 	}
+	compliancePath, err := run.IO.ResolveRunRelative("30/compliance-A.jsonl")
+	if err != nil {
+		return fmt.Errorf("orchestrator: resolve step30 compliance path: %w", err)
+	}
 	if _, err := os.Stat(scoresPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("orchestrator: stat step30 scores path: %w", err)
 	}
@@ -386,6 +390,7 @@ func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {
 	judge := judges.NewPrimaryStub()
 	rubricPath := filepath.Join(run.IO.RunDir(), "rubrics", "default.md")
 	rows := make([]contracts.ScoreEntry, 0, len(agents)*5)
+	complianceRows := make([]contracts.ComplianceEntry, 0, len(agents))
 	for _, agent := range agents {
 		manifest, err := internalio.LoadScorableManifest(run.IO, 1, agent)
 		if err != nil {
@@ -406,12 +411,20 @@ func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {
 			return fmt.Errorf("orchestrator: score pass1 stub output for agent=%s: %w", agent, err)
 		}
 		rows = append(rows, output.Scores...)
+		complianceRows = append(complianceRows, output.Compliance...)
 	}
 	payload, err := marshalScoreJSONL(rows)
 	if err != nil {
 		return err
 	}
-	return internalio.WriteAtomic(scoresPath, payload)
+	if err := internalio.WriteAtomic(scoresPath, payload); err != nil {
+		return err
+	}
+	compliancePayload, err := marshalComplianceJSONL(complianceRows)
+	if err != nil {
+		return err
+	}
+	return internalio.WriteAtomic(compliancePath, compliancePayload)
 }
 
 type stubScoreKey struct {
@@ -512,6 +525,26 @@ func step60ScorableAgents(runIO internalio.RunContext, pkg *contracts.TaskPackag
 }
 
 func marshalScoreJSONL(rows []contracts.ScoreEntry) ([]byte, error) {
+	var buf bytes.Buffer
+	for _, row := range rows {
+		if _, err := contracts.MarshalStrict(row); err != nil {
+			return nil, err
+		}
+		payload, err := contracts.CanonicalMarshal(row)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := buf.Write(payload); err != nil {
+			return nil, err
+		}
+		if err := buf.WriteByte('\n'); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+func marshalComplianceJSONL(rows []contracts.ComplianceEntry) ([]byte, error) {
 	var buf bytes.Buffer
 	for _, row := range rows {
 		if _, err := contracts.MarshalStrict(row); err != nil {

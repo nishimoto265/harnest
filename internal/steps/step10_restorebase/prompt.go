@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+const reconstructedPromptMaxBytes = 64 * 1024
+
 // ReconstructTaskPrompt assembles the PR title, body and linked issue bodies
 // into the raw task prompt that will be persisted in task-package.json.
 //
@@ -45,5 +47,26 @@ func ReconstructTaskPrompt(pr int, title, body string, issues []LinkedIssue) str
 			}
 		}
 	}
-	return b.String()
+	return ensureTrailingNewlineWithinLimit(truncateUTF8Bytes(b.String(), reconstructedPromptMaxBytes), reconstructedPromptMaxBytes)
+}
+
+func truncateUTF8Bytes(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	truncated := value[:maxBytes]
+	for len(truncated) > 0 && (truncated[len(truncated)-1]&0xC0) == 0x80 {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
+}
+
+func ensureTrailingNewlineWithinLimit(value string, maxBytes int) string {
+	if strings.HasSuffix(value, "\n") {
+		return value
+	}
+	if len(value) >= maxBytes && maxBytes > 0 {
+		value = truncateUTF8Bytes(value, maxBytes-1)
+	}
+	return value + "\n"
 }

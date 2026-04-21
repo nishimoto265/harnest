@@ -205,6 +205,9 @@ func driveAdopt(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 		return err
 	}
 	if err := pushBranch(ctx, target, deps); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return handleRollback(ctx, pr, runCtx, pkg, target, intention, store, writer, deps, classifyPushErr(err))
 	}
 	intention.Stage = contracts.IntentionStageBranchPushed
@@ -327,17 +330,23 @@ func handleRollback(ctx context.Context, pr int, runCtx internalio.RunContext, p
 
 	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, reason)
 	}
-	switch remoteHead {
-	case target.TargetSHA:
+	switch {
+	case remoteHead == target.TargetSHA:
 		if err := deps.Git.PushForceWithLease(ctx, target.BestBranch, target.BestShaBefore, target.TargetSHA); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if errors.Is(err, ErrLeaseFailure) {
 				return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonLeaseFailure)
 			}
 			return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
 		}
-	case target.BestShaBefore, "":
+	case remoteHeadMatchesRollbackBase(remoteHead, target.BestShaBefore):
 		// Push never landed; no branch mutation needed.
 	default:
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRemoteDivergence)
@@ -440,17 +449,23 @@ func ensureRollbackBranchState(ctx context.Context, pr int, runCtx internalio.Ru
 	target := targetFromIntention(pkg, intention)
 	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
 	}
-	switch remoteHead {
-	case target.TargetSHA:
+	switch {
+	case remoteHead == target.TargetSHA:
 		if err := deps.Git.PushForceWithLease(ctx, target.BestBranch, target.BestShaBefore, target.TargetSHA); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if errors.Is(err, ErrLeaseFailure) {
 				return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonLeaseFailure)
 			}
 			return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
 		}
-	case target.BestShaBefore, "":
+	case remoteHeadMatchesRollbackBase(remoteHead, target.BestShaBefore):
 		return nil
 	default:
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRemoteDivergence)
@@ -1162,6 +1177,11 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 }
 
 func resumeBranchPushed(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
+	if handled, err := rollbackOnOtherRunSentinel(ctx, pr, runCtx, pkg, intention, store, writer, deps); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
 	appendResult, err := appendRegistryEntries(runCtx, &intention, store, writer, deps, pr)
 	if err != nil {
 		if errors.Is(err, ErrRegistryDivergence) {
@@ -1183,16 +1203,19 @@ func planningDecision(ctx context.Context, pr int, runCtx internalio.RunContext,
 	}
 	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
 	}
-	switch remoteHead {
-	case target.TargetSHA:
+	switch {
+	case remoteHead == target.TargetSHA:
 		intention.Stage = contracts.IntentionStageBranchPushed
 		if err := store.Save(intention); err != nil {
 			return err
 		}
 		return driveRegistry(ctx, pr, runCtx, pkg, intention, store, writer, deps)
-	case target.BestShaBefore, "":
+	case remoteHeadMatchesRollbackBase(remoteHead, target.BestShaBefore):
 		currentHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
 		if err != nil {
 			return err
@@ -1313,6 +1336,10 @@ func resolveBestShaBefore(ctx context.Context, pkg *contracts.TaskPackage, targe
 	}
 	target.BestShaBefore = bestShaBefore
 	return target, nil
+}
+
+func remoteHeadMatchesRollbackBase(remoteHead, bestShaBefore string) bool {
+	return remoteHead == bestShaBefore || (remoteHead == "" && bestShaBefore == "")
 }
 
 func blockOnOtherRunSentinel(runCtx internalio.RunContext) error {

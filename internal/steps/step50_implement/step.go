@@ -13,6 +13,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/prompt"
+	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
 const (
@@ -231,7 +232,7 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	if err != nil {
 		return err
 	}
-	diffBytes, err := gitOutputBytesContext(ctx, allocation.Path, "diff", allocation.BaseSHA+"..HEAD", "--binary")
+	diffBytes, err := successDiffBytes(ctx, allocation.Path, allocation.BaseSHA)
 	if err != nil {
 		return err
 	}
@@ -377,23 +378,14 @@ func stepTimeout(cfg *config.Config, key string) (time.Duration, error) {
 }
 
 func loadChecklistArtifact(worktreePath string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {
-	sourcePath := filepath.Join(worktreePath, checklistFileName)
-	if _, err := os.Stat(sourcePath); err == nil {
-		result, readErr := readJSON[contracts.ChecklistResult](sourcePath)
-		if readErr != nil {
-			return contracts.ChecklistResult{}, readErr
-		}
-		return result, nil
-	} else if !os.IsNotExist(err) {
-		return contracts.ChecklistResult{}, err
-	}
-	return contracts.ChecklistResult{
-		SchemaVersion: "1",
-		RunID:         runID,
-		Pass:          pass,
-		Agent:         agent,
-		Items:         []contracts.ChecklistItem{},
-	}, nil
+	_ = runID
+	_ = pass
+	_ = agent
+	return agentrunner.LoadChecklistArtifact(worktreePath, checklistFileName, "step50")
+}
+
+func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte, error) {
+	return agentrunner.SuccessDiffBytes(ctx, worktreePath, baseSHA, "step50")
 }
 
 func shouldWriteTimeoutManifest(err error, execCtx context.Context) bool {

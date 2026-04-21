@@ -202,6 +202,54 @@ func TestRunSunset_IndexSyncFailureDoesNotAbortCommittedRegistryAppend(t *testin
 	assert.Len(t, lines, 1500)
 }
 
+func TestReadMarker_AcceptsLegacyTwoLineFormat(t *testing.T) {
+	runsBase := t.TempDir()
+	path := filepath.Join(runsBase, markerFilename)
+	require.NoError(t, os.WriteFile(path, []byte("2026-04-21T09:00:00Z\nlegacy-run\n"), 0o644))
+
+	marker, err := readMarker(path)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-run", marker.SunsetRunID)
+	assert.Equal(t, time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC), marker.RecordedStartTime)
+}
+
+func TestRunSunsetWithLock_StopsMutatingWhenSentinelAppearsMidRun(t *testing.T) {
+	runsBase := t.TempDir()
+	original := appendRegistryEntry
+	appendCount := 0
+	appendRegistryEntry = func(path string, entry contracts.RuleRegistryEntry) (contracts.RegistryAppendResult, error) {
+		result, err := original(path, entry)
+		if err == nil {
+			appendCount++
+			if appendCount == 1 {
+				require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runsBase, "needs-recovery", "other-run.json"), contracts.NeedsRecoverySentinel{
+					RunID:      "2026-04-21-PR99-deadbee",
+					PR:         99,
+					Reason:     contracts.RollbackReasonTransactionalFailure,
+					FailedStep: contracts.FailedStep70,
+					CreatedAt:  time.Date(2026, 4, 21, 10, 0, 1, 0, time.UTC),
+				}))
+			}
+		}
+		return result, err
+	}
+	t.Cleanup(func() {
+		appendRegistryEntry = original
+	})
+
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "sunset-midrun",
+		Transitions: []Transition{deprecateTransition("rule-1"), archiveTransition("rule-1", contracts.RuleStatusDeprecated)},
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+	})
+	require.NoError(t, err)
+	assert.Len(t, result.AppendedOpIDs, 1)
+	assert.FileExists(t, filepath.Join(runsBase, markerFilename))
+	assert.NoFileExists(t, filepath.Join(runsBase, lastSunsetFilename))
+	assert.Len(t, readRegistryLinesForTest(t, filepath.Join(runsBase, "rules-registry.jsonl")), 1)
+}
+
 func readRegistryLinesForTest(t *testing.T, path string) []registryLine {
 	t.Helper()
 	lines, err := readRegistryLines(path)

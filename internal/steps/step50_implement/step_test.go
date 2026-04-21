@@ -177,7 +177,7 @@ func TestStepRunParentCancelDoesNotWriteManifest(t *testing.T) {
 	assertArtifactPresence(t, env.run.IO.RunDir(), false)
 }
 
-func TestStepRunMissingChecklistSynthesizesEmptyResult(t *testing.T) {
+func TestStepRunMissingChecklistFailsClosed(t *testing.T) {
 	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
 	t.Setenv("FAKE_AGENT", "a1")
 	t.Setenv("FAKE_SKIP_CHECKLIST", "1")
@@ -185,15 +185,28 @@ func TestStepRunMissingChecklistSynthesizesEmptyResult(t *testing.T) {
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
 
 	err := (Step{}).Run(context.Background(), env.run)
+	require.ErrorContains(t, err, "missing checklist artifact")
+}
+
+func TestStepRunSuccessDiffCapturesUntrackedFilesButSkipsChecklistArtifact(t *testing.T) {
+	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
+	t.Setenv("FAKE_AGENT", "a1")
+
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	worktree := env.run.TaskPackage.Worktrees[3].Path
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, "notes.txt"), []byte("draft\n"), 0o644))
+
+	err := (Step{}).Run(context.Background(), env.run)
 	require.NoError(t, err)
 
 	manifest := readManifest(t, env.manifestPath)
 	success, ok := manifest.Value.(contracts.ManifestSuccess)
 	require.True(t, ok)
-	checklistPath := filepath.Join(env.run.IO.RunDir(), success.ChecklistPath)
-	checklist, readErr := internalio.ReadJSON[contracts.ChecklistResult](checklistPath)
+
+	diffBytes, readErr := os.ReadFile(filepath.Join(env.run.IO.RunDir(), success.DiffPath))
 	require.NoError(t, readErr)
-	assert.Empty(t, checklist.Items)
+	assert.Contains(t, string(diffBytes), "notes.txt")
+	assert.NotContains(t, string(diffBytes), "checklist-result.json")
 }
 
 func TestStepRunRemovesStaleArtifactsOnNonSuccess(t *testing.T) {
@@ -284,11 +297,11 @@ func TestLoadRulePayloads_SkipsDuplicateCandidates(t *testing.T) {
 		ProposedBodyPath: "40/candidates/cand-new.md",
 	}, "# cand-new\nnew body\n")
 	candidateDuplicate := writeCandidateSidecar(t, env.run.IO, contracts.Candidate{
-		CandidateID:        "cand-dup",
-		Kind:               contracts.CandidateKindDuplicate,
-		TargetRuleID:       "rule.v1",
-		Title:              "Duplicate rule",
-		ProposedBodyPath:   "40/candidates/cand-dup.md",
+		CandidateID:      "cand-dup",
+		Kind:             contracts.CandidateKindDuplicate,
+		TargetRuleID:     "rule.v1",
+		Title:            "Duplicate rule",
+		ProposedBodyPath: "40/candidates/cand-dup.md",
 	}, "# cand-dup\nduplicate body\n")
 	writeCandidatesFile(t, env.run.IO, []contracts.Candidate{candidateNew, candidateDuplicate})
 
@@ -303,11 +316,11 @@ func TestLoadRulePayloads_SkipsDuplicateCandidates(t *testing.T) {
 func TestLoadRulePayloads_AllowsNonRegexRuleID(t *testing.T) {
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
 	candidate := writeCandidateSidecar(t, env.run.IO, contracts.Candidate{
-		CandidateID:        "cand-1",
-		Kind:               contracts.CandidateKindUpdate,
-		TargetRuleID:       "rule.v1",
-		Title:              "Updated rule",
-		ProposedBodyPath:   "40/candidates/cand-1.md",
+		CandidateID:      "cand-1",
+		Kind:             contracts.CandidateKindUpdate,
+		TargetRuleID:     "rule.v1",
+		Title:            "Updated rule",
+		ProposedBodyPath: "40/candidates/cand-1.md",
 	}, "# cand-1\nupdated body\n")
 	writeCandidatesFile(t, env.run.IO, []contracts.Candidate{candidate})
 

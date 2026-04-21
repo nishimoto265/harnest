@@ -43,12 +43,14 @@ type stubGit struct {
 	known      map[string]string // path → sha (marks "already exists")
 	createdBy  []string
 	resolvedBy map[string]string
+	mergeBase  map[string]string
 }
 
 func newStubGit() *stubGit {
 	return &stubGit{
 		known:      map[string]string{},
 		resolvedBy: map[string]string{},
+		mergeBase:  map[string]string{},
 	}
 }
 
@@ -76,6 +78,18 @@ func (s *stubGit) ResolveRef(ctx context.Context, repoRoot, ref string) (string,
 		return sha, nil
 	}
 	return testBaseSHA, nil
+}
+
+func (s *stubGit) MergeBase(ctx context.Context, repoRoot, left, right string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sha, ok := s.mergeBase[repoRoot+"::"+left+"::"+right]; ok {
+		return sha, nil
+	}
+	if sha, ok := s.mergeBase[left+"::"+right]; ok {
+		return sha, nil
+	}
+	return "", errors.New("merge-base unavailable")
 }
 
 func newRunCtx(t *testing.T) internalio.RunContext {
@@ -248,16 +262,19 @@ func TestRun_NotMergedPR(t *testing.T) {
 	assert.Contains(t, err.Error(), "step10 requires a merged PR")
 }
 
-func TestRun_RebaseMergedPR_FallsBackToBaseRefOID(t *testing.T) {
+func TestRun_RebaseMergedPR_UsesGitMergeBase(t *testing.T) {
 	rc := newRunCtx(t)
+	git := newStubGit()
+	git.mergeBase[testBaseSHA+"::"+testBaseRefOID] = testBaseSHA
 	runner := &Runner{
 		GH: stubGH{info: PRInfo{
 			Number:     42,
 			Title:      "improve X",
 			State:      "MERGED",
 			BaseRefOid: testBaseRefOID,
+			HeadRefOid: testBaseSHA,
 		}},
-		Git: newStubGit(),
+		Git: git,
 	}
 
 	in := Input{
@@ -268,8 +285,31 @@ func TestRun_RebaseMergedPR_FallsBackToBaseRefOID(t *testing.T) {
 	}
 	res, err := runner.Run(context.Background(), in)
 	require.NoError(t, err)
-	assert.Equal(t, testBaseRefOID, res.Response.BaseSHA)
+	assert.Equal(t, testBaseSHA, res.Response.BaseSHA)
 	assert.Equal(t, 6, res.Response.WorktreesCreated)
+}
+
+func TestRun_RebaseMergedPR_WithoutImmutableBaseFailsClosed(t *testing.T) {
+	rc := newRunCtx(t)
+	runner := &Runner{
+		GH: stubGH{info: PRInfo{
+			Number:     42,
+			Title:      "improve X",
+			State:      "MERGED",
+			BaseRefOid: testBaseRefOID,
+			HeadRefOid: testBaseSHA,
+		}},
+		Git: newStubGit(),
+	}
+
+	in := Input{
+		PR:         42,
+		BestBranch: "auto-improve/best",
+		RepoRoot:   t.TempDir(),
+		RunCtx:     rc,
+	}
+	_, err := runner.Run(context.Background(), in)
+	require.ErrorContains(t, err, "recover immutable base")
 }
 
 func TestRun_RebaseUnmergedPR_RejectsOpenState(t *testing.T) {
@@ -590,6 +630,50 @@ func TestGHCLIPRView_EmptyTitleRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "title")
 }
 
+func TestGHCLIPRView_IssueViewFailureIsBestEffort(t *testing.T) {
+	gh := ghCLI{
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+			require.Equal(t, "gh", name)
+			switch {
+			case slices.Equal(args[:2], []string{"pr", "view"}):
+				return []byte(`{"number":42,"title":"PR","body":"body","state":"MERGED","closingIssuesReferences":[{"number":7,"title":"Issue title"}]}`), nil, nil
+			case slices.Equal(args[:2], []string{"issue", "view"}):
+				return nil, []byte("boom"), errors.New("exit status 1")
+			default:
+				t.Fatalf("unexpected gh args: %v", args)
+				return nil, nil, nil
+			}
+		},
+	}
+
+	info, err := gh.PRView(context.Background(), 42, "")
+	require.NoError(t, err)
+	assert.Empty(t, info.LinkedIssues)
+}
+
+func TestGHCLIPRView_CapsIssueBodySize(t *testing.T) {
+	largeBody := strings.Repeat("x", issueBodyMaxBytes+1024)
+	gh := ghCLI{
+		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+			require.Equal(t, "gh", name)
+			switch {
+			case slices.Equal(args[:2], []string{"pr", "view"}):
+				return []byte(`{"number":42,"title":"PR","body":"body","state":"MERGED","closingIssuesReferences":[{"number":7,"title":"Issue title"}]}`), nil, nil
+			case slices.Equal(args[:2], []string{"issue", "view"}):
+				return []byte(fmt.Sprintf(`{"number":7,"title":"Issue title","body":"%s"}`, largeBody)), nil, nil
+			default:
+				t.Fatalf("unexpected gh args: %v", args)
+				return nil, nil, nil
+			}
+		},
+	}
+
+	info, err := gh.PRView(context.Background(), 42, "")
+	require.NoError(t, err)
+	require.Len(t, info.LinkedIssues, 1)
+	assert.LessOrEqual(t, len(info.LinkedIssues[0].Body), issueBodyMaxBytes)
+}
+
 func TestReconstructTaskPrompt_Variants(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -646,4 +730,13 @@ func TestReconstructTaskPrompt_Variants(t *testing.T) {
 			assert.True(t, strings.HasSuffix(got, "\n"), "prompt must end with newline: %q", got)
 		})
 	}
+}
+
+func TestReconstructTaskPrompt_CapsTotalSize(t *testing.T) {
+	body := strings.Repeat("b", reconstructedPromptMaxBytes)
+	issues := []LinkedIssue{{Number: 7, Title: "issue", Body: strings.Repeat("i", reconstructedPromptMaxBytes)}}
+
+	got := ReconstructTaskPrompt(42, "hello", body, issues)
+	assert.LessOrEqual(t, len(got), reconstructedPromptMaxBytes)
+	assert.True(t, strings.HasSuffix(got, "\n"))
 }

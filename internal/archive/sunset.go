@@ -25,6 +25,10 @@ const (
 	defaultGate        = 24 * time.Hour
 )
 
+var errBlockedBySentinel = errors.New("archive: blocked by sentinel")
+
+var appendRegistryEntry = internalio.AppendRegistryEntry
+
 type Opts struct {
 	RunsBase    string
 	SunsetRunID string
@@ -73,6 +77,11 @@ func RunSunset(ctx context.Context, opts Opts) (Result, error) {
 	registryPath := filepath.Join(opts.RunsBase, "rules-registry.jsonl")
 	result := Result{}
 	for _, t := range opts.Transitions {
+		if blocked, err := sentinelExists(opts.RunsBase); err != nil {
+			return result, err
+		} else if blocked {
+			return result, errBlockedBySentinel
+		}
 		opID := ComputeOpID(opts.SunsetRunID, t.RuleID, transitionKey(t))
 		if existing, ok, err := findByOpID(registryPath, opID); err != nil {
 			return result, err
@@ -86,7 +95,7 @@ func RunSunset(ctx context.Context, opts Opts) (Result, error) {
 		if err != nil {
 			return result, err
 		}
-		appended, err := internalio.AppendRegistryEntry(registryPath, entry)
+		appended, err := appendRegistryEntry(registryPath, entry)
 		if err != nil {
 			return result, fmt.Errorf("archive: append registry entry: %w", err)
 		}
@@ -94,6 +103,11 @@ func RunSunset(ctx context.Context, opts Opts) (Result, error) {
 		result.AppendedOpIDs = append(result.AppendedOpIDs, opID)
 	}
 
+	if blocked, err := sentinelExists(opts.RunsBase); err != nil {
+		return result, err
+	} else if blocked {
+		return result, errBlockedBySentinel
+	}
 	if err := emitSizeWarnings(opts); err != nil {
 		return result, err
 	}
@@ -132,6 +146,11 @@ func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 	if err := reconcileStaleMarker(ctx, opts); err != nil {
 		return Result{}, err
 	}
+	if blocked, err := sentinelExists(opts.RunsBase); err != nil {
+		return Result{}, err
+	} else if blocked {
+		return Result{}, nil
+	}
 	if !opts.Force {
 		ok, err := gateAllows(opts)
 		if err != nil {
@@ -146,6 +165,9 @@ func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 		return Result{}, err
 	}
 	result, runErr := RunSunset(ctx, opts)
+	if errors.Is(runErr, errBlockedBySentinel) {
+		return result, nil
+	}
 	if runErr != nil {
 		return result, runErr
 	}
@@ -439,6 +461,21 @@ func sentinelExists(runsBase string) (bool, error) {
 func readMarker(path string) (sunsetMarker, error) {
 	marker, err := internalio.ReadJSON[sunsetMarker](path)
 	if err != nil {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return sunsetMarker{}, readErr
+		}
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		if len(lines) == 2 {
+			recordedAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(lines[0]))
+			if parseErr != nil {
+				return sunsetMarker{}, err
+			}
+			return sunsetMarker{
+				RecordedStartTime: recordedAt,
+				SunsetRunID:       strings.TrimSpace(lines[1]),
+			}, nil
+		}
 		return sunsetMarker{}, err
 	}
 	if marker.RecordedStartTime.IsZero() || marker.SunsetRunID == "" {

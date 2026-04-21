@@ -81,6 +81,23 @@ type StepRunContext struct {
 
 var errStopPipeline = errors.New("orchestrator: stop pipeline")
 
+type GlobalNeedsRecoveryError struct {
+	Sentinel contracts.NeedsRecoverySentinel
+}
+
+func (e *GlobalNeedsRecoveryError) Error() string {
+	return fmt.Sprintf(
+		"orchestrator: global needs_manual_recovery block: run_id=%s pr=%d restart_from=%s",
+		e.Sentinel.RunID,
+		e.Sentinel.PR,
+		contracts.FailedStep10,
+	)
+}
+
+func (e *GlobalNeedsRecoveryError) RestartStep() contracts.FailedStep {
+	return contracts.FailedStep10
+}
+
 func NewOrchestrator(cfg *config.Config) (*Orchestrator, error) {
 	if cfg == nil {
 		return nil, errors.New("orchestrator: config is required")
@@ -144,6 +161,17 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 	if pr <= 0 {
 		return fmt.Errorf("orchestrator: pr must be > 0: pr=%d", pr)
 	}
+	runsBase, err := o.cfg.RunsBase()
+	if err != nil {
+		return err
+	}
+	sentinel, blocked, err := firstNeedsRecoverySentinel(runsBase)
+	if err != nil {
+		return err
+	}
+	if blocked {
+		return &GlobalNeedsRecoveryError{Sentinel: sentinel}
+	}
 
 	selection, err := o.selectRun(pr, opts)
 	if err != nil {
@@ -206,6 +234,16 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 			if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep20, time.Now().UTC())); err != nil {
 				return err
 			}
+			scorableAgents, err := scorableAgentsForPass(run.IO, run.TaskPackage, 1)
+			if err != nil {
+				return err
+			}
+			if len(scorableAgents) == 0 {
+				if err := o.appendState(failedEntry(pr, run.IO.RunID, contracts.FailedStep20, "no_scorable_agents", "step20 completed without any scorable pass1 manifests", time.Now().UTC())); err != nil {
+					return err
+				}
+				return nil
+			}
 		case contracts.FailedStep30:
 			if err := o.runSingle(ctx, run, contracts.FailedStep30, o.steps.Step30); err != nil {
 				return err
@@ -221,7 +259,7 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 				return err
 			}
 		case contracts.FailedStep50:
-			if noCandidates(run.Candidates) {
+			if noActionableCandidates(run.Candidates) {
 				continue
 			}
 			if err := o.runParallel(ctx, run, 2, contracts.FailedStep50, o.steps.Step50); err != nil {
@@ -234,7 +272,7 @@ func (o *Orchestrator) Run(ctx context.Context, pr int, opts RunOptions) error {
 				return err
 			}
 		case contracts.FailedStep60:
-			if noCandidates(run.Candidates) {
+			if noActionableCandidates(run.Candidates) {
 				continue
 			}
 			if err := o.runSingle(ctx, run, contracts.FailedStep60, o.steps.Step60); err != nil {
@@ -816,6 +854,19 @@ func completedEntry(pr int, runID contracts.RunID, step contracts.FailedStep, at
 	return contracts.StateEntry{Kind: contracts.StateKindCompleted, Value: value}
 }
 
+func failedEntry(pr int, runID contracts.RunID, step contracts.FailedStep, reason, detail string, at time.Time) contracts.StateEntry {
+	value := contracts.StateEntryFailed{
+		Kind:   contracts.StateKindFailed,
+		PR:     pr,
+		RunID:  runID,
+		Step:   step,
+		Reason: reason,
+		Detail: detail,
+		At:     at,
+	}
+	return contracts.StateEntry{Kind: value.Kind, Value: value}
+}
+
 func promotedEntry(pr int, runID contracts.RunID, at time.Time) contracts.StateEntry {
 	value := contracts.StateEntryPromoted{
 		Kind:  contracts.StateKindPromoted,
@@ -840,8 +891,8 @@ func rollbackEntry(pr int, runID contracts.RunID, reason contracts.RollbackReaso
 	return contracts.StateEntry{Kind: contracts.StateKindRollback, Value: value}
 }
 
-func noCandidates(candidates *contracts.Candidates) bool {
-	return candidates != nil && len(candidates.Candidates) == 0
+func noActionableCandidates(candidates *contracts.Candidates) bool {
+	return len(actionableCandidateIDs(candidates)) == 0
 }
 
 func hasFinalizedManifest(runIO internalio.RunContext, pass int, agent contracts.AgentID) (bool, error) {
@@ -964,11 +1015,18 @@ func (o *Orchestrator) validateImplementationBoundary(run *StepRunContext, pass 
 }
 
 func candidateRuleIDs(candidates *contracts.Candidates) []string {
+	return actionableCandidateIDs(candidates)
+}
+
+func actionableCandidateIDs(candidates *contracts.Candidates) []string {
 	if candidates == nil || len(candidates.Candidates) == 0 {
 		return nil
 	}
 	ids := make([]string, 0, len(candidates.Candidates))
 	for _, candidate := range candidates.Candidates {
+		if candidate.Kind == contracts.CandidateKindDuplicate {
+			continue
+		}
 		ids = append(ids, candidate.CandidateID)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
@@ -1095,4 +1153,34 @@ func ensureNeedsRecoverySentinel(runCtx internalio.RunContext, pr int, runID con
 		return err
 	}
 	return internalio.WriteJSONAtomic(path, sentinel)
+}
+
+func firstNeedsRecoverySentinel(runsBase string) (contracts.NeedsRecoverySentinel, bool, error) {
+	dir := filepath.Join(runsBase, "needs-recovery")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return contracts.NeedsRecoverySentinel{}, false, nil
+		}
+		return contracts.NeedsRecoverySentinel{}, false, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".aborted.json") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		sentinel, err := internalio.ReadJSON[contracts.NeedsRecoverySentinel](filepath.Join(dir, name))
+		if err != nil {
+			return contracts.NeedsRecoverySentinel{}, false, err
+		}
+		return sentinel, true, nil
+	}
+	return contracts.NeedsRecoverySentinel{}, false, nil
 }

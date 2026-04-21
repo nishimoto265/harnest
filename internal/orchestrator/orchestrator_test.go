@@ -19,6 +19,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/nishimoto265/auto-improve/internal/state"
 	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
+	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -243,7 +244,10 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs_BlockedBySentinel(t *testing.T)
 	require.NoError(t, ensureNeedsRecoverySentinel(blockedRunCtx, 99, blockedRunID, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70))
 
 	runID := contracts.RunID("2026-04-21-PR44-abcdeff")
-	require.NoError(t, orch.Run(context.Background(), 44, RunOptions{RunID: runID}))
+	var blockedErr *GlobalNeedsRecoveryError
+	err = orch.Run(context.Background(), 44, RunOptions{RunID: runID})
+	require.ErrorAs(t, err, &blockedErr)
+	require.Equal(t, blockedRunID, blockedErr.Sentinel.RunID)
 
 	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
 	require.NoError(t, err)
@@ -252,8 +256,241 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs_BlockedBySentinel(t *testing.T)
 
 	events, err := state.ScanEventsForRun(runCtx, runID)
 	require.NoError(t, err)
+	assert.Empty(t, events)
+}
+
+func TestRun_DefaultSteps_RealWiringWithFakeCLIs_NeedsManualRecovery(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repo.Root = repoRootFromTestFile(t)
+	binDir := installFakeCLI(t)
+	overwriteFakeGitScript(t, binDir, manualRecoveryGitScript())
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AUTO_IMPROVE_GIT_STATE_DIR", t.TempDir())
+	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
+
+	t.Setenv("AUTO_IMPROVE_TEST_BASE_SHA", strings.Repeat("a", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_TARGET_SHA", strings.Repeat("b", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_MERGE_SHA", strings.Repeat("c", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_BEST_SHA", strings.Repeat("d", 40))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps.Step40 = forcedCandidateStep{}
+	orch.steps.Step60 = scriptedStep60Step{decode: orch.decoders.Step60}
+
+	runID := contracts.RunID("2026-04-21-PR45-abcdeff")
+	require.NoError(t, orch.Run(context.Background(), 45, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(cfg.Paths.Runs, "needs-recovery", string(runID)+".json"))
+
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
 	require.NotEmpty(t, events)
-	assert.Equal(t, contracts.StateKindInterrupted, events[len(events)-1].Kind)
+	assert.Equal(t, contracts.StateKindNeedsManualRecovery, events[len(events)-1].Kind)
+	assert.NoFileExists(t, filepath.Join(cfg.Paths.Runs, string(runID), "70", "decision.json"))
+}
+
+func TestRun_DefaultSteps_RealWiringWithFakeCLIs_PostPushRollback(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repo.Root = repoRootFromTestFile(t)
+	binDir := installFakeCLI(t)
+	sentinelPath := filepath.Join(cfg.Paths.Runs, "needs-recovery", "other-run.json")
+	overwriteFakeGitScript(t, binDir, postPushRollbackGitScript())
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AUTO_IMPROVE_GIT_STATE_DIR", t.TempDir())
+	t.Setenv("AUTO_IMPROVE_TEST_SENTINEL_PATH", sentinelPath)
+	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
+
+	t.Setenv("AUTO_IMPROVE_TEST_BASE_SHA", strings.Repeat("a", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_TARGET_SHA", strings.Repeat("b", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_MERGE_SHA", strings.Repeat("c", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_BEST_SHA", strings.Repeat("d", 40))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps.Step40 = forcedCandidateStep{}
+	orch.steps.Step60 = scriptedStep60Step{decode: orch.decoders.Step60}
+
+	runID := contracts.RunID("2026-04-21-PR46-abcdeff")
+	require.NoError(t, orch.Run(context.Background(), 46, RunOptions{RunID: runID}))
+
+	decision, err := internalio.ReadJSON[contracts.Decision](filepath.Join(cfg.Paths.Runs, string(runID), "70", "decision.json"))
+	require.NoError(t, err)
+	assert.Equal(t, contracts.DecisionActionRollback, decision.Action)
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	assert.NoFileExists(t, runCtx.RulesRegistryPath())
+
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	assert.Contains(t, eventKinds(events), contracts.StateKindRollback)
+}
+
+func TestRun_DefaultSteps_RealWiringWithFakeCLIs_ResumesBranchPushedIntention(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repo.Root = repoRootFromTestFile(t)
+	binDir := installFakeCLI(t)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
+
+	t.Setenv("AUTO_IMPROVE_TEST_BASE_SHA", strings.Repeat("a", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_TARGET_SHA", strings.Repeat("b", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_MERGE_SHA", strings.Repeat("c", 40))
+	t.Setenv("AUTO_IMPROVE_TEST_BEST_SHA", strings.Repeat("d", 40))
+
+	runID := contracts.RunID("2026-04-21-PR47-abcdeff")
+
+	first, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	first.steps.Step40 = forcedCandidateStep{}
+	first.steps.Step60 = scriptedStep60Step{decode: first.decoders.Step60}
+	first.steps.Step70 = branchPushedCrashStep{t: t}
+	require.ErrorContains(t, first.Run(context.Background(), 47, RunOptions{RunID: runID}), "simulated branch_pushed crash")
+
+	second, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	second.steps.Step40 = forcedCandidateStep{}
+	second.steps.Step60 = scriptedStep60Step{decode: second.decoders.Step60}
+	require.NoError(t, second.Run(context.Background(), 47, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	decision, err := internalio.ReadJSON[contracts.Decision](filepath.Join(cfg.Paths.Runs, string(runID), "70", "decision.json"))
+	require.NoError(t, err)
+	assert.Equal(t, contracts.DecisionActionAdopt, decision.Action)
+
+	lines, err := internalio.ReadJSONL[contracts.RuleRegistryEntry](runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	require.Len(t, lines, 1)
+
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	assert.Contains(t, eventKinds(events), contracts.StateKindPromoted)
+}
+
+func TestRun_AllNonScorablePass1StopsBeforeStep30(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	recorder := &callRecorder{}
+	orch.steps = Steps{
+		Step10:  stubStep10{},
+		Step20:  nonScorableAgentSteps(contracts.ManifestKindError),
+		Step30:  recordingStep{label: "30", recorder: recorder},
+		Step40:  recordingStep{label: "40", recorder: recorder},
+		Step50:  stubAgentSteps(),
+		Step60:  recordingStep{label: "60", recorder: recorder},
+		Step70:  stubStep70{},
+		Archive: recordingStep{label: "archive", recorder: recorder},
+	}
+
+	runID := contracts.RunID("2026-04-21-PR45-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 45, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindFailed, events[len(events)-1].Kind)
+	assert.Empty(t, recorder.snapshot())
+	assert.NoFileExists(t, filepath.Join(cfg.Paths.Runs, string(runID), "30", "done.marker"))
+}
+
+func TestRun_Step70NeedsManualRecovery_EndToEnd(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	orch.steps.Step10 = stubStep10{}
+	orch.steps.Step20 = stubAgentSteps()
+	orch.steps.Step40 = forcedCandidateStep{}
+	orch.steps.Step50 = stubAgentSteps()
+	orch.steps.Step60 = scriptedStep60Step{decode: orch.decoders.Step60}
+	orch.steps.Step70 = orchestratorStep70{
+		git: testStep70Git{
+			head:    strings.Repeat("9", 40),
+			pushErr: step70_decide.ErrRemoteDivergence,
+		},
+		resolver: testStep70Resolver{},
+	}
+
+	runID := contracts.RunID("2026-04-21-PR46-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 46, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(cfg.Paths.Runs, "needs-recovery", string(runID)+".json"))
+	assert.NoFileExists(t, filepath.Join(cfg.Paths.Runs, string(runID), "70", "decision.json"))
+
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindNeedsManualRecovery, events[len(events)-1].Kind)
+}
+
+func TestRun_DuplicateOnlyCandidatesSkipPass2AndStep60(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	recorder := &callRecorder{}
+	orch.steps.Step10 = stubStep10{}
+	orch.steps.Step20 = stubAgentSteps()
+	orch.steps.Step30 = stubMarkerStep{path: "30/done.marker"}
+	orch.steps.Step40 = duplicateOnlyCandidateStep{}
+	orch.steps.Step50 = recordingAgentSteps("50", recorder)
+	orch.steps.Step60 = recordingStep{label: "60", recorder: recorder}
+	orch.steps.Step70 = stubStep70{}
+	orch.steps.Archive = recordingStep{label: "archive", recorder: recorder}
+
+	runID := contracts.RunID("2026-04-21-PR50-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 50, RunOptions{RunID: runID}))
+
+	assert.NotContains(t, recorder.snapshot(), "50:a1")
+	assert.NotContains(t, recorder.snapshot(), "50:a2")
+	assert.NotContains(t, recorder.snapshot(), "50:a3")
+	assert.NotContains(t, recorder.snapshot(), "60")
+}
+
+func TestRun_ResumeFromBranchPushed_EndToEnd(t *testing.T) {
+	cfg := testConfig(t)
+	runID := contracts.RunID("2026-04-21-PR47-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, seedResumeRun(t, runCtx, 47))
+
+	store := NewIntentionStore(runCtx)
+	intention := validPlanningIntention(runID)
+	intention.Stage = contracts.IntentionStageBranchPushed
+	require.NoError(t, store.Save(intention))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps.Step70 = orchestratorStep70{
+		git:      testStep70Git{head: intention.TargetSha},
+		resolver: testStep70Resolver{},
+	}
+
+	require.NoError(t, orch.Run(context.Background(), 47, RunOptions{RunID: runID}))
+
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	kinds := make([]contracts.StateKind, 0, len(events))
+	for _, event := range events {
+		kinds = append(kinds, event.Kind)
+	}
+	assert.Contains(t, kinds, contracts.StateKindPromoted)
+	assert.FileExists(t, filepath.Join(cfg.Paths.Runs, string(runID), "70", "decision.json"))
+
+	lines, err := internalio.ReadJSONL[contracts.RuleRegistryEntry](runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	assert.Len(t, lines, 1)
 }
 
 func TestStubMarkerStep_SeedsPass1ScoresFromTaskPackageWorktrees(t *testing.T) {
@@ -422,6 +659,46 @@ func (forcedCandidateStep) Run(ctx context.Context, run *StepRunContext) error {
 	return nil
 }
 
+type duplicateOnlyCandidateStep struct{}
+
+func (duplicateOnlyCandidateStep) Run(ctx context.Context, run *StepRunContext) error {
+	_ = ctx
+	body := "# Duplicate rule\n\n- source_rule_id: rule-existing\n- classification: duplicate\n"
+	candidate := contracts.Candidate{
+		CandidateID:        "cand-dup-only",
+		Kind:               contracts.CandidateKindDuplicate,
+		TargetRuleID:       "rule-existing",
+		Title:              "Duplicate rule",
+		Problem:            "problem",
+		Rationale:          "rationale",
+		ProposedBodyPath:   "40/candidates/cand-dup-only.md",
+		ProposedBodySha256: sha256String(body),
+	}
+	candidates := &contracts.Candidates{
+		SchemaVersion:  "1",
+		RunID:          run.IO.RunID,
+		Candidates:     []contracts.Candidate{candidate},
+		CandidatesHash: contracts.CanonicalCandidatesHash([]contracts.Candidate{candidate}),
+		CreatedAt:      time.Now().UTC(),
+	}
+	sidecarPath, err := run.IO.ResolveRunRelative(candidate.ProposedBodyPath)
+	if err != nil {
+		return err
+	}
+	if err := internalio.WriteAtomic(sidecarPath, []byte(body)); err != nil {
+		return err
+	}
+	candidatesPath, err := run.IO.ResolveRunRelative("40/candidates.json")
+	if err != nil {
+		return err
+	}
+	if err := internalio.WriteJSONAtomic(candidatesPath, candidates); err != nil {
+		return err
+	}
+	run.Candidates = candidates
+	return nil
+}
+
 type scriptedStep60Step struct {
 	decode func([]byte, any) (any, error)
 }
@@ -474,6 +751,68 @@ func (s scriptedStep60Step) Run(ctx context.Context, run *StepRunContext) error 
 
 type orchestratorJudge struct {
 	score int
+}
+
+type branchPushedCrashStep struct {
+	t *testing.T
+}
+
+func (s branchPushedCrashStep) Run(ctx context.Context, run *StepRunContext) error {
+	s.t.Helper()
+	repoRoot, err := run.Config.RepoRoot()
+	require.NoError(s.t, err)
+	resolver := step70_decide.FilesystemResolver{RepoDir: repoRoot}
+	target, ok, err := resolver.Resolve(run.IO, run.TaskPackage, run.Candidates)
+	require.NoError(s.t, err)
+	require.True(s.t, ok)
+
+	bestSHA := os.Getenv("AUTO_IMPROVE_TEST_BEST_SHA")
+	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(run.IO.RunID), target.TargetSHA, bestSHA, run.Candidates.CandidatesHash)
+	plannedEntries := make([]contracts.PlannedAdoptionEntry, 0, len(target.RulesToAppend))
+	for idx, entry := range target.RulesToAppend {
+		var (
+			ruleID   string
+			rulePath string
+			sha256   string
+		)
+		switch value := entry.Value.(type) {
+		case contracts.RuleRegistryAdded:
+			ruleID = value.RuleID
+			rulePath = value.RulePath
+			sha256 = value.Sha256
+		case contracts.RuleRegistryUpdated:
+			ruleID = value.RuleID
+			rulePath = value.RulePath
+			sha256 = value.Sha256
+		default:
+			s.t.Fatalf("unexpected planned registry entry type %T", entry.Value)
+		}
+		plannedEntries = append(plannedEntries, contracts.PlannedAdoptionEntry{
+			OpID:     contracts.ComputePlannedAdoptionEntryOpID(idempotencyKey, idx, ruleID),
+			Kind:     entry.Kind,
+			RuleID:   ruleID,
+			RulePath: rulePath,
+			Sha256:   sha256,
+		})
+	}
+
+	intention := contracts.IntentionRecord{
+		SchemaVersion:      "1",
+		Stage:              contracts.IntentionStageBranchPushed,
+		IdempotencyKey:     idempotencyKey,
+		RunID:              run.IO.RunID,
+		BestShaBefore:      bestSHA,
+		TargetSha:          target.TargetSHA,
+		CandidatesHash:     run.Candidates.CandidatesHash,
+		RegistryHeadBefore: "",
+		PlannedAdoption: &contracts.PlannedAdoption{
+			IdempotencyKey: idempotencyKey,
+			Entries:        plannedEntries,
+		},
+		StartedAt: time.Now().UTC(),
+	}
+	require.NoError(s.t, run.IntentionFile.Save(intention))
+	return fmt.Errorf("simulated branch_pushed crash")
 }
 
 func (j orchestratorJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
@@ -532,6 +871,147 @@ func sha256String(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func overwriteFakeGitScript(t *testing.T, binDir, script string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
+}
+
+func manualRecoveryGitScript() string {
+	return `#!/bin/sh
+set -eu
+
+state_dir="${AUTO_IMPROVE_GIT_STATE_DIR}"
+mkdir -p "$state_dir"
+
+if [ "${1:-}" = "-C" ]; then
+  shift 2
+fi
+
+subcmd="$1"
+shift
+
+case "$subcmd" in
+  rev-parse)
+    if [ "${1:-}" = "--verify" ]; then
+      echo "${AUTO_IMPROVE_TEST_BEST_SHA}"
+      exit 0
+    fi
+    case "${1:-}" in
+      *^1) echo "${AUTO_IMPROVE_TEST_BASE_SHA}" ;;
+      HEAD) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
+      *) echo "${AUTO_IMPROVE_TEST_BEST_SHA}" ;;
+    esac
+    ;;
+  worktree)
+    case "${1:-}" in
+      add)
+        if [ "${2:-}" = "-b" ]; then
+          mkdir -p "$4"
+        else
+          mkdir -p "$2"
+        fi
+        ;;
+      remove)
+        rm -rf "$3"
+        ;;
+    esac
+    ;;
+  diff|ls-files|status)
+    exit 0
+    ;;
+  branch)
+    echo "stub-branch"
+    ;;
+  ls-remote)
+    if [ -f "$state_dir/after-push" ]; then
+      exit 0
+    fi
+    branch="${4:-best}"
+    printf '%s\trefs/heads/%s\n' "${AUTO_IMPROVE_TEST_BEST_SHA}" "$branch"
+    ;;
+  push)
+    touch "$state_dir/after-push"
+    echo "non-fast-forward" >&2
+    exit 1
+    ;;
+esac
+
+exit 0
+`
+}
+
+func postPushRollbackGitScript() string {
+	return `#!/bin/sh
+set -eu
+
+state_dir="${AUTO_IMPROVE_GIT_STATE_DIR}"
+mkdir -p "$state_dir"
+
+if [ "${1:-}" = "-C" ]; then
+  shift 2
+fi
+
+subcmd="$1"
+shift
+
+case "$subcmd" in
+  rev-parse)
+    if [ "${1:-}" = "--verify" ]; then
+      echo "${AUTO_IMPROVE_TEST_BEST_SHA}"
+      exit 0
+    fi
+    case "${1:-}" in
+      *^1) echo "${AUTO_IMPROVE_TEST_BASE_SHA}" ;;
+      HEAD) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
+      *) echo "${AUTO_IMPROVE_TEST_BEST_SHA}" ;;
+    esac
+    ;;
+  worktree)
+    case "${1:-}" in
+      add)
+        if [ "${2:-}" = "-b" ]; then
+          mkdir -p "$4"
+        else
+          mkdir -p "$2"
+        fi
+        ;;
+      remove)
+        rm -rf "$3"
+        ;;
+    esac
+    ;;
+  diff|ls-files|status)
+    exit 0
+    ;;
+  branch)
+    echo "stub-branch"
+    ;;
+  ls-remote)
+    branch="${4:-best}"
+    if [ -f "$state_dir/pushed-target" ]; then
+      printf '%s\trefs/heads/%s\n' "${AUTO_IMPROVE_TEST_TARGET_SHA}" "$branch"
+    else
+      printf '%s\trefs/heads/%s\n' "${AUTO_IMPROVE_TEST_BEST_SHA}" "$branch"
+    fi
+    ;;
+  push)
+    refspec="${2:-}"
+    if [ "$refspec" = "${AUTO_IMPROVE_TEST_TARGET_SHA}:best" ]; then
+      mkdir -p "$(dirname "$AUTO_IMPROVE_TEST_SENTINEL_PATH")"
+      cat > "$AUTO_IMPROVE_TEST_SENTINEL_PATH" <<EOF
+{"run_id":"2026-04-21-PR99-deadbee","pr":99,"reason":"transactional_failure","failed_step":"70","created_at":"2026-04-21T00:00:00Z"}
+EOF
+      touch "$state_dir/pushed-target"
+      exit 0
+    fi
+    exit 0
+    ;;
+esac
+
+exit 0
+`
+}
+
 func (r *callRecorder) add(call string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -542,6 +1022,14 @@ func (r *callRecorder) snapshot() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.calls...)
+}
+
+func eventKinds(events []contracts.StateEntry) []contracts.StateKind {
+	kinds := make([]contracts.StateKind, 0, len(events))
+	for _, event := range events {
+		kinds = append(kinds, event.Kind)
+	}
+	return kinds
 }
 
 type recordingStep struct {
@@ -555,6 +1043,8 @@ func (s recordingStep) Run(ctx context.Context, run *StepRunContext) error {
 	switch s.label {
 	case "10":
 		return stubStep10{}.Run(ctx, run)
+	case "30":
+		return stubMarkerStep{path: "30/done.marker"}.Run(ctx, run)
 	case "40":
 		if err := (stubStep40{}).Run(ctx, run); err != nil {
 			return err
@@ -619,6 +1109,130 @@ func stubAgentSteps() map[contracts.AgentID]Step {
 		steps[agent] = stubImplementStep{}
 	}
 	return steps
+}
+
+type nonScorableImplementStep struct {
+	kind contracts.ManifestKind
+}
+
+func (s nonScorableImplementStep) Run(ctx context.Context, run *StepRunContext) error {
+	_ = ctx
+	manifestPath, err := run.IO.ManifestPath(run.Pass, run.Agent)
+	if err != nil {
+		return err
+	}
+	startedAt := time.Now().UTC()
+	switch s.kind {
+	case contracts.ManifestKindTimeout:
+		return internalio.WriteJSONAtomic(manifestPath, contracts.Manifest{
+			Kind: contracts.ManifestKindTimeout,
+			Value: contracts.ManifestTimeout{
+				Kind:           contracts.ManifestKindTimeout,
+				SchemaVersion:  "1",
+				RunID:          run.IO.RunID,
+				Pass:           run.Pass,
+				Agent:          run.Agent,
+				TimeoutSeconds: 300,
+				StartedAt:      startedAt,
+				FinishedAt:     startedAt,
+			},
+		})
+	default:
+		return internalio.WriteJSONAtomic(manifestPath, contracts.Manifest{
+			Kind: contracts.ManifestKindError,
+			Value: contracts.ManifestError{
+				Kind:          contracts.ManifestKindError,
+				SchemaVersion: "1",
+				RunID:         run.IO.RunID,
+				Pass:          run.Pass,
+				Agent:         run.Agent,
+				ExitCode:      1,
+				Reason:        "unknown",
+				Detail:        "fixture non-scorable manifest",
+				StartedAt:     startedAt,
+				FinishedAt:    startedAt,
+			},
+		})
+	}
+}
+
+func nonScorableAgentSteps(kind contracts.ManifestKind) map[contracts.AgentID]Step {
+	steps := make(map[contracts.AgentID]Step, len(defaultAgents))
+	for _, agent := range defaultAgents {
+		steps[agent] = nonScorableImplementStep{kind: kind}
+	}
+	return steps
+}
+
+type orchestratorStep70 struct {
+	git      step70_decide.GitOps
+	resolver step70_decide.TargetResolver
+}
+
+func (s orchestratorStep70) Run(ctx context.Context, run *StepRunContext) error {
+	if err := step70_decide.Run(ctx, run.PR, run.IO, run.TaskPackage, run.Candidates, run.IntentionFile, step70_decide.Deps{
+		Git:      s.git,
+		Resolver: s.resolver,
+		Now: func() time.Time {
+			return time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC)
+		},
+	}); err != nil {
+		return err
+	}
+	decisionPath, err := run.IO.ResolveRunRelative("70/decision.json")
+	if err != nil {
+		return err
+	}
+	if !fileExists(decisionPath) {
+		return nil
+	}
+	decision, err := internalio.ReadJSON[contracts.Decision](decisionPath)
+	if err != nil {
+		return err
+	}
+	run.Decision = &decision
+	return nil
+}
+
+type testStep70Resolver struct{}
+
+func (testStep70Resolver) Resolve(runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates) (step70_decide.Target, bool, error) {
+	_ = pkg
+	if candidates == nil || len(candidates.Candidates) == 0 {
+		return step70_decide.Target{}, false, nil
+	}
+	return step70_decide.Target{
+		BestBranch:    "best",
+		BestShaBefore: strings.Repeat("1", 40),
+		TargetSHA:     strings.Repeat("2", 40),
+		RulesToAppend: []contracts.RuleRegistryEntry{{
+			Kind: contracts.RegistryKindAdded,
+			Value: contracts.RuleRegistryAdded{
+				Kind:          contracts.RegistryKindAdded,
+				SchemaVersion: "1",
+				RuleID:        "r-" + candidates.Candidates[0].CandidateID,
+				RulePath:      "rules/" + candidates.Candidates[0].CandidateID + ".md",
+				Sha256:        strings.Repeat("a", 64),
+			},
+		}},
+	}, true, nil
+}
+
+type testStep70Git struct {
+	head    string
+	pushErr error
+}
+
+func (g testStep70Git) RemoteHead(context.Context, string) (string, error) {
+	return g.head, nil
+}
+
+func (g testStep70Git) PushForceWithLease(context.Context, string, string, string) error {
+	return g.pushErr
+}
+
+func (g testStep70Git) RemoveWorktree(context.Context, string) error {
+	return nil
 }
 
 func testConfig(t *testing.T) *config.Config {

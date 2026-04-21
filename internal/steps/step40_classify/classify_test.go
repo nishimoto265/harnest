@@ -18,28 +18,12 @@ import (
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 )
 
-func TestRun_EmptyInputsProduceZeroCandidates(t *testing.T) {
+func TestRun_EmptyInputsFailClosed(t *testing.T) {
 	cfg := newTestConfig(t)
 
 	got, err := Run(context.Background(), cfg)
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Empty(t, got.Candidates)
-	assert.Equal(t, contracts.CanonicalCandidatesHash(nil), got.CandidatesHash)
-	assert.NoError(t, got.VerifyCandidatesHash())
-
-	stored := readCandidatesFile(t, cfg.IO)
-	assert.Empty(t, stored.Candidates)
-	assert.Equal(t, got.CandidatesHash, stored.CandidatesHash)
-
-	classifications := readClassificationFile(t, cfg.IO)
-	assert.Empty(t, classifications)
-
-	classificationPath, err := cfg.IO.ResolveRunRelative(classificationJSONLPath)
-	require.NoError(t, err)
-	data, err := os.ReadFile(classificationPath)
-	require.NoError(t, err)
-	assert.Len(t, data, 0)
+	require.ErrorContains(t, err, "missing or incomplete step30 inputs")
+	assert.Nil(t, got)
 }
 
 func TestRun_ComplianceViolationsOnlyProduceNewCandidates(t *testing.T) {
@@ -220,6 +204,44 @@ func TestRun_RegistryVariantsProduceExpectedCandidateKinds(t *testing.T) {
 	assert.Empty(t, targets["rule-rolled-back"])
 }
 
+func TestRun_ClassifiesDuplicateWhenExistingRuleBodyMatchesCandidate(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+	writeCompliance(t, cfg.IO, testComplianceEntry(cfg.IO.RunID, "rule-dup", contracts.ComplianceVerdictViolated))
+
+	rulesDir := filepath.Join(filepath.Dir(cfg.registryPath()), "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	body := candidateBodyMarkdown(contracts.Candidate{
+		CandidateID:      "cand-existing",
+		Kind:             contracts.CandidateKindNew,
+		Title:            "Rule candidate for rule-dup",
+		Problem:          "Pass1 recorded 1 violation(s) for rule rule-dup.",
+		Rationale:        "Phase 0 deterministic classify generated one candidate from compliance-A.jsonl for rule-dup.",
+		ProposedBodyPath: "40/candidates/cand-existing.md",
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "rule-existing.md"), []byte(body), 0o644))
+	writeRegistry(t, cfg.registryPath(), contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-existing",
+			RulePath:       "rules/rule-existing.md",
+			Sha256:         sha256Hex([]byte(body)),
+			IdempotencyKey: strings.Repeat("7", 64),
+			VersionSeq:     1,
+			ByRunID:        "2026-04-20-PR1-aaaaaaa",
+			At:             time.Date(2026, 4, 20, 9, 0, 0, 0, time.UTC),
+		},
+	})
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Len(t, got.Candidates, 1)
+	assert.Equal(t, contracts.CandidateKindDuplicate, got.Candidates[0].Kind)
+	assert.Equal(t, "rule-existing", got.Candidates[0].TargetRuleID)
+}
+
 func TestActiveRulesFromRegistry_Variants(t *testing.T) {
 	t.Run("updated entry keeps rule active", func(t *testing.T) {
 		active := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
@@ -258,6 +280,20 @@ func TestActiveRulesFromRegistry_Variants(t *testing.T) {
 		})
 
 		assert.False(t, active["rule-rolled-back"])
+	})
+
+	t.Run("shared rollback target only reverts the latest matching rule", func(t *testing.T) {
+		shared := strings.Repeat("f", 64)
+		active := activeRulesFromRegistry([]contracts.RuleRegistryEntry{
+			registryAdded("rule-a", shared),
+			registryAdded("rule-b", shared),
+			registryAdded("rule-c", shared),
+			registryRolledBack(shared),
+		})
+
+		assert.True(t, active["rule-a"])
+		assert.True(t, active["rule-b"])
+		assert.False(t, active["rule-c"])
 	})
 }
 
@@ -543,10 +579,11 @@ func TestBestDuplicateMatch_IgnoresTemplateBoilerplate(t *testing.T) {
 		TargetRuleID: "",
 	})
 	activeRuleBodies := map[string]string{
+		"rule-a": candidateBody,
 		"rule-b": "# Existing rule\n\n- source_rule_id: rule-b\n- classification: update\n\n## Problem\nPass1 recorded 3 violation(s) for rule rule-b.\n\n## Rationale\nPhase 0 deterministic classify generated one candidate from compliance-A.jsonl for rule-b.\n",
 	}
 
 	ruleID, score := bestDuplicateMatch(candidateBody, activeRuleBodies)
-	assert.Empty(t, ruleID)
-	assert.Zero(t, score)
+	assert.Equal(t, "rule-a", ruleID)
+	assert.Greater(t, score, 0.9)
 }

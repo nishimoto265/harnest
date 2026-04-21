@@ -400,6 +400,10 @@ if [[ "${FAKE_CLAUDE_STDERR:-}" != "" ]]; then
 fi
 if [[ "${FAKE_CLAUDE_CHECKLIST_JSON:-}" != "" ]]; then
   printf '%s' "${FAKE_CLAUDE_CHECKLIST_JSON}" > checklist-result.json
+elif [[ "${FAKE_SKIP_CHECKLIST:-0}" != "1" ]]; then
+  cat > checklist-result.json <<EOF
+{"schema_version":"1","run_id":"${FAKE_RUN_ID:-2026-04-21-PR42-abcdef0}","pass":1,"agent":"${FAKE_AGENT:-a1}","items":[]}
+EOF
 fi
 if [[ "${FAKE_CLAUDE_WRITE_FILE:-}" != "" ]]; then
   printf 'dirty worktree\n' > "${FAKE_CLAUDE_WRITE_FILE}"
@@ -556,6 +560,7 @@ func TestWriteCommitBundleFallsBackToFullHeadWhenBaseIsUnreachable(t *testing.T)
 func TestWriteSuccessArtifacts_CapturesDirtyTrackedDiffWhenHeadIsUnchanged(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, "README.md"), []byte("dirty worktree\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, checklistFileName), []byte(`{"schema_version":"1","run_id":"2026-04-21-PR42-abcdef0","pass":1,"agent":"a1","items":[]}`), 0o644))
 
 	err := fx.step.writeSuccessArtifacts(context.Background(), fx.run, fx.run.TaskPackage.Worktrees[0], runnerResult{
 		StartedAt:  time.Now().Add(-time.Second).UTC(),
@@ -569,6 +574,14 @@ func TestWriteSuccessArtifacts_CapturesDirtyTrackedDiffWhenHeadIsUnchanged(t *te
 	diffBytes, readErr := os.ReadFile(fx.diffPath())
 	require.NoError(t, readErr)
 	require.Contains(t, string(diffBytes), "README.md")
+}
+
+func TestStepRunMissingChecklistFailsClosed(t *testing.T) {
+	t.Setenv("FAKE_SKIP_CHECKLIST", "1")
+
+	fx := newTestFixture(t, 5)
+	err := fx.step.Run(context.Background(), fx.run)
+	require.ErrorContains(t, err, "missing checklist artifact")
 }
 
 func TestStepRunReturnsLeaseContendedDuringConcurrentStartup(t *testing.T) {

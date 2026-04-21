@@ -12,12 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
 type RescueExhaustedError struct {
@@ -168,7 +168,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		CreatedAt:       s.now().UTC(),
 		Artifacts:       artifacts,
 	}
-	if err := internalio.WriteJSONAtomic(filepath.Join(rescueDir, "state.json"), rescueState); err != nil {
+	if err := agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), rescueState); err != nil {
 		return 0, err
 	}
 	if err := verifyRescueState(rescueDir); err != nil {
@@ -236,20 +236,9 @@ func (l *rescueLock) Unlock() error {
 	return err
 }
 
-type rescueStateFile struct {
-	ExpectedBaseSHA string                 `json:"expected_base_sha" validate:"required,sha1_hex"`
-	RescuedHeadSHA  string                 `json:"rescued_head_sha" validate:"required,sha1_hex"`
-	RetryCount      int                    `json:"retry_count" validate:"gte=1"`
-	CommitCount     int                    `json:"commit_count" validate:"gte=0"`
-	BundleMode      string                 `json:"bundle_mode" validate:"required,oneof=none range full_head"`
-	CreatedAt       time.Time              `json:"created_at" validate:"required"`
-	Artifacts       []rescueArtifactDigest `json:"artifacts" validate:"required,dive"`
-}
+type rescueStateFile = agentrunner.RescueStateFile
 
-type rescueArtifactDigest struct {
-	Path   string `json:"path" validate:"required"`
-	SHA256 string `json:"sha256" validate:"required,len=64,hexadecimal"`
-}
+type rescueArtifactDigest = agentrunner.RescueArtifactDigest
 
 func writeCommitBundle(ctx context.Context, worktreePath, rescueDir, baseSHA string) (int, string, error) {
 	bundlePath := filepath.Join(rescueDir, "commits.bundle")
@@ -262,18 +251,18 @@ func writeCommitBundle(ctx context.Context, worktreePath, rescueDir, baseSHA str
 		if err != nil {
 			return 0, "", err
 		}
-		return commitCount, "full_head", nil
+		return commitCount, agentrunner.RescueBundleModeFullHead, nil
 	}
 	trimmed := strings.TrimSpace(revList)
 	if trimmed == "" {
 		if err := internalio.WriteAtomic(bundlePath, nil); err != nil {
 			return 0, "", err
 		}
-		return 0, "none", nil
+		return 0, agentrunner.RescueBundleModeNone, nil
 	}
 	commitCount := len(strings.Split(trimmed, "\n"))
 	if _, err := gitOutputContext(ctx, identity, worktreePath, "bundle", "create", bundlePath, baseSHA+"..HEAD"); err == nil {
-		return commitCount, "range", nil
+		return commitCount, agentrunner.RescueBundleModeRange, nil
 	}
 	if _, err := gitOutputContext(ctx, identity, worktreePath, "bundle", "create", bundlePath, "HEAD", "--objects"); err != nil {
 		return 0, "", err
@@ -282,7 +271,7 @@ func writeCommitBundle(ctx context.Context, worktreePath, rescueDir, baseSHA str
 	if err != nil {
 		return 0, "", err
 	}
-	return commitCount, "full_head", nil
+	return commitCount, agentrunner.RescueBundleModeFullHead, nil
 }
 
 func writeGitOutput(worktreePath, target string, args ...string) error {
@@ -368,21 +357,7 @@ func writeIgnoredList(ctx context.Context, worktreePath, target string) error {
 }
 
 func verifyRescueState(rescueDir string) error {
-	state, err := internalio.ReadJSON[rescueStateFile](filepath.Join(rescueDir, "state.json"))
-	if err != nil {
-		return err
-	}
-	for _, artifact := range state.Artifacts {
-		path := filepath.Join(rescueDir, filepath.FromSlash(artifact.Path))
-		digest, err := fileDigest(path)
-		if err != nil {
-			return err
-		}
-		if digest != artifact.SHA256 {
-			return fmt.Errorf("step20: rescue artifact digest mismatch: path=%s", artifact.Path)
-		}
-	}
-	return nil
+	return agentrunner.VerifyRescueState(rescueDir, fileDigest, "step20")
 }
 
 func copyFile(src, dst string, perm os.FileMode) error {

@@ -174,20 +174,30 @@ func (r *Runner) deriveBaseSHA(ctx context.Context, repoRoot string, pr PRInfo, 
 		}
 		return baseSHA, nil
 	}
-	if pr.State != "MERGED" {
-		if pr.State == "" {
-			return "", fmt.Errorf("step10 requires a merged PR: state is empty")
+	if pr.State == "MERGED" {
+		if err := validation.Instance().Var(pr.HeadRefOid, "required,sha1_hex"); err != nil {
+			return "", fmt.Errorf("step10: head_ref_oid is not a 40-hex sha: %q: %w", pr.HeadRefOid, err)
 		}
-		return "", fmt.Errorf("step10 requires a merged PR: state=%s", pr.State)
+		if err := validation.Instance().Var(pr.BaseRefOid, "required,sha1_hex"); err != nil {
+			return "", fmt.Errorf("step10: base_ref_oid is not a 40-hex sha: %q: %w", pr.BaseRefOid, err)
+		}
+		baseSHA, err := r.Git.MergeBase(ctx, repoRoot, pr.HeadRefOid, pr.BaseRefOid)
+		if err != nil {
+			return "", fmt.Errorf("step10: recover immutable base from head=%s base_tip=%s: %w", pr.HeadRefOid, pr.BaseRefOid, err)
+		}
+		if err := validation.Instance().Var(baseSHA, "required,sha1_hex"); err != nil {
+			return "", fmt.Errorf("step10: recovered immutable base is not a 40-hex sha: %q: %w", baseSHA, err)
+		}
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("step10: mergeCommit absent; derived immutable base with git merge-base", "pr", pr.Number, "head_ref_oid", pr.HeadRefOid, "base_ref_oid", pr.BaseRefOid)
+		return baseSHA, nil
 	}
-	if err := validation.Instance().Var(pr.BaseRefOid, "required,sha1_hex"); err != nil {
-		return "", fmt.Errorf("step10: base_ref_oid is not a 40-hex sha: %q: %w", pr.BaseRefOid, err)
+	if pr.State == "" {
+		return "", fmt.Errorf("step10 requires a merged PR: state is empty")
 	}
-	if logger == nil {
-		logger = slog.Default()
-	}
-	logger.Warn("step10: mergeCommit absent for merged PR; falling back to baseRefOid", "pr", pr.Number, "base_ref_oid", pr.BaseRefOid)
-	return pr.BaseRefOid, nil
+	return "", fmt.Errorf("step10 requires a merged PR: state=%s", pr.State)
 }
 
 func (r *Runner) validateInput(in Input) ([]contracts.AgentID, error) {

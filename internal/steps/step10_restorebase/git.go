@@ -23,6 +23,9 @@ type GitClient interface {
 
 	// ResolveRef resolves a ref to a 40-hex SHA.
 	ResolveRef(ctx context.Context, repoRoot, ref string) (string, error)
+
+	// MergeBase resolves the immutable merge base between two commits.
+	MergeBase(ctx context.Context, repoRoot, left, right string) (string, error)
 }
 
 type gitCLI struct {
@@ -117,6 +120,14 @@ func (g gitCLI) ResolveRef(ctx context.Context, repoRoot, ref string) (string, e
 	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "rev-parse", ref)
 	if err != nil {
 		return "", formatCommandFailure(fmt.Sprintf("step10: git rev-parse %s (in %s)", ref, repoRoot), err, out, stderr)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (g gitCLI) MergeBase(ctx context.Context, repoRoot, left, right string) (string, error) {
+	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "merge-base", left, right)
+	if err != nil {
+		return "", formatCommandFailure(fmt.Sprintf("step10: git merge-base %s %s (in %s)", left, right, repoRoot), err, out, stderr)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 )
 
 // FilesystemResolver is the production TargetResolver used by the orchestrator.
@@ -83,10 +84,13 @@ func resolveWinningAgent(runCtx internalio.RunContext) (contracts.AgentID, bool,
 	if err != nil {
 		return "", false, err
 	}
-	pairwise, err := internalio.ReadJSONL[contracts.PairwiseEntry](pairwisePath)
+	pairwiseRows, err := internalio.ReadJSONL[contracts.PairwiseEntry](pairwisePath)
 	if err != nil {
 		return "", false, err
 	}
+	pairwise := internalio.CollapseByKey(pairwiseRows, func(entry contracts.PairwiseEntry) [2]contracts.AgentID {
+		return [2]contracts.AgentID{entry.AgentA, entry.AgentB}
+	})
 	if len(pairwise) == 0 {
 		return "", false, nil
 	}
@@ -95,10 +99,11 @@ func resolveWinningAgent(runCtx internalio.RunContext) (contracts.AgentID, bool,
 	if err != nil {
 		return "", false, err
 	}
-	scores, err := internalio.ReadJSONL[contracts.ScoreEntry](scoresPath)
+	scoreRows, err := internalio.ReadJSONL[contracts.ScoreEntry](scoresPath)
 	if err != nil {
 		return "", false, err
 	}
+	scores := scorecore.CollapseFinalScores(scoreRows)
 	type scoreSummary struct {
 		agent contracts.AgentID
 		sum   int

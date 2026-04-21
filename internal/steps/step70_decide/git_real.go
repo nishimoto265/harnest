@@ -19,6 +19,9 @@ func (g RealGitOps) RemoteHead(ctx context.Context, branch string) (string, erro
 	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "ls-remote", "--heads", remote, branch)
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", err
 	}
 	fields := strings.Fields(string(out))
@@ -36,6 +39,9 @@ func (g RealGitOps) PushForceWithLease(ctx context.Context, branch, targetSHA, e
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		msg := stderr.String()
 		if strings.Contains(msg, "stale info") || strings.Contains(msg, "fetch first") || strings.Contains(msg, "non-fast-forward") {
 			return fmt.Errorf("%w: %s", ErrLeaseFailure, strings.TrimSpace(msg))
@@ -52,6 +58,9 @@ func (g RealGitOps) RemoveWorktree(ctx context.Context, path string) error {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		msgs := make([]string, 0, 2)
 		if out := strings.TrimSpace(stdout.String()); out != "" {
 			msgs = append(msgs, "stdout="+out)

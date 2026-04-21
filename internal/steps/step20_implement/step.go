@@ -1,13 +1,11 @@
 package step20_implement
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
@@ -17,6 +15,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/prompt"
+	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
 const (
@@ -327,52 +326,7 @@ func ensureDir(path string) error {
 }
 
 func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte, error) {
-	tracked, err := gitOutputBytesContext(ctx, worktreePath, "diff", baseSHA, "--binary")
-	if err != nil {
-		return nil, err
-	}
-
-	untrackedList, err := gitOutputContext(ctx, identity, worktreePath, "ls-files", "--others", "--exclude-standard", "-z")
-	if err != nil {
-		return nil, err
-	}
-	var combined bytes.Buffer
-	if _, err := combined.Write(tracked); err != nil {
-		return nil, err
-	}
-	for _, entry := range strings.Split(untrackedList, "\x00") {
-		if entry == "" {
-			continue
-		}
-		if err := contracts.EnsureCleanRelativePath(entry); err != nil {
-			return nil, err
-		}
-		diff, err := gitNoIndexDiffContext(ctx, worktreePath, entry)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := combined.Write(diff); err != nil {
-			return nil, err
-		}
-	}
-	return combined.Bytes(), nil
-}
-
-func gitNoIndexDiffContext(ctx context.Context, worktreePath, relativePath string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", "diff", "--binary", "--no-index", "--", "/dev/null", relativePath)
-	cmd.Dir = worktreePath
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		return output, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-		return output, nil
-	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	return nil, fmt.Errorf("step20: git diff --binary --no-index -- /dev/null %s: %w: %s", relativePath, err, strings.TrimSpace(string(output)))
+	return agentrunner.SuccessDiffBytes(ctx, worktreePath, baseSHA, "step20")
 }
 
 func manifestPrefix(pass int, agent contracts.AgentID) string {
@@ -434,21 +388,8 @@ func renderPrompt(cfg *config.Config, data promptData) (string, error) {
 }
 
 func loadChecklistArtifact(worktreePath string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {
-	sourcePath := filepath.Join(worktreePath, checklistFileName)
-	if _, err := os.Stat(sourcePath); err == nil {
-		result, readErr := internalio.ReadJSON[contracts.ChecklistResult](sourcePath)
-		if readErr != nil {
-			return contracts.ChecklistResult{}, readErr
-		}
-		return result, nil
-	} else if !os.IsNotExist(err) {
-		return contracts.ChecklistResult{}, err
-	}
-	return contracts.ChecklistResult{
-		SchemaVersion: "1",
-		RunID:         runID,
-		Pass:          pass,
-		Agent:         agent,
-		Items:         []contracts.ChecklistItem{},
-	}, nil
+	_ = runID
+	_ = pass
+	_ = agent
+	return agentrunner.LoadChecklistArtifact(worktreePath, checklistFileName, "step20")
 }

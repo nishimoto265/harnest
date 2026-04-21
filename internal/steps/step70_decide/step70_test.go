@@ -198,6 +198,24 @@ func TestRun_ResumeFromBranchPushed_CASAppendSucceeds(t *testing.T) {
 	assert.Equal(t, lines[0].Sha256, adopt.RegistryAppendResult.Sha256)
 }
 
+func TestRun_ResumeFromBranchPushed_RollsBackWhenSentinelAppearsBeforeResumeStep(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR422")
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageBranchPushed
+
+	store := newLoadHookStore(intentionPath(t, runCtx), func() {
+		require.NoError(t, writeSentinel(runCtx.RunsBase, "2026-04-21-PR99-feedbee", 99, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70, fixedNow()()))
+	})
+	require.NoError(t, store.Save(intention))
+
+	git := &fakeGit{head: resolver.target.TargetSHA}
+	require.NoError(t, Run(context.Background(), 422, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}))
+
+	rollback := mustDecisionRollback(t, readDecision(t, runCtx))
+	assert.Equal(t, contracts.RollbackReasonTransactionalFailure, rollback.RollbackReason)
+	assert.Len(t, git.pushCalls, 1)
+}
+
 func TestRun_ResumeFromBranchPushed_CASMismatchRetrySucceeds(t *testing.T) {
 	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR43")
 	store := newTrackingStore(intentionPath(t, runCtx))
@@ -430,6 +448,32 @@ func TestRun_RollbackOnPushFailure(t *testing.T) {
 	assert.Equal(t, contracts.RollbackReasonLeaseFailure, rb.RollbackReason)
 }
 
+func TestRun_RollbackTreatsMissingRemoteHeadAsManualRecoveryWhenBestShaBeforeKnown(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR601")
+	git := &fakeGit{head: "", pushErr: ErrLeaseFailure}
+
+	err := Run(context.Background(), 601, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()})
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+}
+
+func TestRun_CanceledPushReturnsContextErrorWithoutManualRecovery(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR423")
+	ctx, cancel := context.WithCancel(context.Background())
+	git := &fakeGit{
+		head: resolver.target.BestShaBefore,
+		onPush: func(call fakePushCall) {
+			_ = call
+			cancel()
+		},
+		pushErr: context.Canceled,
+	}
+
+	err := Run(ctx, 423, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+}
+
 func TestRun_NeedsManualRecoveryOnRemoteDivergence(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR7")
 	// Push succeeds, but later rollback path reads an unrelated head.
@@ -445,6 +489,65 @@ func TestRun_NeedsManualRecoveryOnRemoteDivergence(t *testing.T) {
 	events := readStateEvents(t, runCtx)
 	require.NotEmpty(t, events)
 	assert.Equal(t, contracts.StateKindNeedsManualRecovery, events[len(events)-1].Kind)
+}
+
+func TestRun_RollbackRequiresEmptyBestShaBeforeForEmptyRemoteHead(t *testing.T) {
+	t.Run("fresh rollback blocks on empty remote head when best sha before exists", func(t *testing.T) {
+		runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR701")
+		git := &fakeGit{head: "", pushErr: ErrLeaseFailure}
+
+		err := Run(context.Background(), 701, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()})
+		require.ErrorIs(t, err, ErrNeedsManualRecovery)
+		assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+	})
+
+	t.Run("fresh rollback allows empty remote head when best sha before is empty", func(t *testing.T) {
+		runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR702")
+		resolver.target.BestShaBefore = ""
+		intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+		writer := state.NewWriter(runCtx)
+
+		require.NoError(t, handleRollback(context.Background(), 702, runCtx, pkg, resolver.target, intention, noopStore{}, writer, Deps{
+			Git:      &fakeGit{head: ""},
+			Resolver: resolver,
+			Now:      fixedNow(),
+		}, contracts.RollbackReasonLeaseFailure))
+		assert.Equal(t, contracts.DecisionActionRollback, readDecision(t, runCtx).Action)
+		assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+	})
+
+	t.Run("resume rollback blocks on empty remote head when best sha before exists", func(t *testing.T) {
+		runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR703")
+		intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+		intention.Stage = contracts.IntentionStageRollingBackBranchReverted
+		intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
+		intention.FailedStep = contracts.FailedStep70
+		require.NoError(t, store.Save(intention))
+
+		err := Run(context.Background(), 703, runCtx, pkg, candidates, store, Deps{
+			Git:      &fakeGit{head: ""},
+			Resolver: unexpectedResolver{t: t},
+			Now:      fixedNow(),
+		})
+		require.ErrorIs(t, err, ErrNeedsManualRecovery)
+		assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+	})
+
+	t.Run("resume rollback allows empty remote head when best sha before is empty", func(t *testing.T) {
+		runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR704")
+		resolver.target.BestShaBefore = ""
+		intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+		intention.Stage = contracts.IntentionStageRollingBackBranchReverted
+		intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
+		intention.FailedStep = contracts.FailedStep70
+		writer := state.NewWriter(runCtx)
+
+		require.NoError(t, ensureRollbackBranchState(context.Background(), 704, runCtx, pkg, intention, noopStore{}, writer, Deps{
+			Git:      &fakeGit{head: ""},
+			Resolver: unexpectedResolver{t: t},
+			Now:      fixedNow(),
+		}))
+	})
 }
 
 func TestFlockContention_ChildCannotAcquire(t *testing.T) {
@@ -797,6 +900,25 @@ func TestRun_RollsBackWhenOtherRunSentinelAppearsAfterPush(t *testing.T) {
 	require.Len(t, git.pushCalls, 2)
 }
 
+func TestRun_ResumeFromBranchPushed_RollsBackWhenOtherRunSentinelAppearsBeforeResumeRegistry(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR705")
+	store := newLoadHookStore(intentionPath(t, runCtx), func() {
+		require.NoError(t, writeSentinel(runCtx.RunsBase, "2026-04-21-PR99-feedbee", 99, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70, fixedNow()()))
+	})
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageBranchPushed
+	require.NoError(t, store.Save(intention))
+
+	require.NoError(t, Run(context.Background(), 705, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.TargetSHA},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	}))
+
+	rollback := mustDecisionRollback(t, readDecision(t, runCtx))
+	assert.Equal(t, contracts.RollbackReasonTransactionalFailure, rollback.RollbackReason)
+}
+
 func TestRun_RollsBackWhenOtherRunSentinelAppearsAfterRegistryAppend(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR19")
 	original := appendRegistryEntry
@@ -833,6 +955,23 @@ func TestRun_FillsBestShaBeforeFromRemoteHeadAfterLock(t *testing.T) {
 
 	adopt := mustDecisionAdopt(t, readDecision(t, runCtx))
 	assert.Equal(t, strings.Repeat("4", 40), adopt.BestShaBefore)
+}
+
+func TestRun_CanceledPushReturnsContextWithoutRollback(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR706")
+	ctx, cancel := context.WithCancel(context.Background())
+	git := cancelOnPushGit{
+		head:   resolver.target.BestShaBefore,
+		cancel: cancel,
+	}
+
+	err := Run(ctx, 706, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()})
+	require.ErrorIs(t, err, context.Canceled)
+
+	decisionPath, pathErr := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, pathErr)
+	assert.NoFileExists(t, decisionPath)
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
 }
 
 func TestRun_RejectsPersistedDecisionThatFailsRequestBoundValidation(t *testing.T) {
@@ -916,6 +1055,11 @@ type fakeGit struct {
 	onPush    func(fakePushCall)
 }
 
+type cancelOnPushGit struct {
+	head   string
+	cancel context.CancelFunc
+}
+
 func (g *fakeGit) RemoteHead(_ context.Context, _ string) (string, error) {
 	return g.head, nil
 }
@@ -935,6 +1079,24 @@ func (g *fakeGit) PushForceWithLease(_ context.Context, branch, target, expected
 }
 
 func (g *fakeGit) RemoveWorktree(_ context.Context, _ string) error {
+	return nil
+}
+
+func (g cancelOnPushGit) RemoteHead(_ context.Context, _ string) (string, error) {
+	return g.head, nil
+}
+
+func (g cancelOnPushGit) PushForceWithLease(ctx context.Context, branch, target, expected string) error {
+	_ = branch
+	_ = target
+	_ = expected
+	if g.cancel != nil {
+		g.cancel()
+	}
+	return ctx.Err()
+}
+
+func (g cancelOnPushGit) RemoveWorktree(_ context.Context, _ string) error {
 	return nil
 }
 
@@ -1214,12 +1376,23 @@ type hookStore struct {
 	hook func(contracts.IntentionRecord)
 }
 
+type loadHookStore struct {
+	*memStore
+	hook func()
+}
+
+type noopStore struct{}
+
 func newTrackingStore(path string) *trackingStore {
 	return &trackingStore{memStore: newMemStore(path)}
 }
 
 func newHookStore(path string, hook func(contracts.IntentionRecord)) *hookStore {
 	return &hookStore{memStore: newMemStore(path), hook: hook}
+}
+
+func newLoadHookStore(path string, hook func()) *loadHookStore {
+	return &loadHookStore{memStore: newMemStore(path), hook: hook}
 }
 
 func (m *memStore) Load() (*contracts.IntentionRecord, error) {
@@ -1239,6 +1412,26 @@ func (m *memStore) Load() (*contracts.IntentionRecord, error) {
 	}
 	return &rec, nil
 }
+
+func (s *loadHookStore) Load() (*contracts.IntentionRecord, error) {
+	if s.hook != nil {
+		s.hook()
+		s.hook = nil
+	}
+	return s.memStore.Load()
+}
+
+func (s *loadHookStore) Save(r contracts.IntentionRecord) error {
+	return s.memStore.Save(r)
+}
+
+func (s *loadHookStore) Delete() error {
+	return s.memStore.Delete()
+}
+
+func (noopStore) Load() (*contracts.IntentionRecord, error) { return nil, nil }
+func (noopStore) Save(contracts.IntentionRecord) error      { return nil }
+func (noopStore) Delete() error                             { return nil }
 
 func (m *memStore) Save(r contracts.IntentionRecord) error {
 	if m.path == "" {

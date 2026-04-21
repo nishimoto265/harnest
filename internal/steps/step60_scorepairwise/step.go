@@ -1124,99 +1124,11 @@ func fileSHA256(path string) (string, error) {
 }
 
 func reduceRawScores(rows []contracts.RawScoreEntry) []contracts.RawScoreEntry {
-	primary := collapseRawScoresByRole(rows, contracts.JudgeRolePrimary)
-	secondary := collapseRawScoresByRole(rows, contracts.JudgeRoleSecondary)
-	primaryByKey := make(map[scoreKey]contracts.RawScoreEntry, len(primary))
-	for _, entry := range primary {
-		primaryByKey[scoreKey{Agent: entry.Agent, Dimension: entry.Dimension}] = entry
-	}
-	secondaryByKey := make(map[scoreKey]contracts.RawScoreEntry, len(secondary))
-	for _, entry := range secondary {
-		secondaryByKey[scoreKey{Agent: entry.Agent, Dimension: entry.Dimension}] = entry
-	}
-
-	validArbiters := make([]contracts.RawScoreEntry, 0)
-	for _, entry := range rows {
-		if entry.JudgeRole != contracts.JudgeRoleArbiter {
-			continue
-		}
-		key := scoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
-		primaryEntry, ok := primaryByKey[key]
-		if !ok || entry.PrimaryRef == nil || entry.PrimaryRef.Sha256 != primaryEntry.OutputSha256 {
-			continue
-		}
-		secondaryEntry, ok := secondaryByKey[key]
-		if !ok || entry.SecondaryRef == nil || entry.SecondaryRef.Sha256 != secondaryEntry.OutputSha256 {
-			continue
-		}
-		validArbiters = append(validArbiters, entry)
-	}
-	arbiter := internalio.CollapseByKey(validArbiters, func(entry contracts.RawScoreEntry) rawScoreKey {
-		return rawScoreKey{Agent: entry.Agent, JudgeRole: entry.JudgeRole, Dimension: entry.Dimension}
-	})
-
-	reduced := make([]contracts.RawScoreEntry, 0, len(primary)+len(secondary)+len(arbiter))
-	reduced = append(reduced, primary...)
-	reduced = append(reduced, secondary...)
-	reduced = append(reduced, arbiter...)
-	sort.Slice(reduced, func(i, j int) bool {
-		if reduced[i].Agent != reduced[j].Agent {
-			return reduced[i].Agent < reduced[j].Agent
-		}
-		if reduced[i].JudgeRole != reduced[j].JudgeRole {
-			return reduced[i].JudgeRole < reduced[j].JudgeRole
-		}
-		return reduced[i].Dimension < reduced[j].Dimension
-	})
-	return reduced
+	return scorecore.CollapseRawScores(rows)
 }
 
 func reduceRawCompliance(rows []contracts.RawComplianceEntry) []contracts.RawComplianceEntry {
-	primary := collapseRawComplianceByRole(rows, contracts.JudgeRolePrimary)
-	secondary := collapseRawComplianceByRole(rows, contracts.JudgeRoleSecondary)
-	primaryByKey := make(map[complianceKey]contracts.RawComplianceEntry, len(primary))
-	for _, entry := range primary {
-		primaryByKey[complianceKey{Agent: entry.Agent, RuleID: entry.RuleID}] = entry
-	}
-	secondaryByKey := make(map[complianceKey]contracts.RawComplianceEntry, len(secondary))
-	for _, entry := range secondary {
-		secondaryByKey[complianceKey{Agent: entry.Agent, RuleID: entry.RuleID}] = entry
-	}
-
-	validArbiters := make([]contracts.RawComplianceEntry, 0)
-	for _, entry := range rows {
-		if entry.JudgeRole != contracts.JudgeRoleArbiter {
-			continue
-		}
-		key := complianceKey{Agent: entry.Agent, RuleID: entry.RuleID}
-		primaryEntry, ok := primaryByKey[key]
-		if !ok || entry.PrimaryRef == nil || entry.PrimaryRef.Sha256 != primaryEntry.OutputSha256 {
-			continue
-		}
-		secondaryEntry, ok := secondaryByKey[key]
-		if !ok || entry.SecondaryRef == nil || entry.SecondaryRef.Sha256 != secondaryEntry.OutputSha256 {
-			continue
-		}
-		validArbiters = append(validArbiters, entry)
-	}
-	arbiter := internalio.CollapseByKey(validArbiters, func(entry contracts.RawComplianceEntry) rawComplianceKey {
-		return rawComplianceKey{Agent: entry.Agent, JudgeRole: entry.JudgeRole, RuleID: entry.RuleID}
-	})
-
-	reduced := make([]contracts.RawComplianceEntry, 0, len(primary)+len(secondary)+len(arbiter))
-	reduced = append(reduced, primary...)
-	reduced = append(reduced, secondary...)
-	reduced = append(reduced, arbiter...)
-	sort.Slice(reduced, func(i, j int) bool {
-		if reduced[i].Agent != reduced[j].Agent {
-			return reduced[i].Agent < reduced[j].Agent
-		}
-		if reduced[i].JudgeRole != reduced[j].JudgeRole {
-			return reduced[i].JudgeRole < reduced[j].JudgeRole
-		}
-		return reduced[i].RuleID < reduced[j].RuleID
-	})
-	return reduced
+	return scorecore.CollapseRawCompliance(rows)
 }
 
 func collapseRawScoresByRole(rows []contracts.RawScoreEntry, role contracts.JudgeRole) []contracts.RawScoreEntry {

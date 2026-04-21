@@ -17,6 +17,8 @@ type LinkedIssue struct {
 	Body   string
 }
 
+const issueBodyMaxBytes = 8 * 1024
+
 // PRInfo is the subset of `gh pr view` output that step10 consumes.
 type PRInfo struct {
 	Number                  int
@@ -164,7 +166,7 @@ func (c ghCLI) PRView(ctx context.Context, pr int, repo string) (PRInfo, error) 
 	for _, ref := range raw.ClosingIssuesReferences {
 		issue, err := c.issueView(ctx, ref.Number, repo)
 		if err != nil {
-			return PRInfo{}, err
+			continue
 		}
 		// Prefer the PR-side title if the issue view fails to populate it.
 		if issue.Title == "" {
@@ -191,5 +193,9 @@ func (c ghCLI) issueView(ctx context.Context, number int, repo string) (LinkedIs
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return LinkedIssue{}, fmt.Errorf("step10: gh issue view #%d: decode: %w", number, err)
 	}
-	return LinkedIssue{Number: raw.Number, Title: raw.Title, Body: raw.Body}, nil
+	return LinkedIssue{
+		Number: raw.Number,
+		Title:  raw.Title,
+		Body:   truncateUTF8Bytes(raw.Body, issueBodyMaxBytes),
+	}, nil
 }

@@ -125,7 +125,7 @@ func readJSONLAt[T any](runIO internalio.RunContext, rel string) ([]T, error) {
 
 func buildCandidates(runID contracts.RunID, now time.Time, scores []contracts.ScoreEntry, compliance []contracts.ComplianceEntry, registry []contracts.RuleRegistryEntry, registryBase string) ([]contracts.Candidate, []contracts.ClassificationEntry, error) {
 	if len(scores) == 0 || len(compliance) == 0 {
-		return []contracts.Candidate{}, []contracts.ClassificationEntry{}, nil
+		return nil, nil, errors.New("step40_classify: missing or incomplete step30 inputs")
 	}
 
 	violations := collectViolations(compliance)
@@ -187,7 +187,7 @@ type rollbackState struct {
 
 func activeRulesFromRegistry(entries []contracts.RuleRegistryEntry) map[string]bool {
 	states := make(map[string]ruleState)
-	rollbackTargets := make(map[string]rollbackState)
+	rollbackTargets := make(map[string][]rollbackState)
 
 	apply := func(ruleID string, exists bool, seq int) {
 		states[ruleID] = ruleState{exists: exists, lastSeq: seq}
@@ -198,25 +198,25 @@ func activeRulesFromRegistry(entries []contracts.RuleRegistryEntry) map[string]b
 		switch v := entry.Value.(type) {
 		case contracts.RuleRegistryAdded:
 			previous := states[v.RuleID]
-			rollbackTargets[v.IdempotencyKey] = rollbackState{ruleID: v.RuleID, prevExists: previous.exists, seq: seq}
+			rollbackTargets[v.IdempotencyKey] = append(rollbackTargets[v.IdempotencyKey], rollbackState{ruleID: v.RuleID, prevExists: previous.exists, seq: seq})
 			apply(v.RuleID, true, seq)
 		case *contracts.RuleRegistryAdded:
 			if v == nil {
 				continue
 			}
 			previous := states[v.RuleID]
-			rollbackTargets[v.IdempotencyKey] = rollbackState{ruleID: v.RuleID, prevExists: previous.exists, seq: seq}
+			rollbackTargets[v.IdempotencyKey] = append(rollbackTargets[v.IdempotencyKey], rollbackState{ruleID: v.RuleID, prevExists: previous.exists, seq: seq})
 			apply(v.RuleID, true, seq)
 		case contracts.RuleRegistryUpdated:
 			previous := states[v.RuleID]
-			rollbackTargets[v.IdempotencyKey] = rollbackState{ruleID: v.RuleID, prevExists: previous.exists, seq: seq}
+			rollbackTargets[v.IdempotencyKey] = append(rollbackTargets[v.IdempotencyKey], rollbackState{ruleID: v.RuleID, prevExists: previous.exists, seq: seq})
 			apply(v.RuleID, true, seq)
 		case *contracts.RuleRegistryUpdated:
 			if v == nil {
 				continue
 			}
 			previous := states[v.RuleID]
-			rollbackTargets[v.IdempotencyKey] = rollbackState{ruleID: v.RuleID, prevExists: previous.exists, seq: seq}
+			rollbackTargets[v.IdempotencyKey] = append(rollbackTargets[v.IdempotencyKey], rollbackState{ruleID: v.RuleID, prevExists: previous.exists, seq: seq})
 			apply(v.RuleID, true, seq)
 		case contracts.RuleRegistryStatusChanged:
 			apply(v.RuleID, v.NewStatus != contracts.RuleStatusArchived, seq)
@@ -258,18 +258,22 @@ func activeRulesFromRegistry(entries []contracts.RuleRegistryEntry) map[string]b
 	return active
 }
 
-func rollbackRule(states map[string]ruleState, rollbackTargets map[string]rollbackState, targetOpID string, seq int) {
-	target, ok := rollbackTargets[targetOpID]
+func rollbackRule(states map[string]ruleState, rollbackTargets map[string][]rollbackState, targetOpID string, seq int) {
+	targets, ok := rollbackTargets[targetOpID]
 	if !ok {
 		return
 	}
-	current := states[target.ruleID]
-	if current.lastSeq != target.seq {
+	for i := len(targets) - 1; i >= 0; i-- {
+		target := targets[i]
+		current := states[target.ruleID]
+		if current.lastSeq != target.seq {
+			continue
+		}
+		states[target.ruleID] = ruleState{
+			exists:  target.prevExists,
+			lastSeq: seq,
+		}
 		return
-	}
-	states[target.ruleID] = ruleState{
-		exists:  target.prevExists,
-		lastSeq: seq,
 	}
 }
 
@@ -433,8 +437,6 @@ func normalizeRuleContent(value string) string {
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case trimmed == "":
-			continue
-		case strings.HasPrefix(trimmed, "# "):
 			continue
 		case strings.HasPrefix(trimmed, "- source_rule_id:"):
 			continue

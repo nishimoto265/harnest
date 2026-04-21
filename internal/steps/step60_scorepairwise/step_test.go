@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -599,6 +600,118 @@ func TestRun_GoldenHashes(t *testing.T) {
 	assert.Equal(t, "f24957610c33e2667e3bc04cf8fae00992b05c42ea27f4e1f762c08351b7b4d0", marker.ContentHashes.ScoresFinal)
 	assert.Equal(t, "a7684f4f2d558b499008ea67464f3f3894da8fae81446ca276659efa97bfdfa4", marker.ContentHashes.ComplianceFinal)
 	assert.Equal(t, "c149fdcaf85dca93f7a473896ee7968be45a325f069b0d8c2ca523411481fd89", marker.ContentHashes.PairwiseFinal)
+}
+
+func TestReduceRawScores_KeepsArbiterWhenRefsMatchRawEntryHashes(t *testing.T) {
+	resolvedAt := time.Date(2026, 4, 21, 21, 0, 0, 0, time.UTC)
+	primary := contracts.RawScoreEntry{
+		SchemaVersion: "1",
+		RunID:         "2026-04-21-PR42-abcdef0",
+		Pass:          2,
+		Agent:         "a1",
+		JudgeRole:     contracts.JudgeRolePrimary,
+		Dimension:     contracts.DimensionFidelity,
+		Score:         80,
+		Reasons:       "primary",
+		OutputSha256:  strings.Repeat("a", 64),
+		RubricVersion: "r",
+		PromptVersion: "p",
+		ResolvedAt:    resolvedAt,
+	}
+	secondary := contracts.RawScoreEntry{
+		SchemaVersion: "1",
+		RunID:         primary.RunID,
+		Pass:          2,
+		Agent:         "a1",
+		JudgeRole:     contracts.JudgeRoleSecondary,
+		Dimension:     contracts.DimensionFidelity,
+		Score:         79,
+		Reasons:       "secondary",
+		OutputSha256:  strings.Repeat("b", 64),
+		RubricVersion: "r",
+		PromptVersion: "p",
+		ResolvedAt:    resolvedAt,
+	}
+	primaryHash, err := rawScoreEntryHash(primary)
+	require.NoError(t, err)
+	secondaryHash, err := rawScoreEntryHash(secondary)
+	require.NoError(t, err)
+	arbiter := contracts.RawScoreEntry{
+		SchemaVersion: "1",
+		RunID:         primary.RunID,
+		Pass:          2,
+		Agent:         "a1",
+		JudgeRole:     contracts.JudgeRoleArbiter,
+		Dimension:     contracts.DimensionFidelity,
+		Score:         80,
+		Reasons:       "arbiter",
+		OutputSha256:  strings.Repeat("c", 64),
+		PrimaryRef:    &contracts.RawJudgeRef{Role: contracts.JudgeRolePrimary, Sha256: primaryHash},
+		SecondaryRef:  &contracts.RawJudgeRef{Role: contracts.JudgeRoleSecondary, Sha256: secondaryHash},
+		RubricVersion: "r",
+		PromptVersion: "p",
+		ResolvedAt:    resolvedAt,
+	}
+
+	reduced := reduceRawScores([]contracts.RawScoreEntry{primary, secondary, arbiter})
+	require.Len(t, reduced, 3)
+	assert.Equal(t, contracts.JudgeRoleArbiter, reduced[2].JudgeRole)
+}
+
+func TestReduceRawCompliance_KeepsArbiterWhenRefsMatchRawEntryHashes(t *testing.T) {
+	resolvedAt := time.Date(2026, 4, 21, 21, 0, 0, 0, time.UTC)
+	primary := contracts.RawComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         "2026-04-21-PR42-abcdef0",
+		Pass:          2,
+		Agent:         "a1",
+		JudgeRole:     contracts.JudgeRolePrimary,
+		RuleID:        "rule-1",
+		Verdict:       contracts.ComplianceVerdictViolated,
+		Rationale:     "primary",
+		OutputSha256:  strings.Repeat("a", 64),
+		RubricVersion: "r",
+		PromptVersion: "p",
+		ResolvedAt:    resolvedAt,
+	}
+	secondary := contracts.RawComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         primary.RunID,
+		Pass:          2,
+		Agent:         "a1",
+		JudgeRole:     contracts.JudgeRoleSecondary,
+		RuleID:        "rule-1",
+		Verdict:       contracts.ComplianceVerdictCompliant,
+		Rationale:     "secondary",
+		OutputSha256:  strings.Repeat("b", 64),
+		RubricVersion: "r",
+		PromptVersion: "p",
+		ResolvedAt:    resolvedAt,
+	}
+	primaryHash, err := rawComplianceEntryHash(primary)
+	require.NoError(t, err)
+	secondaryHash, err := rawComplianceEntryHash(secondary)
+	require.NoError(t, err)
+	arbiter := contracts.RawComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         primary.RunID,
+		Pass:          2,
+		Agent:         "a1",
+		JudgeRole:     contracts.JudgeRoleArbiter,
+		RuleID:        "rule-1",
+		Verdict:       contracts.ComplianceVerdictViolated,
+		Rationale:     "arbiter",
+		OutputSha256:  strings.Repeat("c", 64),
+		PrimaryRef:    &contracts.RawJudgeRef{Role: contracts.JudgeRolePrimary, Sha256: primaryHash},
+		SecondaryRef:  &contracts.RawJudgeRef{Role: contracts.JudgeRoleSecondary, Sha256: secondaryHash},
+		RubricVersion: "r",
+		PromptVersion: "p",
+		ResolvedAt:    resolvedAt,
+	}
+
+	reduced := reduceRawCompliance([]contracts.RawComplianceEntry{primary, secondary, arbiter})
+	require.Len(t, reduced, 3)
+	assert.Equal(t, contracts.JudgeRoleArbiter, reduced[2].JudgeRole)
 }
 
 func TestRun_SkipsPass2AgentWhenDeclaredArtifactIsMissing(t *testing.T) {
