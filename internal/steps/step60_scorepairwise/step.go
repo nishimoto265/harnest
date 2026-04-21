@@ -373,9 +373,22 @@ func collectScorableAgentRuns(in Input, agents []contracts.AgentID) ([]scorableA
 		if err != nil {
 			return nil, fmt.Errorf("step60: load pass2 manifest for agent=%s: %w", agent, err)
 		}
-		outputPath, err := in.IO.ResolveRunRelative(manifest.DiffPath)
+		outputPath, ok, err := resolveExistingManifestArtifact(in.IO, manifest.DiffPath)
 		if err != nil {
 			return nil, fmt.Errorf("step60: resolve pass2 diff path for agent=%s: %w", agent, err)
+		}
+		if !ok {
+			continue
+		}
+		if _, ok, err := resolveExistingManifestArtifact(in.IO, manifest.SessionPath); err != nil {
+			return nil, fmt.Errorf("step60: resolve pass2 session path for agent=%s: %w", agent, err)
+		} else if !ok {
+			continue
+		}
+		if _, ok, err := resolveExistingManifestArtifact(in.IO, manifest.ChecklistPath); err != nil {
+			return nil, fmt.Errorf("step60: resolve pass2 checklist path for agent=%s: %w", agent, err)
+		} else if !ok {
+			continue
 		}
 		runs = append(runs, scorableAgentRun{
 			Agent: agent,
@@ -394,6 +407,20 @@ func collectScorableAgentRuns(in Input, agents []contracts.AgentID) ([]scorableA
 	return runs, nil
 }
 
+func resolveExistingManifestArtifact(runIO internalio.RunContext, relativePath string) (string, bool, error) {
+	resolvedPath, err := runIO.ResolveRunRelative(relativePath)
+	if err != nil {
+		return "", false, err
+	}
+	if _, err := os.Stat(resolvedPath); err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return resolvedPath, true, nil
+}
+
 func truncateStep60Artifacts(paths step60Paths) error {
 	for _, path := range []string{
 		paths.ScoresRaw,
@@ -410,6 +437,9 @@ func truncateStep60Artifacts(paths step60Paths) error {
 }
 
 func scoreJudgeOutput(ctx context.Context, label string, judge judges.Judge, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return judges.JudgeOutput{}, fmt.Errorf("step60: %s judge score output for agent=%s: %w", label, input.Agent, err)
+	}
 	output, err := judge.ScoreOutput(ctx, input)
 	if err != nil {
 		return judges.JudgeOutput{}, fmt.Errorf("step60: %s judge score output for agent=%s: %w", label, input.Agent, err)
@@ -576,6 +606,25 @@ func emitCompliance(
 
 		var finalEntry contracts.ComplianceEntry
 		switch {
+		case arbiterOK && !primaryOK && !secondaryOK:
+			arbiterHash, err := complianceOutputHash(arbiterEntry)
+			if err != nil {
+				return nil, fmt.Errorf("step60: hash arbiter-only compliance rule=%s agent=%s: %w", ruleID, agent, err)
+			}
+			// RawJudgeRef requires both refs for judge_role=arbiter. When only the arbiter
+			// emitted a rule, persist it as a single-source raw row under the canonical
+			// primary slot so compliance-B-raw.jsonl still retains traceable provenance.
+			if err := internalio.AppendJSONL(paths.ComplianceRaw, makeRawComplianceEntry(
+				arbiterEntry,
+				contracts.JudgeRolePrimary,
+				arbiterHash,
+				nil,
+				nil,
+				meta.ResolvedAt,
+			)); err != nil {
+				return nil, fmt.Errorf("step60: append arbiter-only raw compliance rule=%s agent=%s: %w", ruleID, agent, err)
+			}
+			finalEntry = finalizeCompliance(meta, arbiterEntry, contracts.VerdictPathSingle)
 		case primaryDecision.Verdict == secondaryDecision.Verdict:
 			finalEntry = finalizeCompliance(meta, preferredComplianceAgreementSource(primaryDecision, secondaryDecision, primaryOK, secondaryOK), contracts.VerdictPathAgreement)
 		case !primaryOK || !secondaryOK:

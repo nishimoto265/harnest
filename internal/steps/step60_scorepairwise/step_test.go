@@ -422,6 +422,71 @@ func TestRun_ComplianceSingleSideRuleKeepsRawProvenance(t *testing.T) {
 	assert.Equal(t, contracts.ComplianceVerdictViolated, secondaryOnly[0].Verdict)
 }
 
+func TestRun_ComplianceArbiterOnlyRuleFinalizesAsSingleSource(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+
+	primary := scriptedJudge{
+		score:        80,
+		reasonPrefix: "primary",
+		compliance: map[string]contracts.ComplianceVerdict{
+			"only-primary": contracts.ComplianceVerdictViolated,
+		},
+	}
+	secondary := scriptedJudge{
+		score:        70,
+		reasonPrefix: "secondary",
+		compliance: map[string]contracts.ComplianceVerdict{
+			"only-secondary": contracts.ComplianceVerdictCompliant,
+		},
+	}
+	arbiter := scriptedJudge{
+		score:        80,
+		reasonPrefix: "arbiter",
+		compliance: map[string]contracts.ComplianceVerdict{
+			"only-arbiter": contracts.ComplianceVerdictValidException,
+		},
+	}
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     arbiter,
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 16, 30, 0, 0, time.UTC) },
+	}))
+
+	compliance := mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl")
+	require.Len(t, compliance, 3)
+	byRule := make(map[string]contracts.ComplianceEntry, len(compliance))
+	for _, entry := range compliance {
+		byRule[entry.RuleID] = entry
+	}
+	assert.Equal(t, contracts.ComplianceVerdictValidException, byRule["only-arbiter"].Verdict)
+	assert.Equal(t, contracts.VerdictPathSingle, byRule["only-arbiter"].VerdictPath)
+	assert.Equal(t, contracts.ComplianceVerdictViolated, byRule["only-primary"].Verdict)
+	assert.Equal(t, contracts.VerdictPathSingle, byRule["only-primary"].VerdictPath)
+	assert.Equal(t, contracts.ComplianceVerdictCompliant, byRule["only-secondary"].Verdict)
+	assert.Equal(t, contracts.VerdictPathSingle, byRule["only-secondary"].VerdictPath)
+
+	rawCompliance := mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl")
+	byRawRule := make(map[string][]contracts.RawComplianceEntry, len(rawCompliance))
+	for _, entry := range rawCompliance {
+		byRawRule[entry.RuleID] = append(byRawRule[entry.RuleID], entry)
+	}
+	require.Len(t, byRawRule["only-arbiter"], 1)
+	assert.Equal(t, contracts.JudgeRolePrimary, byRawRule["only-arbiter"][0].JudgeRole)
+	assert.Nil(t, byRawRule["only-arbiter"][0].PrimaryRef)
+	assert.Nil(t, byRawRule["only-arbiter"][0].SecondaryRef)
+	require.Len(t, byRawRule["only-primary"], 1)
+	assert.Equal(t, contracts.JudgeRolePrimary, byRawRule["only-primary"][0].JudgeRole)
+	require.Len(t, byRawRule["only-secondary"], 1)
+	assert.Equal(t, contracts.JudgeRoleSecondary, byRawRule["only-secondary"][0].JudgeRole)
+}
+
 func TestRun_NormalizesRawResolvedAtToRunSnapshot(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score:        true,
@@ -480,6 +545,60 @@ func TestRun_GoldenHashes(t *testing.T) {
 	assert.Equal(t, "dbc9c0fbcf88d47e0fc4012a4fbbd4ff2e222aa95b7e62654949e31babe1622a", marker.ContentHashes.ScoresFinal)
 	assert.Equal(t, "a7684f4f2d558b499008ea67464f3f3894da8fae81446ca276659efa97bfdfa4", marker.ContentHashes.ComplianceFinal)
 	assert.Equal(t, "00561b80430f4550eab3db53903ea32875834f0b43058a45d4bbc1d6acc2bce7", marker.ContentHashes.PairwiseFinal)
+}
+
+func TestRun_SkipsPass2AgentWhenDeclaredArtifactIsMissing(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		agents:          []contracts.AgentID{"a1", "a2", "a3"},
+		writePass1Score: true,
+	})
+
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "50-pass2/a2/diff.patch")))
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 19, 0, 0, 0, time.UTC) },
+	}))
+
+	marker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
+	assert.Equal(t, []contracts.AgentID{"a1", "a3"}, marker.CompletedAgents)
+	assert.EqualValues(t, 10, marker.ExpectedCounts.Scores)
+	assert.EqualValues(t, 2, marker.ExpectedCounts.Compliance)
+	assert.EqualValues(t, 2, marker.ExpectedCounts.Pairwise)
+}
+
+func TestRun_StopsBeforeSecondaryJudgeWhenContextIsCanceled(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	secondaryCalled := false
+
+	err := Run(ctx, Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary: cancelingJudge{
+			delegate: scriptedJudge{
+				score:        80,
+				reasonPrefix: "primary",
+				compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant},
+			},
+			cancel: cancel,
+		},
+		Secondary: unexpectedCallJudge{called: &secondaryCalled},
+		Arbiter:   unexpectedCallJudge{},
+		Now:       func() time.Time { return time.Date(2026, 4, 21, 20, 0, 0, 0, time.UTC) },
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.False(t, secondaryCalled)
+	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
 type fixtureOptions struct {
@@ -556,6 +675,30 @@ func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput)
 		Compliance: compliance,
 	}
 	return output, output.ValidateFor(input)
+}
+
+type cancelingJudge struct {
+	delegate scriptedJudge
+	cancel   context.CancelFunc
+}
+
+func (j cancelingJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	output, err := j.delegate.ScoreOutput(ctx, input)
+	if j.cancel != nil {
+		j.cancel()
+	}
+	return output, err
+}
+
+type unexpectedCallJudge struct {
+	called *bool
+}
+
+func (j unexpectedCallJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	if j.called != nil {
+		*j.called = true
+	}
+	return judges.JudgeOutput{}, errors.New("unexpected judge call")
 }
 
 func seedStep60Fixture(t *testing.T, opts fixtureOptions) (internalio.RunContext, contracts.TaskPackage) {
