@@ -10,6 +10,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,8 +28,8 @@ func TestStep30Score_RunAndResume(t *testing.T) {
 
 	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
 	require.NoError(t, err)
-	assert.Equal(t, int64(15), marker.ExpectedCounts.Scores)     // 3 agents × 5 dims
-	assert.Equal(t, int64(3), marker.ExpectedCounts.Compliance)  // 3 agents × 1 stub rule
+	assert.Equal(t, int64(15), marker.ExpectedCounts.Scores)    // 3 agents × 5 dims
+	assert.Equal(t, int64(3), marker.ExpectedCounts.Compliance) // 3 agents × 1 stub rule
 	assert.Len(t, marker.CompletedAgents, 3)
 
 	scoreFinalPath, err := runCtx.ResolveRunRelative("30/scores-A.jsonl")
@@ -74,6 +75,68 @@ func TestStep30Score_SkipsUnscorableAgents(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(10), marker.ExpectedCounts.Scores) // only a1 + a2
 	assert.Len(t, marker.CompletedAgents, 2)
+}
+
+func TestStep30Score_ResumeWithoutMarkerIsNoOp(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	calls := &judgeCallCounter{}
+	step := New(WithPanelProvider(newCountingPanelProvider(calls, 1)))
+
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+	assert.Equal(t, 3, calls.primary)
+	assert.Equal(t, 3, calls.secondary)
+	assert.Equal(t, 0, calls.arbiter)
+
+	scoreRawPath, err := runCtx.ResolveRunRelative("30/scores-A-raw.jsonl")
+	require.NoError(t, err)
+	scoreFinalPath, err := runCtx.ResolveRunRelative("30/scores-A.jsonl")
+	require.NoError(t, err)
+	complianceRawPath, err := runCtx.ResolveRunRelative("30/compliance-A-raw.jsonl")
+	require.NoError(t, err)
+	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
+	require.NoError(t, err)
+	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
+	require.NoError(t, err)
+
+	before := map[string]int64{}
+	for _, path := range []string{scoreRawPath, scoreFinalPath, complianceRawPath, complianceFinalPath} {
+		info, statErr := os.Stat(path)
+		require.NoError(t, statErr)
+		before[path] = info.Size()
+	}
+
+	require.NoError(t, os.Remove(markerPath))
+	calls.reset()
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+	assert.Equal(t, 0, calls.primary)
+	assert.Equal(t, 0, calls.secondary)
+	assert.Equal(t, 0, calls.arbiter)
+
+	for _, path := range []string{scoreRawPath, scoreFinalPath, complianceRawPath, complianceFinalPath} {
+		info, statErr := os.Stat(path)
+		require.NoError(t, statErr)
+		assert.Equal(t, before[path], info.Size(), "path=%s", path)
+	}
+}
+
+func TestStep30Score_AllowsMultipleComplianceRulesPerAgent(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	step := New(WithPanelProvider(newCountingPanelProvider(&judgeCallCounter{}, 2)))
+
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
+	require.NoError(t, err)
+	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
+	require.NoError(t, err)
+	assert.Equal(t, int64(15), marker.ExpectedCounts.Scores)
+	assert.Equal(t, int64(6), marker.ExpectedCounts.Compliance)
+
+	compliancePath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
+	require.NoError(t, err)
+	rows, err := internalio.ReadJSONL[contracts.ComplianceEntry](compliancePath)
+	require.NoError(t, err)
+	assert.Len(t, rows, 6)
 }
 
 // seedStep30Fixtures creates a minimal RunContext + TaskPackage with pass-1
@@ -165,4 +228,94 @@ func itoa(i int) string {
 	default:
 		return "x"
 	}
+}
+
+type judgeCallCounter struct {
+	primary   int
+	secondary int
+	arbiter   int
+}
+
+func (c *judgeCallCounter) reset() {
+	c.primary = 0
+	c.secondary = 0
+	c.arbiter = 0
+}
+
+type countingJudge struct {
+	role            contracts.JudgeRole
+	complianceRules int
+	calls           *judgeCallCounter
+}
+
+func (j countingJudge) ScoreOutput(_ context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	switch j.role {
+	case contracts.JudgeRolePrimary:
+		j.calls.primary++
+	case contracts.JudgeRoleSecondary:
+		j.calls.secondary++
+	case contracts.JudgeRoleArbiter:
+		j.calls.arbiter++
+	}
+
+	verdictPath := contracts.VerdictPathAgreement
+	scoreBase := 80
+	switch j.role {
+	case contracts.JudgeRolePrimary:
+		verdictPath = contracts.VerdictPathSingle
+	case contracts.JudgeRoleSecondary:
+		scoreBase = 79
+	case contracts.JudgeRoleArbiter:
+		verdictPath = contracts.VerdictPathArbitrated
+		scoreBase = 78
+	}
+
+	scores := make([]contracts.ScoreEntry, 0, len(step30Dimensions))
+	for idx, dimension := range step30Dimensions {
+		scores = append(scores, contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         input.RunID,
+			Pass:          input.Pass,
+			Agent:         input.Agent,
+			Dimension:     dimension,
+			Score:         scoreBase + idx,
+			Reasons:       string(j.role) + " reasons",
+			VerdictPath:   verdictPath,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+		})
+	}
+
+	compliance := make([]contracts.ComplianceEntry, 0, j.complianceRules)
+	for i := 0; i < j.complianceRules; i++ {
+		compliance = append(compliance, contracts.ComplianceEntry{
+			SchemaVersion: "1",
+			RunID:         input.RunID,
+			Pass:          input.Pass,
+			Agent:         input.Agent,
+			RuleID:        "rule-" + string(rune('a'+i)),
+			Verdict:       contracts.ComplianceVerdictCompliant,
+			Rationale:     string(j.role) + " rationale",
+			VerdictPath:   verdictPath,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+		})
+	}
+
+	return judges.JudgeOutput{
+		Scores:     scores,
+		Compliance: compliance,
+		Arbiter:    j.role == contracts.JudgeRoleArbiter,
+	}, nil
+}
+
+func newCountingPanelProvider(calls *judgeCallCounter, complianceRules int) PanelProvider {
+	return FuncPanelProvider(func(input judges.JudgeInput) (judges.Judge, judges.Judge, judges.Judge, error) {
+		return countingJudge{role: contracts.JudgeRolePrimary, complianceRules: complianceRules, calls: calls},
+			countingJudge{role: contracts.JudgeRoleSecondary, complianceRules: complianceRules, calls: calls},
+			countingJudge{role: contracts.JudgeRoleArbiter, complianceRules: complianceRules, calls: calls},
+			nil
+	})
 }

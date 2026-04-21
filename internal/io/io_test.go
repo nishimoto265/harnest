@@ -74,6 +74,23 @@ func TestAppendJSONLAndReadJSONL(t *testing.T) {
 	assert.Equal(t, "beta", records[1].Name)
 }
 
+func TestAppendJSONL_SyncsParentDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.jsonl")
+	var synced []string
+
+	originalSync := directorySync
+	directorySync = func(path string) error {
+		synced = append(synced, path)
+		return nil
+	}
+	t.Cleanup(func() {
+		directorySync = originalSync
+	})
+
+	require.NoError(t, AppendJSONL(path, testJSONLRecord{Name: "alpha"}))
+	require.Equal(t, []string{filepath.Dir(path)}, synced)
+}
+
 func TestAppendJSONL_RejectsEntryTooLarge(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.jsonl")
 	err := AppendJSONL(path, testJSONLRecord{Name: strings.Repeat("a", JSONLMaxLineBytes)})

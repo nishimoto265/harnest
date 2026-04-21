@@ -7,10 +7,10 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/judges"
 )
 
-// buildRawScoreEntries converts a JudgeOutput into RawScoreEntry rows for the
+// BuildRawScoreEntries converts a JudgeOutput into RawScoreEntry rows for the
 // given role, attaching optional arbiter refs when role == arbiter. Reasons
 // above ReasonsMaxChars are spilled to sidecar and replaced with a reference.
-func buildRawScoreEntries(
+func BuildRawScoreEntries(
 	out judges.JudgeOutput,
 	in PanelInput,
 	role contracts.JudgeRole,
@@ -56,7 +56,11 @@ func buildRawScoreEntries(
 	return rows, nil
 }
 
-func buildRawComplianceEntries(
+// BuildRawComplianceEntries converts a JudgeOutput into RawComplianceEntry
+// rows for the given role, attaching optional arbiter refs when role ==
+// arbiter. Rationale values above RationaleMaxChars are spilled to sidecar
+// and replaced with a reference.
+func BuildRawComplianceEntries(
 	out judges.JudgeOutput,
 	in PanelInput,
 	role contracts.JudgeRole,

@@ -17,6 +17,7 @@ var (
 	atomicNowFunc              = time.Now
 	atomicRename               = os.Rename
 	atomicRand    stdio.Reader = crand.Reader
+	directorySync              = syncDirectory
 )
 
 // WriteAtomic writes data to `<path>.tmp-<pid>-<ms>-<rand>` and renames it into
@@ -66,7 +67,7 @@ func WriteAtomic(path string, data []byte) error {
 		cleanupTmp()
 		return err
 	}
-	if err := syncDirectory(parent); err != nil {
+	if err := directorySync(parent); err != nil {
 		return err
 	}
 	return nil

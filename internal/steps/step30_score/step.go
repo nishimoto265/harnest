@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -140,10 +142,27 @@ func (s *Step) Run(ctx context.Context, req Request) error {
 		return err
 	}
 
+	state, err := loadResumeState(paths)
+	if err != nil {
+		return err
+	}
+
 	for _, agent := range scorableAgents {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		agentState := state.agent(agent.agent)
+		result, reusable, err := s.reusablePanelResult(agentState)
+		if err != nil {
+			return fmt.Errorf("step30_score: resume state agent=%s: %w", agent.agent, err)
+		}
+		if reusable {
+			if err := appendExpectedFinal(paths, agentState, result); err != nil {
+				return err
+			}
+			continue
+		}
+
 		manifest, err := internalio.LoadScorableManifest(req.RunContext, 1, agent.agent)
 		if err != nil {
 			return fmt.Errorf("step30_score: load manifest agent=%s: %w", agent.agent, err)
@@ -168,47 +187,108 @@ func (s *Step) Run(ctx context.Context, req Request) error {
 			OutputPath: diffAbs,
 			RubricPath: rubricPath,
 		}
-		primary, secondary, arbiter, err := s.panel.Judges(judgeInput)
-		if err != nil {
-			return fmt.Errorf("step30_score: panel agent=%s: %w", agent.agent, err)
+
+		panel := lazyPanel{}
+		loadPanel := func() error {
+			if panel.loaded {
+				return nil
+			}
+			primary, secondary, arbiter, err := s.panel.Judges(judgeInput)
+			if err != nil {
+				return fmt.Errorf("step30_score: panel agent=%s: %w", agent.agent, err)
+			}
+			panel.primary = primary
+			panel.secondary = secondary
+			panel.arbiter = arbiter
+			panel.loaded = true
+			return nil
 		}
 
-		result, err := s.resolver.Resolve(ctx, scorecore.PanelInput{
-			Primary:               primary,
-			Secondary:             secondary,
-			Arbiter:               arbiter,
-			JudgeInput:            judgeInput,
-			OutputSha256:          outputSha,
-			DisagreementThreshold: s.threshold,
-			RunContext:            req.RunContext,
-			StepDir:               "30",
-		})
-		if err != nil {
-			return fmt.Errorf("step30_score: resolve agent=%s: %w", agent.agent, err)
+		if !agentState.roleComplete(contracts.JudgeRolePrimary) {
+			if err := loadPanel(); err != nil {
+				return err
+			}
+			if err := s.appendJudgeRole(
+				ctx,
+				req.RunContext,
+				paths,
+				agentState,
+				judgeInput,
+				outputSha,
+				contracts.JudgeRolePrimary,
+				panel.primary,
+			); err != nil {
+				return err
+			}
 		}
 
-		// Raw layer first, then final. Within each layer keep the order
-		// produced by the resolver so CollapseByKey yields the expected
-		// "last wins" shape.
-		for _, row := range result.RawScores {
-			if err := internalio.AppendJSONL(paths.ScoreRaw, row); err != nil {
+		secondaryEnabled := agentState.roleComplete(contracts.JudgeRoleSecondary)
+		if !secondaryEnabled {
+			if err := loadPanel(); err != nil {
+				return err
+			}
+			secondaryEnabled = panel.secondary != nil
+		}
+		if secondaryEnabled && !agentState.roleComplete(contracts.JudgeRoleSecondary) {
+			if err := s.appendJudgeRole(
+				ctx,
+				req.RunContext,
+				paths,
+				agentState,
+				judgeInput,
+				outputSha,
+				contracts.JudgeRoleSecondary,
+				panel.secondary,
+			); err != nil {
 				return err
 			}
 		}
-		for _, row := range result.RawCompliance {
-			if err := internalio.AppendJSONL(paths.ComplianceRaw, row); err != nil {
+
+		arbiterEnabled := agentState.roleComplete(contracts.JudgeRoleArbiter)
+		if !arbiterEnabled {
+			if err := loadPanel(); err != nil {
 				return err
+			}
+			arbiterEnabled = panel.arbiter != nil
+		}
+
+		if secondaryEnabled {
+			disagree, err := scorecore.PanelDisagrees(
+				agentState.rawScoreRows(contracts.JudgeRolePrimary),
+				agentState.rawScoreRows(contracts.JudgeRoleSecondary),
+				agentState.rawComplianceRows(contracts.JudgeRolePrimary),
+				agentState.rawComplianceRows(contracts.JudgeRoleSecondary),
+				s.threshold,
+			)
+			if err != nil {
+				return fmt.Errorf("step30_score: panel disagreement agent=%s: %w", agent.agent, err)
+			}
+			if disagree && arbiterEnabled && !agentState.roleComplete(contracts.JudgeRoleArbiter) {
+				if err := s.appendJudgeRole(
+					ctx,
+					req.RunContext,
+					paths,
+					agentState,
+					judgeInput,
+					outputSha,
+					contracts.JudgeRoleArbiter,
+					panel.arbiter,
+				); err != nil {
+					return err
+				}
+				result, err = s.expectedPanelResult(agentState, secondaryEnabled, arbiterEnabled)
+				if err != nil {
+					return fmt.Errorf("step30_score: refresh final agent=%s: %w", agent.agent, err)
+				}
 			}
 		}
-		for _, row := range result.FinalScores {
-			if err := internalio.AppendJSONL(paths.ScoreFinal, row); err != nil {
-				return err
-			}
+		result, err = s.expectedPanelResult(agentState, secondaryEnabled, arbiterEnabled)
+		if err != nil {
+			return fmt.Errorf("step30_score: assemble final agent=%s: %w", agent.agent, err)
 		}
-		for _, row := range result.FinalCompliance {
-			if err := internalio.AppendJSONL(paths.ComplianceFinal, row); err != nil {
-				return err
-			}
+
+		if err := appendExpectedFinal(paths, agentState, result); err != nil {
+			return err
 		}
 	}
 
@@ -218,27 +298,424 @@ func (s *Step) Run(ctx context.Context, req Request) error {
 	}
 
 	marker, err := scorecore.BuildStep30DoneMarker(scorecore.Step30MarkerInputs{
-		Agents: agentIDs,
-		Paths:  paths.MarkerPaths,
+		Agents:     agentIDs,
+		Paths:      paths.MarkerPaths,
 		ResolvedAt: s.now(),
 	})
 	if err != nil {
 		return err
 	}
 
-	expectedScores := int64(len(agentIDs) * 5)
-	expectedCompliance := int64(len(agentIDs))
-	if marker.ExpectedCounts.Scores != expectedScores || marker.ExpectedCounts.Compliance != expectedCompliance {
+	expectedScores := int64(len(agentIDs) * len(step30Dimensions))
+	if marker.ExpectedCounts.Scores != expectedScores {
 		return fmt.Errorf(
-			"%w: agents=%d scores=%d/%d compliance=%d/%d",
+			"%w: agents=%d scores=%d/%d",
 			ErrCardinalityMismatch,
 			len(agentIDs),
 			marker.ExpectedCounts.Scores, expectedScores,
-			marker.ExpectedCounts.Compliance, expectedCompliance,
 		)
+	}
+	if err := validateComplianceCoverage(state, agentIDs); err != nil {
+		return err
 	}
 
 	return scorecore.WriteStep30DoneMarker(req.RunContext, marker)
+}
+
+var step30Dimensions = []contracts.Dimension{
+	contracts.DimensionFidelity,
+	contracts.DimensionCorrectness,
+	contracts.DimensionMaintainability,
+	contracts.DimensionDiscipline,
+	contracts.DimensionCommunication,
+}
+
+type lazyPanel struct {
+	loaded    bool
+	primary   judges.Judge
+	secondary judges.Judge
+	arbiter   judges.Judge
+}
+
+type resumeState struct {
+	agents map[contracts.AgentID]*agentResumeState
+}
+
+type agentResumeState struct {
+	rawScores       map[contracts.JudgeRole]map[contracts.Dimension]contracts.RawScoreEntry
+	rawCompliance   map[contracts.JudgeRole]map[string]contracts.RawComplianceEntry
+	finalScores     map[contracts.Dimension]contracts.ScoreEntry
+	finalCompliance map[string]contracts.ComplianceEntry
+}
+
+func loadResumeState(paths stepPathsResult) (*resumeState, error) {
+	scoreRaw, err := internalio.ReadJSONL[contracts.RawScoreEntry](paths.ScoreRaw)
+	if err != nil {
+		return nil, fmt.Errorf("step30_score: read raw scores: %w", err)
+	}
+	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](paths.ComplianceRaw)
+	if err != nil {
+		return nil, fmt.Errorf("step30_score: read raw compliance: %w", err)
+	}
+	scoreFinal, err := internalio.ReadJSONL[contracts.ScoreEntry](paths.ScoreFinal)
+	if err != nil {
+		return nil, fmt.Errorf("step30_score: read final scores: %w", err)
+	}
+	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](paths.ComplianceFinal)
+	if err != nil {
+		return nil, fmt.Errorf("step30_score: read final compliance: %w", err)
+	}
+
+	state := &resumeState{agents: map[contracts.AgentID]*agentResumeState{}}
+	for _, row := range scorecore.ReduceRawScoreEntries(scoreRaw) {
+		state.agent(row.Agent).setRawScore(row)
+	}
+	for _, row := range scorecore.ReduceRawComplianceEntries(complianceRaw) {
+		state.agent(row.Agent).setRawCompliance(row)
+	}
+	for _, row := range internalio.CollapseByKey(scoreFinal, func(e contracts.ScoreEntry) [2]string {
+		return [2]string{string(e.Agent), string(e.Dimension)}
+	}) {
+		state.agent(row.Agent).setFinalScore(row)
+	}
+	for _, row := range internalio.CollapseByKey(complianceFinal, func(e contracts.ComplianceEntry) [2]string {
+		return [2]string{string(e.Agent), e.RuleID}
+	}) {
+		state.agent(row.Agent).setFinalCompliance(row)
+	}
+	return state, nil
+}
+
+func (s *resumeState) agent(agent contracts.AgentID) *agentResumeState {
+	if s.agents == nil {
+		s.agents = map[contracts.AgentID]*agentResumeState{}
+	}
+	if state, ok := s.agents[agent]; ok {
+		return state
+	}
+	state := &agentResumeState{
+		rawScores:       map[contracts.JudgeRole]map[contracts.Dimension]contracts.RawScoreEntry{},
+		rawCompliance:   map[contracts.JudgeRole]map[string]contracts.RawComplianceEntry{},
+		finalScores:     map[contracts.Dimension]contracts.ScoreEntry{},
+		finalCompliance: map[string]contracts.ComplianceEntry{},
+	}
+	s.agents[agent] = state
+	return state
+}
+
+func (a *agentResumeState) setRawScore(row contracts.RawScoreEntry) {
+	if a.rawScores[row.JudgeRole] == nil {
+		a.rawScores[row.JudgeRole] = map[contracts.Dimension]contracts.RawScoreEntry{}
+	}
+	a.rawScores[row.JudgeRole][row.Dimension] = row
+}
+
+func (a *agentResumeState) setRawCompliance(row contracts.RawComplianceEntry) {
+	if a.rawCompliance[row.JudgeRole] == nil {
+		a.rawCompliance[row.JudgeRole] = map[string]contracts.RawComplianceEntry{}
+	}
+	a.rawCompliance[row.JudgeRole][row.RuleID] = row
+}
+
+func (a *agentResumeState) setFinalScore(row contracts.ScoreEntry) {
+	a.finalScores[row.Dimension] = row
+}
+
+func (a *agentResumeState) setFinalCompliance(row contracts.ComplianceEntry) {
+	a.finalCompliance[row.RuleID] = row
+}
+
+func (a *agentResumeState) roleComplete(role contracts.JudgeRole) bool {
+	if len(a.rawCompliance[role]) == 0 {
+		return false
+	}
+	rows := a.rawScores[role]
+	if len(rows) != len(step30Dimensions) {
+		return false
+	}
+	for _, dimension := range step30Dimensions {
+		if _, ok := rows[dimension]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *agentResumeState) rawScoreRows(role contracts.JudgeRole) []contracts.RawScoreEntry {
+	rows := make([]contracts.RawScoreEntry, 0, len(a.rawScores[role]))
+	for _, dimension := range step30Dimensions {
+		row, ok := a.rawScores[role][dimension]
+		if ok {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+func (a *agentResumeState) rawComplianceRows(role contracts.JudgeRole) []contracts.RawComplianceEntry {
+	keys := make([]string, 0, len(a.rawCompliance[role]))
+	for key := range a.rawCompliance[role] {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	rows := make([]contracts.RawComplianceEntry, 0, len(keys))
+	for _, key := range keys {
+		rows = append(rows, a.rawCompliance[role][key])
+	}
+	return rows
+}
+
+func (a *agentResumeState) refreshArbiterFreshness() {
+	scoreRows := make([]contracts.RawScoreEntry, 0, len(step30Dimensions)*3)
+	for _, role := range []contracts.JudgeRole{
+		contracts.JudgeRolePrimary,
+		contracts.JudgeRoleSecondary,
+		contracts.JudgeRoleArbiter,
+	} {
+		scoreRows = append(scoreRows, a.rawScoreRows(role)...)
+	}
+	complianceRows := make([]contracts.RawComplianceEntry, 0)
+	for _, role := range []contracts.JudgeRole{
+		contracts.JudgeRolePrimary,
+		contracts.JudgeRoleSecondary,
+		contracts.JudgeRoleArbiter,
+	} {
+		complianceRows = append(complianceRows, a.rawComplianceRows(role)...)
+	}
+
+	a.rawScores = map[contracts.JudgeRole]map[contracts.Dimension]contracts.RawScoreEntry{}
+	for _, row := range scorecore.ReduceRawScoreEntries(scoreRows) {
+		a.setRawScore(row)
+	}
+	a.rawCompliance = map[contracts.JudgeRole]map[string]contracts.RawComplianceEntry{}
+	for _, row := range scorecore.ReduceRawComplianceEntries(complianceRows) {
+		a.setRawCompliance(row)
+	}
+}
+
+func (a *agentResumeState) finalDiff(result scorecore.PanelResult) ([]contracts.ScoreEntry, []contracts.ComplianceEntry) {
+	scoreRows := make([]contracts.ScoreEntry, 0, len(result.FinalScores))
+	for _, row := range result.FinalScores {
+		existing, ok := a.finalScores[row.Dimension]
+		if !ok || !reflect.DeepEqual(existing, row) {
+			scoreRows = append(scoreRows, row)
+		}
+	}
+
+	complianceRows := make([]contracts.ComplianceEntry, 0, len(result.FinalCompliance))
+	for _, row := range result.FinalCompliance {
+		existing, ok := a.finalCompliance[row.RuleID]
+		if !ok || !reflect.DeepEqual(existing, row) {
+			complianceRows = append(complianceRows, row)
+		}
+	}
+	return scoreRows, complianceRows
+}
+
+func (s *Step) reusablePanelResult(agentState *agentResumeState) (scorecore.PanelResult, bool, error) {
+	if !agentState.roleComplete(contracts.JudgeRolePrimary) || !agentState.roleComplete(contracts.JudgeRoleSecondary) {
+		return scorecore.PanelResult{}, false, nil
+	}
+
+	disagree, err := scorecore.PanelDisagrees(
+		agentState.rawScoreRows(contracts.JudgeRolePrimary),
+		agentState.rawScoreRows(contracts.JudgeRoleSecondary),
+		agentState.rawComplianceRows(contracts.JudgeRolePrimary),
+		agentState.rawComplianceRows(contracts.JudgeRoleSecondary),
+		s.threshold,
+	)
+	if err != nil {
+		return scorecore.PanelResult{}, false, err
+	}
+	if disagree && !agentState.roleComplete(contracts.JudgeRoleArbiter) {
+		return scorecore.PanelResult{}, false, nil
+	}
+
+	result, err := s.expectedPanelResult(agentState, true, agentState.roleComplete(contracts.JudgeRoleArbiter))
+	if err != nil {
+		return scorecore.PanelResult{}, false, err
+	}
+	return result, true, nil
+}
+
+func (s *Step) expectedPanelResult(
+	agentState *agentResumeState,
+	secondaryEnabled bool,
+	arbiterEnabled bool,
+) (scorecore.PanelResult, error) {
+	primaryScores := agentState.rawScoreRows(contracts.JudgeRolePrimary)
+	primaryCompliance := agentState.rawComplianceRows(contracts.JudgeRolePrimary)
+	if len(primaryScores) == 0 {
+		return scorecore.PanelResult{}, fmt.Errorf("%w: primary=%d secondary=%d", scorecore.ErrPanelDimensionMatch, 0, 0)
+	}
+	if !secondaryEnabled {
+		return scorecore.AssemblePanelResultFromRaw(primaryScores, nil, nil, primaryCompliance, nil, nil, s.threshold)
+	}
+	if !agentState.roleComplete(contracts.JudgeRoleSecondary) {
+		return scorecore.PanelResult{}, fmt.Errorf("%w: secondary missing", ErrCardinalityMismatch)
+	}
+
+	secondaryScores := agentState.rawScoreRows(contracts.JudgeRoleSecondary)
+	secondaryCompliance := agentState.rawComplianceRows(contracts.JudgeRoleSecondary)
+	disagree, err := scorecore.PanelDisagrees(primaryScores, secondaryScores, primaryCompliance, secondaryCompliance, s.threshold)
+	if err != nil {
+		return scorecore.PanelResult{}, err
+	}
+	if !disagree {
+		return scorecore.AssemblePanelResultFromRaw(primaryScores, secondaryScores, nil, primaryCompliance, secondaryCompliance, nil, s.threshold)
+	}
+
+	if !arbiterEnabled {
+		return scorecore.AssemblePanelResultFromRaw(primaryScores, secondaryScores, nil, primaryCompliance, secondaryCompliance, nil, s.threshold)
+	}
+	if !agentState.roleComplete(contracts.JudgeRoleArbiter) {
+		return scorecore.PanelResult{}, fmt.Errorf("%w: arbiter missing", ErrCardinalityMismatch)
+	}
+	return scorecore.AssemblePanelResultFromRaw(
+		primaryScores,
+		secondaryScores,
+		agentState.rawScoreRows(contracts.JudgeRoleArbiter),
+		primaryCompliance,
+		secondaryCompliance,
+		agentState.rawComplianceRows(contracts.JudgeRoleArbiter),
+		s.threshold,
+	)
+}
+
+func (s *Step) appendJudgeRole(
+	ctx context.Context,
+	runCtx internalio.RunContext,
+	paths stepPathsResult,
+	agentState *agentResumeState,
+	judgeInput judges.JudgeInput,
+	outputSha string,
+	role contracts.JudgeRole,
+	judge judges.Judge,
+) error {
+	if judge == nil {
+		if role == contracts.JudgeRolePrimary {
+			return scorecore.ErrPanelPrimaryRequired
+		}
+		return fmt.Errorf("step30_score: missing %s judge", role)
+	}
+
+	out, err := judge.ScoreOutput(ctx, judgeInput)
+	if err != nil {
+		return fmt.Errorf("step30_score: %s agent=%s: %w", role, judgeInput.Agent, err)
+	}
+
+	var (
+		primaryRefs             map[contracts.Dimension]*contracts.RawJudgeRef
+		secondaryRefs           map[contracts.Dimension]*contracts.RawJudgeRef
+		primaryComplianceRefs   map[string]*contracts.RawJudgeRef
+		secondaryComplianceRefs map[string]*contracts.RawJudgeRef
+	)
+	if role == contracts.JudgeRoleArbiter {
+		primaryRefs, err = scorecore.RefsByDimension(agentState.rawScoreRows(contracts.JudgeRolePrimary), contracts.JudgeRolePrimary)
+		if err != nil {
+			return err
+		}
+		secondaryRefs, err = scorecore.RefsByDimension(agentState.rawScoreRows(contracts.JudgeRoleSecondary), contracts.JudgeRoleSecondary)
+		if err != nil {
+			return err
+		}
+		primaryComplianceRefs, err = scorecore.ComplianceRefsByRule(agentState.rawComplianceRows(contracts.JudgeRolePrimary), contracts.JudgeRolePrimary)
+		if err != nil {
+			return err
+		}
+		secondaryComplianceRefs, err = scorecore.ComplianceRefsByRule(agentState.rawComplianceRows(contracts.JudgeRoleSecondary), contracts.JudgeRoleSecondary)
+		if err != nil {
+			return err
+		}
+	}
+
+	panelInput := scorecore.PanelInput{
+		JudgeInput:            judgeInput,
+		OutputSha256:          outputSha,
+		DisagreementThreshold: s.threshold,
+		RunContext:            runCtx,
+		StepDir:               "30",
+	}
+	rawScores, err := scorecore.BuildRawScoreEntries(out, panelInput, role, primaryRefs, secondaryRefs)
+	if err != nil {
+		return err
+	}
+	rawCompliance, err := scorecore.BuildRawComplianceEntries(out, panelInput, role, primaryComplianceRefs, secondaryComplianceRefs)
+	if err != nil {
+		return err
+	}
+
+	for _, row := range rawScores {
+		if err := internalio.AppendJSONL(paths.ScoreRaw, row); err != nil {
+			return err
+		}
+	}
+	for _, row := range rawCompliance {
+		if err := internalio.AppendJSONL(paths.ComplianceRaw, row); err != nil {
+			return err
+		}
+	}
+	for _, row := range rawScores {
+		agentState.setRawScore(row)
+	}
+	for _, row := range rawCompliance {
+		agentState.setRawCompliance(row)
+	}
+	agentState.refreshArbiterFreshness()
+	return nil
+}
+
+func appendExpectedFinal(paths stepPathsResult, agentState *agentResumeState, result scorecore.PanelResult) error {
+	scoreRows, complianceRows := agentState.finalDiff(result)
+	for _, row := range scoreRows {
+		if err := internalio.AppendJSONL(paths.ScoreFinal, row); err != nil {
+			return err
+		}
+		agentState.setFinalScore(row)
+	}
+	for _, row := range complianceRows {
+		if err := internalio.AppendJSONL(paths.ComplianceFinal, row); err != nil {
+			return err
+		}
+		agentState.setFinalCompliance(row)
+	}
+	return nil
+}
+
+func validateComplianceCoverage(state *resumeState, agentIDs []contracts.AgentID) error {
+	expected := make(map[contracts.AgentID]struct{}, len(agentIDs))
+	for _, agent := range agentIDs {
+		expected[agent] = struct{}{}
+	}
+
+	actual := make(map[contracts.AgentID]struct{}, len(agentIDs))
+	for agent, agentState := range state.agents {
+		if len(agentState.finalCompliance) == 0 {
+			continue
+		}
+		actual[agent] = struct{}{}
+	}
+
+	if len(actual) != len(expected) {
+		return fmt.Errorf(
+			"%w: compliance_agents=%d/%d",
+			ErrCardinalityMismatch,
+			len(actual),
+			len(expected),
+		)
+	}
+	for agent := range expected {
+		if _, ok := actual[agent]; !ok {
+			return fmt.Errorf("%w: missing compliance agent=%s", ErrCardinalityMismatch, agent)
+		}
+	}
+	for agent := range actual {
+		if _, ok := expected[agent]; !ok {
+			return fmt.Errorf("%w: unexpected compliance agent=%s", ErrCardinalityMismatch, agent)
+		}
+	}
+	return nil
 }
 
 type scorableAgent struct {

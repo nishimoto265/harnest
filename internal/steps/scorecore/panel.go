@@ -104,11 +104,11 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 		return PanelResult{}, fmt.Errorf("scorecore: primary: %w", err)
 	}
 
-	primaryRaw, err := buildRawScoreEntries(primaryOut, in, contracts.JudgeRolePrimary, nil, nil)
+	primaryRaw, err := BuildRawScoreEntries(primaryOut, in, contracts.JudgeRolePrimary, nil, nil)
 	if err != nil {
 		return PanelResult{}, err
 	}
-	primaryRawCompliance, err := buildRawComplianceEntries(primaryOut, in, contracts.JudgeRolePrimary, nil, nil)
+	primaryRawCompliance, err := BuildRawComplianceEntries(primaryOut, in, contracts.JudgeRolePrimary, nil, nil)
 	if err != nil {
 		return PanelResult{}, err
 	}
@@ -123,16 +123,22 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 		return PanelResult{}, fmt.Errorf("scorecore: secondary: %w", err)
 	}
 
-	secondaryRaw, err := buildRawScoreEntries(secondaryOut, in, contracts.JudgeRoleSecondary, nil, nil)
+	secondaryRaw, err := BuildRawScoreEntries(secondaryOut, in, contracts.JudgeRoleSecondary, nil, nil)
 	if err != nil {
 		return PanelResult{}, err
 	}
-	secondaryRawCompliance, err := buildRawComplianceEntries(secondaryOut, in, contracts.JudgeRoleSecondary, nil, nil)
+	secondaryRawCompliance, err := BuildRawComplianceEntries(secondaryOut, in, contracts.JudgeRoleSecondary, nil, nil)
 	if err != nil {
 		return PanelResult{}, err
 	}
 
-	disagree, err := anyDimensionDisagrees(primaryRaw, secondaryRaw, in.DisagreementThreshold)
+	disagree, err := PanelDisagrees(
+		primaryRaw,
+		secondaryRaw,
+		primaryRawCompliance,
+		secondaryRawCompliance,
+		in.DisagreementThreshold,
+	)
 	if err != nil {
 		return PanelResult{}, err
 	}
@@ -154,19 +160,19 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 	}
 
 	// Arbiter path. Compute refs against primary/secondary rows.
-	primaryRefs, err := refsByDimension(primaryRaw, contracts.JudgeRolePrimary)
+	primaryRefs, err := RefsByDimension(primaryRaw, contracts.JudgeRolePrimary)
 	if err != nil {
 		return PanelResult{}, err
 	}
-	secondaryRefs, err := refsByDimension(secondaryRaw, contracts.JudgeRoleSecondary)
+	secondaryRefs, err := RefsByDimension(secondaryRaw, contracts.JudgeRoleSecondary)
 	if err != nil {
 		return PanelResult{}, err
 	}
-	primaryComplianceRefs, err := complianceRefsByRule(primaryRawCompliance, contracts.JudgeRolePrimary)
+	primaryComplianceRefs, err := ComplianceRefsByRule(primaryRawCompliance, contracts.JudgeRolePrimary)
 	if err != nil {
 		return PanelResult{}, err
 	}
-	secondaryComplianceRefs, err := complianceRefsByRule(secondaryRawCompliance, contracts.JudgeRoleSecondary)
+	secondaryComplianceRefs, err := ComplianceRefsByRule(secondaryRawCompliance, contracts.JudgeRoleSecondary)
 	if err != nil {
 		return PanelResult{}, err
 	}
@@ -175,11 +181,11 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 	if err != nil {
 		return PanelResult{}, fmt.Errorf("scorecore: arbiter: %w", err)
 	}
-	arbiterRaw, err := buildRawScoreEntries(arbiterOut, in, contracts.JudgeRoleArbiter, primaryRefs, secondaryRefs)
+	arbiterRaw, err := BuildRawScoreEntries(arbiterOut, in, contracts.JudgeRoleArbiter, primaryRefs, secondaryRefs)
 	if err != nil {
 		return PanelResult{}, err
 	}
-	arbiterRawCompliance, err := buildRawComplianceEntries(arbiterOut, in, contracts.JudgeRoleArbiter, primaryComplianceRefs, secondaryComplianceRefs)
+	arbiterRawCompliance, err := BuildRawComplianceEntries(arbiterOut, in, contracts.JudgeRoleArbiter, primaryComplianceRefs, secondaryComplianceRefs)
 	if err != nil {
 		return PanelResult{}, err
 	}
@@ -325,7 +331,7 @@ func classifyArbiterVerdict(primary, secondary, arbiter []contracts.RawScoreEntr
 	return contracts.VerdictPathArbitrated
 }
 
-func refsByDimension(raws []contracts.RawScoreEntry, role contracts.JudgeRole) (map[contracts.Dimension]*contracts.RawJudgeRef, error) {
+func RefsByDimension(raws []contracts.RawScoreEntry, role contracts.JudgeRole) (map[contracts.Dimension]*contracts.RawJudgeRef, error) {
 	out := make(map[contracts.Dimension]*contracts.RawJudgeRef, len(raws))
 	for _, raw := range raws {
 		sum, err := rawScoreSha256(raw)
@@ -337,7 +343,7 @@ func refsByDimension(raws []contracts.RawScoreEntry, role contracts.JudgeRole) (
 	return out, nil
 }
 
-func complianceRefsByRule(raws []contracts.RawComplianceEntry, role contracts.JudgeRole) (map[string]*contracts.RawJudgeRef, error) {
+func ComplianceRefsByRule(raws []contracts.RawComplianceEntry, role contracts.JudgeRole) (map[string]*contracts.RawJudgeRef, error) {
 	out := make(map[string]*contracts.RawJudgeRef, len(raws))
 	for _, raw := range raws {
 		sum, err := rawComplianceSha256(raw)
