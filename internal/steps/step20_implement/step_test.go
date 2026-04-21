@@ -412,6 +412,11 @@ if [[ "${FAKE_CLAUDE_FORK_SESSION_WRITER:-}" == "1" ]]; then
     done
   ) &
 fi
+if [[ "${FAKE_CLAUDE_BACKGROUND_SENTINEL_PATH:-}" != "" ]]; then
+  nohup bash -c 'sleep "$1"; touch "$2"' _ \
+    "${FAKE_CLAUDE_BACKGROUND_SENTINEL_DELAY_SECONDS:-0.2}" \
+    "${FAKE_CLAUDE_BACKGROUND_SENTINEL_PATH}" >/dev/null 2>&1 &
+fi
 if [[ "${FAKE_CLAUDE_SLEEP_SECONDS:-0}" != "0" ]]; then
   sleep "${FAKE_CLAUDE_SLEEP_SECONDS}"
 fi
@@ -605,6 +610,26 @@ func TestStepRunCancelsChildProcessGroupOnContextCancellation(t *testing.T) {
 	require.Equal(t, before, after)
 
 	_, statErr := os.Stat(fx.manifestPath())
+	require.Error(t, statErr)
+	require.True(t, os.IsNotExist(statErr))
+}
+
+func TestStepRunSweepsGrandchildProcessesAfterSuccessfulExit(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	sentinelPath := filepath.Join(t.TempDir(), "grandchild-sentinel")
+	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_PATH", sentinelPath)
+	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_DELAY_SECONDS", "0.2")
+
+	err := fx.step.Run(context.Background(), fx.run)
+	require.NoError(t, err)
+
+	manifest := fx.readManifest(t)
+	_, ok := manifest.Value.(contracts.ManifestSuccess)
+	require.True(t, ok)
+
+	time.Sleep(350 * time.Millisecond)
+
+	_, statErr := os.Stat(sentinelPath)
 	require.Error(t, statErr)
 	require.True(t, os.IsNotExist(statErr))
 }
