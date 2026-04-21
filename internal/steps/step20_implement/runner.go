@@ -84,9 +84,7 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 
 	waitErr := cmd.Wait()
 	close(groupKillDone)
-	if timeoutCtx.Err() != nil {
-		_ = killProcessGroup(cmd.Process.Pid)
-	}
+	_ = killProcessGroup(cmd.Process.Pid)
 	result.FinishedAt = r.now().UTC()
 	result.StdoutSnippet = stdoutTail.Bytes()
 	result.StderrSnippet = stderrTail.Bytes()

@@ -412,6 +412,11 @@ if [[ "${FAKE_CLAUDE_FORK_SESSION_WRITER:-}" == "1" ]]; then
     done
   ) &
 fi
+if [[ "${FAKE_CLAUDE_BACKGROUND_SENTINEL_HELPER:-}" != "" ]]; then
+  "${FAKE_CLAUDE_BACKGROUND_SENTINEL_HELPER}" \
+    "${FAKE_CLAUDE_BACKGROUND_SENTINEL_PATH}" \
+    "${FAKE_CLAUDE_BACKGROUND_SENTINEL_DELAY:-200ms}"
+fi
 if [[ "${FAKE_CLAUDE_SLEEP_SECONDS:-0}" != "0" ]]; then
   sleep "${FAKE_CLAUDE_SLEEP_SECONDS}"
 fi
@@ -419,6 +424,49 @@ exit "${FAKE_CLAUDE_EXIT_CODE:-0}"
 `
 	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
 	return path
+}
+
+func writeBackgroundSentinelHelper(t *testing.T, dir string) string {
+	t.Helper()
+	sourcePath := filepath.Join(dir, "background_sentinel_helper.go")
+	binaryPath := filepath.Join(dir, "background-sentinel-helper")
+	source := `package main
+
+import (
+	"os"
+	"os/exec"
+	"time"
+)
+
+func main() {
+	if len(os.Args) < 3 {
+		os.Exit(2)
+	}
+	if os.Getenv("BACKGROUND_SENTINEL_CHILD") == "1" {
+		delay, err := time.ParseDuration(os.Args[2])
+		if err != nil {
+			os.Exit(2)
+		}
+		time.Sleep(delay)
+		if err := os.WriteFile(os.Args[1], []byte("background-child\n"), 0o644); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], os.Args[1], os.Args[2])
+	cmd.Env = append(os.Environ(), "BACKGROUND_SENTINEL_CHILD=1")
+	if err := cmd.Start(); err != nil {
+		os.Exit(1)
+	}
+}
+`
+	require.NoError(t, os.WriteFile(sourcePath, []byte(source), 0o644))
+
+	cmd := exec.Command("go", "build", "-o", binaryPath, sourcePath)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return binaryPath
 }
 
 func mustRepoRoot(t *testing.T) string {
@@ -607,6 +655,28 @@ func TestStepRunCancelsChildProcessGroupOnContextCancellation(t *testing.T) {
 	_, statErr := os.Stat(fx.manifestPath())
 	require.Error(t, statErr)
 	require.True(t, os.IsNotExist(statErr))
+}
+
+func TestStepRunSweepsGrandchildrenAfterSuccessfulExit(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	helperPath := writeBackgroundSentinelHelper(t, t.TempDir())
+	sentinelPath := filepath.Join(t.TempDir(), "background-child.txt")
+	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_HELPER", helperPath)
+	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_PATH", sentinelPath)
+	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_DELAY", "200ms")
+
+	err := fx.step.Run(context.Background(), fx.run)
+	require.NoError(t, err)
+
+	time.Sleep(350 * time.Millisecond)
+
+	_, statErr := os.Stat(sentinelPath)
+	require.Error(t, statErr)
+	require.True(t, os.IsNotExist(statErr))
+
+	manifest := fx.readManifest(t)
+	_, ok := manifest.Value.(contracts.ManifestSuccess)
+	require.True(t, ok)
 }
 
 func TestStepRunSuccessArtifactsHonorContextCancellation(t *testing.T) {
