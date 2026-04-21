@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -668,6 +669,9 @@ func doneMarkerMatchesCurrentState(paths step60Paths) (bool, error) {
 	if err := marker.Validate(); err != nil {
 		return false, nil
 	}
+	if !slices.Equal(marker.Dimensions, canonicalDimensions) {
+		return false, nil
+	}
 
 	scoresFinalCount, scoresFinalHash, err := currentFinalScoresState(paths.ScoresFinal)
 	if err != nil {
@@ -885,6 +889,9 @@ func loadPass1Scores(runIO internalio.RunContext) (map[contracts.AgentID][]contr
 	}
 	rows, err := internalio.ReadJSONL[contracts.ScoreEntry](path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: path=%s", ErrPass1ScoresIncomplete, path)
+		}
 		return nil, fmt.Errorf("step60: read pass1 scores: %w", err)
 	}
 	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ScoreEntry) scoreKey {

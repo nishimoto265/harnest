@@ -10,6 +10,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
+	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,7 +41,7 @@ func TestSeedStubPass1Scores_RebuildsPartialFile(t *testing.T) {
 	assert.True(t, complete)
 }
 
-func TestStep60StepRun_SelfHealsMissingPass1SeedForLegacyRuns(t *testing.T) {
+func TestStep60StepRun_ReturnsTypedErrorWhenPass1SeedMissing(t *testing.T) {
 	cfg := testConfig(t)
 	runCtx, stepRun := seededStubStepRun(t, cfg, "2026-04-21-PR92-abcdef0", 92)
 
@@ -54,12 +55,12 @@ func TestStep60StepRun_SelfHealsMissingPass1SeedForLegacyRuns(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.Remove(done60Path))
 
-	require.NoError(t, step60Step{}.Run(context.Background(), stepRun))
+	err = step60Step{}.Run(context.Background(), stepRun)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, step60_scorepairwise.ErrPass1ScoresIncomplete)
 
-	seeded, err := internalio.ReadJSONL[contracts.ScoreEntry](scoresPath)
-	require.NoError(t, err)
-	assert.Len(t, seeded, len(defaultAgents)*len(stubPass1Dimensions))
-	assert.FileExists(t, done60Path)
+	assert.NoFileExists(t, scoresPath)
+	assert.NoFileExists(t, done60Path)
 }
 
 func seededStubStepRun(t *testing.T, cfg *config.Config, runID contracts.RunID, pr int) (internalio.RunContext, *StepRunContext) {

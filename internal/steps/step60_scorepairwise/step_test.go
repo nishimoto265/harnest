@@ -183,6 +183,49 @@ func TestRun_RebuildsWhenDoneMarkerVerificationFails(t *testing.T) {
 	assert.Equal(t, beforeStat.ModTime(), afterStat.ModTime())
 }
 
+func TestRun_RebuildsWhenDoneMarkerDimensionsAreNotCanonical(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		agents:          []contracts.AgentID{"a1", "a2", "a3"},
+		writePass1Score: true,
+	})
+
+	now := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+
+	donePath := mustResolve(t, runIO, "60/done.marker")
+	freshArtifacts := readStep60Artifacts(t, runIO)
+	freshMarker := mustReadJSON[contracts.Step60DoneMarker](t, donePath)
+
+	mutatedMarker := freshMarker
+	mutatedMarker.Dimensions = []contracts.Dimension{
+		contracts.DimensionCorrectness,
+		contracts.DimensionFidelity,
+		contracts.DimensionMaintainability,
+		contracts.DimensionDiscipline,
+		contracts.DimensionCommunication,
+	}
+	require.NoError(t, internalio.WriteJSONAtomic(donePath, mutatedMarker))
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+
+	assert.Equal(t, freshArtifacts, readStep60Artifacts(t, runIO))
+	assert.Equal(t, canonicalDimensions, mustReadJSON[contracts.Step60DoneMarker](t, donePath).Dimensions)
+}
+
 func TestRun_ErrorsWhenPass2ManifestMissing(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		agents:             []contracts.AgentID{"a1", "a2", "a3"},
@@ -308,6 +351,24 @@ func TestRun_NoScorableAgentsReturnsTypedError(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNoScorablePass2Agents)
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/scores-B-raw.jsonl"))
+}
+
+func TestRun_MissingPass1ScoresReturnsTypedError(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		agents: []contracts.AgentID{"a1", "a2", "a3"},
+	})
+
+	err := Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 12, 30, 0, 0, time.UTC) },
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPass1ScoresIncomplete)
+	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
 func TestRun_ArbiterVerdictPaths(t *testing.T) {
