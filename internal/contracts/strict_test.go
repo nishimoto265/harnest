@@ -422,6 +422,16 @@ func TestDecodeStrict_IntentionRecord_EnforcesStageInvariant(t *testing.T) {
   "target_sha": "2222222222222222222222222222222222222222",
   "candidates_hash": "` + candidatesHash + `",
   "registry_head_before": "",
+  "planned_adoption": {
+    "entries": [
+      {
+        "kind": "added",
+        "rule_id": "r-0001",
+        "rule_path": "rules/r-0001.md",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000005"
+      }
+    ]
+  },
   "started_at": "2026-04-20T10:00:00Z"
 }`)
 	var r IntentionRecord

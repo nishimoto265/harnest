@@ -374,6 +374,16 @@ func validPlanningIntention(runID contracts.RunID) contracts.IntentionRecord {
 		TargetSha:          target,
 		CandidatesHash:     hash,
 		RegistryHeadBefore: "",
-		StartedAt:          time.Now().UTC(),
+		PlannedAdoption: &contracts.PlannedAdoption{
+			Entries: []contracts.PlannedAdoptionEntry{
+				{
+					Kind:     contracts.RegistryKindAdded,
+					RuleID:   "r-0001",
+					RulePath: "rules/r-0001.md",
+					Sha256:   strings.Repeat("4", 64),
+				},
+			},
+		},
+		StartedAt: time.Now().UTC(),
 	}
 }

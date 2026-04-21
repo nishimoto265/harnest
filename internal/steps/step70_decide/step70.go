@@ -31,6 +31,8 @@ import (
 
 const registryMandatoryIndexAt = 1800
 
+var appendRegistryEntry = internalio.AppendRegistryEntry
+
 // TargetResolver is injected by the caller (orchestrator) to derive the
 // promotion target (best candidate head) from candidates + manifests.
 //
@@ -168,6 +170,10 @@ func startFresh(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 	if err != nil {
 		return err
 	}
+	plannedAdoption, err := plannedAdoptionFromRegistryEntries(target.RulesToAppend)
+	if err != nil {
+		return err
+	}
 	now := deps.Now()
 	intention := contracts.IntentionRecord{
 		SchemaVersion:      "1",
@@ -178,6 +184,7 @@ func startFresh(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 		TargetSha:          target.TargetSHA,
 		CandidatesHash:     candidates.CandidatesHash,
 		RegistryHeadBefore: registryHead,
+		PlannedAdoption:    plannedAdoption,
 		StartedAt:          now,
 	}
 	if err := store.Save(intention); err != nil {
@@ -186,10 +193,10 @@ func startFresh(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 	if err := appendStateOnce(runCtx, writer, contracts.StateKindPromoting, promotingEvent(pr, runCtx.RunID, now)); err != nil {
 		return err
 	}
-	return driveAdopt(ctx, pr, runCtx, pkg, candidates, target, intention, store, writer, deps)
+	return driveAdopt(ctx, pr, runCtx, pkg, target, intention, store, writer, deps)
 }
 
-func driveAdopt(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
+func driveAdopt(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -200,20 +207,20 @@ func driveAdopt(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 	if err := store.Save(intention); err != nil {
 		return err
 	}
-	return driveRegistry(ctx, pr, runCtx, pkg, candidates, target, intention, store, writer, deps)
+	return driveRegistry(ctx, pr, runCtx, pkg, intention, store, writer, deps)
 }
 
-func driveRegistry(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
+func driveRegistry(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	appendResult, err := appendRegistryEntries(runCtx, intention, target, writer, deps, pr)
+	appendResult, err := appendRegistryEntries(runCtx, intention, writer, deps, pr)
 	if err != nil {
 		reason := contracts.RollbackReasonTransactionalFailure
 		if errors.Is(err, ErrRegistryDivergence) {
 			reason = contracts.RollbackReasonRegistryDivergence
 		}
-		return handleRollback(pr, runCtx, pkg, target, intention, store, writer, deps, reason)
+		return handleRollback(pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, reason)
 	}
 	intention.RegistryAppendResult = &appendResult
 	intention.Stage = contracts.IntentionStageRegistryAppended
@@ -514,7 +521,7 @@ type registryLine struct {
 	Entry  contracts.RuleRegistryEntry
 }
 
-func appendRegistryEntries(runCtx internalio.RunContext, intention contracts.IntentionRecord, target Target, writer state.Writer, deps Deps, pr int) (contracts.RegistryAppendResult, error) {
+func appendRegistryEntries(runCtx internalio.RunContext, intention contracts.IntentionRecord, writer state.Writer, deps Deps, pr int) (contracts.RegistryAppendResult, error) {
 	if existing, ok, err := findRegistryByIdempotencyKey(runCtx, intention.IdempotencyKey); err != nil {
 		return contracts.RegistryAppendResult{}, err
 	} else if ok {
@@ -531,40 +538,7 @@ func appendRegistryEntries(runCtx internalio.RunContext, intention contracts.Int
 	if currentHead != intention.RegistryHeadBefore {
 		return contracts.RegistryAppendResult{}, ErrRegistryDivergence
 	}
-	if len(target.RulesToAppend) == 0 {
-		return contracts.RegistryAppendResult{}, errors.New("step70: adopt target must include at least one registry entry")
-	}
-
-	var result contracts.RegistryAppendResult
-	for _, rawEntry := range target.RulesToAppend {
-		entry, err := deriveRegistryChain(rawEntry, runCtx.RulesRegistryPath())
-		if err != nil {
-			return contracts.RegistryAppendResult{}, err
-		}
-
-		appended, err := internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), entry)
-		if err != nil {
-			if !errors.Is(err, internalio.ErrRegistryCASMismatch) {
-				return contracts.RegistryAppendResult{}, err
-			}
-			entry, err = deriveRegistryChain(rawEntry, runCtx.RulesRegistryPath())
-			if err != nil {
-				return contracts.RegistryAppendResult{}, err
-			}
-			appended, err = internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), entry)
-			if err != nil {
-				return contracts.RegistryAppendResult{}, err
-			}
-		}
-
-		syncRegistryIndex(runCtx, entry, appended)
-		result = appended
-	}
-
-	if err := emitRegistrySizeWarnings(runCtx, writer, deps, pr); err != nil {
-		return contracts.RegistryAppendResult{}, err
-	}
-	return result, nil
+	return appendPlannedRegistryEntries(runCtx, intention, writer, deps, pr)
 }
 
 func appendRegistryRollback(runCtx internalio.RunContext, intention contracts.IntentionRecord, reason contracts.RollbackReason, at time.Time) (contracts.RegistryAppendResult, error) {
@@ -595,7 +569,7 @@ func appendRegistryRollback(runCtx internalio.RunContext, intention contracts.In
 	if err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
-	result, err := internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), wrapper)
+	result, err := appendRegistryEntry(runCtx.RulesRegistryPath(), wrapper)
 	if err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
@@ -631,33 +605,139 @@ func deriveRegistryChain(entry contracts.RuleRegistryEntry, path string) (contra
 	}
 }
 
-func nextRegistryVersionForRule(lines []registryLine, ruleID string) int64 {
-	var seq int64
-	for _, line := range lines {
-		switch v := line.Entry.Value.(type) {
+func plannedAdoptionFromRegistryEntries(entries []contracts.RuleRegistryEntry) (*contracts.PlannedAdoption, error) {
+	if len(entries) == 0 {
+		return nil, errors.New("step70: adopt target must include at least one registry entry")
+	}
+	planned := &contracts.PlannedAdoption{Entries: make([]contracts.PlannedAdoptionEntry, 0, len(entries))}
+	for _, entry := range entries {
+		switch v := entry.Value.(type) {
 		case contracts.RuleRegistryAdded:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
+			planned.Entries = append(planned.Entries, contracts.PlannedAdoptionEntry{
+				Kind:     contracts.RegistryKindAdded,
+				RuleID:   v.RuleID,
+				RulePath: v.RulePath,
+				Sha256:   v.Sha256,
+			})
 		case contracts.RuleRegistryUpdated:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		case contracts.RuleRegistryStatusChanged:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		case contracts.RuleRegistryArchived:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
-		case contracts.RuleRegistryRestored:
-			if v.RuleID == ruleID && v.VersionSeq > seq {
-				seq = v.VersionSeq
-			}
+			planned.Entries = append(planned.Entries, contracts.PlannedAdoptionEntry{
+				Kind:       contracts.RegistryKindUpdated,
+				RuleID:     v.RuleID,
+				RulePath:   v.RulePath,
+				Sha256:     v.Sha256,
+				PrevSha256: v.PrevSha256,
+			})
+		default:
+			return nil, fmt.Errorf("step70: unsupported planned adoption registry kind=%q", entry.Kind)
 		}
 	}
-	return seq + 1
+	if err := planned.Validate(); err != nil {
+		return nil, err
+	}
+	return planned, nil
+}
+
+func registryEntriesFromPlannedAdoption(intention contracts.IntentionRecord, at time.Time) ([]contracts.RuleRegistryEntry, error) {
+	if intention.PlannedAdoption == nil {
+		return nil, contracts.ErrIntentionMissingPlannedAdoption
+	}
+	if err := intention.PlannedAdoption.Validate(); err != nil {
+		return nil, err
+	}
+	entries := make([]contracts.RuleRegistryEntry, 0, len(intention.PlannedAdoption.Entries))
+	for _, planned := range intention.PlannedAdoption.Entries {
+		switch planned.Kind {
+		case contracts.RegistryKindAdded:
+			entry := contracts.RuleRegistryAdded{
+				Kind:           contracts.RegistryKindAdded,
+				SchemaVersion:  "1",
+				RuleID:         planned.RuleID,
+				RulePath:       planned.RulePath,
+				Sha256:         planned.Sha256,
+				IdempotencyKey: intention.IdempotencyKey,
+				VersionSeq:     1,
+				PrevHash:       "",
+				ByRunID:        intention.RunID,
+				At:             at,
+			}
+			entries = append(entries, contracts.RuleRegistryEntry{Kind: entry.Kind, Value: entry})
+		case contracts.RegistryKindUpdated:
+			entry := contracts.RuleRegistryUpdated{
+				Kind:           contracts.RegistryKindUpdated,
+				SchemaVersion:  "1",
+				RuleID:         planned.RuleID,
+				RulePath:       planned.RulePath,
+				Sha256:         planned.Sha256,
+				PrevSha256:     planned.PrevSha256,
+				IdempotencyKey: intention.IdempotencyKey,
+				VersionSeq:     1,
+				PrevHash:       "",
+				ByRunID:        intention.RunID,
+				At:             at,
+			}
+			entries = append(entries, contracts.RuleRegistryEntry{Kind: entry.Kind, Value: entry})
+		default:
+			return nil, fmt.Errorf("step70: unsupported planned adoption kind=%q", planned.Kind)
+		}
+	}
+	return entries, nil
+}
+
+func appendPlannedRegistryEntries(runCtx internalio.RunContext, intention contracts.IntentionRecord, writer state.Writer, deps Deps, pr int) (contracts.RegistryAppendResult, error) {
+	rawEntries, err := registryEntriesFromPlannedAdoption(intention, deps.Now())
+	if err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+
+	var result contracts.RegistryAppendResult
+	for _, rawEntry := range rawEntries {
+		entry, err := deriveRegistryChain(rawEntry, runCtx.RulesRegistryPath())
+		if err != nil {
+			return contracts.RegistryAppendResult{}, err
+		}
+
+		appended, err := appendRegistryEntry(runCtx.RulesRegistryPath(), entry)
+		if err != nil {
+			if !errors.Is(err, internalio.ErrRegistryCASMismatch) {
+				return contracts.RegistryAppendResult{}, err
+			}
+			entry, err = deriveRegistryChain(rawEntry, runCtx.RulesRegistryPath())
+			if err != nil {
+				return contracts.RegistryAppendResult{}, err
+			}
+			appended, err = appendRegistryEntry(runCtx.RulesRegistryPath(), entry)
+			if err != nil {
+				return contracts.RegistryAppendResult{}, err
+			}
+		}
+
+		syncRegistryIndex(runCtx, entry, appended)
+		result = appended
+	}
+
+	if err := emitRegistrySizeWarnings(runCtx, writer, deps, pr); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	return result, nil
+}
+
+func targetFromIntention(pkg *contracts.TaskPackage, intention contracts.IntentionRecord) Target {
+	bestBranch := ""
+	if pkg != nil {
+		bestBranch = pkg.BestBranch
+	}
+	return Target{
+		BestBranch:    bestBranch,
+		BestShaBefore: intention.BestShaBefore,
+		TargetSHA:     intention.TargetSha,
+	}
+}
+
+func nextRegistryVersionForRule(lines []registryLine, _ string) int64 {
+	if len(lines) == 0 {
+		return 1
+	}
+	return registryVersionSeq(lines[len(lines)-1].Entry) + 1
 }
 
 func nextRegistryVersionForRollback(lines []registryLine, targetOpID string) int64 {
@@ -940,7 +1020,7 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 
 func resumeBranchPushed(pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
 	if existing, ok, err := findRegistryByIdempotencyKey(runCtx, intention.IdempotencyKey); err != nil {
-		return err
+		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
 	} else if ok {
 		intention.RegistryAppendResult = &existing
 		intention.Stage = contracts.IntentionStageRegistryAppended
@@ -952,16 +1032,22 @@ func resumeBranchPushed(pr int, runCtx internalio.RunContext, pkg *contracts.Tas
 
 	currentHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
 	if err != nil {
-		return err
+		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
 	}
 	if currentHead != intention.RegistryHeadBefore {
-		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRegistryDivergence)
+		return handleRollback(pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonRegistryDivergence)
 	}
 
-	// branch_pushed recovery must not re-resolve step40/50/60 artifacts. Until
-	// the append payload is persisted in intention.json, an idempotency miss here
-	// cannot be completed automatically from durable state alone.
-	return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+	appendResult, err := appendPlannedRegistryEntries(runCtx, intention, writer, deps, pr)
+	if err != nil {
+		return handleRollback(pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+	}
+	intention.RegistryAppendResult = &appendResult
+	intention.Stage = contracts.IntentionStageRegistryAppended
+	if err := store.Save(intention); err != nil {
+		return err
+	}
+	return driveDecision(pr, runCtx, pkg, intention, store, writer, deps)
 }
 
 func planningDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
@@ -975,7 +1061,7 @@ func planningDecision(ctx context.Context, pr int, runCtx internalio.RunContext,
 		if err := store.Save(intention); err != nil {
 			return err
 		}
-		return driveRegistry(ctx, pr, runCtx, pkg, candidates, target, intention, store, writer, deps)
+		return driveRegistry(ctx, pr, runCtx, pkg, intention, store, writer, deps)
 	case target.BestShaBefore, "":
 		currentHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
 		if err != nil {
@@ -985,7 +1071,7 @@ func planningDecision(ctx context.Context, pr int, runCtx internalio.RunContext,
 			if err := appendStateOnce(runCtx, writer, contracts.StateKindInterrupted, interruptedEvent(pr, runCtx.RunID, contracts.InterruptedReasonPrePushCrash, "", deps.Now())); err != nil {
 				return err
 			}
-			return driveAdopt(ctx, pr, runCtx, pkg, candidates, target, intention, store, writer, deps)
+			return driveAdopt(ctx, pr, runCtx, pkg, target, intention, store, writer, deps)
 		}
 		if err := store.Delete(); err != nil {
 			return err

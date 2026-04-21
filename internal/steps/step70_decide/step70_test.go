@@ -67,8 +67,9 @@ func TestRun_SentinelBlocksExecution(t *testing.T) {
 	assert.NoFileExists(t, decisionPath)
 }
 
-func TestRun_ResumeFromBranchPushed(t *testing.T) {
-	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR4")
+func TestRun_ResumeFromBranchPushed_IdempotencyHit(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR4")
+	store := newTrackingStore(intentionPath(t, runCtx))
 	appendResult, _ := seedRegistryAdd(t, runCtx.RulesRegistryPath(), resolver, runCtx.RunID, candidates.CandidatesHash)
 	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
 	intention.Stage = contracts.IntentionStageBranchPushed
@@ -83,8 +84,102 @@ func TestRun_ResumeFromBranchPushed(t *testing.T) {
 	adopt, ok := decision.Value.(contracts.DecisionAdopt)
 	require.True(t, ok)
 	assert.Equal(t, appendResult, adopt.RegistryAppendResult)
+	require.Len(t, store.saved, 3)
+	assert.Equal(t, contracts.IntentionStageRegistryAppended, store.saved[1].Stage)
+	require.NotNil(t, store.saved[1].RegistryAppendResult)
+	assert.Equal(t, appendResult, *store.saved[1].RegistryAppendResult)
 	// No additional push from the resume path (branch already pushed).
 	assert.Empty(t, git.pushCalls)
+}
+
+func TestRun_ResumeFromBranchPushed_CASAppendSucceeds(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR42")
+	store := newTrackingStore(intentionPath(t, runCtx))
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageBranchPushed
+	require.NoError(t, store.Save(intention))
+
+	deps := Deps{Git: &fakeGit{head: resolver.target.TargetSHA}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 42, runCtx, pkg, candidates, store, deps))
+
+	decision := readDecision(t, runCtx)
+	adopt, ok := decision.Value.(contracts.DecisionAdopt)
+	require.True(t, ok)
+	require.Len(t, store.saved, 3)
+	assert.Equal(t, contracts.IntentionStageRegistryAppended, store.saved[1].Stage)
+	require.NotNil(t, store.saved[1].RegistryAppendResult)
+	assert.Equal(t, *store.saved[1].RegistryAppendResult, adopt.RegistryAppendResult)
+
+	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	require.Len(t, lines, 1)
+	assert.Equal(t, lines[0].Offset, adopt.RegistryAppendResult.Offset)
+	assert.Equal(t, lines[0].Sha256, adopt.RegistryAppendResult.Sha256)
+}
+
+func TestRun_ResumeFromBranchPushed_CASMismatchRetrySucceeds(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR43")
+	store := newTrackingStore(intentionPath(t, runCtx))
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageBranchPushed
+	require.NoError(t, store.Save(intention))
+	installAppendCASMismatchHook(t, runCtx, 1)
+
+	deps := Deps{Git: &fakeGit{head: resolver.target.TargetSHA}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 43, runCtx, pkg, candidates, store, deps))
+
+	decision := readDecision(t, runCtx)
+	adopt := mustDecisionAdopt(t, decision)
+	assert.Equal(t, contracts.IntentionStageRegistryAppended, store.saved[1].Stage)
+
+	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	require.Len(t, lines, 2)
+	assert.Equal(t, lines[len(lines)-1].Offset, adopt.RegistryAppendResult.Offset)
+	assert.Equal(t, lines[len(lines)-1].Sha256, adopt.RegistryAppendResult.Sha256)
+}
+
+func TestRun_ResumeFromBranchPushed_CASMismatchTwiceRollsBack(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR44")
+	store := newTrackingStore(intentionPath(t, runCtx))
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageBranchPushed
+	require.NoError(t, store.Save(intention))
+	installAppendCASMismatchHook(t, runCtx, 2)
+
+	git := &fakeGit{head: resolver.target.TargetSHA}
+	deps := Deps{Git: git, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 44, runCtx, pkg, candidates, store, deps))
+
+	decision := readDecision(t, runCtx)
+	assert.Equal(t, contracts.DecisionActionRollback, decision.Action)
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+	require.Len(t, git.pushCalls, 1)
+	assert.Equal(t, resolver.target.BestShaBefore, git.pushCalls[0].target)
+	assert.Equal(t, resolver.target.TargetSHA, git.pushCalls[0].expected)
+}
+
+func TestRun_ResumeFromBranchPushed_RegistryDivergedRollsBack(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR45")
+	store := newTrackingStore(intentionPath(t, runCtx))
+	firstResult, _ := seedRegistryUniqueAdd(t, runCtx.RulesRegistryPath(), "seed-before", fmt.Sprintf("%064x", 7001), "2026-04-21-PR80-abcdef0")
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageBranchPushed
+	intention.RegistryHeadBefore = firstResult.Sha256
+	require.NoError(t, store.Save(intention))
+
+	_, _ = seedRegistryUniqueAdd(t, runCtx.RulesRegistryPath(), "seed-after", fmt.Sprintf("%064x", 7002), "2026-04-21-PR81-abcdef0")
+
+	git := &fakeGit{head: resolver.target.TargetSHA}
+	deps := Deps{Git: git, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
+	require.NoError(t, Run(context.Background(), 45, runCtx, pkg, candidates, store, deps))
+
+	decision := readDecision(t, runCtx)
+	rollback := mustDecisionRollback(t, decision)
+	assert.Equal(t, contracts.RollbackReasonRegistryDivergence, rollback.RollbackReason)
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+	require.Len(t, git.pushCalls, 1)
 }
 
 func TestRun_ResumeFromRegistryAppended(t *testing.T) {
@@ -292,6 +387,7 @@ func TestRun_ResumeFromRollingBackRegistryAppended(t *testing.T) {
 		TargetSha:            resolver.target.TargetSHA,
 		CandidatesHash:       candidates.CandidatesHash,
 		RegistryHeadBefore:   "",
+		PlannedAdoption:      mustPlannedAdoption(t, resolver.target.RulesToAppend),
 		StartedAt:            time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
 		RegistryAppendResult: &appendResult,
 	}, contracts.RollbackReasonTransactionalFailure, time.Date(2026, 4, 21, 10, 0, 1, 0, time.UTC))
@@ -617,8 +713,22 @@ func planningIntention(runID contracts.RunID, target Target, candidatesHash stri
 		TargetSha:          target.TargetSHA,
 		CandidatesHash:     candidatesHash,
 		RegistryHeadBefore: "",
+		PlannedAdoption:    mustPlannedAdoption(nil, target.RulesToAppend),
 		StartedAt:          time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
 	}
+}
+
+func mustPlannedAdoption(t *testing.T, entries []contracts.RuleRegistryEntry) *contracts.PlannedAdoption {
+	if t != nil {
+		t.Helper()
+	}
+	planned, err := plannedAdoptionFromRegistryEntries(entries)
+	if t != nil {
+		require.NoError(t, err)
+	} else if err != nil {
+		panic(err)
+	}
+	return planned
 }
 
 func seedRegistryAdd(t *testing.T, path string, resolver *fixtureResolver, runID contracts.RunID, candidatesHash string) (contracts.RegistryAppendResult, contracts.RuleRegistryEntry) {
@@ -749,6 +859,31 @@ func emptyCandidates(runID contracts.RunID) contracts.Candidates {
 	}
 }
 
+func installAppendCASMismatchHook(t *testing.T, runCtx internalio.RunContext, mismatches int) {
+	t.Helper()
+	original := appendRegistryEntry
+	count := 0
+	appendRegistryEntry = func(path string, entry contracts.RuleRegistryEntry) (contracts.RegistryAppendResult, error) {
+		if path == runCtx.RulesRegistryPath() && count < mismatches {
+			switch entry.Kind {
+			case contracts.RegistryKindAdded, contracts.RegistryKindUpdated:
+				count++
+				_, _ = seedRegistryUniqueAdd(
+					t,
+					path,
+					fmt.Sprintf("race-%d", count),
+					fmt.Sprintf("%064x", 9000+count),
+					fmt.Sprintf("2026-04-21-PR9%d-abcdef0", count),
+				)
+			}
+		}
+		return original(path, entry)
+	}
+	t.Cleanup(func() {
+		appendRegistryEntry = original
+	})
+}
+
 // memStore is a minimal in-memory IntentionWriter replacement for tests that
 // exercise stage transitions. Saves are also persisted to disk so that a
 // subsequent Run() call (resume) sees them.
@@ -757,6 +892,15 @@ type memStore struct {
 }
 
 func newMemStore(path string) *memStore { return &memStore{path: path} }
+
+type trackingStore struct {
+	*memStore
+	saved []contracts.IntentionRecord
+}
+
+func newTrackingStore(path string) *trackingStore {
+	return &trackingStore{memStore: newMemStore(path)}
+}
 
 func (m *memStore) Load() (*contracts.IntentionRecord, error) {
 	if m.path == "" {
@@ -793,6 +937,11 @@ func (m *memStore) Delete() error {
 	return nil
 }
 
+func (s *trackingStore) Save(r contracts.IntentionRecord) error {
+	s.saved = append(s.saved, r)
+	return s.memStore.Save(r)
+}
+
 func readDecision(t *testing.T, runCtx internalio.RunContext) contracts.Decision {
 	t.Helper()
 	path, err := runCtx.ResolveRunRelative("70/decision.json")
@@ -807,6 +956,34 @@ func readStateEvents(t *testing.T, runCtx internalio.RunContext) []contracts.Sta
 	events, err := state.ScanEventsForRun(runCtx, runCtx.RunID)
 	require.NoError(t, err)
 	return events
+}
+
+func mustDecisionAdopt(t *testing.T, decision contracts.Decision) contracts.DecisionAdopt {
+	t.Helper()
+	switch v := decision.Value.(type) {
+	case contracts.DecisionAdopt:
+		return v
+	case *contracts.DecisionAdopt:
+		require.NotNil(t, v)
+		return *v
+	default:
+		t.Fatalf("expected adopt decision, got action=%s type=%T", decision.Action, decision.Value)
+		return contracts.DecisionAdopt{}
+	}
+}
+
+func mustDecisionRollback(t *testing.T, decision contracts.Decision) contracts.DecisionRollback {
+	t.Helper()
+	switch v := decision.Value.(type) {
+	case contracts.DecisionRollback:
+		return v
+	case *contracts.DecisionRollback:
+		require.NotNil(t, v)
+		return *v
+	default:
+		t.Fatalf("expected rollback decision, got action=%s type=%T", decision.Action, decision.Value)
+		return contracts.DecisionRollback{}
+	}
 }
 
 func intentionPath(t *testing.T, runCtx internalio.RunContext) string {
