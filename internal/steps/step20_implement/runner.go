@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -61,6 +62,7 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 	cmd.Dir = req.Workdir
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	cmd.Env = append(os.Environ(), req.Env...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdoutTail := newTailBuffer(8 << 10)
 	stderrTail := newTailBuffer(8 << 10)
@@ -72,7 +74,28 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 		return runnerResult{}, err
 	}
 
+	var (
+		waitDone   = make(chan struct{})
+		killGroup  sync.Once
+		processPID = cmd.Process.Pid
+	)
+	go func() {
+		select {
+		case <-timeoutCtx.Done():
+			killGroup.Do(func() {
+				_ = syscall.Kill(-processPID, syscall.SIGKILL)
+			})
+		case <-waitDone:
+		}
+	}()
+
 	waitErr := cmd.Wait()
+	close(waitDone)
+	if timeoutCtx.Err() != nil {
+		killGroup.Do(func() {
+			_ = syscall.Kill(-processPID, syscall.SIGKILL)
+		})
+	}
 	result.FinishedAt = r.now().UTC()
 	result.StdoutSnippet = stdoutTail.Bytes()
 	result.StderrSnippet = stderrTail.Bytes()

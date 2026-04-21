@@ -1,6 +1,7 @@
 package step20_implement
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -397,6 +399,17 @@ fi
 if [[ "${FAKE_CLAUDE_STDERR:-}" != "" ]]; then
   printf '%s' "${FAKE_CLAUDE_STDERR}" >&2
 fi
+if [[ "${FAKE_CLAUDE_FORK_SESSION_WRITER:-}" == "1" ]]; then
+  (
+    while true; do
+      printf '%s\n' "${FAKE_CLAUDE_CHILD_LINE:-child-process}"
+      sleep "${FAKE_CLAUDE_CHILD_INTERVAL_SECONDS:-0.05}"
+    done
+  ) &
+  if [[ "${FAKE_CLAUDE_CHILD_PID_FILE:-}" != "" ]]; then
+    printf '%s\n' "$!" > "${FAKE_CLAUDE_CHILD_PID_FILE}"
+  fi
+fi
 if [[ "${FAKE_CLAUDE_CHECKLIST_JSON:-}" != "" ]]; then
   printf '%s' "${FAKE_CLAUDE_CHECKLIST_JSON}" > checklist-result.json
 fi
@@ -560,6 +573,108 @@ func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr))
 }
 
+func TestStepRunCancelsClaudeChildProcessGroup(t *testing.T) {
+	fx := newTestFixture(t, 30)
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("FAKE_CLAUDE_FORK_SESSION_WRITER", "1")
+	t.Setenv("FAKE_CLAUDE_CHILD_PID_FILE", pidFile)
+	t.Setenv("FAKE_CLAUDE_CHILD_LINE", "child-process")
+	t.Setenv("FAKE_CLAUDE_CHILD_INTERVAL_SECONDS", "0.02")
+	t.Setenv("FAKE_CLAUDE_SLEEP_SECONDS", "30")
+
+	t.Cleanup(func() {
+		pid, err := readPIDFile(pidFile)
+		if err == nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fx.step.Run(ctx, fx.run)
+	}()
+
+	require.Eventually(t, func() bool {
+		if _, err := os.Stat(pidFile); err != nil {
+			return false
+		}
+		sessionBytes, err := os.ReadFile(fx.sessionPath())
+		if err != nil {
+			return false
+		}
+		return bytes.Count(sessionBytes, []byte("child-process\n")) >= 2
+	}, 3*time.Second, 20*time.Millisecond)
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Step.Run did not return promptly after cancellation")
+	}
+
+	before, err := os.ReadFile(fx.sessionPath())
+	require.NoError(t, err)
+	time.Sleep(250 * time.Millisecond)
+	after, err := os.ReadFile(fx.sessionPath())
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+
+	_, statErr := os.Stat(fx.manifestPath())
+	require.Error(t, statErr)
+	require.True(t, os.IsNotExist(statErr))
+}
+
+func TestStepRunSuccessArtifactsHonorContextCancellation(t *testing.T) {
+	fx := newTestFixture(t, 30)
+	t.Setenv("FAKE_CLAUDE_STDOUT", `{"event":"ok"}`+"\n")
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+
+	wrapperDir := t.TempDir()
+	logPath := filepath.Join(wrapperDir, "git.log")
+	writeFakeGitWrapper(t, wrapperDir)
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("FAKE_GIT_LOG", logPath)
+	t.Setenv("FAKE_GIT_SLEEP_ON_PREFIX", "rev-parse HEAD")
+	t.Setenv("FAKE_GIT_SLEEP_SECONDS", "5")
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fx.step.Run(ctx, fx.run)
+	}()
+
+	require.Eventually(t, func() bool {
+		logBytes, readErr := os.ReadFile(logPath)
+		if readErr != nil {
+			return false
+		}
+		return strings.Contains(string(logBytes), "rev-parse HEAD")
+	}, time.Second, 10*time.Millisecond)
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Step.Run did not return promptly after success-path cancellation")
+	}
+
+	_, statErr := os.Stat(fx.manifestPath())
+	require.Error(t, statErr)
+	require.True(t, os.IsNotExist(statErr))
+}
+
 func TestPidAliveTreatsEPERMAsAlive(t *testing.T) {
 	originalKill := killProcess
 	killProcess = func(pid int, sig syscall.Signal) error {
@@ -580,9 +695,20 @@ set -euo pipefail
 joined="$*"
 printf '%s\n' "$joined" >> "$FAKE_GIT_LOG"
 if [[ -n "${FAKE_GIT_SLEEP_ON_PREFIX:-}" && "$joined" == "${FAKE_GIT_SLEEP_ON_PREFIX}"* ]]; then
-  sleep "${FAKE_GIT_SLEEP_SECONDS:-5}"
+  deadline=$((SECONDS + ${FAKE_GIT_SLEEP_SECONDS:-5}))
+  while (( SECONDS < deadline )); do
+    :
+  done
 fi
 exec "$REAL_GIT" "$@"
 `
 	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+}
+
+func readPIDFile(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(data)))
 }
