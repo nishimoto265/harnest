@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -185,16 +186,22 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		if err != nil {
 			return err
 		}
-		outputSha, err := fileSha256(diffAbs)
+		// F16: hash and snapshot in one read. The judge receives the
+		// snapshot path instead of the live diff, so a concurrent rename
+		// or symlink swap cannot make `outputSha` disagree with the bytes
+		// the judge actually scores. The snapshot lives under the run
+		// directory (cleaned up by step cleanup) and is only used to
+		// stabilise the hash boundary.
+		snapshotPath, outputSha, err := snapshotAndHashDiff(req.RunContext, agent.agent, diffAbs)
 		if err != nil {
-			return fmt.Errorf("step30_score: hash diff agent=%s: %w", agent.agent, err)
+			return fmt.Errorf("step30_score: snapshot diff agent=%s: %w", agent.agent, err)
 		}
 
 		judgeInput := judges.JudgeInput{
 			RunID:      req.RunContext.RunID,
 			Pass:       1,
 			Agent:      agent.agent,
-			OutputPath: diffAbs,
+			OutputPath: snapshotPath,
 			RubricPath: rubricPath,
 		}
 		primary, secondary, arbiter, err := s.panel.Judges(judgeInput)
@@ -835,4 +842,102 @@ func fileSha256(path string) (string, error) {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// snapshotAndHashDiff materializes a read-only snapshot of the manifest diff
+// under the run directory and hashes the bytes that were snapshotted. The
+// judge receives the snapshot path as OutputPath so a concurrent
+// rename/symlink swap between the hash call and the judge read cannot split
+// hash-bytes from score-bytes (F16 TOCTOU).
+//
+// Snapshots are per-agent and content-addressed by sha256 so reruns that
+// encounter identical diffs are no-ops. Old snapshots for the same agent
+// are removed before the new one is written so the run directory does not
+// accumulate stale copies across resume cycles.
+func snapshotAndHashDiff(runCtx internalio.RunContext, agent contracts.AgentID, diffAbs string) (string, string, error) {
+	if err := contracts.EnsureCleanAbsolutePath(diffAbs); err != nil {
+		return "", "", err
+	}
+	// os.ReadFile follows symlinks — that is acceptable because we pin the
+	// exact bytes we read into a snapshot and hash those bytes, not the
+	// live path. A post-read swap of the original symlink does not affect
+	// subsequent scoring.
+	data, err := os.ReadFile(diffAbs)
+	if err != nil {
+		return "", "", err
+	}
+	sum := sha256.Sum256(data)
+	hash := hex.EncodeToString(sum[:])
+
+	snapshotDir, err := runCtx.ResolveRunRelative(filepath.Join("30", "snapshots"))
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
+		return "", "", err
+	}
+	// Content-address by sha256 so we never rewrite an already-pinned byte
+	// sequence, and so concurrent resume attempts converge.
+	fileName := fmt.Sprintf("%s-%s.patch", string(agent), hash)
+	snapshotPath := filepath.Join(snapshotDir, fileName)
+	if err := contracts.EnsureCleanAbsolutePath(snapshotPath); err != nil {
+		return "", "", err
+	}
+
+	// Fast path: snapshot already exists with matching content.
+	if existing, err := os.ReadFile(snapshotPath); err == nil && bytesEqual(existing, data) {
+		return snapshotPath, hash, nil
+	}
+
+	// Atomic write into the snapshot path.
+	tmp, err := os.CreateTemp(snapshotDir, string(agent)+"-snap-*.tmp")
+	if err != nil {
+		return "", "", err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return "", "", err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return "", "", err
+	}
+	if err := os.Rename(tmpName, snapshotPath); err != nil {
+		_ = os.Remove(tmpName)
+		// Concurrent snapshotter may have landed first.
+		if existing, verr := os.ReadFile(snapshotPath); verr == nil && bytesEqual(existing, data) {
+			return snapshotPath, hash, nil
+		}
+		return "", "", err
+	}
+
+	// Best-effort cleanup of stale snapshots for the same agent from prior
+	// resume cycles (different hash). Failures are non-fatal — a stale file
+	// cannot affect correctness because we always name by current hash.
+	if entries, rerr := os.ReadDir(snapshotDir); rerr == nil {
+		prefix := string(agent) + "-"
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasPrefix(name, prefix) || name == fileName {
+				continue
+			}
+			_ = os.Remove(filepath.Join(snapshotDir, name))
+		}
+	}
+
+	return snapshotPath, hash, nil
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
