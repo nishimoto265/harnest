@@ -117,6 +117,32 @@ func TestPanelResolver_Resolve(t *testing.T) {
 		assert.Equal(t, contracts.ComplianceVerdictCompliant, result.FinalCompliance[0].Verdict)
 	})
 
+	t.Run("compliance-only third verdict becomes arbiter_overruled", func(t *testing.T) {
+		primaryOut := baseScores(judges.RolePrimary, 80)
+		secondaryOut := baseScores(judges.RoleSecondary, 80)
+		secondaryOut.Compliance[0].Verdict = contracts.ComplianceVerdictViolated
+		arbiterOut := baseScores(judges.RoleArbiter, 80)
+		arbiterOut.Compliance[0].Verdict = contracts.ComplianceVerdictNA
+
+		r := NewPanelResolver()
+		result, err := r.Resolve(context.Background(), PanelInput{
+			Primary:               fakeJudge{out: primaryOut},
+			Secondary:             fakeJudge{out: secondaryOut},
+			Arbiter:               fakeJudge{out: arbiterOut},
+			JudgeInput:            input,
+			OutputSha256:          outputSha,
+			DisagreementThreshold: 5,
+			RunContext:            runCtx,
+			StepDir:               "30",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, contracts.VerdictPathArbiterOverruled, result.VerdictPath)
+		require.Len(t, result.FinalCompliance, 1)
+		assert.Equal(t, contracts.VerdictPathArbiterOverruled, result.FinalCompliance[0].VerdictPath)
+		require.Len(t, result.FinalScores, 5)
+		assert.Equal(t, contracts.VerdictPathArbiterOverruled, result.FinalScores[0].VerdictPath)
+	})
+
 	t.Run("panel input versions override judge output", func(t *testing.T) {
 		primaryOut := baseScores(judges.RolePrimary, 80)
 		for i := range primaryOut.Scores {

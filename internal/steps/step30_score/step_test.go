@@ -58,6 +58,14 @@ func TestStep30Score_RunAndResume(t *testing.T) {
 	assert.Equal(t, int64(15), rebuilt.ExpectedCounts.Scores)
 }
 
+func TestStep30Score_RejectsTaskPackageRunIDMismatch(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	pkg.RunID = internalio.NewRunID(100)
+
+	err := New().Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg})
+	require.ErrorContains(t, err, "task package run_id mismatch")
+}
+
 func TestStep30Score_SkipsUnscorableAgents(t *testing.T) {
 	// TaskPackage requires exactly 6 worktrees (3 agents × 2 passes). Seed all
 	// 3 agents but only write manifests for a1 / a2 — a3's missing manifest
@@ -443,6 +451,43 @@ func TestStep30Score_RunSerializesConcurrentWriters(t *testing.T) {
 	scoreRaw, err := internalio.ReadJSONL[contracts.RawScoreEntry](scoreRawPath)
 	require.NoError(t, err)
 	assert.Len(t, scoreRaw, 30)
+}
+
+func TestStep30Score_UsesBundledRubricPathWithoutTouchingLegacySymlink(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	legacyDir := filepath.Join(runCtx.RunsBase, ".rubrics")
+	require.NoError(t, os.MkdirAll(legacyDir, 0o755))
+	target := filepath.Join(t.TempDir(), "legacy-target.md")
+	require.NoError(t, os.WriteFile(target, []byte("sentinel\n"), 0o644))
+	legacyPath := filepath.Join(legacyDir, "default.md")
+	require.NoError(t, os.Symlink(target, legacyPath))
+
+	var rubricPaths []string
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			rubricPaths = append(rubricPaths, input.RubricPath)
+			score := 80
+			if role == contracts.JudgeRoleSecondary {
+				score = 79
+			}
+			return makeJudgeOutput(input, role, score, []ruleVerdict{{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant}})
+		},
+	}
+
+	require.NoError(t, New(WithPanelProvider(provider)).Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	bundledPath, err := judges.DefaultRubricPath()
+	require.NoError(t, err)
+	require.NotEmpty(t, rubricPaths)
+	for _, seen := range rubricPaths {
+		assert.Equal(t, bundledPath, seen)
+	}
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "sentinel\n", string(data))
+	linkTarget, err := os.Readlink(legacyPath)
+	require.NoError(t, err)
+	assert.Equal(t, target, linkTarget)
 }
 
 // seedStep30Fixtures creates a minimal RunContext + TaskPackage with pass-1

@@ -90,6 +90,23 @@ func TestRun_HappyPath(t *testing.T) {
 	assert.Equal(t, marker.RawHashes.ComplianceRaw, mustHashReducedRawCompliance(t, runIO))
 }
 
+func TestRun_RejectsTaskPackageRunIDMismatch(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+	pkg.RunID = "2026-04-22-PR42-bbbbbbb"
+
+	err := Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 15, 4, 5, 0, time.UTC) },
+	})
+	require.ErrorContains(t, err, "task package run_id mismatch")
+}
+
 func TestAppendJSONLWithParentDirSync_ReturnsAppendError(t *testing.T) {
 	err := appendJSONLWithParentDirSync("relative/path.jsonl", contracts.ScoreEntry{})
 	require.Error(t, err)
@@ -502,7 +519,15 @@ func TestRun_RerunWithoutMarker_RebuildsFromRawWithoutRejudging(t *testing.T) {
 	require.True(t, ok)
 	outputHash, err := fileSHA256(outputPath)
 	require.NoError(t, err)
-	_, reusable, err := tryReuseRawPanelResult(runIO, rawState, "a1", outputHash, "default", "phase0-stub")
+	_, reusable, err := tryReuseRawPanelResult(
+		runIO,
+		rawState,
+		"a1",
+		outputHash,
+		"default",
+		"phase0-stub",
+		map[string]struct{}{"stub-rubric-rule": {}},
+	)
 	require.NoError(t, err)
 	require.True(t, reusable)
 
@@ -635,7 +660,7 @@ func TestRun_IgnoresHistoricalRawVersionsAfterMigration(t *testing.T) {
 	assert.False(t, called)
 }
 
-func TestRun_RerunsWhenRawComplianceCoverageIsMissing(t *testing.T) {
+func TestRun_RebuildsWhenRawComplianceCoverageIsMissing(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score:        true,
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
@@ -644,6 +669,7 @@ func TestRun_RerunsWhenRawComplianceCoverageIsMissing(t *testing.T) {
 	primary := scriptedJudge{score: 80, reasonPrefix: "primary", compliance: map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant}}
 	secondary := scriptedJudge{score: 79, reasonPrefix: "secondary", compliance: map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant}}
 	arbiter := scriptedJudge{score: 78, reasonPrefix: "arbiter", compliance: map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictCompliant}}
+	writePass1Compliance(t, runIO, pkg.RunID, "a1", primary.compliance)
 
 	require.NoError(t, Run(context.Background(), Input{
 		IO:          runIO,
@@ -656,17 +682,69 @@ func TestRun_RerunsWhenRawComplianceCoverageIsMissing(t *testing.T) {
 	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/compliance-B-raw.jsonl")))
 	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
 
-	var called bool
-	noJudge := unexpectedCallJudge{called: &called}
+	counter := &countingJudge{delegate: primary}
 	require.NoError(t, Run(context.Background(), Input{
 		IO:          runIO,
 		TaskPackage: &pkg,
-		Primary:     noJudge,
-		Secondary:   noJudge,
-		Arbiter:     noJudge,
+		Primary:     counter,
+		Secondary:   secondary,
+		Arbiter:     arbiter,
 		Now:         func() time.Time { return now },
 	}))
-	assert.False(t, called)
+	assert.Greater(t, counter.callCount(), int32(0))
+}
+
+func TestRun_RebuildsWhenRawComplianceCoverageIsPartial(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	now := time.Date(2026, 4, 21, 11, 45, 0, 0, time.UTC)
+	compliance := map[string]contracts.ComplianceVerdict{
+		"rule-a": contracts.ComplianceVerdictCompliant,
+		"rule-b": contracts.ComplianceVerdictCompliant,
+		"rule-c": contracts.ComplianceVerdictCompliant,
+		"rule-d": contracts.ComplianceVerdictCompliant,
+		"rule-e": contracts.ComplianceVerdictCompliant,
+	}
+	primary := scriptedJudge{score: 80, reasonPrefix: "primary", compliance: compliance}
+	secondary := scriptedJudge{score: 79, reasonPrefix: "secondary", compliance: compliance}
+	arbiter := scriptedJudge{score: 78, reasonPrefix: "arbiter", compliance: compliance}
+	writePass1Compliance(t, runIO, pkg.RunID, "a1", compliance)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     arbiter,
+		Now:         func() time.Time { return now },
+	}))
+
+	rawCompliancePath := mustResolve(t, runIO, "60/compliance-B-raw.jsonl")
+	rawCompliance := mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl")
+	truncated := make([]contracts.RawComplianceEntry, 0, 4)
+	for _, row := range rawCompliance {
+		if row.RuleID == "rule-a" || row.RuleID == "rule-b" {
+			truncated = append(truncated, row)
+		}
+	}
+	require.Len(t, truncated, 4)
+	rewriteRawCompliance(t, rawCompliancePath, truncated)
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
+
+	counter := &countingJudge{delegate: primary}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     counter,
+		Secondary:   secondary,
+		Arbiter:     arbiter,
+		Now:         func() time.Time { return now },
+	}))
+
+	assert.Greater(t, counter.callCount(), int32(0))
+	assert.Len(t, mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl"), 5)
 }
 
 func TestRun_NoScorableAgentsReturnsTypedError(t *testing.T) {
@@ -1810,6 +1888,39 @@ func rewriteRawScores(t *testing.T, path string, rows []contracts.RawScoreEntry)
 	require.NoError(t, os.Remove(path))
 	for _, row := range rows {
 		require.NoError(t, internalio.AppendJSONL(path, row))
+	}
+}
+
+func rewriteRawCompliance(t *testing.T, path string, rows []contracts.RawComplianceEntry) {
+	t.Helper()
+	require.NoError(t, os.Remove(path))
+	for _, row := range rows {
+		require.NoError(t, internalio.AppendJSONL(path, row))
+	}
+}
+
+func writePass1Compliance(t *testing.T, runIO internalio.RunContext, runID contracts.RunID, agent contracts.AgentID, verdicts map[string]contracts.ComplianceVerdict) {
+	t.Helper()
+	path := mustResolve(t, runIO, "30/compliance-A.jsonl")
+	ruleIDs := make([]string, 0, len(verdicts))
+	for ruleID := range verdicts {
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	sort.Strings(ruleIDs)
+	for _, ruleID := range ruleIDs {
+		require.NoError(t, internalio.AppendJSONL(path, contracts.ComplianceEntry{
+			SchemaVersion: "1",
+			RunID:         runID,
+			Pass:          1,
+			Agent:         agent,
+			RuleID:        ruleID,
+			Verdict:       verdicts[ruleID],
+			Rationale:     fmt.Sprintf("pass1-%s-%s", agent, ruleID),
+			VerdictPath:   contracts.VerdictPathAgreement,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+		}))
 	}
 }
 
