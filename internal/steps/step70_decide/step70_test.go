@@ -744,11 +744,17 @@ func TestRun_RulePublishIntegrityFailuresTransitionToManualRecovery(t *testing.T
 	}
 }
 
-func TestMarkManualRecoveryWithDetail_DoesNotPersistIntentionWhenSentinelWriteFails(t *testing.T) {
+// F9: when the durable sentinel write fails, the intention must already be
+// parked at stage=needs_manual_recovery so a subsequent resume tick returns
+// ErrNeedsManualRecovery from resume() and refuses to reopen the transaction
+// path. Otherwise an intention left at branch_pushed / registry_appended could
+// silently continue promotion once the sentinel is cleared out of band.
+func TestMarkManualRecoveryWithDetail_ParksIntentionAtNeedsManualRecoveryWhenSentinelWriteFails(t *testing.T) {
 	runCtx, _, candidates, _, resolver := newFixtureWithResolver(t, "PR416")
 	store := newTrackingStore(intentionPath(t, runCtx))
 	writer := state.NewWriter(runCtx)
 	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageBranchPushed
 
 	originalWriteSentinel := writeSentinelFn
 	writeSentinelFn = func(string, contracts.RunID, int, contracts.RollbackReason, contracts.FailedStep, time.Time) error {
@@ -764,11 +770,32 @@ func TestMarkManualRecoveryWithDetail_DoesNotPersistIntentionWhenSentinelWriteFa
 
 	loaded, loadErr := store.Load()
 	require.NoError(t, loadErr)
-	assert.Nil(t, loaded)
+	require.NotNil(t, loaded, "intention must persist at needs_manual_recovery so resume() self-blocks even if the sentinel never lands")
+	assert.Equal(t, contracts.IntentionStageNeedsManualRecovery, loaded.Stage)
+	assert.Equal(t, contracts.RollbackReasonTransactionalFailure, loaded.RecoveryReason)
+	assert.Equal(t, contracts.FailedStep70, loaded.FailedStep)
 
+	// No sentinel landed — the durable block is carried by the intention stage.
 	blocked, blockErr := SentinelExists(runCtx.RunsBase)
 	require.NoError(t, blockErr)
 	assert.False(t, blocked)
+}
+
+// F9: even with no sentinel on disk, a run whose intention is parked at
+// needs_manual_recovery must self-block on resume instead of reopening the
+// old staged transaction path.
+func TestRun_ResumeFromParkedNeedsManualRecoveryIntentionWithoutSentinelReturnsErrNeedsManualRecovery(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR4161")
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageNeedsManualRecovery
+	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
+	intention.FailedStep = contracts.FailedStep70
+	require.NoError(t, store.Save(intention))
+
+	deps := Deps{Git: &fakeGit{head: resolver.target.BestShaBefore}, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}
+	err := Run(context.Background(), 4161, runCtx, pkg, candidates, store, deps)
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
 }
 
 func TestFindPlannedRegistryMatches_RejectsPayloadMismatchForMatchingOpID(t *testing.T) {

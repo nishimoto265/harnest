@@ -542,10 +542,20 @@ func markManualRecoveryWithDetail(pr int, runCtx internalio.RunContext, intentio
 	intention.Stage = contracts.IntentionStageNeedsManualRecovery
 	intention.RecoveryReason = reason
 	intention.FailedStep = contracts.FailedStep70
-	if err := writeSentinelFn(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, deps.Now()); err != nil {
+	// F9: persist the intention transition to needs_manual_recovery BEFORE
+	// writing the durable sentinel. If the sentinel write later fails, the
+	// intention is already parked at a stage that resume() treats as
+	// terminal-but-persisted (returns ErrNeedsManualRecovery and refuses to
+	// reopen transaction paths), so the operator-gate barrier holds even
+	// without the sentinel. The inverse ordering (sentinel-first) would leave
+	// a durable needs_manual_recovery file with an intention still at
+	// branch_pushed / registry_appended; once the operator cleared the
+	// sentinel, a subsequent tick would resume the old transaction path
+	// instead of re-blocking — a silent bypass of the manual-recovery barrier.
+	if err := store.Save(intention); err != nil {
 		return err
 	}
-	if err := store.Save(intention); err != nil {
+	if err := writeSentinelFn(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, deps.Now()); err != nil {
 		return err
 	}
 	if err := appendStateOnce(runCtx, writer, contracts.StateKindNeedsManualRecovery, needsManualRecoveryEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, detail, deps.Now())); err != nil {
