@@ -189,7 +189,13 @@ func Run(ctx context.Context, in Input) error {
 		if err != nil {
 			return fmt.Errorf("step60: hash pass2 output for agent=%s: %w", run.Agent, err)
 		}
-		expectedCompliance := expectedComplianceRuleIDsForAgent(run.Agent, pass1ComplianceRuleIDs, rawState.final[run.Agent], fallbackComplianceRuleIDs)
+		expectedCompliance := expectedComplianceRuleIDsForAgent(
+			run.Agent,
+			pass1ComplianceRuleIDs,
+			rawState.final[run.Agent],
+			rawState.observedComplianceRuleIDs(run.Agent),
+			fallbackComplianceRuleIDs,
+		)
 		if result, ok, err := tryReuseRawPanelResult(in.IO, rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion, expectedCompliance); err != nil {
 			return err
 		} else if ok {
@@ -471,7 +477,20 @@ func collectScorableAgentRuns(in Input, agents []contracts.AgentID, explicit boo
 				return nil, fmt.Errorf("step60: declared scorable agent missing pass1 scorable manifest: agent=%s: %w", agent, err)
 			}
 			if shouldSkipAgent(err) || os.IsNotExist(err) {
-				continue
+				pass2Manifest, pass2Err := internalio.LoadScorableManifest(in.IO, 2, agent)
+				switch {
+				case shouldSkipAgent(pass2Err):
+					continue
+				case pass2Err != nil:
+					if explicit && os.IsNotExist(pass2Err) {
+						return nil, fmt.Errorf("step60: declared scorable agent missing pass2 manifest: agent=%s: %w", agent, pass2Err)
+					}
+					return nil, fmt.Errorf("step60: load pass2 manifest for agent=%s: %w", agent, pass2Err)
+				case pass2Manifest != nil:
+					return nil, fmt.Errorf("step60: pass2 scorable agent missing pass1 scorable manifest: agent=%s: %w", agent, err)
+				default:
+					continue
+				}
 			}
 			return nil, fmt.Errorf("step60: load pass1 scorable manifest for agent=%s: %w", agent, err)
 		}
@@ -995,6 +1014,23 @@ func (s step60RawState) complianceRows(agent contracts.AgentID, role contracts.J
 	return out
 }
 
+func (s step60RawState) observedComplianceRuleIDs(agent contracts.AgentID) map[string]struct{} {
+	rules := make(map[string]struct{})
+	for _, role := range []contracts.JudgeRole{
+		contracts.JudgeRolePrimary,
+		contracts.JudgeRoleSecondary,
+		contracts.JudgeRoleArbiter,
+	} {
+		for ruleID := range s.compliance[agent][role] {
+			rules[ruleID] = struct{}{}
+		}
+	}
+	if len(rules) == 0 {
+		return nil
+	}
+	return rules
+}
+
 func tryReuseRawPanelResult(
 	runIO internalio.RunContext,
 	state step60RawState,
@@ -1041,7 +1077,7 @@ func tryReuseRawPanelResult(
 	if err := validateRawComplianceOverflowRefs(runIO, arbiterCompliance); err != nil {
 		arbiterCompliance = nil
 	}
-	result, err := scorecore.BuildFinalResultFromRaw(
+	result, err := rebuildFinalResultFromRaw(
 		primaryScores,
 		secondaryScores,
 		arbiterScores,
@@ -1076,6 +1112,139 @@ func appendPanelFinals(paths step60Paths, meta finalMetadata, result scorecore.P
 		finalCompliance = append(finalCompliance, finalEntry)
 	}
 	return finalScores, finalCompliance, nil
+}
+
+func rebuildFinalResultFromRaw(
+	primaryScores, secondaryScores, arbiterScores []contracts.RawScoreEntry,
+	primaryCompliance, secondaryCompliance, arbiterCompliance []contracts.RawComplianceEntry,
+	threshold int,
+	secondaryPresent, arbiterPresent bool,
+) (scorecore.PanelResult, error) {
+	scoreResult, err := scorecore.BuildFinalResultFromRaw(
+		primaryScores,
+		secondaryScores,
+		arbiterScores,
+		nil,
+		nil,
+		nil,
+		threshold,
+		secondaryPresent,
+		len(arbiterScores) > 0,
+	)
+	if err != nil {
+		return scorecore.PanelResult{}, err
+	}
+
+	finalCompliance, err := rebuildFinalComplianceFromRaw(
+		primaryCompliance,
+		secondaryCompliance,
+		arbiterCompliance,
+		secondaryPresent,
+		arbiterPresent,
+	)
+	if err != nil {
+		return scorecore.PanelResult{}, err
+	}
+
+	scoreResult.RawCompliance = make([]contracts.RawComplianceEntry, 0, len(primaryCompliance)+len(secondaryCompliance)+len(arbiterCompliance))
+	scoreResult.RawCompliance = append(scoreResult.RawCompliance, primaryCompliance...)
+	scoreResult.RawCompliance = append(scoreResult.RawCompliance, secondaryCompliance...)
+	scoreResult.RawCompliance = append(scoreResult.RawCompliance, arbiterCompliance...)
+	scoreResult.FinalCompliance = finalCompliance
+	return scoreResult, nil
+}
+
+func rebuildFinalComplianceFromRaw(
+	primaryRows, secondaryRows, arbiterRows []contracts.RawComplianceEntry,
+	secondaryPresent, arbiterPresent bool,
+) ([]contracts.ComplianceEntry, error) {
+	primary, err := rawComplianceEntriesAsFinal(primaryRows)
+	if err != nil {
+		return nil, err
+	}
+	if !secondaryPresent {
+		ruleIDs := sortedComplianceRuleIDs(primary)
+		finalEntries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
+		for _, ruleID := range ruleIDs {
+			entry := primary[ruleID]
+			entry.VerdictPath = contracts.VerdictPathSingle
+			finalEntries = append(finalEntries, entry)
+		}
+		return finalEntries, nil
+	}
+
+	secondary, err := rawComplianceEntriesAsFinal(secondaryRows)
+	if err != nil {
+		return nil, err
+	}
+	if !complianceRuleSetsMatch(primary, secondary) {
+		return nil, fmt.Errorf("step60: compliance rule-set mismatch in raw reuse")
+	}
+
+	disputed := disputedComplianceRuleIDs(primary, secondary)
+	arbiter, err := rawComplianceEntriesAsFinal(arbiterRows)
+	if err != nil {
+		return nil, err
+	}
+	if len(disputed) == 0 {
+		ruleIDs := complianceRuleIDs(primary, secondary, nil)
+		finalEntries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
+		for _, ruleID := range ruleIDs {
+			entry := primary[ruleID]
+			entry.VerdictPath = contracts.VerdictPathAgreement
+			finalEntries = append(finalEntries, entry)
+		}
+		return finalEntries, nil
+	}
+	if !arbiterPresent || len(arbiter) == 0 {
+		return nil, scorecore.ErrPanelArbiterRequired
+	}
+	if err := scorecore.ValidateArbiterComplianceRuleCoverage(disputed, disputed, sortedComplianceRuleIDs(arbiter)); err != nil {
+		return nil, err
+	}
+
+	ruleIDs := complianceRuleIDs(primary, secondary, nil)
+	finalEntries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
+	for _, ruleID := range ruleIDs {
+		primaryEntry := primary[ruleID]
+		secondaryEntry := secondary[ruleID]
+		if primaryEntry.Verdict == secondaryEntry.Verdict {
+			primaryEntry.VerdictPath = contracts.VerdictPathAgreement
+			finalEntries = append(finalEntries, primaryEntry)
+			continue
+		}
+
+		arbiterEntry, ok := arbiter[ruleID]
+		if !ok {
+			return nil, fmt.Errorf("step60: missing arbiter compliance rule=%s in raw reuse", ruleID)
+		}
+		arbiterEntry.VerdictPath = complianceVerdictPath(primaryEntry, secondaryEntry, arbiterEntry)
+		finalEntries = append(finalEntries, arbiterEntry)
+	}
+	return finalEntries, nil
+}
+
+func rawComplianceEntriesAsFinal(rows []contracts.RawComplianceEntry) (map[string]contracts.ComplianceEntry, error) {
+	final := make(map[string]contracts.ComplianceEntry, len(rows))
+	for _, row := range rows {
+		if _, exists := final[row.RuleID]; exists {
+			return nil, fmt.Errorf("%w: rule_id=%s", ErrDuplicateComplianceRuleID, row.RuleID)
+		}
+		final[row.RuleID] = contracts.ComplianceEntry{
+			SchemaVersion:        row.SchemaVersion,
+			RunID:                row.RunID,
+			Pass:                 row.Pass,
+			Agent:                row.Agent,
+			RuleID:               row.RuleID,
+			Verdict:              row.Verdict,
+			Rationale:            row.Rationale,
+			RationaleOverflowRef: row.RationaleOverflowRef,
+			RubricVersion:        row.RubricVersion,
+			PromptVersion:        row.PromptVersion,
+			ResolvedAt:           row.ResolvedAt,
+		}
+	}
+	return final, nil
 }
 
 func rawRoleUsable(rows []contracts.RawScoreEntry, outputHash, rubricVersion, promptVersion string) bool {
@@ -1357,6 +1526,7 @@ func expectedComplianceRuleIDsForAgent(
 	agent contracts.AgentID,
 	pass1Rules map[contracts.AgentID]map[string]struct{},
 	finalRules map[string]contracts.ComplianceEntry,
+	rawRules map[string]struct{},
 	fallbackRules []string,
 ) map[string]struct{} {
 	rules := make(map[string]struct{})
@@ -1364,6 +1534,9 @@ func expectedComplianceRuleIDsForAgent(
 		rules[ruleID] = struct{}{}
 	}
 	for ruleID := range finalRules {
+		rules[ruleID] = struct{}{}
+	}
+	for ruleID := range rawRules {
 		rules[ruleID] = struct{}{}
 	}
 	if len(rules) == 0 {

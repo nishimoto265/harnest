@@ -31,8 +31,11 @@ func TestCleanupProcessTree_KillsDetachedGrandchildSpawnedAfterRootExit(t *testi
 
 	require.NoError(t, cmd.Wait())
 	if tracker != nil {
-		time.Sleep(150 * time.Millisecond)
-		tracker.CaptureBurst(100 * time.Millisecond)
+		require.Eventually(t, func() bool {
+			_, err := os.Stat(pidPath)
+			return err == nil
+		}, 5*time.Second, 20*time.Millisecond)
+		tracker.CaptureBurst(200 * time.Millisecond)
 		tracker.Stop()
 	}
 	require.NoError(t, CleanupProcessTree(lease, 0, tracker))
@@ -204,7 +207,7 @@ func main() {
 		if err := cmd.Start(); err != nil {
 			os.Exit(1)
 		}
-		time.Sleep(75 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 		return
 	default:
 		cmd := exec.Command(os.Args[0], os.Args[1], os.Args[2], os.Args[3])

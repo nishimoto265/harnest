@@ -544,6 +544,115 @@ func TestRun_RerunWithoutMarker_RebuildsFromRawWithoutRejudging(t *testing.T) {
 	assert.False(t, called)
 }
 
+func TestRun_RerunWithoutMarker_PreservesSeparateScoreAndComplianceVerdictPaths(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	now := time.Date(2026, 4, 21, 11, 35, 0, 0, time.UTC)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary: scriptedJudge{
+			score:        80,
+			reasonPrefix: "primary",
+			compliance:   map[string]contracts.ComplianceVerdict{"disputed": contracts.ComplianceVerdictViolated},
+		},
+		Secondary: scriptedJudge{
+			score:        70,
+			reasonPrefix: "secondary",
+			compliance:   map[string]contracts.ComplianceVerdict{"disputed": contracts.ComplianceVerdictCompliant},
+		},
+		Arbiter: scriptedJudge{
+			score:        80,
+			reasonPrefix: "primary",
+			compliance:   map[string]contracts.ComplianceVerdict{"disputed": contracts.ComplianceVerdictValidException},
+		},
+		Now: func() time.Time { return now },
+	}))
+
+	beforeScores := mustReadJSONL[contracts.ScoreEntry](t, runIO, "60/scores-B.jsonl")
+	beforeCompliance := mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl")
+	require.Len(t, beforeCompliance, 1)
+	for _, row := range beforeScores {
+		assert.Equal(t, contracts.VerdictPathArbitrated, row.VerdictPath)
+	}
+	assert.Equal(t, contracts.VerdictPathArbiterOverruled, beforeCompliance[0].VerdictPath)
+
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
+
+	var called bool
+	noJudge := unexpectedCallJudge{called: &called}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     noJudge,
+		Secondary:   noJudge,
+		Arbiter:     noJudge,
+		Now:         func() time.Time { return now },
+	}))
+	assert.False(t, called)
+
+	afterScores := mustReadJSONL[contracts.ScoreEntry](t, runIO, "60/scores-B.jsonl")
+	afterCompliance := mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl")
+	assert.Equal(t, beforeScores, afterScores)
+	assert.Equal(t, beforeCompliance, afterCompliance)
+}
+
+func TestRun_RerunWithoutMarker_ReusesDisputedOnlyArbiterCompliance(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	now := time.Date(2026, 4, 21, 11, 40, 0, 0, time.UTC)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary: scriptedJudge{
+			score:        80,
+			reasonPrefix: "primary",
+			compliance: map[string]contracts.ComplianceVerdict{
+				"agreed":   contracts.ComplianceVerdictCompliant,
+				"disputed": contracts.ComplianceVerdictViolated,
+			},
+		},
+		Secondary: scriptedJudge{
+			score:        80,
+			reasonPrefix: "secondary",
+			compliance: map[string]contracts.ComplianceVerdict{
+				"agreed":   contracts.ComplianceVerdictCompliant,
+				"disputed": contracts.ComplianceVerdictValidException,
+			},
+		},
+		Arbiter: scriptedJudge{
+			score:        80,
+			reasonPrefix: "arbiter",
+			compliance: map[string]contracts.ComplianceVerdict{
+				"disputed": contracts.ComplianceVerdictCompliant,
+			},
+		},
+		Now: func() time.Time { return now },
+	}))
+
+	beforeCompliance := mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl")
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
+
+	var called bool
+	noJudge := unexpectedCallJudge{called: &called}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     noJudge,
+		Secondary:   noJudge,
+		Arbiter:     noJudge,
+		Now:         func() time.Time { return now },
+	}))
+	assert.False(t, called)
+	assert.Equal(t, beforeCompliance, mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl"))
+}
+
 func TestRun_RerunWithoutMarker_IgnoresStaleFinalComplianceRows(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score: true,
@@ -1357,25 +1466,45 @@ func TestRun_SkipsPass2AgentWhenDeclaredArtifactIsMissing(t *testing.T) {
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
-func TestRun_UsesPass1Pass2ScorableIntersection(t *testing.T) {
+func TestRun_FailsClosedWhenPass2AgentIsNotPass1Scorable(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score:        true,
 		nonScorablePass1Agents: map[contracts.AgentID]bool{"a2": true},
 	})
 
-	require.NoError(t, Run(context.Background(), Input{
+	err := Run(context.Background(), Input{
 		IO:          runIO,
 		TaskPackage: &pkg,
 		Primary:     judges.NewPrimaryStub(),
 		Secondary:   judges.NewSecondaryStub(),
 		Arbiter:     judges.NewArbiterStub(),
 		Now:         func() time.Time { return time.Date(2026, 4, 21, 19, 30, 0, 0, time.UTC) },
-	}))
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pass2 scorable agent missing pass1 scorable manifest")
+	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
+}
 
-	marker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
-	assert.Equal(t, []contracts.AgentID{"a1", "a3"}, marker.CompletedAgents)
-	assert.EqualValues(t, 10, marker.ExpectedCounts.Scores)
-	assert.EqualValues(t, 2, marker.ExpectedCounts.Pairwise)
+func TestRun_ImplicitScorableAgentsFailClosedWhenPass1ManifestMissing(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+
+	manifestPath, err := runIO.ManifestPath(1, "a2")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(manifestPath))
+
+	err = Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 19, 35, 0, 0, time.UTC) },
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pass2 scorable agent missing pass1 scorable manifest")
+	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
 func TestRun_SerializesConcurrentWriters(t *testing.T) {

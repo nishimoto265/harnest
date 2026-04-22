@@ -1230,6 +1230,7 @@ func TestStepRunSuccessArtifactsHonorContextCancellation(t *testing.T) {
 func TestStepRun_RescueStartFailureLeavesNoPhantomLease(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	fx.seedResumeState(t, 0)
+	stubQuiescentRescueWorktree(t)
 
 	failingStep := newStep(fx.cfg, stepOptions{
 		now:               time.Now,

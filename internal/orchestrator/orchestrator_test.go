@@ -608,6 +608,27 @@ func TestStubStep40_UsesRequestBoundDecoder(t *testing.T) {
 		ResolvedAt:    time.Now().UTC(),
 	}))
 	require.NoError(t, writeValidStep30ArtifactsForTest(runCtx))
+	manifestPath, err := runCtx.ManifestPath(1, "a1")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(manifestPath, contracts.Manifest{
+		Kind: contracts.ManifestKindSuccess,
+		Value: contracts.ManifestSuccess{
+			Kind:          contracts.ManifestKindSuccess,
+			SchemaVersion: "1",
+			RunID:         runID,
+			Pass:          1,
+			Agent:         "a1",
+			BranchName:    "auto-improve/fixture",
+			HeadSHA:       strings.Repeat("b", 40),
+			BaseSHA:       strings.Repeat("a", 40),
+			DiffPath:      "20-pass1/a1/diff.patch",
+			SessionPath:   "20-pass1/a1/session.jsonl",
+			ChecklistPath: "20-pass1/a1/checklist-result.json",
+			PromptVersion: "phase0",
+			StartedAt:     time.Now().UTC(),
+			FinishedAt:    time.Now().UTC(),
+		},
+	}))
 	require.NoError(t, internalio.WriteAtomic(runCtx.RulesRegistryPath(), nil))
 
 	called := false

@@ -333,6 +333,28 @@ func TestRun_CandidateEvidenceStaysWithinViolatingAgents(t *testing.T) {
 	assert.NotContains(t, string(ruleABody), "a2/correctness: Rule B scoring evidence must not leak into rule A candidates.")
 }
 
+func TestBuildCandidates_CollectsScoreEvidenceFromViolatingAgentsBeyondComplianceSnippetCap(t *testing.T) {
+	cfg := newTestConfig(t)
+	now := time.Date(2026, 4, 21, 11, 15, 0, 0, time.UTC)
+	scores := []contracts.ScoreEntry{
+		{SchemaVersion: "1", RunID: cfg.IO.RunID, Pass: 1, Agent: "a1", Dimension: contracts.DimensionFidelity, Score: 70, Reasons: "placeholder", VerdictPath: contracts.VerdictPathSingle, RubricVersion: "default", PromptVersion: "phase0", ResolvedAt: now},
+		{SchemaVersion: "1", RunID: cfg.IO.RunID, Pass: 1, Agent: "a2", Dimension: contracts.DimensionFidelity, Score: 69, Reasons: "placeholder", VerdictPath: contracts.VerdictPathSingle, RubricVersion: "default", PromptVersion: "phase0", ResolvedAt: now},
+		{SchemaVersion: "1", RunID: cfg.IO.RunID, Pass: 1, Agent: "a3", Dimension: contracts.DimensionFidelity, Score: 68, Reasons: "placeholder", VerdictPath: contracts.VerdictPathSingle, RubricVersion: "default", PromptVersion: "phase0", ResolvedAt: now},
+		{SchemaVersion: "1", RunID: cfg.IO.RunID, Pass: 1, Agent: "a4", Dimension: contracts.DimensionFidelity, Score: 67, Reasons: "Fourth violating agent exposed the only useful score evidence for this rule.", VerdictPath: contracts.VerdictPathSingle, RubricVersion: "default", PromptVersion: "phase0", ResolvedAt: now},
+	}
+	compliance := []contracts.ComplianceEntry{
+		{SchemaVersion: "1", RunID: cfg.IO.RunID, Pass: 1, Agent: "a1", RuleID: "rule-cap", Verdict: contracts.ComplianceVerdictViolated, Rationale: "First compliance rationale remains substantive.", VerdictPath: contracts.VerdictPathSingle, RubricVersion: "default", PromptVersion: "phase0", ResolvedAt: now},
+		{SchemaVersion: "1", RunID: cfg.IO.RunID, Pass: 1, Agent: "a2", RuleID: "rule-cap", Verdict: contracts.ComplianceVerdictViolated, Rationale: "Second compliance rationale remains substantive.", VerdictPath: contracts.VerdictPathSingle, RubricVersion: "default", PromptVersion: "phase0", ResolvedAt: now},
+		{SchemaVersion: "1", RunID: cfg.IO.RunID, Pass: 1, Agent: "a3", RuleID: "rule-cap", Verdict: contracts.ComplianceVerdictViolated, Rationale: "Third compliance rationale remains substantive.", VerdictPath: contracts.VerdictPathSingle, RubricVersion: "default", PromptVersion: "phase0", ResolvedAt: now},
+		{SchemaVersion: "1", RunID: cfg.IO.RunID, Pass: 1, Agent: "a4", RuleID: "rule-cap", Verdict: contracts.ComplianceVerdictViolated, Rationale: "placeholder", VerdictPath: contracts.VerdictPathSingle, RubricVersion: "default", PromptVersion: "phase0", ResolvedAt: now},
+	}
+
+	built, err := buildCandidates(cfg.IO, now, scores, compliance, nil, filepath.Dir(cfg.registryPath()))
+	require.NoError(t, err)
+	require.Len(t, built, 1)
+	assert.Contains(t, built[0].Body, "a4/fidelity: Fourth violating agent exposed the only useful score evidence for this rule.")
+}
+
 func TestRun_UsesOverflowSidecarWhenInlineRationaleIsEmpty(t *testing.T) {
 	cfg := newTestConfig(t)
 	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
@@ -353,6 +375,29 @@ func TestRun_UsesOverflowSidecarWhenInlineRationaleIsEmpty(t *testing.T) {
 	body, err := os.ReadFile(bodyPath)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "Sidecar rationale proves the rule was skipped on the guarded path.")
+}
+
+func TestRun_UsesOverflowSidecarWhenInlineRationaleIsNonSubstantive(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+	ref, err := scorecore.WriteOverflowSidecar(cfg.IO, "30", "Sidecar rationale remains usable even when inline text carries no real evidence.")
+	require.NoError(t, err)
+
+	entry := testComplianceEntry(cfg.IO.RunID, "rule-sidecar-placeholder", contracts.ComplianceVerdictViolated)
+	entry.Rationale = "placeholder"
+	entry.RationaleOverflowRef = &ref
+	writeCompliance(t, cfg.IO, entry)
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Len(t, got.Candidates, 1)
+
+	bodyPath, err := cfg.IO.ResolveRunRelative(got.Candidates[0].ProposedBodyPath)
+	require.NoError(t, err)
+	body, err := os.ReadFile(bodyPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Sidecar rationale remains usable even when inline text carries no real evidence.")
+	assert.NotContains(t, string(body), "- compliance: placeholder")
 }
 
 func TestRun_RejectsTamperedActiveRuleSidecar(t *testing.T) {
@@ -495,6 +540,22 @@ func TestRun_RejectsStaleStep30DoneMarkerWhenCurrentScorableSetShrinks(t *testin
 
 	_, err := Run(context.Background(), cfg)
 	require.ErrorContains(t, err, "step30 done.marker is missing or invalid")
+}
+
+func TestStep30Ready_RejectsTaskPackageWithPass1WorktreesButNoResolvableManifests(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+	writeCompliance(t, cfg.IO, testComplianceEntry(cfg.IO.RunID, "rule-a", contracts.ComplianceVerdictViolated))
+
+	for _, agent := range []contracts.AgentID{"a1", "a2", "a3"} {
+		manifestPath, err := cfg.IO.ManifestPath(1, agent)
+		require.NoError(t, err)
+		require.NoError(t, os.Remove(manifestPath))
+	}
+
+	ready, err := step30Ready(cfg.IO, cfg.TaskPackage)
+	require.ErrorContains(t, err, "pass1 worktrees exist but no pass1 manifests are resolvable")
+	assert.False(t, ready)
 }
 
 func TestRun_RejectsInvalidExistingRulePath(t *testing.T) {

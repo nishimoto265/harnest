@@ -150,10 +150,6 @@ func readJSONLAt[T any](runIO internalio.RunContext, rel string) ([]T, error) {
 }
 
 func step30Ready(runIO internalio.RunContext, pkg *contracts.TaskPackage) (bool, error) {
-	expectedAgents, known, err := currentPass1ScorableAgents(runIO, pkg)
-	if err != nil {
-		return false, err
-	}
 	markerPath, err := runIO.ResolveRunRelative("30/done.marker")
 	if err != nil {
 		return false, err
@@ -164,6 +160,10 @@ func step30Ready(runIO internalio.RunContext, pkg *contracts.TaskPackage) (bool,
 	}
 	if err := marker.Validate(); err != nil {
 		return false, nil
+	}
+	expectedAgents, known, err := currentPass1ScorableAgents(runIO, pkg)
+	if err != nil {
+		return false, err
 	}
 	if known && !slices.Equal(marker.CompletedAgents, expectedAgents) {
 		return false, nil
@@ -198,11 +198,16 @@ func currentPass1ScorableAgents(runIO internalio.RunContext, pkg *contracts.Task
 	}
 	agents := make([]contracts.AgentID, 0, len(pkg.Worktrees)/2)
 	seen := make(map[contracts.AgentID]struct{}, len(pkg.Worktrees))
+	pass1Agents := make(map[contracts.AgentID]struct{}, len(pkg.Worktrees)/2)
 	manifestCount := 0
 	for _, wt := range pkg.Worktrees {
 		if wt.Pass != 1 {
 			continue
 		}
+		if _, dup := pass1Agents[wt.Agent]; dup {
+			continue
+		}
+		pass1Agents[wt.Agent] = struct{}{}
 		if _, dup := seen[wt.Agent]; dup {
 			continue
 		}
@@ -227,6 +232,9 @@ func currentPass1ScorableAgents(runIO internalio.RunContext, pkg *contracts.Task
 		}
 		seen[wt.Agent] = struct{}{}
 		agents = append(agents, wt.Agent)
+	}
+	if len(pass1Agents) > 0 && manifestCount == 0 {
+		return nil, false, errors.New("step40_classify: pass1 worktrees exist but no pass1 manifests are resolvable")
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i] < agents[j] })
 	return agents, manifestCount > 0, nil
@@ -566,6 +574,11 @@ func collectCandidateEvidence(runIO internalio.RunContext, ruleID string, compli
 			continue
 		}
 		matchingAgents[entry.Agent] = struct{}{}
+	}
+	for _, entry := range compliance {
+		if entry.RuleID != ruleID || !isViolationVerdict(entry.Verdict) {
+			continue
+		}
 		text, ok, err := substantiveEvidenceText(runIO, entry.Rationale, entry.RationaleOverflowRef)
 		if err != nil {
 			return candidateEvidence{}, err
@@ -623,34 +636,43 @@ func collectScoreEvidence(runIO internalio.RunContext, scores []contracts.ScoreE
 }
 
 func substantiveEvidenceText(runIO internalio.RunContext, value string, overflow *contracts.OverflowRef) (string, bool, error) {
-	trimmed := normalizeEvidenceText(value)
-	if trimmed == "" && overflow != nil {
+	if trimmed, ok := normalizedSubstantiveEvidenceText(value); ok {
+		return trimmed, true, nil
+	}
+	if overflow != nil {
 		sidecar, err := internalio.ReadSidecar(runIO, *overflow)
 		if err != nil {
 			return "", false, err
 		}
-		trimmed = normalizeEvidenceText(sidecar)
+		if trimmed, ok := normalizedSubstantiveEvidenceText(sidecar); ok {
+			return trimmed, true, nil
+		}
 	}
-	if trimmed == "" {
-		return "", false, nil
-	}
-	lower := strings.ToLower(trimmed)
-	switch {
-	case strings.HasPrefix(lower, "stub "):
-		return "", false, nil
-	case strings.Contains(lower, "placeholder"):
-		return "", false, nil
-	case strings.HasPrefix(lower, "todo"):
-		return "", false, nil
-	case strings.HasPrefix(lower, "phase 0 deterministic classify"):
-		return "", false, nil
-	default:
-		return trimmed, true, nil
-	}
+	return "", false, nil
 }
 
 func normalizeEvidenceText(value string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func normalizedSubstantiveEvidenceText(value string) (string, bool) {
+	trimmed := normalizeEvidenceText(value)
+	if trimmed == "" {
+		return "", false
+	}
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasPrefix(lower, "stub "):
+		return "", false
+	case strings.Contains(lower, "placeholder"):
+		return "", false
+	case strings.HasPrefix(lower, "todo"):
+		return "", false
+	case strings.HasPrefix(lower, "phase 0 deterministic classify"):
+		return "", false
+	default:
+		return trimmed, true
+	}
 }
 
 func candidateRationale(ruleID string, evidence candidateEvidence) string {
