@@ -114,9 +114,6 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 	if err := run.IO.ValidateWorktreeAllocation(allocation); err != nil {
 		return err
 	}
-	if err := ensureAllocationWorktree(ctx, run.Config, allocation); err != nil {
-		return err
-	}
 	timeout, err := stepTimeout(run.Config, "step20")
 	if err != nil {
 		return err
@@ -138,6 +135,10 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 		return fmt.Errorf("%w: agent %s", ErrAgentLeaseContended, run.Agent)
 	}
 	defer leaseLock.Unlock()
+
+	if err := ensureAllocationWorktree(ctx, run.Config, allocation); err != nil {
+		return err
+	}
 
 	stepStartedAt := s.now().UTC()
 	retryCount, err := s.resumeIfNeeded(ctx, run, allocation, agentDir)
@@ -219,18 +220,31 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 		return err
 	}
 
+	finalizeCtx := context.Background()
+	if heartbeat != nil {
+		heartbeat.Stop()
+		heartbeat = nil
+	}
+	if err := prepareTerminalLeaseFinalize(agentDir); err != nil {
+		return err
+	}
+
+	var finalizeErr error
 	if runResult.TimedOut {
-		return s.writeTimeoutManifest(ctx, run, allocation, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
-	}
-	if runResult.ExitCode != 0 {
-		return s.writeErrorManifest(ctx, run, runResult)
-	}
-	if runResult.CleanupErr != nil {
+		finalizeErr = s.writeTimeoutManifest(finalizeCtx, run, allocation, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
+	} else if runResult.ExitCode != 0 {
+		finalizeErr = s.writeErrorManifest(finalizeCtx, run, runResult)
+	} else if runResult.CleanupErr != nil {
 		runResult.ExitCode = 1
 		runResult.StderrSnippet = appendCleanupDetail(runResult.StderrSnippet, runResult.CleanupErr)
-		return s.writeErrorManifest(ctx, run, runResult)
+		finalizeErr = s.writeErrorManifest(finalizeCtx, run, runResult)
+	} else {
+		finalizeErr = s.writeSuccessArtifacts(finalizeCtx, run, allocation, runResult)
 	}
-	return s.writeSuccessArtifacts(ctx, run, allocation, runResult)
+	if finalizeErr != nil {
+		return finalizeErr
+	}
+	return clearActiveLease(agentDir)
 }
 
 func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, runResult runnerResult) error {
@@ -471,14 +485,14 @@ func ensureAllocationWorktree(ctx context.Context, cfg *config.Config, allocatio
 		case strings.Contains(detail, "invalid reference"),
 			strings.Contains(detail, "not a valid object name"),
 			strings.Contains(detail, "unknown revision"):
-			if _, addErr := gitOutputContext(ctx, identity, repoRoot, "worktree", "add", "-b", allocation.Branch, allocation.Path, allocation.BaseSHA); addErr != nil {
+			if _, addErr := gitOutputContext(ctx, identity, repoRoot, "worktree", "add", "-b", allocation.Branch, allocation.Path, "HEAD"); addErr != nil {
 				return addErr
 			}
 		default:
 			return err
 		}
 	}
-	return restoreAllocationWorktree(ctx, allocation, allocation.BaseSHA)
+	return nil
 }
 
 func appendCleanupDetail(stderrSnippet []byte, cleanupErr error) []byte {

@@ -2,10 +2,12 @@ package step20_implement
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -59,6 +61,78 @@ func TestPerformRescue_AggregateStorageLimitRequiresManualRecovery(t *testing.T)
 	var manual *agentrunner.ManualRecoveryRequiredError
 	require.ErrorAs(t, err, &manual)
 	assert.Empty(t, rescueDirEntries(t, fx.agentDir))
+}
+
+func TestResumeIfNeeded_AdoptsExistingRescueAfterCrashBeforeResumeStateSave(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	allocation, err := worktreeFor(fx.run.TaskPackage, fx.run.Pass, fx.run.Agent)
+	require.NoError(t, err)
+	stubQuiescentRescueWorktree(t)
+
+	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	require.NoError(t, saveResumeState(fx.agentDir, resumeState{
+		ExpectedBaseSHA: fx.baseSHA,
+		StartedAt:       oldTime,
+		Pid:             999999,
+		LeaderStartTime: "stale-start",
+		RetryCount:      0,
+		LastHeartbeat:   oldTime,
+	}))
+	require.NoError(t, touchHeartbeat(fx.agentDir, oldTime))
+	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, "dirty.txt"), []byte("dirty\n"), 0o644))
+
+	rescueDir := filepath.Join(fx.agentDir, rescuedDirName, "existing-rescue")
+	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
+	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
+		ExpectedBaseSHA: fx.baseSHA,
+		RescuedHeadSHA:  allocation.BaseSHA,
+		RetryCount:      1,
+		CommitCount:     0,
+		BundleMode:      agentrunner.RescueBundleModeNone,
+		CreatedAt:       time.Now().UTC(),
+		Artifacts:       []agentrunner.RescueArtifactDigest{},
+	}))
+
+	retryCount, err := fx.step.resumeIfNeeded(context.Background(), fx.run, allocation, fx.agentDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, retryCount)
+	assert.NoFileExists(t, filepath.Join(fx.worktree, "dirty.txt"))
+
+	state, ok, err := loadResumeState(fx.agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Zero(t, state.Pid)
+	assert.Equal(t, 1, state.RetryCount)
+	assert.Len(t, rescueDirEntries(t, fx.agentDir), 1)
+}
+
+func TestEnsureRescueLeaseQuiesced_PreservesTimeoutSentinel(t *testing.T) {
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	originalKillPID := rescueKillPID
+	originalSleep := rescueSleep
+	originalMaxWait := rescueQuiesceMaxWait
+	originalInterval := rescueQuiesceInterval
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) { return []int{424242}, nil }
+	rescueKillPID = func(int, syscall.Signal) error { return nil }
+	rescueSleep = func(time.Duration) {}
+	rescueQuiesceMaxWait = time.Nanosecond
+	rescueQuiesceInterval = 0
+	t.Cleanup(func() {
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+		rescueKillPID = originalKillPID
+		rescueSleep = originalSleep
+		rescueQuiesceMaxWait = originalMaxWait
+		rescueQuiesceInterval = originalInterval
+	})
+
+	err := ensureRescueLeaseQuiesced(context.Background(), t.TempDir(), resumeState{
+		Pid:             999999,
+		LeaderStartTime: "stale-start",
+	})
+	require.Error(t, err)
+	var manual *agentrunner.ManualRecoveryRequiredError
+	require.ErrorAs(t, err, &manual)
+	assert.True(t, errors.Is(err, agentrunner.ErrRescueLeaseQuiesceTimedOut))
 }
 
 func staleResumeState(baseSHA string) resumeState {

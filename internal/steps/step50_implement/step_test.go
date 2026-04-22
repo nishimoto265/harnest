@@ -532,6 +532,72 @@ func TestStepRunMissingChecklistFailsClosed(t *testing.T) {
 	require.ErrorContains(t, err, "missing checklist artifact")
 }
 
+func TestStepRun_RecreatesDeletedPass2Worktree(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(allocation.Path))
+
+	require.NoError(t, (Step{}).Run(context.Background(), env.run))
+	assert.FileExists(t, filepath.Join(allocation.Path, "implemented.txt"))
+}
+
+func TestStepRun_FinalizeFailureForcesImmediateRescueOnNextResume(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+
+	t.Setenv("FAKE_SKIP_CHECKLIST", "1")
+	err = (Step{}).Run(context.Background(), env.run)
+	require.ErrorContains(t, err, "missing checklist artifact")
+
+	state, ok, err := loadResumeState(agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.NotZero(t, state.Pid)
+	_, statErr := os.Stat(heartbeatPath(agentDir))
+	require.Error(t, statErr)
+	assert.True(t, os.IsNotExist(statErr))
+
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) { return nil, nil }
+	t.Cleanup(func() {
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+	})
+
+	t.Setenv("FAKE_SKIP_CHECKLIST", "")
+	require.NoError(t, (Step{}).Run(context.Background(), env.run))
+	assert.Len(t, rescueDirEntries(t, agentDir), 1)
+}
+
+func TestStepRun_StopsHeartbeatBeforeSlowFinalize(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	wrapperDir := t.TempDir()
+	writeContainsFakeGitWrapper(t, wrapperDir)
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("FAKE_GIT_SLEEP_ON_SUBSTRING", " rev-parse HEAD")
+	t.Setenv("FAKE_GIT_SLEEP_SECONDS", "1")
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	step := newStep(env.run.Config, stepOptions{
+		now:               time.Now,
+		heartbeatInterval: 10 * time.Millisecond,
+		staleAfter:        time.Second,
+	})
+	require.NoError(t, step.Run(context.Background(), env.run))
+
+	state, ok, err := loadResumeState(agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Zero(t, state.Pid)
+	assert.Zero(t, state.Pgid)
+}
+
 func TestStepRunSuccessDiffCapturesUntrackedFilesButSkipsChecklistArtifact(t *testing.T) {
 	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
 	t.Setenv("FAKE_AGENT", "a1")
@@ -1033,6 +1099,11 @@ func newStepTestEnv(t *testing.T, script string, timeoutSeconds int) stepTestEnv
 
 	scriptPath := testScriptPath(t, script)
 	cfg := &config.Config{
+		Repo: config.RepoConfig{
+			Root:          repoDir,
+			DefaultBranch: "main",
+			BestBranch:    "best/main",
+		},
 		RunsBasePath:     runsBase,
 		WorktreeBasePath: worktreeBase,
 		ClaudeCLIPath:    scriptPath,
@@ -1131,6 +1202,20 @@ func main() {
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(output))
 	return binaryPath
+}
+
+func writeContainsFakeGitWrapper(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "git")
+	script := `#!/bin/bash
+set -euo pipefail
+joined="$*"
+if [[ -n "${FAKE_GIT_SLEEP_ON_SUBSTRING:-}" && "$joined" == *"${FAKE_GIT_SLEEP_ON_SUBSTRING}"* ]]; then
+  sleep "${FAKE_GIT_SLEEP_SECONDS:-5}"
+fi
+exec "$REAL_GIT" "$@"
+`
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
 }
 
 func processDead(pid int) bool {

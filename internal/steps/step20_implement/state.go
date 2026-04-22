@@ -216,3 +216,20 @@ func clearActiveLease(agentDir string) error {
 	}
 	return saveResumeState(agentDir, state)
 }
+
+func prepareTerminalLeaseFinalize(agentDir string) error {
+	state, ok, err := loadResumeState(agentDir)
+	if err != nil || !ok {
+		return err
+	}
+	if state.Pid == 0 {
+		if err := os.Remove(heartbeatPath(agentDir)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := os.Remove(heartbeatPath(agentDir)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return saveResumeState(agentDir, state)
+}

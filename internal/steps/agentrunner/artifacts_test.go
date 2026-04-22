@@ -72,6 +72,47 @@ func TestWriteSuccessDiff_CapsHugeUntrackedPatch(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr))
 }
 
+func TestWriteSuccessDiff_SyncsTempBeforeRenameAndParentDirAfter(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, "", "git", "init", "-b", "main", repoDir)
+	runGit(t, repoDir, "git", "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "git", "config", "user.name", "Agent Runner Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\nchange\n"), 0o644))
+	runGit(t, repoDir, "git", "add", "README.md")
+	runGit(t, repoDir, "git", "commit", "-m", "base")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\nchanged\n"), 0o644))
+
+	baseSHA := strings.TrimSpace(runGit(t, repoDir, "git", "rev-parse", "HEAD"))
+	destPath := filepath.Join(t.TempDir(), "diff.patch")
+
+	originalSync := writeSuccessDiffFileSync
+	originalRename := writeSuccessDiffRename
+	originalSyncDir := writeSuccessDiffSyncDir
+	t.Cleanup(func() {
+		writeSuccessDiffFileSync = originalSync
+		writeSuccessDiffRename = originalRename
+		writeSuccessDiffSyncDir = originalSyncDir
+	})
+
+	var order []string
+	writeSuccessDiffFileSync = func(f *os.File) error {
+		order = append(order, "temp-sync")
+		return nil
+	}
+	writeSuccessDiffRename = func(oldPath, newPath string) error {
+		order = append(order, "rename")
+		return os.Rename(oldPath, newPath)
+	}
+	writeSuccessDiffSyncDir = func(path string) error {
+		order = append(order, "dir-sync")
+		return nil
+	}
+
+	err := WriteSuccessDiff(context.Background(), repoDir, baseSHA, "test", destPath)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"temp-sync", "rename", "dir-sync"}, order)
+}
+
 func TestWriteSuccessDiff_RejectsOversizedUntrackedFileBeforeSnapshotCopy(t *testing.T) {
 	repoDir := t.TempDir()
 	runGit(t, "", "git", "init", "-b", "main", repoDir)
@@ -107,6 +148,39 @@ func TestWriteSuccessDiff_RejectsOversizedUntrackedFileBeforeSnapshotCopy(t *tes
 	entries, readErr := os.ReadDir(destDir)
 	require.NoError(t, readErr)
 	assert.Empty(t, entries)
+}
+
+func TestWriteSuccessDiff_RemovesTempFileWhenRenameFails(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, "", "git", "init", "-b", "main", repoDir)
+	runGit(t, repoDir, "git", "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "git", "config", "user.name", "Agent Runner Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repoDir, "git", "add", "README.md")
+	runGit(t, repoDir, "git", "commit", "-m", "base")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\nchanged\n"), 0o644))
+
+	baseSHA := strings.TrimSpace(runGit(t, repoDir, "git", "rev-parse", "HEAD"))
+	destPath := filepath.Join(t.TempDir(), "diff.patch")
+
+	originalRename := writeSuccessDiffRename
+	t.Cleanup(func() {
+		writeSuccessDiffRename = originalRename
+	})
+
+	renameErr := errors.New("rename failed")
+	tempPath := ""
+	writeSuccessDiffRename = func(oldPath, newPath string) error {
+		tempPath = oldPath
+		return renameErr
+	}
+
+	err := WriteSuccessDiff(context.Background(), repoDir, baseSHA, "test", destPath)
+	require.ErrorIs(t, err, renameErr)
+	require.NotEmpty(t, tempPath)
+	_, statErr := os.Stat(tempPath)
+	require.Error(t, statErr)
+	assert.True(t, os.IsNotExist(statErr))
 }
 
 func TestSnapshotDiffableArtifact_RejectsGrowthBeyondLimitDuringCopy(t *testing.T) {

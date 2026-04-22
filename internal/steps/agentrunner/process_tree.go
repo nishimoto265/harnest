@@ -203,10 +203,10 @@ func CleanupProcessTree(lease ProcessLease, sessionID int, tracker *DescendantTr
 	if tracker != nil {
 		tracker.CaptureUntilStable(500*time.Millisecond, 25*time.Millisecond)
 	}
-	if err := KillProcessGroupUntilGone(lease.PGID, 500*time.Millisecond, 25*time.Millisecond); err != nil {
+	if err := killProcessGroupUntilGoneOwned(lease, 500*time.Millisecond, 25*time.Millisecond); err != nil {
 		errs = append(errs, err)
 	}
-	if err := KillSessionProcessesUntilGone(sessionID, 500*time.Millisecond, 25*time.Millisecond); err != nil {
+	if err := killSessionProcessesUntilGoneOwned(lease, sessionID, 500*time.Millisecond, 25*time.Millisecond); err != nil {
 		errs = append(errs, err)
 	}
 	if tracker != nil {
@@ -217,6 +217,103 @@ func CleanupProcessTree(lease ProcessLease, sessionID int, tracker *DescendantTr
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+func killProcessGroupUntilGoneOwned(lease ProcessLease, maxWait, interval time.Duration) error {
+	if lease.PGID <= 0 {
+		return nil
+	}
+	if lease.PID <= 0 || lease.StartTime == "" {
+		return nil
+	}
+	if interval <= 0 {
+		interval = 25 * time.Millisecond
+	}
+	if maxWait <= 0 {
+		maxWait = 500 * time.Millisecond
+	}
+	deadline := cleanupNow().Add(maxWait)
+	var lastErr error
+	for {
+		matches, err := processIdentityMatches(lease.PID, lease.StartTime)
+		if err != nil {
+			return errors.Join(lastErr, err)
+		}
+		if !matches {
+			return lastErr
+		}
+		if err := killProcessGroupUntilGoneSignal(lease.PGID); err != nil {
+			lastErr = err
+		}
+		members, err := processGroupMembersUntilGoneList(lease.PGID)
+		if err != nil {
+			return errors.Join(lastErr, err)
+		}
+		if len(members) == 0 {
+			return lastErr
+		}
+		if !cleanupNow().Before(deadline) {
+			timeoutErr := fmt.Errorf("%w: pgid=%d survivors=%v", ErrCleanupTimeout, lease.PGID, members)
+			return errors.Join(timeoutErr, lastErr)
+		}
+		cleanupSleep(interval)
+	}
+}
+
+func killSessionProcessesUntilGoneOwned(lease ProcessLease, sessionID int, maxWait, interval time.Duration) error {
+	if sessionID <= 0 {
+		return nil
+	}
+	if lease.PID <= 0 || lease.StartTime == "" {
+		return nil
+	}
+	if interval <= 0 {
+		interval = 25 * time.Millisecond
+	}
+	if maxWait <= 0 {
+		maxWait = 500 * time.Millisecond
+	}
+	deadline := cleanupNow().Add(maxWait)
+	var lastErr error
+	for {
+		matches, err := processIdentityMatches(lease.PID, lease.StartTime)
+		if err != nil {
+			return errors.Join(lastErr, err)
+		}
+		if !matches {
+			return lastErr
+		}
+		pids, err := sessionProcessesUntilGoneList(sessionID)
+		if err != nil {
+			return errors.Join(lastErr, err)
+		}
+		if len(pids) == 0 {
+			return lastErr
+		}
+		if err := killSessionProcessesUntilGoneKill(pids); err != nil {
+			lastErr = err
+		}
+		if !cleanupNow().Before(deadline) {
+			timeoutErr := fmt.Errorf("%w: session_id=%d survivors=%v", ErrCleanupTimeout, sessionID, pids)
+			return errors.Join(timeoutErr, lastErr)
+		}
+		cleanupSleep(interval)
+	}
+}
+
+func processIdentityMatches(pid int, expectedStartTime string) (bool, error) {
+	if pid <= 0 || expectedStartTime == "" {
+		return false, nil
+	}
+	currentStartTime, err := lookupProcessStartTime(pid)
+	switch {
+	case errors.Is(err, syscall.ESRCH):
+		return false, nil
+	case err != nil:
+		return false, err
+	default:
+		return currentStartTime == expectedStartTime, nil
+	}
 }
 
 func KillSessionProcesses(sessionID int) error {

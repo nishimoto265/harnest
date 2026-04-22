@@ -151,6 +151,10 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	}
 	defer leaseLock.Unlock()
 
+	if err := ensureAllocationWorktree(ctx, run.Config, allocation); err != nil {
+		return err
+	}
+
 	stepStartedAt := s.now().UTC()
 	retryCount, err := s.resumeIfNeeded(ctx, run, allocation, agentDir)
 	if err != nil {
@@ -242,21 +246,30 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	}
 
 	finalizeCtx := context.Background()
-	if err := clearActiveLease(agentDir); err != nil {
+	if heartbeat != nil {
+		heartbeat.Stop()
+		heartbeat = nil
+	}
+	if err := prepareTerminalLeaseFinalize(agentDir); err != nil {
 		return err
 	}
+
+	var finalizeErr error
 	if runResult.TimedOut {
-		return s.writeTimeoutManifest(finalizeCtx, run, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
-	}
-	if runResult.CleanupErr != nil {
+		finalizeErr = s.writeTimeoutManifest(finalizeCtx, run, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
+	} else if runResult.CleanupErr != nil {
 		runResult.ExitCode = 1
 		runResult.StderrSnippet = appendCleanupDetail(runResult.StderrSnippet, runResult.CleanupErr)
-		return s.writeErrorManifest(finalizeCtx, run, runResult)
+		finalizeErr = s.writeErrorManifest(finalizeCtx, run, runResult)
+	} else if runResult.ExitCode != 0 {
+		finalizeErr = s.writeErrorManifest(finalizeCtx, run, runResult)
+	} else {
+		finalizeErr = s.writeSuccessArtifacts(finalizeCtx, run, allocation, runResult)
 	}
-	if runResult.ExitCode != 0 {
-		return s.writeErrorManifest(finalizeCtx, run, runResult)
+	if finalizeErr != nil {
+		return finalizeErr
 	}
-	return s.writeSuccessArtifacts(finalizeCtx, run, allocation, runResult)
+	return clearActiveLease(agentDir)
 }
 
 func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, runResult runnerResult) error {
@@ -377,6 +390,64 @@ func artifactPath(runIO internalio.RunContext, pass int, agent contracts.AgentID
 
 func ensureDir(path string) error {
 	return os.MkdirAll(path, 0o755)
+}
+
+func ensureAllocationWorktree(ctx context.Context, cfg *config.Config, allocation contracts.WorktreeAllocation) error {
+	info, err := os.Stat(allocation.Path)
+	if err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("step50: worktree path is not a directory: %s", allocation.Path)
+		}
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	if cfg == nil {
+		return errors.New("step50: config is required to recreate missing worktree")
+	}
+	repoRoot, err := cfg.RepoRoot()
+	if err != nil {
+		return err
+	}
+	if err := ensureDir(filepath.Dir(allocation.Path)); err != nil {
+		return err
+	}
+	if err := runGitCommand(ctx, repoRoot, "worktree", "prune"); err != nil {
+		return err
+	}
+	if err := runGitCommand(ctx, repoRoot, "worktree", "add", allocation.Path, allocation.Branch); err != nil {
+		detail := err.Error()
+		switch {
+		case strings.Contains(detail, "invalid reference"),
+			strings.Contains(detail, "not a valid object name"),
+			strings.Contains(detail, "unknown revision"):
+			if err := runGitCommand(ctx, repoRoot, "worktree", "add", "-b", allocation.Branch, allocation.Path, "HEAD"); err != nil {
+				return err
+			}
+		default:
+			return err
+		}
+	}
+	return nil
+}
+
+func restoreAllocationWorktree(ctx context.Context, allocation contracts.WorktreeAllocation, expectedBaseSHA string) error {
+	targetRef := expectedBaseSHA
+	currentHead, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
+	if err == nil && currentHead == expectedBaseSHA {
+		targetRef = "HEAD"
+	}
+	if err := runGitCommand(ctx, allocation.Path, "checkout", "--force", "-B", allocation.Branch, targetRef); err != nil {
+		return err
+	}
+	if err := runGitCommand(ctx, allocation.Path, "reset", "--hard", targetRef); err != nil {
+		return err
+	}
+	if err := runGitCommand(ctx, allocation.Path, "clean", "-fd"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func manifestPrefix(pass int, agent contracts.AgentID) string {

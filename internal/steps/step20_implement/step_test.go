@@ -897,6 +897,93 @@ func TestStepRunReturnsLeaseContendedDuringConcurrentStartup(t *testing.T) {
 	require.NoError(t, <-firstErrCh)
 }
 
+func TestStepRunSerializesWorktreeRecreationUnderRescueLock(t *testing.T) {
+	root := t.TempDir()
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	repoDir := filepath.Join(root, "repo")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	require.NoError(t, os.MkdirAll(repoDir, 0o755))
+
+	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
+	runGit(t, repoDir, "init", "-b", "main")
+	runGit(t, repoDir, "config", "user.name", "Test User")
+	runGit(t, repoDir, "config", "user.email", "test@example.com")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repoDir, "add", "README.md")
+	runGit(t, repoDir, "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	worktreePath := filepath.Join(worktreeBase, string(runID)+"-pass1-a1")
+	branch := "auto-improve/" + string(runID) + "/pass1/a1"
+	runGit(t, repoDir, "worktree", "add", "-b", branch, worktreePath, baseSHA)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "prompts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "prompts", "step20-implement.tmpl"), []byte("step20 prompt\n"), 0o644))
+
+	runIO, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
+	require.NoError(t, err)
+	pkg := buildTaskPackage(t, runID, worktreeBase, worktreePath, baseSHA)
+	scriptPath := writeFakeClaudeScript(t, root)
+	cfg := &config.Config{
+		Repo: config.RepoConfig{
+			Root:          repoDir,
+			DefaultBranch: "main",
+			BestBranch:    "best",
+		},
+		Worktree:      config.WorktreeConfig{Base: worktreeBase},
+		Paths:         config.PathsConfig{Runs: runsBase},
+		ClaudeCLIPath: scriptPath,
+		StepTimeouts: map[string]int{
+			"step20": 5,
+		},
+	}
+	step := newStep(cfg, stepOptions{
+		now:               time.Now,
+		heartbeatInterval: 10 * time.Millisecond,
+		staleAfter:        time.Second,
+	})
+	run := RunContext{
+		Config:      cfg,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PR:          42,
+		Pass:        1,
+		Agent:       "a1",
+		IO:          runIO,
+		TaskPackage: &pkg,
+	}
+
+	require.NoError(t, os.RemoveAll(worktreePath))
+	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(worktreePath, "recreated.txt"))
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	wrapperDir := t.TempDir()
+	logPath := filepath.Join(wrapperDir, "git.log")
+	writeFakeGitWrapper(t, wrapperDir)
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("FAKE_GIT_LOG", logPath)
+	t.Setenv("FAKE_GIT_SLEEP_ON_PREFIX", "worktree add")
+	t.Setenv("FAKE_GIT_SLEEP_SECONDS", "1")
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	firstErrCh := make(chan error, 1)
+	go func() {
+		firstErrCh <- step.Run(context.Background(), run)
+	}()
+
+	require.Eventually(t, func() bool {
+		logBytes, readErr := os.ReadFile(logPath)
+		if readErr != nil {
+			return false
+		}
+		return strings.Contains(string(logBytes), "worktree add")
+	}, 3*time.Second, 10*time.Millisecond)
+
+	err = step.Run(context.Background(), run)
+	require.ErrorIs(t, err, ErrAgentLeaseContended)
+	require.NoError(t, <-firstErrCh)
+}
+
 func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	fx.seedResumeState(t, 0)
@@ -909,7 +996,7 @@ func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
 	writeFakeGitWrapper(t, wrapperDir)
 	t.Setenv("REAL_GIT", realGit)
 	t.Setenv("FAKE_GIT_LOG", logPath)
-	t.Setenv("FAKE_GIT_SLEEP_ON_PREFIX", "diff HEAD --binary --no-ext-diff --no-textconv")
+	t.Setenv("FAKE_GIT_SLEEP_ON_SUBSTRING", " diff HEAD --binary --no-ext-diff --no-textconv")
 	t.Setenv("FAKE_GIT_SLEEP_SECONDS", "5")
 	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -942,6 +1029,39 @@ func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
 	_, statErr := os.Stat(fx.manifestPath())
 	require.Error(t, statErr)
 	require.True(t, os.IsNotExist(statErr))
+}
+
+func TestStepRun_PersistsTerminalSuccessAfterParentCancellationAndClearsLease(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	agentDir := fx.agentDir
+
+	ctx, cancel := context.WithCancel(context.Background())
+	step := newStep(fx.cfg, stepOptions{
+		now:               time.Now,
+		heartbeatInterval: 10 * time.Millisecond,
+		staleAfter:        time.Second,
+		runner: cancelAfterSuccessRunner{
+			cancel: cancel,
+			runID:  fx.run.IO.RunID,
+			agent:  fx.run.Agent,
+		},
+	})
+	err := step.Run(ctx, fx.run)
+	require.NoError(t, err)
+
+	manifest := fx.readManifest(t)
+	assert.Equal(t, contracts.ManifestKindSuccess, manifest.Kind)
+
+	state, ok, err := loadResumeState(agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Zero(t, state.Pid)
+	assert.Zero(t, state.Pgid)
+	assert.Empty(t, state.LeaderStartTime)
+
+	_, statErr := os.Stat(fx.heartbeatLeasePath())
+	require.Error(t, statErr)
+	assert.True(t, os.IsNotExist(statErr))
 }
 
 func TestStepRunCancelsChildProcessGroupOnContextCancellation(t *testing.T) {
@@ -1193,7 +1313,7 @@ func TestStepRunSuccessArtifactsHonorContextCancellation(t *testing.T) {
 	writeFakeGitWrapper(t, wrapperDir)
 	t.Setenv("REAL_GIT", realGit)
 	t.Setenv("FAKE_GIT_LOG", logPath)
-	t.Setenv("FAKE_GIT_SLEEP_ON_PREFIX", "rev-parse HEAD")
+	t.Setenv("FAKE_GIT_SLEEP_ON_SUBSTRING", " rev-parse HEAD")
 	t.Setenv("FAKE_GIT_SLEEP_SECONDS", "5")
 	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -1216,15 +1336,11 @@ func TestStepRunSuccessArtifactsHonorContextCancellation(t *testing.T) {
 	cancel()
 
 	err = <-errCh
-	require.ErrorIs(t, err, context.Canceled)
+	require.NoError(t, err)
 
-	_, statErr := os.Stat(fx.manifestPath())
-	require.Error(t, statErr)
-	require.True(t, os.IsNotExist(statErr))
-
-	_, statErr = os.Stat(fx.diffPath())
-	require.Error(t, statErr)
-	require.True(t, os.IsNotExist(statErr))
+	manifest := fx.readManifest(t)
+	assert.Equal(t, contracts.ManifestKindError, manifest.Kind)
+	assert.NoFileExists(t, fx.diffPath())
 }
 
 func TestStepRun_RescueStartFailureLeavesNoPhantomLease(t *testing.T) {
@@ -1371,6 +1487,49 @@ func (failBeforeStartRunner) Run(context.Context, runnerRequest) (runnerResult, 
 	return runnerResult{}, errors.New("synthetic start failure")
 }
 
+type cancelAfterSuccessRunner struct {
+	cancel func()
+	runID  contracts.RunID
+	agent  contracts.AgentID
+}
+
+func (r cancelAfterSuccessRunner) Run(_ context.Context, req runnerRequest) (runnerResult, error) {
+	startedAt := time.Now().Add(-time.Second).UTC()
+	if req.OnStart != nil {
+		if err := req.OnStart(agentrunner.ProcessLease{
+			PID:       4242,
+			PGID:      4242,
+			StartTime: "Tue Apr 22 10:00:00 2026",
+		}, startedAt); err != nil {
+			return runnerResult{}, err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(req.SessionPath), 0o755); err != nil {
+		return runnerResult{}, err
+	}
+	if err := os.WriteFile(req.SessionPath, []byte("{\"event\":\"ok\"}\n"), 0o644); err != nil {
+		return runnerResult{}, err
+	}
+	if err := os.WriteFile(filepath.Join(req.Workdir, "implemented.txt"), []byte("ok\n"), 0o644); err != nil {
+		return runnerResult{}, err
+	}
+	if err := os.WriteFile(filepath.Join(req.Workdir, checklistFileName), []byte(`{"schema_version":"1","run_id":"`+string(r.runID)+`","pass":1,"agent":"`+string(r.agent)+`","items":[]}`), 0o644); err != nil {
+		return runnerResult{}, err
+	}
+	if r.cancel != nil {
+		r.cancel()
+	}
+	return runnerResult{
+		StartedAt:  startedAt,
+		FinishedAt: time.Now().UTC(),
+		Lease: agentrunner.ProcessLease{
+			PID:       4242,
+			PGID:      4242,
+			StartTime: "Tue Apr 22 10:00:00 2026",
+		},
+	}, nil
+}
+
 func TestPidAliveTreatsEPERMAsAlive(t *testing.T) {
 	originalKill := killProcess
 	killProcess = func(pid int, sig syscall.Signal) error {
@@ -1492,6 +1651,9 @@ set -euo pipefail
 joined="$*"
 printf '%s\n' "$joined" >> "$FAKE_GIT_LOG"
 if [[ -n "${FAKE_GIT_SLEEP_ON_PREFIX:-}" && "$joined" == "${FAKE_GIT_SLEEP_ON_PREFIX}"* ]]; then
+  sleep "${FAKE_GIT_SLEEP_SECONDS:-5}"
+fi
+if [[ -n "${FAKE_GIT_SLEEP_ON_SUBSTRING:-}" && "$joined" == *"${FAKE_GIT_SLEEP_ON_SUBSTRING}"* ]]; then
   sleep "${FAKE_GIT_SLEEP_SECONDS:-5}"
 fi
 exec "$REAL_GIT" "$@"

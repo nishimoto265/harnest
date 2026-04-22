@@ -27,6 +27,11 @@ var (
 
 var snapshotOpenValidatedRegularFile = OpenValidatedRegularFile
 var snapshotCopyOpenFile = copySnapshotOpenFile
+var writeSuccessDiffFileSync = func(f *os.File) error {
+	return f.Sync()
+}
+var writeSuccessDiffRename = os.Rename
+var writeSuccessDiffSyncDir = syncRescueDir
 
 func SuccessDiffBytes(ctx context.Context, worktreePath, baseSHA, errPrefix string) ([]byte, error) {
 	tempDir, err := os.MkdirTemp("", "auto-improve-diff-*")
@@ -111,10 +116,17 @@ func WriteSuccessDiff(ctx context.Context, worktreePath, baseSHA, errPrefix, des
 			return closeWithErr(fmt.Errorf("%w: worktree=%s entry=%s", ErrSuccessDiffOverflow, worktreePath, entry))
 		}
 	}
+	if err := writeSuccessDiffFileSync(tempFile); err != nil {
+		return closeWithErr(err)
+	}
 	if err := tempFile.Close(); err != nil {
 		return closeWithErr(err)
 	}
-	return os.Rename(tempPath, destPath)
+	if err := writeSuccessDiffRename(tempPath, destPath); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	return writeSuccessDiffSyncDir(filepath.Dir(destPath))
 }
 
 func LoadChecklistArtifact(worktreePath, filename, errPrefix string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {

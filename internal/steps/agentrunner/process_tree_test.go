@@ -75,6 +75,70 @@ func TestKillTrackedPIDs_SkipsRecycledPIDWhenStartTimeDiffers(t *testing.T) {
 	require.Empty(t, killed)
 }
 
+func TestCleanupProcessTree_SkipsRecycledGroupAndSessionButKillsTrackedDescendants(t *testing.T) {
+	originalLookup := lookupProcessStartTime
+	originalGroupKill := killProcessGroupUntilGoneSignal
+	originalGroupMembers := processGroupMembersUntilGoneList
+	originalSessionList := sessionProcessesUntilGoneList
+	originalSessionKill := killSessionProcessesUntilGoneKill
+	originalPIDKill := killPIDSignal
+	t.Cleanup(func() {
+		lookupProcessStartTime = originalLookup
+		killProcessGroupUntilGoneSignal = originalGroupKill
+		processGroupMembersUntilGoneList = originalGroupMembers
+		sessionProcessesUntilGoneList = originalSessionList
+		killSessionProcessesUntilGoneKill = originalSessionKill
+		killPIDSignal = originalPIDKill
+	})
+
+	groupKillCount := 0
+	sessionKillCount := 0
+	var killed []int
+	lookupProcessStartTime = func(pid int) (string, error) {
+		switch pid {
+		case 4242:
+			return "Tue Apr 22 10:00:01 2026", nil
+		case 777:
+			return "Tue Apr 22 09:59:59 2026", nil
+		default:
+			return "", syscall.ESRCH
+		}
+	}
+	killProcessGroupUntilGoneSignal = func(int) error {
+		groupKillCount++
+		return nil
+	}
+	processGroupMembersUntilGoneList = func(int) ([]int, error) {
+		return []int{9001}, nil
+	}
+	sessionProcessesUntilGoneList = func(int) ([]int, error) {
+		return []int{9002}, nil
+	}
+	killSessionProcessesUntilGoneKill = func([]int) error {
+		sessionKillCount++
+		return nil
+	}
+	killPIDSignal = func(pid int, sig syscall.Signal) error {
+		killed = append(killed, pid)
+		return nil
+	}
+
+	tracker := &DescendantTracker{
+		seen: map[int]string{
+			777: "Tue Apr 22 09:59:59 2026",
+		},
+	}
+	err := CleanupProcessTree(ProcessLease{
+		PID:       4242,
+		PGID:      4242,
+		StartTime: "Tue Apr 22 10:00:00 2026",
+	}, 4242, tracker)
+	require.NoError(t, err)
+	require.Zero(t, groupKillCount)
+	require.Zero(t, sessionKillCount)
+	require.Equal(t, []int{777}, killed)
+}
+
 func TestKillSessionProcessesUntilGone_ReturnsTimeoutWhenSurvivorsRemain(t *testing.T) {
 	originalNow := cleanupNow
 	originalSleep := cleanupSleep

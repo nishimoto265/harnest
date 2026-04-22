@@ -2,10 +2,13 @@ package step50_implement
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -73,6 +76,107 @@ func TestPerformRescue_AggregateStorageLimitRemovesPartialRescueDir(t *testing.T
 	var manual *agentrunner.ManualRecoveryRequiredError
 	require.ErrorAs(t, err, &manual)
 	assert.Empty(t, rescueDirEntries(t, agentDir))
+}
+
+func TestResumeIfNeeded_AdoptsExistingRescueAfterCrashBeforeResumeStateSave(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+
+	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	require.NoError(t, saveResumeState(agentDir, resumeState{
+		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
+		StartedAt:       oldTime,
+		Pid:             999999,
+		LeaderStartTime: "stale-start",
+		RetryCount:      0,
+		LastHeartbeat:   oldTime,
+	}))
+	require.NoError(t, touchHeartbeat(agentDir, oldTime))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "dirty.txt"), []byte("dirty\n"), 0o644))
+
+	rescueDir := filepath.Join(agentDir, rescuedDirName, "existing-rescue")
+	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
+	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
+		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
+		RescuedHeadSHA:  allocation.BaseSHA,
+		RetryCount:      1,
+		CommitCount:     0,
+		BundleMode:      agentrunner.RescueBundleModeNone,
+		CreatedAt:       time.Now().UTC(),
+		Artifacts:       []agentrunner.RescueArtifactDigest{},
+	}))
+
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) { return nil, nil }
+	t.Cleanup(func() {
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+	})
+
+	step := newStep(env.run.Config, stepOptions{now: time.Now, heartbeatInterval: 10 * time.Millisecond, staleAfter: time.Second})
+	retryCount, err := step.resumeIfNeeded(context.Background(), env.run, allocation, agentDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, retryCount)
+	assert.NoFileExists(t, filepath.Join(allocation.Path, "dirty.txt"))
+
+	state, ok, err := loadResumeState(agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Zero(t, state.Pid)
+	assert.Equal(t, 1, state.RetryCount)
+	assert.Len(t, rescueDirEntries(t, agentDir), 1)
+}
+
+func TestEnsureRescueLeaseQuiesced_PreservesTimeoutSentinel(t *testing.T) {
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	originalKillPID := rescueKillPID
+	originalSleep := rescueSleep
+	originalMaxWait := rescueQuiesceMaxWait
+	originalInterval := rescueQuiesceInterval
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) { return []int{424242}, nil }
+	rescueKillPID = func(int, syscall.Signal) error { return nil }
+	rescueSleep = func(time.Duration) {}
+	rescueQuiesceMaxWait = time.Nanosecond
+	rescueQuiesceInterval = 0
+	t.Cleanup(func() {
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+		rescueKillPID = originalKillPID
+		rescueSleep = originalSleep
+		rescueQuiesceMaxWait = originalMaxWait
+		rescueQuiesceInterval = originalInterval
+	})
+
+	err := ensureRescueLeaseQuiesced(context.Background(), t.TempDir(), resumeState{
+		Pid:             999999,
+		LeaderStartTime: "stale-start",
+	})
+	require.Error(t, err)
+	var manual *agentrunner.ManualRecoveryRequiredError
+	require.ErrorAs(t, err, &manual)
+	assert.True(t, errors.Is(err, agentrunner.ErrRescueLeaseQuiesceTimedOut))
+}
+
+func TestWriteIgnoredList_QuotesIgnoredFilenamesWithNewlines(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+
+	ignoredName := "ignored\nfile.txt"
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ".gitignore"), []byte("ignored*file.txt\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ignoredName), []byte("secret\n"), 0o644))
+
+	dest := filepath.Join(t.TempDir(), "ignored.txt")
+	require.NoError(t, writeIgnoredList(context.Background(), allocation.Path, dest))
+
+	data, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	require.Len(t, lines, 1)
+	unquoted, err := strconv.Unquote(lines[0])
+	require.NoError(t, err)
+	assert.Equal(t, ignoredName, unquoted)
 }
 
 func staleResumeState(baseSHA string) resumeState {

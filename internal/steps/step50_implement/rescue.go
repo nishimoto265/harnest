@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -130,110 +131,116 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 			Detail: fmt.Sprintf("step50: rescue aborted because worktree branch drifted: got=%q want=%q", currentBranch, allocation.Branch),
 		}
 	}
-	rescueID := fmt.Sprintf("%s-%s-rescue-%d-%d", filepath.Base(run.IO.RunDir()), run.Agent, state.RetryCount+1, s.now().UTC().Unix())
-	rescueDir := filepath.Join(agentDir, rescuedDirName, rescueID)
-	if err := ensureDir(filepath.Join(rescueDir, "untracked")); err != nil {
-		return 0, err
-	}
-	rescueStateVerified := false
-	defer func() {
-		if !rescueStateVerified {
-			_ = os.RemoveAll(rescueDir)
-		}
-	}()
-	budget := agentrunner.NewRescueArtifactBudget()
-
-	headSHA, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
-	if err != nil {
-		return 0, err
-	}
-	artifacts := make([]rescueArtifactDigest, 0, 8)
-
-	commitCount, bundleMode, err := writeCommitBundle(ctx, allocation.Path, rescueDir, state.ExpectedBaseSHA)
-	if err != nil {
-		return 0, err
-	}
-	if digest, err := fileDigest(filepath.Join(rescueDir, "commits.bundle")); err == nil {
-		artifacts = append(artifacts, rescueArtifactDigest{Path: "commits.bundle", SHA256: digest})
-	} else {
-		return 0, err
-	}
-	if err := mapRescueCaptureError("step50", recordRescueArtifact(&budget, filepath.Join(rescueDir, "commits.bundle"), "commits.bundle")); err != nil {
-		return 0, err
-	}
-
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if err := mapRescueCaptureError("step50", writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv")); err != nil {
-		return 0, err
-	}
-	if digest, err := fileDigest(filepath.Join(rescueDir, "tracked.patch")); err == nil {
-		artifacts = append(artifacts, rescueArtifactDigest{Path: "tracked.patch", SHA256: digest})
-	} else {
-		return 0, err
-	}
-	if err := mapRescueCaptureError("step50", recordRescueArtifact(&budget, filepath.Join(rescueDir, "tracked.patch"), "tracked.patch")); err != nil {
-		return 0, err
-	}
-
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if err := mapRescueCaptureError("step50", writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv")); err != nil {
-		return 0, err
-	}
-	if digest, err := fileDigest(filepath.Join(rescueDir, "staged.patch")); err == nil {
-		artifacts = append(artifacts, rescueArtifactDigest{Path: "staged.patch", SHA256: digest})
-	} else {
-		return 0, err
-	}
-	if err := mapRescueCaptureError("step50", recordRescueArtifact(&budget, filepath.Join(rescueDir, "staged.patch"), "staged.patch")); err != nil {
-		return 0, err
-	}
-
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	untrackedArtifacts, err := copyUntrackedFilesWithBudget(ctx, allocation.Path, rescueDir, &budget)
-	if err != nil {
-		return 0, mapRescueCaptureError("step50", err)
-	}
-	artifacts = append(artifacts, untrackedArtifacts...)
-
-	ignoredPath := filepath.Join(rescueDir, "ignored.txt")
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if err := writeIgnoredList(ctx, allocation.Path, ignoredPath); err != nil {
-		return 0, err
-	}
-	if digest, err := fileDigest(ignoredPath); err == nil {
-		artifacts = append(artifacts, rescueArtifactDigest{Path: "ignored.txt", SHA256: digest})
-	} else {
-		return 0, err
-	}
-	if err := mapRescueCaptureError("step50", recordRescueArtifact(&budget, ignoredPath, "ignored.txt")); err != nil {
-		return 0, err
-	}
-
 	nextRetry := state.RetryCount + 1
-	rescueState := rescueStateFile{
-		ExpectedBaseSHA: state.ExpectedBaseSHA,
-		RescuedHeadSHA:  headSHA,
-		RetryCount:      nextRetry,
-		CommitCount:     commitCount,
-		BundleMode:      bundleMode,
-		CreatedAt:       s.now().UTC(),
-		Artifacts:       artifacts,
-	}
-	if err := agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), rescueState); err != nil {
+	rescueDir, adopted, err := findExistingRescueDir(agentDir, state.ExpectedBaseSHA, nextRetry)
+	if err != nil {
 		return 0, err
 	}
-	if err := verifyRescueState(rescueDir); err != nil {
-		return 0, err
+	if !adopted {
+		rescueID := fmt.Sprintf("%s-%s-rescue-%d-%d", filepath.Base(run.IO.RunDir()), run.Agent, nextRetry, s.now().UTC().Unix())
+		rescueDir = filepath.Join(agentDir, rescuedDirName, rescueID)
+		if err := ensureDir(filepath.Join(rescueDir, "untracked")); err != nil {
+			return 0, err
+		}
+		rescueStateVerified := false
+		defer func() {
+			if !rescueStateVerified {
+				_ = os.RemoveAll(rescueDir)
+			}
+		}()
+		budget := agentrunner.NewRescueArtifactBudget()
+
+		headSHA, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
+		if err != nil {
+			return 0, err
+		}
+		artifacts := make([]rescueArtifactDigest, 0, 8)
+
+		commitCount, bundleMode, err := writeCommitBundle(ctx, allocation.Path, rescueDir, state.ExpectedBaseSHA)
+		if err != nil {
+			return 0, err
+		}
+		if digest, err := fileDigest(filepath.Join(rescueDir, "commits.bundle")); err == nil {
+			artifacts = append(artifacts, rescueArtifactDigest{Path: "commits.bundle", SHA256: digest})
+		} else {
+			return 0, err
+		}
+		if err := mapRescueCaptureError("step50", recordRescueArtifact(&budget, filepath.Join(rescueDir, "commits.bundle"), "commits.bundle")); err != nil {
+			return 0, err
+		}
+
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if err := mapRescueCaptureError("step50", writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv")); err != nil {
+			return 0, err
+		}
+		if digest, err := fileDigest(filepath.Join(rescueDir, "tracked.patch")); err == nil {
+			artifacts = append(artifacts, rescueArtifactDigest{Path: "tracked.patch", SHA256: digest})
+		} else {
+			return 0, err
+		}
+		if err := mapRescueCaptureError("step50", recordRescueArtifact(&budget, filepath.Join(rescueDir, "tracked.patch"), "tracked.patch")); err != nil {
+			return 0, err
+		}
+
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if err := mapRescueCaptureError("step50", writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv")); err != nil {
+			return 0, err
+		}
+		if digest, err := fileDigest(filepath.Join(rescueDir, "staged.patch")); err == nil {
+			artifacts = append(artifacts, rescueArtifactDigest{Path: "staged.patch", SHA256: digest})
+		} else {
+			return 0, err
+		}
+		if err := mapRescueCaptureError("step50", recordRescueArtifact(&budget, filepath.Join(rescueDir, "staged.patch"), "staged.patch")); err != nil {
+			return 0, err
+		}
+
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		untrackedArtifacts, err := copyUntrackedFilesWithBudget(ctx, allocation.Path, rescueDir, &budget)
+		if err != nil {
+			return 0, mapRescueCaptureError("step50", err)
+		}
+		artifacts = append(artifacts, untrackedArtifacts...)
+
+		ignoredPath := filepath.Join(rescueDir, "ignored.txt")
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if err := writeIgnoredList(ctx, allocation.Path, ignoredPath); err != nil {
+			return 0, err
+		}
+		if digest, err := fileDigest(ignoredPath); err == nil {
+			artifacts = append(artifacts, rescueArtifactDigest{Path: "ignored.txt", SHA256: digest})
+		} else {
+			return 0, err
+		}
+		if err := mapRescueCaptureError("step50", recordRescueArtifact(&budget, ignoredPath, "ignored.txt")); err != nil {
+			return 0, err
+		}
+
+		rescueState := rescueStateFile{
+			ExpectedBaseSHA: state.ExpectedBaseSHA,
+			RescuedHeadSHA:  headSHA,
+			RetryCount:      nextRetry,
+			CommitCount:     commitCount,
+			BundleMode:      bundleMode,
+			CreatedAt:       s.now().UTC(),
+			Artifacts:       artifacts,
+		}
+		if err := agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), rescueState); err != nil {
+			return 0, err
+		}
+		if err := verifyRescueState(rescueDir); err != nil {
+			return 0, err
+		}
+		rescueStateVerified = true
 	}
-	rescueStateVerified = true
 
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -261,6 +268,47 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		return 0, err
 	}
 	return nextRetry, nil
+}
+
+func findExistingRescueDir(agentDir, expectedBaseSHA string, nextRetry int) (string, bool, error) {
+	rescueRoot := filepath.Join(agentDir, rescuedDirName)
+	entries, err := os.ReadDir(rescueRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+
+	var selectedDir string
+	var selectedState rescueStateFile
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		candidateDir := filepath.Join(rescueRoot, entry.Name())
+		state, err := agentrunner.ReadRescueState(filepath.Join(candidateDir, "state.json"))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", false, err
+		}
+		if state.ExpectedBaseSHA != expectedBaseSHA || state.RetryCount != nextRetry {
+			continue
+		}
+		if err := verifyRescueState(candidateDir); err != nil {
+			continue
+		}
+		if selectedDir == "" || state.CreatedAt.After(selectedState.CreatedAt) {
+			selectedDir = candidateDir
+			selectedState = state
+		}
+	}
+	if selectedDir == "" {
+		return "", false, nil
+	}
+	return selectedDir, true, nil
 }
 
 type rescueLock struct {
@@ -461,11 +509,19 @@ func copyUntrackedFilesWithBudget(ctx context.Context, repoPath, rescueDir strin
 }
 
 func writeIgnoredList(ctx context.Context, repoPath, dest string) error {
-	output, err := gitOutputBytesContext(ctx, repoPath, "ls-files", "--others", "-i", "--exclude-standard")
+	output, err := gitOutputBytesContext(ctx, repoPath, "ls-files", "--others", "-i", "--exclude-standard", "-z")
 	if err != nil {
 		return err
 	}
-	return writeAtomicImpl(dest, output)
+	entries := strings.Split(strings.Trim(string(output), "\x00"), "\x00")
+	lines := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry == "" {
+			continue
+		}
+		lines = append(lines, strconv.Quote(entry))
+	}
+	return writeAtomicImpl(dest, []byte(strings.Join(lines, "\n")))
 }
 
 func fileDigest(path string) (string, error) {
@@ -564,11 +620,13 @@ func ensureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state r
 		return &agentrunner.ManualRecoveryRequiredError{
 			Reason: contracts.RollbackReasonLeaseFailure,
 			Detail: "step50: rescue lease quiesce timed out while worktree remained busy",
+			Err:    err,
 		}
 	case errors.Is(err, agentrunner.ErrRescueLeaseQuiesceEnumerate):
 		return &agentrunner.ManualRecoveryRequiredError{
 			Reason: contracts.RollbackReasonLeaseFailure,
 			Detail: fmt.Sprintf("step50: rescue lease quiesce failed to enumerate worktree processes: %v", err),
+			Err:    err,
 		}
 	default:
 		return err
