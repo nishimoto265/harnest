@@ -132,7 +132,15 @@ func BuildFinalResultFromRaw(
 		return PanelResult{}, err
 	}
 
-	verdict := classifyArbiterVerdict(primaryScores, secondaryScores, arbiterScores, threshold)
+	verdict := classifyArbiterVerdict(
+		primaryScores,
+		secondaryScores,
+		arbiterScores,
+		primaryCompliance,
+		secondaryCompliance,
+		arbiterCompliance,
+		threshold,
+	)
 	return PanelResult{
 		RawScores:       concatRawScores(primaryScores, secondaryScores, arbiterScores),
 		RawCompliance:   concatRawCompliance(primaryCompliance, secondaryCompliance, arbiterCompliance),

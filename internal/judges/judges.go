@@ -25,6 +25,7 @@ const (
 )
 
 var (
+	ErrDefaultRubricUnresolved        = errors.New("judges: default rubric path could not be resolved")
 	ErrUnknownJudgeRole               = errors.New("judges: unknown judge role")
 	ErrJudgeOutputMissingScores       = errors.New("judges: output must contain one score per dimension")
 	ErrJudgeOutputDuplicateScore      = errors.New("judges: output contains duplicate dimension score")

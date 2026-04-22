@@ -107,6 +107,9 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 	if req.TaskPackage == nil {
 		return ErrNoTaskPackage
 	}
+	if req.TaskPackage.RunID != req.RunContext.RunID {
+		return fmt.Errorf("step30_score: task package run_id mismatch: task_package=%s io=%s", req.TaskPackage.RunID, req.RunContext.RunID)
+	}
 
 	paths, err := stepPaths(req.RunContext)
 	if err != nil {
@@ -818,18 +821,9 @@ func (s *Step) resolveRubricPath(runCtx internalio.RunContext) (string, error) {
 	if s.rubricPathFn != nil {
 		return s.rubricPathFn(runCtx)
 	}
-	// Phase 0: use a placeholder rubric path under RunsBase so validation
-	// passes. Rubric loading is tracked in Phase 1.
-	path := filepath.Join(runCtx.RunsBase, ".rubrics", "default.md")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return "", err
-	}
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.WriteFile(path, []byte("# phase0 stub rubric\n"), 0o644); err != nil {
-			return "", err
-		}
-	} else if err != nil {
-		return "", err
+	path, err := judges.DefaultRubricPath()
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrRubricPathUnresolved, err)
 	}
 	return path, nil
 }

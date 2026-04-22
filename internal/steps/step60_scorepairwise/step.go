@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"time"
@@ -162,6 +161,14 @@ func Run(ctx context.Context, in Input) error {
 	if err != nil {
 		return err
 	}
+	pass1ComplianceRuleIDs, err := loadPass1ComplianceRuleIDs(in.IO)
+	if err != nil {
+		return err
+	}
+	fallbackComplianceRuleIDs, err := judges.ExpectedComplianceRuleIDs(in.RubricPath)
+	if err != nil {
+		return err
+	}
 
 	resolvedAt := in.Now().UTC()
 	meta := finalMetadata{
@@ -182,7 +189,8 @@ func Run(ctx context.Context, in Input) error {
 		if err != nil {
 			return fmt.Errorf("step60: hash pass2 output for agent=%s: %w", run.Agent, err)
 		}
-		if result, ok, err := tryReuseRawPanelResult(in.IO, rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion); err != nil {
+		expectedCompliance := expectedComplianceRuleIDsForAgent(run.Agent, pass1ComplianceRuleIDs, rawState.final[run.Agent], fallbackComplianceRuleIDs)
+		if result, ok, err := tryReuseRawPanelResult(in.IO, rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion, expectedCompliance); err != nil {
 			return err
 		} else if ok {
 			agentScores, agentCompliance, err := appendPanelFinals(paths, meta, result)
@@ -352,6 +360,9 @@ func applyDefaults(in Input) (Input, error) {
 	if err := in.TaskPackage.Validate(); err != nil {
 		return Input{}, err
 	}
+	if in.TaskPackage.RunID != in.IO.RunID {
+		return Input{}, fmt.Errorf("step60: task package run_id mismatch: task_package=%s io=%s", in.TaskPackage.RunID, in.IO.RunID)
+	}
 	if in.Now == nil {
 		in.Now = time.Now
 	}
@@ -362,7 +373,11 @@ func applyDefaults(in Input) (Input, error) {
 		in.PromptVersion = "phase0-stub"
 	}
 	if in.RubricPath == "" {
-		in.RubricPath = filepath.Join(in.IO.RunDir(), "rubrics", "default.md")
+		rubricPath, err := judges.DefaultRubricPath()
+		if err != nil {
+			return Input{}, err
+		}
+		in.RubricPath = rubricPath
 	}
 	if err := contracts.EnsureCleanAbsolutePath(in.RubricPath); err != nil {
 		return Input{}, err
@@ -980,13 +995,23 @@ func (s step60RawState) complianceRows(agent contracts.AgentID, role contracts.J
 	return out
 }
 
-func tryReuseRawPanelResult(runIO internalio.RunContext, state step60RawState, agent contracts.AgentID, outputHash, rubricVersion, promptVersion string) (scorecore.PanelResult, bool, error) {
+func tryReuseRawPanelResult(
+	runIO internalio.RunContext,
+	state step60RawState,
+	agent contracts.AgentID,
+	outputHash, rubricVersion, promptVersion string,
+	expectedCompliance map[string]struct{},
+) (scorecore.PanelResult, bool, error) {
 	primaryScores := state.scoreRows(agent, contracts.JudgeRolePrimary)
 	secondaryScores := state.scoreRows(agent, contracts.JudgeRoleSecondary)
 	primaryCompliance := state.complianceRows(agent, contracts.JudgeRolePrimary)
 	secondaryCompliance := state.complianceRows(agent, contracts.JudgeRoleSecondary)
-	expectedCompliance := state.expectedComplianceRuleIDs(agent)
 	if !rawRoleUsable(primaryScores, outputHash, rubricVersion, promptVersion) || !rawRoleUsable(secondaryScores, outputHash, rubricVersion, promptVersion) {
+		return scorecore.PanelResult{}, false, nil
+	}
+	arbiterScores := state.scoreRows(agent, contracts.JudgeRoleArbiter)
+	arbiterCompliance := state.complianceRows(agent, contracts.JudgeRoleArbiter)
+	if len(expectedCompliance) == 0 && (len(primaryCompliance) > 0 || len(secondaryCompliance) > 0 || len(arbiterCompliance) > 0) {
 		return scorecore.PanelResult{}, false, nil
 	}
 	if !rawComplianceUsable(primaryCompliance, expectedCompliance, outputHash, rubricVersion, promptVersion) || !rawComplianceUsable(secondaryCompliance, expectedCompliance, outputHash, rubricVersion, promptVersion) {
@@ -1004,8 +1029,6 @@ func tryReuseRawPanelResult(runIO internalio.RunContext, state step60RawState, a
 	if err := validateRawComplianceOverflowRefs(runIO, secondaryCompliance); err != nil {
 		return scorecore.PanelResult{}, false, nil
 	}
-	arbiterScores := state.scoreRows(agent, contracts.JudgeRoleArbiter)
-	arbiterCompliance := state.complianceRows(agent, contracts.JudgeRoleArbiter)
 	if !rawRoleUsable(arbiterScores, outputHash, rubricVersion, promptVersion) {
 		arbiterScores = nil
 	}
@@ -1093,23 +1116,6 @@ func rawArbiterComplianceUsable(rows []contracts.RawComplianceEntry, outputHash,
 		}
 	}
 	return true
-}
-
-func (s step60RawState) expectedComplianceRuleIDs(agent contracts.AgentID) map[string]struct{} {
-	rules := make(map[string]struct{})
-	for _, role := range []contracts.JudgeRole{
-		contracts.JudgeRolePrimary,
-		contracts.JudgeRoleSecondary,
-		contracts.JudgeRoleArbiter,
-	} {
-		for ruleID := range s.compliance[agent][role] {
-			rules[ruleID] = struct{}{}
-		}
-	}
-	for ruleID := range s.final[agent] {
-		rules[ruleID] = struct{}{}
-	}
-	return rules
 }
 
 func readJSONLOrEmpty[T any](path string) ([]T, error) {
@@ -1322,6 +1328,53 @@ func loadPass1Scores(runIO internalio.RunContext) (map[contracts.AgentID][]contr
 		byAgent[entry.Agent] = append(byAgent[entry.Agent], entry)
 	}
 	return byAgent, nil
+}
+
+func loadPass1ComplianceRuleIDs(runIO internalio.RunContext) (map[contracts.AgentID]map[string]struct{}, error) {
+	path, err := runIO.ResolveRunRelative("30/compliance-A.jsonl")
+	if err != nil {
+		return nil, fmt.Errorf("step60: resolve pass1 compliance path: %w", err)
+	}
+	rows, err := internalio.ReadJSONL[contracts.ComplianceEntry](path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[contracts.AgentID]map[string]struct{}{}, nil
+		}
+		return nil, fmt.Errorf("step60: read pass1 compliance: %w", err)
+	}
+	collapsed := scorecore.CollapseFinalCompliance(rows)
+	byAgent := make(map[contracts.AgentID]map[string]struct{}, len(collapsed))
+	for _, entry := range collapsed {
+		if _, ok := byAgent[entry.Agent]; !ok {
+			byAgent[entry.Agent] = map[string]struct{}{}
+		}
+		byAgent[entry.Agent][entry.RuleID] = struct{}{}
+	}
+	return byAgent, nil
+}
+
+func expectedComplianceRuleIDsForAgent(
+	agent contracts.AgentID,
+	pass1Rules map[contracts.AgentID]map[string]struct{},
+	finalRules map[string]contracts.ComplianceEntry,
+	fallbackRules []string,
+) map[string]struct{} {
+	rules := make(map[string]struct{})
+	for ruleID := range pass1Rules[agent] {
+		rules[ruleID] = struct{}{}
+	}
+	for ruleID := range finalRules {
+		rules[ruleID] = struct{}{}
+	}
+	if len(rules) == 0 {
+		for _, ruleID := range fallbackRules {
+			rules[ruleID] = struct{}{}
+		}
+	}
+	if len(rules) == 0 {
+		return nil
+	}
+	return rules
 }
 
 func resolvePass1AverageTenths(runIO internalio.RunContext, agent contracts.AgentID, scores []contracts.ScoreEntry) (int, error) {

@@ -186,7 +186,15 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 		return PanelResult{}, err
 	}
 
-	verdict := classifyArbiterVerdict(primaryRaw, secondaryRaw, arbiterRaw, in.DisagreementThreshold)
+	verdict := classifyArbiterVerdict(
+		primaryRaw,
+		secondaryRaw,
+		arbiterRaw,
+		primaryRawCompliance,
+		secondaryRawCompliance,
+		arbiterRawCompliance,
+		in.DisagreementThreshold,
+	)
 
 	result := PanelResult{
 		RawScores:       concatRawScores(primaryRaw, secondaryRaw, arbiterRaw),
@@ -299,10 +307,24 @@ func anyDimensionDisagrees(primary, secondary []contracts.RawScoreEntry, thresho
 }
 
 // classifyArbiterVerdict decides between arbitrated and arbiter_overruled.
-// "arbiter_overruled" means the arbiter is decisively different from BOTH
-// primary AND secondary (per any single dimension exceeds 2*threshold) — the
-// arbiter actively overrode the panel rather than siding with either.
-func classifyArbiterVerdict(primary, secondary, arbiter []contracts.RawScoreEntry, threshold int) contracts.VerdictPath {
+// The shared verdict is marked as arbiter_overruled when either score or
+// compliance resolution picks a third path that differs from both panel votes.
+func classifyArbiterVerdict(
+	primaryScores, secondaryScores, arbiterScores []contracts.RawScoreEntry,
+	primaryCompliance, secondaryCompliance, arbiterCompliance []contracts.RawComplianceEntry,
+	threshold int,
+) contracts.VerdictPath {
+	scoreVerdict := classifyScoreArbiterVerdict(primaryScores, secondaryScores, arbiterScores, threshold)
+	complianceVerdict := classifyComplianceArbiterVerdict(primaryCompliance, secondaryCompliance, arbiterCompliance)
+	if scoreVerdict == contracts.VerdictPathArbiterOverruled || complianceVerdict == contracts.VerdictPathArbiterOverruled {
+		return contracts.VerdictPathArbiterOverruled
+	}
+	return contracts.VerdictPathArbitrated
+}
+
+// classifyScoreArbiterVerdict marks arbiter_overruled when the arbiter is
+// decisively different from both panel scores across every dimension.
+func classifyScoreArbiterVerdict(primary, secondary, arbiter []contracts.RawScoreEntry, threshold int) contracts.VerdictPath {
 	primByDim := map[contracts.Dimension]int{}
 	for _, p := range primary {
 		primByDim[p.Dimension] = p.Score
@@ -323,6 +345,33 @@ func classifyArbiterVerdict(primary, secondary, arbiter []contracts.RawScoreEntr
 	}
 	if overruledAll && len(arbiter) > 0 {
 		return contracts.VerdictPathArbiterOverruled
+	}
+	return contracts.VerdictPathArbitrated
+}
+
+func classifyComplianceArbiterVerdict(
+	primary, secondary, arbiter []contracts.RawComplianceEntry,
+) contracts.VerdictPath {
+	if len(arbiter) == 0 {
+		return contracts.VerdictPathArbitrated
+	}
+	primaryByRule := make(map[string]contracts.ComplianceVerdict, len(primary))
+	for _, row := range primary {
+		primaryByRule[row.RuleID] = row.Verdict
+	}
+	secondaryByRule := make(map[string]contracts.ComplianceVerdict, len(secondary))
+	for _, row := range secondary {
+		secondaryByRule[row.RuleID] = row.Verdict
+	}
+	for _, row := range arbiter {
+		primaryVerdict, primaryOK := primaryByRule[row.RuleID]
+		secondaryVerdict, secondaryOK := secondaryByRule[row.RuleID]
+		if !primaryOK || !secondaryOK {
+			continue
+		}
+		if row.Verdict != primaryVerdict && row.Verdict != secondaryVerdict {
+			return contracts.VerdictPathArbiterOverruled
+		}
 	}
 	return contracts.VerdictPathArbitrated
 }

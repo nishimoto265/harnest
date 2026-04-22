@@ -69,7 +69,7 @@ func Run(ctx context.Context, cfg Config) (*contracts.Candidates, error) {
 	}
 
 	createdAt := cfg.now()
-	built, err := buildCandidates(cfg.IO.RunID, createdAt, scores, compliance, registry, filepath.Dir(cfg.registryPath()))
+	built, err := buildCandidates(cfg.IO, createdAt, scores, compliance, registry, filepath.Dir(cfg.registryPath()))
 	if err != nil {
 		return nil, err
 	}
@@ -232,15 +232,17 @@ func currentPass1ScorableAgents(runIO internalio.RunContext, pkg *contracts.Task
 	return agents, manifestCount > 0, nil
 }
 
-func buildCandidates(runID contracts.RunID, now time.Time, scores []contracts.ScoreEntry, compliance []contracts.ComplianceEntry, registry []contracts.RuleRegistryEntry, registryBase string) ([]builtCandidate, error) {
-	if len(compliance) == 0 {
+func buildCandidates(runIO internalio.RunContext, now time.Time, scores []contracts.ScoreEntry, compliance []contracts.ComplianceEntry, registry []contracts.RuleRegistryEntry, registryBase string) ([]builtCandidate, error) {
+	latestScores := scorecore.CollapseFinalScores(scores)
+	latestCompliance := scorecore.CollapseFinalCompliance(compliance)
+	if len(latestCompliance) == 0 {
 		return []builtCandidate{}, nil
 	}
-	if len(scores) == 0 {
+	if len(latestScores) == 0 {
 		return nil, errors.New("step40_classify: missing or incomplete step30 inputs")
 	}
 
-	violations := collectViolations(compliance)
+	violations := collectViolations(latestCompliance)
 	if len(violations) == 0 {
 		return []builtCandidate{}, nil
 	}
@@ -253,7 +255,6 @@ func buildCandidates(runID contracts.RunID, now time.Time, scores []contracts.Sc
 	if err != nil {
 		return nil, err
 	}
-	scoreEvidence := collectScoreEvidence(scores)
 	ruleIDs := make([]string, 0, len(violations))
 	for ruleID := range violations {
 		ruleIDs = append(ruleIDs, ruleID)
@@ -262,8 +263,11 @@ func buildCandidates(runID contracts.RunID, now time.Time, scores []contracts.Sc
 
 	candidates := make([]builtCandidate, 0, len(ruleIDs))
 	for idx, ruleID := range ruleIDs {
-		evidence := collectCandidateEvidence(ruleID, compliance, scoreEvidence)
-		candidate, ok, err := buildCandidate(runID, now, idx+1, ruleID, violations[ruleID], activeRules[ruleID], activeRuleBodies, evidence)
+		evidence, err := collectCandidateEvidence(runIO, ruleID, latestCompliance, latestScores)
+		if err != nil {
+			return nil, err
+		}
+		candidate, ok, err := buildCandidate(runIO.RunID, now, idx+1, ruleID, violations[ruleID], activeRules[ruleID], activeRuleBodies, evidence)
 		if err != nil {
 			return nil, err
 		}
@@ -420,13 +424,19 @@ func bestDuplicateMatch(candidateBody string, activeRuleBodies map[string]string
 	if strings.TrimSpace(normalizedCandidate) == "" {
 		return "", 0
 	}
-	for ruleID, body := range activeRuleBodies {
+	ruleIDs := make([]string, 0, len(activeRuleBodies))
+	for ruleID := range activeRuleBodies {
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	sort.Strings(ruleIDs)
+	for _, ruleID := range ruleIDs {
+		body := activeRuleBodies[ruleID]
 		normalizedBody := normalizeRuleContent(body)
 		if strings.TrimSpace(normalizedBody) == "" {
 			continue
 		}
 		score := tokenSetSimilarity(normalizedCandidate, normalizedBody)
-		if score > bestScore {
+		if score > bestScore || (score == bestScore && score > 0 && (bestRuleID == "" || ruleID < bestRuleID)) {
 			bestRuleID = ruleID
 			bestScore = score
 		}
@@ -544,17 +554,22 @@ func writeCandidateBodies(runIO internalio.RunContext, candidates []builtCandida
 	return nil
 }
 
-func collectCandidateEvidence(ruleID string, compliance []contracts.ComplianceEntry, scoreEvidence []string) candidateEvidence {
+func collectCandidateEvidence(runIO internalio.RunContext, ruleID string, compliance []contracts.ComplianceEntry, scores []contracts.ScoreEntry) (candidateEvidence, error) {
 	evidence := candidateEvidence{
 		Compliance: make([]string, 0, 3),
 		Scores:     make([]string, 0, 2),
 	}
 	seenCompliance := map[string]struct{}{}
+	matchingAgents := make(map[contracts.AgentID]struct{})
 	for _, entry := range compliance {
 		if entry.RuleID != ruleID || !isViolationVerdict(entry.Verdict) {
 			continue
 		}
-		text, ok := substantiveEvidenceText(entry.Rationale)
+		matchingAgents[entry.Agent] = struct{}{}
+		text, ok, err := substantiveEvidenceText(runIO, entry.Rationale, entry.RationaleOverflowRef)
+		if err != nil {
+			return candidateEvidence{}, err
+		}
 		if !ok {
 			continue
 		}
@@ -567,20 +582,32 @@ func collectCandidateEvidence(ruleID string, compliance []contracts.ComplianceEn
 			break
 		}
 	}
+	scoreEvidence, err := collectScoreEvidence(runIO, scores, matchingAgents)
+	if err != nil {
+		return candidateEvidence{}, err
+	}
 	for _, line := range scoreEvidence {
 		evidence.Scores = append(evidence.Scores, line)
 		if len(evidence.Scores) == 2 {
 			break
 		}
 	}
-	return evidence
+	return evidence, nil
 }
 
-func collectScoreEvidence(scores []contracts.ScoreEntry) []string {
+func collectScoreEvidence(runIO internalio.RunContext, scores []contracts.ScoreEntry, matchingAgents map[contracts.AgentID]struct{}) ([]string, error) {
 	lines := make([]string, 0, len(scores))
 	seen := map[string]struct{}{}
 	for _, score := range scores {
-		text, ok := substantiveEvidenceText(score.Reasons)
+		if len(matchingAgents) > 0 {
+			if _, ok := matchingAgents[score.Agent]; !ok {
+				continue
+			}
+		}
+		text, ok, err := substantiveEvidenceText(runIO, score.Reasons, score.ReasonsOverflowRef)
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			continue
 		}
@@ -592,27 +619,38 @@ func collectScoreEvidence(scores []contracts.ScoreEntry) []string {
 		lines = append(lines, line)
 	}
 	sort.Strings(lines)
-	return lines
+	return lines, nil
 }
 
-func substantiveEvidenceText(value string) (string, bool) {
-	trimmed := strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+func substantiveEvidenceText(runIO internalio.RunContext, value string, overflow *contracts.OverflowRef) (string, bool, error) {
+	trimmed := normalizeEvidenceText(value)
+	if trimmed == "" && overflow != nil {
+		sidecar, err := internalio.ReadSidecar(runIO, *overflow)
+		if err != nil {
+			return "", false, err
+		}
+		trimmed = normalizeEvidenceText(sidecar)
+	}
 	if trimmed == "" {
-		return "", false
+		return "", false, nil
 	}
 	lower := strings.ToLower(trimmed)
 	switch {
 	case strings.HasPrefix(lower, "stub "):
-		return "", false
+		return "", false, nil
 	case strings.Contains(lower, "placeholder"):
-		return "", false
+		return "", false, nil
 	case strings.HasPrefix(lower, "todo"):
-		return "", false
+		return "", false, nil
 	case strings.HasPrefix(lower, "phase 0 deterministic classify"):
-		return "", false
+		return "", false, nil
 	default:
-		return trimmed, true
+		return trimmed, true, nil
 	}
+}
+
+func normalizeEvidenceText(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
 }
 
 func candidateRationale(ruleID string, evidence candidateEvidence) string {
