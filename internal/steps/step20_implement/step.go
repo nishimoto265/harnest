@@ -456,11 +456,23 @@ func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeA
 }
 
 func ensureAllocationWorktree(ctx context.Context, cfg *config.Config, allocation contracts.WorktreeAllocation) error {
-	info, err := os.Stat(allocation.Path)
+	// No-follow Lstat at use time (not just at step10 validation). A symlink
+	// could have been swapped in between ValidateWorktreeAllocation and now;
+	// os.Stat would follow it and accept an arbitrary target directory.
+	if err := internalio.EnsureNoSymlinkPathComponents(allocation.Path); err != nil {
+		return fmt.Errorf("step20: worktree path rejected: %w", err)
+	}
+	info, err := os.Lstat(allocation.Path)
 	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("step20: worktree path is a symlink: %s", allocation.Path)
+		}
 		if !info.IsDir() {
 			return fmt.Errorf("step20: worktree path is not a directory: %s", allocation.Path)
 		}
+		// Existing worktree: HEAD may legitimately have advanced via a prior
+		// successful attempt. Trust the on-disk state; BaseSHA / HeadSHA
+		// verification happens downstream in rescue / diff flows.
 		return nil
 	}
 	if !os.IsNotExist(err) {
@@ -469,28 +481,53 @@ func ensureAllocationWorktree(ctx context.Context, cfg *config.Config, allocatio
 	if cfg == nil {
 		return errors.New("step20: config is required to recreate missing worktree")
 	}
+	if allocation.HeadSHA == "" {
+		return errors.New("step20: cannot recreate worktree without immutable head_sha")
+	}
 	repoRoot, err := cfg.RepoRoot()
 	if err != nil {
 		return err
 	}
-	if err := ensureDir(filepath.Dir(allocation.Path)); err != nil {
+	parent := filepath.Dir(allocation.Path)
+	if err := internalio.EnsureNoSymlinkPathComponents(parent); err != nil {
+		return fmt.Errorf("step20: worktree parent rejected: %w", err)
+	}
+	if err := ensureDir(parent); err != nil {
 		return err
 	}
 	if _, err := gitOutputContext(ctx, identity, repoRoot, "worktree", "prune"); err != nil {
 		return err
 	}
-	if _, err := gitOutputContext(ctx, identity, repoRoot, "worktree", "add", allocation.Path, allocation.Branch); err != nil {
-		detail := err.Error()
-		switch {
-		case strings.Contains(detail, "invalid reference"),
-			strings.Contains(detail, "not a valid object name"),
-			strings.Contains(detail, "unknown revision"):
-			if _, addErr := gitOutputContext(ctx, identity, repoRoot, "worktree", "add", "-b", allocation.Branch, allocation.Path, "HEAD"); addErr != nil {
-				return addErr
-			}
-		default:
-			return err
-		}
+	// Pin the recreated worktree to the immutable HeadSHA recorded in the
+	// task package rather than trusting the current tip of allocation.Branch
+	// (the branch may have advanced via a prior attempt / manual edit, which
+	// would break the BaseSHA-anchored rescue/diff invariant). `-B` forces
+	// the branch to point at HeadSHA; combined with an explicit commit ref
+	// this is a fresh checkout of the recorded immutable state.
+	if _, err := gitOutputContext(ctx, identity, repoRoot,
+		"worktree", "add", "-B", allocation.Branch, allocation.Path, allocation.HeadSHA); err != nil {
+		return err
+	}
+	// Re-check symlink components after creation: refuse to continue if the
+	// freshly created path or any ancestor was swapped to a symlink mid-setup.
+	if err := internalio.EnsureNoSymlinkPathComponents(allocation.Path); err != nil {
+		return fmt.Errorf("step20: worktree path swapped after create: %w", err)
+	}
+	return verifyAllocationHead(ctx, allocation)
+}
+
+// verifyAllocationHead refuses to continue if the worktree's HEAD does not
+// match the immutable allocation.HeadSHA recorded in the task package.
+func verifyAllocationHead(ctx context.Context, allocation contracts.WorktreeAllocation) error {
+	if allocation.HeadSHA == "" {
+		return nil
+	}
+	head, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("step20: rev-parse HEAD for allocation %s: %w", allocation.Path, err)
+	}
+	if head != allocation.HeadSHA {
+		return fmt.Errorf("step20: allocation HEAD mismatch: path=%s want=%s got=%s", allocation.Path, allocation.HeadSHA, head)
 	}
 	return nil
 }
