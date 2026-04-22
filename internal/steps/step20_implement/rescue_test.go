@@ -51,6 +51,7 @@ func TestPerformRescue_AggregateStorageLimitRequiresManualRecovery(t *testing.T)
 		require.NoError(t, file.Truncate(10<<20))
 		require.NoError(t, file.Close())
 	}
+	stubQuiescentRescueWorktree(t)
 
 	_, err = fx.step.performRescue(context.Background(), fx.run, allocation, fx.agentDir, staleResumeState(fx.baseSHA))
 	require.Error(t, err)
