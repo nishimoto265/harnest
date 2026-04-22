@@ -143,10 +143,10 @@ func processLeaseAlive(pid, expectedPGID int, expectedStartTime string) bool {
 	if !pidAlive(pid) {
 		return false
 	}
+	if expectedStartTime == "" {
+		return false
+	}
 	if expectedPGID <= 0 {
-		if expectedStartTime == "" {
-			return true
-		}
 		actualStartTime, err := lookupLeaseStartTime(pid)
 		if err != nil {
 			return !errors.Is(err, syscall.ESRCH)
@@ -159,9 +159,6 @@ func processLeaseAlive(pid, expectedPGID int, expectedStartTime string) bool {
 	}
 	if actualPGID != expectedPGID {
 		return false
-	}
-	if expectedStartTime == "" {
-		return true
 	}
 	actualStartTime, err := lookupLeaseStartTime(pid)
 	if err != nil {
@@ -195,8 +192,27 @@ func (s resumeState) Validate() error {
 	if s.Pid < 0 {
 		return errors.New("step20: resume state: pid must be >= 0")
 	}
+	if s.LeaderStartTime == "" {
+		return errors.New("step20: resume state: active lease requires leader_start_time")
+	}
 	if s.StartedAt.IsZero() || s.LastHeartbeat.IsZero() {
 		return errors.New("step20: resume state: active lease requires started_at and last_heartbeat")
 	}
 	return nil
+}
+
+func clearActiveLease(agentDir string) error {
+	state, ok, err := loadResumeState(agentDir)
+	if err != nil || !ok {
+		return err
+	}
+	state.StartedAt = time.Time{}
+	state.LastHeartbeat = time.Time{}
+	state.Pid = 0
+	state.Pgid = 0
+	state.LeaderStartTime = ""
+	if err := os.Remove(heartbeatPath(agentDir)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return saveResumeState(agentDir, state)
 }

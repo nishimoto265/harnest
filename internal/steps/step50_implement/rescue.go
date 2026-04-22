@@ -135,6 +135,13 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := ensureDir(filepath.Join(rescueDir, "untracked")); err != nil {
 		return 0, err
 	}
+	rescueStateVerified := false
+	defer func() {
+		if !rescueStateVerified {
+			_ = os.RemoveAll(rescueDir)
+		}
+	}()
+	budget := agentrunner.NewRescueArtifactBudget()
 
 	headSHA, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
@@ -151,11 +158,14 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	} else {
 		return 0, err
 	}
+	if err := mapRescueCaptureError("step50", recordRescueArtifact(&budget, filepath.Join(rescueDir, "commits.bundle"), "commits.bundle")); err != nil {
+		return 0, err
+	}
 
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv"); err != nil {
+	if err := mapRescueCaptureError("step50", writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv")); err != nil {
 		return 0, err
 	}
 	if digest, err := fileDigest(filepath.Join(rescueDir, "tracked.patch")); err == nil {
@@ -163,11 +173,14 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	} else {
 		return 0, err
 	}
+	if err := mapRescueCaptureError("step50", recordRescueArtifact(&budget, filepath.Join(rescueDir, "tracked.patch"), "tracked.patch")); err != nil {
+		return 0, err
+	}
 
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"); err != nil {
+	if err := mapRescueCaptureError("step50", writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv")); err != nil {
 		return 0, err
 	}
 	if digest, err := fileDigest(filepath.Join(rescueDir, "staged.patch")); err == nil {
@@ -175,13 +188,16 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	} else {
 		return 0, err
 	}
+	if err := mapRescueCaptureError("step50", recordRescueArtifact(&budget, filepath.Join(rescueDir, "staged.patch"), "staged.patch")); err != nil {
+		return 0, err
+	}
 
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	untrackedArtifacts, err := copyUntrackedFiles(ctx, allocation.Path, rescueDir)
+	untrackedArtifacts, err := copyUntrackedFilesWithBudget(ctx, allocation.Path, rescueDir, &budget)
 	if err != nil {
-		return 0, err
+		return 0, mapRescueCaptureError("step50", err)
 	}
 	artifacts = append(artifacts, untrackedArtifacts...)
 
@@ -195,6 +211,9 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if digest, err := fileDigest(ignoredPath); err == nil {
 		artifacts = append(artifacts, rescueArtifactDigest{Path: "ignored.txt", SHA256: digest})
 	} else {
+		return 0, err
+	}
+	if err := mapRescueCaptureError("step50", recordRescueArtifact(&budget, ignoredPath, "ignored.txt")); err != nil {
 		return 0, err
 	}
 
@@ -214,6 +233,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := verifyRescueState(rescueDir); err != nil {
 		return 0, err
 	}
+	rescueStateVerified = true
 
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -353,14 +373,16 @@ func gitOutputContext(ctx context.Context, mapFn func(string) string, dir string
 }
 
 func writeGitOutputContext(ctx context.Context, dir, dest string, args ...string) error {
-	output, err := gitOutputBytesContext(ctx, dir, args...)
-	if err != nil {
-		return err
-	}
-	return writeAtomicImpl(dest, output)
+	_, err := agentrunner.StreamGitOutputWithLimit(ctx, dir, "step50", dest, agentrunner.RescueDiffLimitBytes, args...)
+	return err
 }
 
 func copyUntrackedFiles(ctx context.Context, repoPath, rescueDir string) ([]rescueArtifactDigest, error) {
+	budget := agentrunner.NewRescueArtifactBudget()
+	return copyUntrackedFilesWithBudget(ctx, repoPath, rescueDir, &budget)
+}
+
+func copyUntrackedFilesWithBudget(ctx context.Context, repoPath, rescueDir string, budget *agentrunner.RescueArtifactBudget) ([]rescueArtifactDigest, error) {
 	output, err := gitOutputBytesContext(ctx, repoPath, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return nil, err
@@ -403,6 +425,10 @@ func copyUntrackedFiles(ctx context.Context, repoPath, rescueDir string) ([]resc
 			skipLog = append(skipLog, fmt.Sprintf("skipped_too_large:%s:%d", cleaned, size))
 			continue
 		}
+		if err := budget.RecordFile(filepath.ToSlash(filepath.Join("untracked", cleaned)), size); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
 		if err := ensureDir(filepath.Dir(dst)); err != nil {
 			_ = file.Close()
 			return nil, err
@@ -421,6 +447,9 @@ func copyUntrackedFiles(ctx context.Context, repoPath, rescueDir string) ([]resc
 	}
 	symlinkPath := filepath.Join(rescueDir, "untracked-symlinks.txt")
 	if err := writeAtomicImpl(symlinkPath, []byte(strings.Join(skipLog, "\n"))); err != nil {
+		return nil, err
+	}
+	if err := recordRescueArtifact(budget, symlinkPath, "untracked-symlinks.txt"); err != nil {
 		return nil, err
 	}
 	digest, err := fileDigest(symlinkPath)
@@ -567,4 +596,28 @@ func shouldKillSavedProcessGroup(state resumeState) bool {
 
 func parsePIDList(output string) []int {
 	return agentrunner.ParsePIDList(output)
+}
+
+func recordRescueArtifact(budget *agentrunner.RescueArtifactBudget, path, logicalPath string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	return budget.RecordFile(logicalPath, info.Size())
+}
+
+func mapRescueCaptureError(step string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, agentrunner.ErrRescueDiffOverLimit) || errors.Is(err, agentrunner.ErrRescueStorageOverLimit) {
+		return errors.Join(
+			&agentrunner.ManualRecoveryRequiredError{
+				Reason: contracts.RollbackReasonLeaseFailure,
+				Detail: fmt.Sprintf("%s: rescue capture exceeded storage limits: %v", step, err),
+			},
+			err,
+		)
+	}
+	return err
 }

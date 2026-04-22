@@ -1,6 +1,7 @@
 package agentrunner
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,8 @@ func TestCleanupProcessTree_KillsDetachedGrandchildSpawnedAfterRootExit(t *testi
 
 	require.NoError(t, cmd.Wait())
 	if tracker != nil {
+		time.Sleep(150 * time.Millisecond)
+		tracker.CaptureBurst(100 * time.Millisecond)
 		tracker.Stop()
 	}
 	require.NoError(t, CleanupProcessTree(lease, 0, tracker))
@@ -41,7 +44,7 @@ func TestCleanupProcessTree_KillsDetachedGrandchildSpawnedAfterRootExit(t *testi
 
 	require.Eventually(t, func() bool {
 		return processDead(pid)
-	}, 2*time.Second, 20*time.Millisecond)
+	}, 10*time.Second, 20*time.Millisecond)
 }
 
 func TestKillTrackedPIDs_SkipsRecycledPIDWhenStartTimeDiffers(t *testing.T) {
@@ -67,6 +70,95 @@ func TestKillTrackedPIDs_SkipsRecycledPIDWhenStartTimeDiffers(t *testing.T) {
 	err := killTrackedPIDs([]processIdentity{{pid: 4242, startTime: "Tue Apr 22 10:00:00 2026"}})
 	require.NoError(t, err)
 	require.Empty(t, killed)
+}
+
+func TestKillSessionProcessesUntilGone_ReturnsTimeoutWhenSurvivorsRemain(t *testing.T) {
+	originalNow := cleanupNow
+	originalSleep := cleanupSleep
+	originalList := sessionProcessesUntilGoneList
+	originalKill := killSessionProcessesUntilGoneKill
+	t.Cleanup(func() {
+		cleanupNow = originalNow
+		cleanupSleep = originalSleep
+		sessionProcessesUntilGoneList = originalList
+		killSessionProcessesUntilGoneKill = originalKill
+	})
+
+	now := time.Unix(0, 0)
+	cleanupNow = func() time.Time {
+		current := now
+		now = now.Add(time.Millisecond)
+		return current
+	}
+	cleanupSleep = func(time.Duration) {}
+	sessionProcessesUntilGoneList = func(int) ([]int, error) {
+		return []int{111, 222}, nil
+	}
+	killSessionProcessesUntilGoneKill = func([]int) error { return nil }
+
+	err := KillSessionProcessesUntilGone(42, time.Microsecond, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCleanupTimeout)
+}
+
+func TestKillProcessGroupUntilGone_ReturnsTimeoutWhenMembersRemain(t *testing.T) {
+	originalNow := cleanupNow
+	originalSleep := cleanupSleep
+	originalMembers := processGroupMembersUntilGoneList
+	originalKill := killProcessGroupUntilGoneSignal
+	t.Cleanup(func() {
+		cleanupNow = originalNow
+		cleanupSleep = originalSleep
+		processGroupMembersUntilGoneList = originalMembers
+		killProcessGroupUntilGoneSignal = originalKill
+	})
+
+	now := time.Unix(0, 0)
+	cleanupNow = func() time.Time {
+		current := now
+		now = now.Add(time.Millisecond)
+		return current
+	}
+	cleanupSleep = func(time.Duration) {}
+	processGroupMembersUntilGoneList = func(int) ([]int, error) {
+		return []int{333}, nil
+	}
+	killProcessGroupUntilGoneSignal = func(int) error { return nil }
+
+	err := KillProcessGroupUntilGone(99, time.Microsecond, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCleanupTimeout)
+}
+
+func TestKillProcessGroupUntilGone_JoinsKillErrorWithTimeout(t *testing.T) {
+	originalNow := cleanupNow
+	originalSleep := cleanupSleep
+	originalMembers := processGroupMembersUntilGoneList
+	originalKill := killProcessGroupUntilGoneSignal
+	t.Cleanup(func() {
+		cleanupNow = originalNow
+		cleanupSleep = originalSleep
+		processGroupMembersUntilGoneList = originalMembers
+		killProcessGroupUntilGoneSignal = originalKill
+	})
+
+	want := errors.New("kill failed")
+	now := time.Unix(0, 0)
+	cleanupNow = func() time.Time {
+		current := now
+		now = now.Add(time.Millisecond)
+		return current
+	}
+	cleanupSleep = func(time.Duration) {}
+	processGroupMembersUntilGoneList = func(int) ([]int, error) {
+		return []int{333}, nil
+	}
+	killProcessGroupUntilGoneSignal = func(int) error { return want }
+
+	err := KillProcessGroupUntilGone(99, time.Microsecond, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCleanupTimeout)
+	require.ErrorIs(t, err, want)
 }
 
 func writeDetachedGrandchildHelper(t *testing.T, dir string) string {

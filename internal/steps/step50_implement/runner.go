@@ -39,6 +39,7 @@ type runnerResult struct {
 	StartedAt     time.Time
 	FinishedAt    time.Time
 	Lease         agentrunner.ProcessLease
+	CleanupErr    error
 }
 
 type commandRunner struct {
@@ -98,9 +99,9 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 				tracker.Stop()
 				defer func() { tracker = nil }()
 			}
-			_ = cleanupProcessTree(lease, lease.PID, tracker)
+			cleanupErr := cleanupProcessTree(lease, lease.PID, tracker)
 			_ = cmd.Wait()
-			return runnerResult{}, err
+			return runnerResult{}, errors.Join(err, cleanupErr)
 		}
 	}
 
@@ -119,7 +120,7 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 		tracker.CaptureBurst(25 * time.Millisecond)
 		tracker.Stop()
 	}
-	_ = cleanupProcessTree(lease, lease.PID, tracker)
+	result.CleanupErr = cleanupProcessTree(lease, lease.PID, tracker)
 	result.FinishedAt = r.now().UTC()
 	result.StdoutSnippet = stdoutTail.Bytes()
 	result.StderrSnippet = stderrTail.Bytes()
