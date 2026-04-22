@@ -781,6 +781,103 @@ func TestMarkManualRecoveryWithDetail_ParksIntentionAtNeedsManualRecoveryWhenSen
 	assert.False(t, blocked)
 }
 
+// F11: planning resume with remoteHead==target_sha must require ownership
+// proof. When no committed registry entry exists for this intention's planned
+// op_ids AND the registry head has advanced since planning, another run may
+// have pushed the same SHA. Proceeding into driveRegistry would trigger
+// rollback and force-push the branch back to best_sha_before — silently
+// undoing the other run's promotion. Instead, the intention must be dropped
+// and startFresh invoked so the planner observes the true state.
+func TestRun_PlanningResumeRemoteMatchesTargetButAnotherRunAdvancedRegistryRestartsFresh(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR4111")
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+
+	// Seed registry: planning snapshot points to empty head, but another run
+	// has since appended a row unrelated to this intention's planned op-ids.
+	_, _ = seedRegistryUniqueAdd(t, runCtx.RulesRegistryPath(), "other-run-seed", fmt.Sprintf("%064x", 7110), "2026-04-21-PR80-abcdef0")
+	// intention.RegistryHeadBefore stays at "" (planningIntention default).
+	require.NoError(t, store.Save(intention))
+
+	git := &fakeGit{head: resolver.target.TargetSHA}
+	secondTarget := Target{
+		BestBranch:    resolver.target.BestBranch,
+		BestShaBefore: resolver.target.BestShaBefore,
+		TargetSHA:     strings.Repeat("3", 40),
+		RulesToAppend: []contracts.RuleRegistryEntry{
+			adoptAddedEntryWithTarget(runCtx.RunID, candidates.CandidatesHash, strings.Repeat("3", 40), "rule-refreshed"),
+		},
+	}
+	seqResolver := &sequenceResolver{targets: []Target{resolver.target, secondTarget}}
+	require.NoError(t, Run(context.Background(), 4111, runCtx, pkg, candidates, store, Deps{
+		Git:      git,
+		Resolver: seqResolver,
+		Now:      fixedNow(),
+	}))
+
+	// No branch force-push back to best_sha_before — the other run is safe.
+	for _, call := range git.pushCalls {
+		assert.NotEqual(t, resolver.target.BestShaBefore, call.target, "must not force-push branch back to best_sha_before when ownership unproven")
+	}
+
+	// interrupted state event signals snapshot refresh.
+	kinds := readStateKinds(t, runCtx)
+	assert.Contains(t, kinds, contracts.StateKindInterrupted)
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+}
+
+// F11: planning resume with remoteHead==target_sha AND a committed registry
+// entry under this intention's idempotency_key proves ownership, so resume
+// proceeds into driveRegistry normally.
+func TestRun_PlanningResumeRemoteMatchesTargetWithOwnershipProofProceeds(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR4112")
+	store := newTrackingStore(intentionPath(t, runCtx))
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	require.NoError(t, store.Save(intention))
+
+	// Seed the registry with this intention's planned row — proof of
+	// ownership even though registry_head has advanced past planning.
+	seedRegistryAdd(t, runCtx.RulesRegistryPath(), resolver, runCtx.RunID, candidates.CandidatesHash)
+
+	git := &fakeGit{head: resolver.target.TargetSHA}
+	// Planning resume calls the resolver once to verify target hasn't changed
+	// (planningResumeNeedsRefresh); a fixtureResolver returning the same
+	// target keeps that path quiescent.
+	require.NoError(t, Run(context.Background(), 4112, runCtx, pkg, candidates, store, Deps{
+		Git:      git,
+		Resolver: resolver,
+		Now:      fixedNow(),
+	}))
+
+	assert.Equal(t, contracts.DecisionActionAdopt, readDecision(t, runCtx).Action)
+	// Ownership proof allowed the adopt path — no rollback force-push.
+	assert.Empty(t, git.pushCalls, "ownership-proof resume must not push anything")
+}
+
+// F11: pre-push rollback (driveAdopt push-failure path) with remoteHead==
+// target_sha and no ownership proof must mark needs_manual_recovery instead
+// of force-pushing the branch back to best_sha_before — another run may have
+// pushed the same SHA and promoted it.
+func TestRun_PrePushRollbackRefusesBranchRevertWithoutOwnershipProofWhenRegistryAdvanced(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR4113")
+	// Seed registry with an unrelated promotion by another run.
+	_, _ = seedRegistryUniqueAdd(t, runCtx.RulesRegistryPath(), "other-run", fmt.Sprintf("%064x", 7113), "2026-04-21-PR80-abcdef0")
+
+	// Push fails, but remote happens to sit at target_sha (another run).
+	git := &fakeGit{head: resolver.target.TargetSHA, pushErr: ErrLeaseFailure}
+	err := Run(context.Background(), 4113, runCtx, pkg, candidates, store, Deps{
+		Git:      git,
+		Resolver: resolver,
+		Now:      fixedNow(),
+	})
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+
+	// Exactly one push attempt (the original adopt push). No follow-up
+	// force-push to best_sha_before.
+	require.Len(t, git.pushCalls, 1)
+	assert.Equal(t, resolver.target.TargetSHA, git.pushCalls[0].target)
+}
+
 // F9: even with no sentinel on disk, a run whose intention is parked at
 // needs_manual_recovery must self-block on resume instead of reopening the
 // old staged transaction path.
@@ -982,7 +1079,7 @@ func TestRun_RollbackRequiresEmptyBestShaBeforeForEmptyRemoteHead(t *testing.T) 
 			Git:      &fakeGit{head: ""},
 			Resolver: resolver,
 			Now:      fixedNow(),
-		}, contracts.RollbackReasonLeaseFailure))
+		}, contracts.RollbackReasonLeaseFailure, pushUnknown))
 		assert.Equal(t, contracts.DecisionActionRollback, readDecision(t, runCtx).Action)
 		assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
 	})
@@ -1363,6 +1460,105 @@ func TestPromoteRuleSidecarAndCleanup_FsyncParentDirsAfterDeletion(t *testing.T)
 
 	assert.Contains(t, calls, filepath.Clean(filepath.Dir(stagedPath)))
 	assert.Contains(t, calls, filepath.Clean(runCtx.RunDir()))
+}
+
+// F10: after the first rule sidecar in a multi-entry adoption is published and
+// its staged copy removed, a resume must recognise the destination's matching
+// SHA as already-published instead of escalating the whole batch to
+// needs_manual_recovery via errRulePublishStagedMissing.
+func TestPromoteRuleSidecar_TreatsMissingStagedWithMatchingDestinationAsPublished(t *testing.T) {
+	runCtx, _, _, _, _ := newFixtureWithResolver(t, "PR4101")
+	body := "rule-a body\n"
+	stagedPath := mustStagedRulePath(t, runCtx, "rules/rule-a.md")
+
+	dstPath := filepath.Join(runCtx.RunsBase, "rules", "rule-a.md")
+	require.NoError(t, internalio.WriteAtomic(dstPath, []byte(body)))
+	// staged file intentionally absent to simulate a crash after the first
+	// entry in the batch was published and its staged copy fsynced away.
+	assert.NoFileExists(t, stagedPath)
+
+	require.NoError(t, promoteRuleSidecar(stagedPath, dstPath, sha256String(body)))
+	// Destination unchanged and still holds the planned bytes.
+	got, err := os.ReadFile(dstPath)
+	require.NoError(t, err)
+	assert.Equal(t, body, string(got))
+}
+
+// F10: if the staged file is missing AND the destination does not hold the
+// planned SHA, the original errRulePublishStagedMissing signal is preserved so
+// the batch still escalates to needs_manual_recovery rather than silently
+// committing stale bytes.
+func TestPromoteRuleSidecar_MissingStagedWithWrongDestinationStillFails(t *testing.T) {
+	runCtx, _, _, _, _ := newFixtureWithResolver(t, "PR4102")
+	stagedPath := mustStagedRulePath(t, runCtx, "rules/rule-a.md")
+	dstPath := filepath.Join(runCtx.RunsBase, "rules", "rule-a.md")
+	require.NoError(t, internalio.WriteAtomic(dstPath, []byte("stale bytes\n")))
+
+	err := promoteRuleSidecar(stagedPath, dstPath, sha256String("rule-a body\n"))
+	require.ErrorIs(t, err, errRulePublishStagedMissing)
+}
+
+// F10: multi-entry adoption resuming after a crash-between-publishes must
+// complete without re-publishing the entry whose destination already holds
+// the planned SHA.
+func TestPromoteStagedRuleSidecars_MultiEntryResumeAfterFirstPublish(t *testing.T) {
+	runCtx, _, candidates, _, resolver := newFixtureWithResolver(t, "PR4103")
+	resolver.target.RulesToAppend = []contracts.RuleRegistryEntry{
+		adoptAddedEntryWithBody(runCtx.RunID, "rule-a", "rule-a body\n"),
+		adoptAddedEntryWithBody(runCtx.RunID, "rule-b", "rule-b body\n"),
+	}
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+
+	// Prepare staging dir + entry-b staged file. Entry-a was already published
+	// and its staged copy removed; entry-b's staged file still exists.
+	require.NoError(t, internalio.WriteAtomic(mustStagedRulePath(t, runCtx, "rules/rule-b.md"), []byte("rule-b body\n")))
+	dstA := filepath.Join(runCtx.RunsBase, "rules", "rule-a.md")
+	require.NoError(t, internalio.WriteAtomic(dstA, []byte("rule-a body\n")))
+
+	store := newTrackingStore(intentionPath(t, runCtx))
+	require.NoError(t, promoteStagedRuleSidecars(runCtx, &intention, store))
+
+	dstB := filepath.Join(runCtx.RunsBase, "rules", "rule-b.md")
+	got, err := os.ReadFile(dstB)
+	require.NoError(t, err)
+	assert.Equal(t, "rule-b body\n", string(got))
+
+	// Both entries were persisted as published (even the one recognised via
+	// matching destination SHA with a missing staged file).
+	require.NotEmpty(t, intention.PublishedRuleOpIDs)
+	assert.ElementsMatch(t, []string{
+		intention.PlannedAdoption.Entries[0].OpID,
+		intention.PlannedAdoption.Entries[1].OpID,
+	}, intention.PublishedRuleOpIDs)
+
+	// Staging directory cleaned up after the last publish.
+	stagingDir, err := runCtx.ResolveRunRelative("staging")
+	require.NoError(t, err)
+	_, err = os.Stat(stagingDir)
+	assert.True(t, os.IsNotExist(err), "staging dir must be removed after successful promotion")
+}
+
+// F10: intention.PublishedRuleOpIDs persisted by a previous tick means the
+// resume path skips the already-published entry without inspecting staged /
+// destination files, even if neither currently exists on disk.
+func TestPromoteStagedRuleSidecars_SkipsPublishedOpIDsOnResume(t *testing.T) {
+	runCtx, _, candidates, _, resolver := newFixtureWithResolver(t, "PR4104")
+	resolver.target.RulesToAppend = []contracts.RuleRegistryEntry{
+		adoptAddedEntryWithBody(runCtx.RunID, "rule-a", "rule-a body\n"),
+		adoptAddedEntryWithBody(runCtx.RunID, "rule-b", "rule-b body\n"),
+	}
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.PublishedRuleOpIDs = []string{intention.PlannedAdoption.Entries[0].OpID}
+
+	// Only entry-b's staged file exists; entry-a is already marked published.
+	require.NoError(t, internalio.WriteAtomic(mustStagedRulePath(t, runCtx, "rules/rule-b.md"), []byte("rule-b body\n")))
+
+	require.NoError(t, promoteStagedRuleSidecars(runCtx, &intention, nil))
+
+	// rule-a destination never existed (it was marked published) — we must not
+	// have attempted to read staged nor failed with errRulePublishStagedMissing.
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-a.md"))
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-b.md"))
 }
 
 func TestPromoteRuleSidecar_RejectsSymlinkDestination(t *testing.T) {
