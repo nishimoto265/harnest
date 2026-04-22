@@ -65,6 +65,13 @@ type IntentionRecord struct {
 	// recovery が committed row を再発見できるようにする。
 	AppendedEntryOpIDs []string `json:"appended_entry_op_ids,omitempty" validate:"omitempty,dive,sha256_hex"`
 
+	// PublishedRuleOpIDs: stage5 multi-entry sidecar publish 中に既 publish 済みの
+	// per-entry op_id を逐次保存する。crash-after-first-publish の resume 時に
+	// 既に destination へ landing 済みの rule sidecar を再 publish せず、かつ
+	// staged file が消えた状態で errRulePublishStagedMissing に escalate しない
+	// ようにする (F10)。optional field として non-breaking で拡張する。
+	PublishedRuleOpIDs []string `json:"published_rule_op_ids,omitempty" validate:"omitempty,dive,sha256_hex"`
+
 	// RecoveryReason / FailedStep: stage=needs_manual_recovery もしくは
 	// rolling_back_* 時にのみ populate.
 	RecoveryReason RollbackReason `json:"recovery_reason,omitempty" validate:"omitempty,oneof=lease_failure remote_divergence registry_divergence worktree_rescue_loop manual_abort_pending_cleanup transactional_failure"`
@@ -199,6 +206,25 @@ func (r IntentionRecord) Validate() error {
 		}
 		seen := make(map[string]struct{}, len(r.AppendedEntryOpIDs))
 		for _, opID := range r.AppendedEntryOpIDs {
+			if _, ok := allowed[opID]; !ok {
+				return fmt.Errorf("%w: %s", ErrPlannedAdoptionAppendedEntryUnknown, opID)
+			}
+			if _, ok := seen[opID]; ok {
+				return fmt.Errorf("%w: %s", ErrPlannedAdoptionAppendedEntryDuplicate, opID)
+			}
+			seen[opID] = struct{}{}
+		}
+	}
+	if len(r.PublishedRuleOpIDs) > 0 {
+		if r.PlannedAdoption == nil {
+			return ErrIntentionMissingPlannedAdoption
+		}
+		allowed := make(map[string]struct{}, len(r.PlannedAdoption.Entries))
+		for _, entry := range r.PlannedAdoption.Entries {
+			allowed[entry.OpID] = struct{}{}
+		}
+		seen := make(map[string]struct{}, len(r.PublishedRuleOpIDs))
+		for _, opID := range r.PublishedRuleOpIDs {
 			if _, ok := allowed[opID]; !ok {
 				return fmt.Errorf("%w: %s", ErrPlannedAdoptionAppendedEntryUnknown, opID)
 			}

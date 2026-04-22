@@ -241,7 +241,7 @@ func driveAdopt(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return handleRollback(ctx, pr, runCtx, pkg, target, intention, store, writer, deps, classifyPushErr(err))
+		return handleRollback(ctx, pr, runCtx, pkg, target, intention, store, writer, deps, classifyPushErr(err), pushUnknown)
 	}
 	intention.Stage = contracts.IntentionStageBranchPushed
 	if err := store.Save(intention); err != nil {
@@ -268,7 +268,7 @@ func driveRegistry(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 		if errors.Is(err, ErrRegistryDivergence) {
 			reason = contracts.RollbackReasonRegistryDivergence
 		}
-		return handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, reason)
+		return handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, reason, pushOwned)
 	}
 	intention.RegistryAppendResult = &appendResult
 	intention.Stage = contracts.IntentionStageRegistryAppended
@@ -284,7 +284,7 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 	} else if handled {
 		return nil
 	}
-	if err := promoteStagedRuleSidecars(runCtx, &intention); err != nil {
+	if err := promoteStagedRuleSidecars(runCtx, &intention, store); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -323,7 +323,7 @@ func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunCon
 	if err != nil {
 		return err
 	}
-	if err := promoteStagedRuleSidecars(runCtx, intention); err != nil {
+	if err := promoteStagedRuleSidecars(runCtx, intention, store); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -375,7 +375,19 @@ func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.Ru
 
 // ---- Rollback ----
 
-func handleRollback(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, reason contracts.RollbackReason) error {
+// pushOwnershipKnown signals whether the caller has already confirmed this
+// intention owns the push. post-push rollbacks (driveRegistry, resumeBranch,
+// sentinel-triggered mid-promotion rollback) pass pushOwned; pre-push
+// rollbacks (driveAdopt after PushForceWithLease failed) pass pushUnknown so
+// the rollback path must verify ownership before reverting the branch.
+type pushOwnership int
+
+const (
+	pushUnknown pushOwnership = iota
+	pushOwned
+)
+
+func handleRollback(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, reason contracts.RollbackReason, ownership pushOwnership) error {
 	intention.Stage = contracts.IntentionStageRollingBackBranchReverted
 	intention.RecoveryReason = reason
 	intention.FailedStep = contracts.FailedStep70
@@ -392,6 +404,24 @@ func handleRollback(ctx context.Context, pr int, runCtx internalio.RunContext, p
 	}
 	switch {
 	case remoteHead == target.TargetSHA:
+		// F11: only revert the branch when we can prove this intention owns
+		// the remote target_sha. Post-push callers (pushOwnership=pushOwned)
+		// have already confirmed ownership via the successful push+stage
+		// transition. Pre-push callers (pushOwnership=pushUnknown) must
+		// produce proof via a committed registry row under this intention's
+		// idempotency_key — without it, another run may have legitimately
+		// pushed the same SHA and a force-push back to best_sha_before would
+		// silently undo their success. No proof ⇒ manual recovery, never
+		// branch rollback.
+		if ownership != pushOwned {
+			owns, ownErr := intentionOwnsRemotePush(runCtx, intention)
+			if ownErr != nil {
+				return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+			}
+			if !owns {
+				return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRemoteDivergence)
+			}
+		}
 		if err := deps.Git.PushForceWithLease(ctx, target.BestBranch, target.BestShaBefore, target.TargetSHA); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -517,6 +547,26 @@ func ensureRollbackBranchState(ctx context.Context, pr int, runCtx internalio.Ru
 	}
 	switch {
 	case remoteHead == target.TargetSHA:
+		// F11: ensureRollbackBranchState is only reached via
+		// rolling_back_branch_reverted resume, which means a prior tick
+		// already satisfied handleRollback's ownership check before
+		// transitioning the intention into rolling_back_*. Ownership is
+		// therefore already proven. Still, if concurrent activity advanced
+		// registry past planning + we have no committed op-id, treat it as
+		// registry divergence instead of blindly force-pushing.
+		owns, ownErr := intentionOwnsRemotePush(runCtx, intention)
+		if ownErr != nil {
+			return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+		}
+		if !owns {
+			currentHead, headErr := currentRegistryHead(runCtx.RulesRegistryPath())
+			if headErr != nil {
+				return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+			}
+			if currentHead != intention.RegistryHeadBefore {
+				return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRegistryDivergence)
+			}
+		}
 		if err := deps.Git.PushForceWithLease(ctx, target.BestBranch, target.BestShaBefore, target.TargetSHA); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -542,10 +592,20 @@ func markManualRecoveryWithDetail(pr int, runCtx internalio.RunContext, intentio
 	intention.Stage = contracts.IntentionStageNeedsManualRecovery
 	intention.RecoveryReason = reason
 	intention.FailedStep = contracts.FailedStep70
-	if err := writeSentinelFn(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, deps.Now()); err != nil {
+	// F9: persist the intention transition to needs_manual_recovery BEFORE
+	// writing the durable sentinel. If the sentinel write later fails, the
+	// intention is already parked at a stage that resume() treats as
+	// terminal-but-persisted (returns ErrNeedsManualRecovery and refuses to
+	// reopen transaction paths), so the operator-gate barrier holds even
+	// without the sentinel. The inverse ordering (sentinel-first) would leave
+	// a durable needs_manual_recovery file with an intention still at
+	// branch_pushed / registry_appended; once the operator cleared the
+	// sentinel, a subsequent tick would resume the old transaction path
+	// instead of re-blocking — a silent bypass of the manual-recovery barrier.
+	if err := store.Save(intention); err != nil {
 		return err
 	}
-	if err := store.Save(intention); err != nil {
+	if err := writeSentinelFn(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, deps.Now()); err != nil {
 		return err
 	}
 	if err := appendStateOnce(runCtx, writer, contracts.StateKindNeedsManualRecovery, needsManualRecoveryEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, detail, deps.Now())); err != nil {
@@ -1026,7 +1086,16 @@ func targetFromIntention(pkg *contracts.TaskPackage, intention contracts.Intenti
 	}
 }
 
-func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contracts.IntentionRecord) error {
+// promoteStagedRuleSidecars publishes the staged rule bodies to their
+// canonical locations. It is idempotent per-entry: callers pass the intention
+// so that each successful publish is persisted as PublishedRuleOpIDs, and a
+// subsequent resume skips entries whose destination already holds the planned
+// SHA even if the staged file is gone (F10).
+//
+// When store is non-nil, per-entry progress is saved after each successful
+// publish so a crash-after-first-publish can resume without re-applying or
+// escalating to needs_manual_recovery.
+func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contracts.IntentionRecord, store IntentionWriter) error {
 	stagingDir, err := runCtx.ResolveRunRelative("staging")
 	if err != nil {
 		return err
@@ -1040,7 +1109,14 @@ func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contract
 	if intention == nil || intention.PlannedAdoption == nil {
 		return errMissingPlannedAdoptionForStaging
 	}
+	published := make(map[string]struct{}, len(intention.PublishedRuleOpIDs))
+	for _, opID := range intention.PublishedRuleOpIDs {
+		published[opID] = struct{}{}
+	}
 	for _, entry := range intention.PlannedAdoption.Entries {
+		if _, ok := published[entry.OpID]; ok {
+			continue
+		}
 		stagedPath, err := stagedRuleSidecarPath(runCtx, entry.RulePath)
 		if err != nil {
 			return err
@@ -1048,6 +1124,13 @@ func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contract
 		dstPath := filepath.Join(runCtx.RunsBase, filepath.FromSlash(entry.RulePath))
 		if err := promoteRuleSidecarFn(stagedPath, dstPath, entry.Sha256); err != nil {
 			return err
+		}
+		intention.PublishedRuleOpIDs = appendIfMissing(intention.PublishedRuleOpIDs, entry.OpID)
+		published[entry.OpID] = struct{}{}
+		if store != nil {
+			if err := store.Save(*intention); err != nil {
+				return err
+			}
 		}
 	}
 	return cleanupStagedRuleSidecars(runCtx)
@@ -1057,6 +1140,22 @@ func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
 	data, err := internalio.ReadValidatedRegularFile(stagedPath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// F10: per-entry idempotency for multi-rule adoptions. When the
+			// staged file is missing but the destination already holds the
+			// planned SHA as a regular file, a prior promote of this entry
+			// landed and was removed before the crash. Re-treating that as
+			// errRulePublishStagedMissing would escalate the whole batch to
+			// needs_manual_recovery even though the canonical bytes are
+			// correct. Fall through to an already-published success.
+			if info, statErr := os.Lstat(dstPath); statErr == nil && info.Mode().IsRegular() {
+				dstData, readErr := internalio.ReadValidatedRegularFile(dstPath)
+				if readErr == nil {
+					sum := sha256.Sum256(dstData)
+					if hex.EncodeToString(sum[:]) == wantSHA {
+						return nil
+					}
+				}
+			}
 			return fmt.Errorf("%w: path=%s", errRulePublishStagedMissing, stagedPath)
 		}
 		return fmt.Errorf("%w: read staged=%s: %v", errRulePublishIntegrity, stagedPath, err)
@@ -1427,9 +1526,9 @@ func resumeBranchPushed(ctx context.Context, pr int, runCtx internalio.RunContex
 			return nil
 		}
 		if errors.Is(err, ErrRegistryDivergence) {
-			return handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonRegistryDivergence)
+			return handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonRegistryDivergence, pushOwned)
 		}
-		return handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+		return handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, pushOwned)
 	}
 	intention.RegistryAppendResult = &appendResult
 	intention.Stage = contracts.IntentionStageRegistryAppended
@@ -1452,11 +1551,47 @@ func planningDecision(ctx context.Context, pr int, runCtx internalio.RunContext,
 	}
 	switch {
 	case remoteHead == target.TargetSHA:
-		intention.Stage = contracts.IntentionStageBranchPushed
-		if err := store.Save(intention); err != nil {
+		// F11: require proof that this intention owns the current remote SHA
+		// before treating the resume as "branch_pushed by us". Without proof,
+		// the same SHA may have been produced by a concurrent run that
+		// already completed promotion — proceeding here would later drive
+		// driveRegistry's rollback path and force-push the branch back to
+		// best_sha_before, silently undoing the other run.
+		owns, err := intentionOwnsRemotePush(runCtx, intention)
+		if err != nil {
 			return err
 		}
-		return driveRegistry(ctx, pr, runCtx, pkg, intention, store, writer, deps)
+		if owns {
+			intention.Stage = contracts.IntentionStageBranchPushed
+			if err := store.Save(intention); err != nil {
+				return err
+			}
+			return driveRegistry(ctx, pr, runCtx, pkg, intention, store, writer, deps)
+		}
+		// No committed op-id match. If the registry head still matches the
+		// planning snapshot, our push is the one that landed pre-registry-
+		// append (legit crash between push and registry). Otherwise the
+		// snapshot is stale: another run advanced registry AND the branch
+		// sits at target_sha only because they happened to pick the same
+		// commit. Do NOT rollback the branch — refresh and re-plan.
+		currentHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
+		if err != nil {
+			return err
+		}
+		if currentHead == intention.RegistryHeadBefore {
+			intention.Stage = contracts.IntentionStageBranchPushed
+			if err := store.Save(intention); err != nil {
+				return err
+			}
+			return driveRegistry(ctx, pr, runCtx, pkg, intention, store, writer, deps)
+		}
+		if err := store.Delete(); err != nil {
+			return err
+		}
+		if err := appendStateOnce(runCtx, writer, contracts.StateKindInterrupted, interruptedEvent(pr, runCtx.RunID, contracts.InterruptedReasonPrePushCrash, "remote matches target_sha without committed op-id and registry advanced; snapshot refresh required", deps.Now())); err != nil {
+			return err
+		}
+		return startFresh(ctx, pr, runCtx, pkg, candidates, store, writer, deps)
 	case remoteHeadMatchesRollbackBase(remoteHead, target.BestShaBefore):
 		currentHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
 		if err != nil {
@@ -1478,6 +1613,40 @@ func planningDecision(ctx context.Context, pr int, runCtx internalio.RunContext,
 	default:
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRemoteDivergence)
 	}
+}
+
+// intentionOwnsRemotePush reports whether any of this intention's planned
+// adoption entries are already committed to the registry by THIS run (or by
+// any run under this intention's idempotency key). A positive proof means the
+// remote's current target_sha was produced by this intention's push, so
+// rollback / resume can proceed without risk of undoing another run's
+// successful promotion (F11).
+//
+// The check is based on the planned op-ids (derived from intention's
+// idempotency_key). Per io-contracts §idempotency_key, the adopt
+// idempotency_key is sha256(run_id || target_sha || best_sha_before ||
+// candidates_hash), so a match here uniquely implies this run authored the
+// registry row.
+func intentionOwnsRemotePush(runCtx internalio.RunContext, intention contracts.IntentionRecord) (bool, error) {
+	if intention.PlannedAdoption == nil {
+		return false, nil
+	}
+	matches, err := findPlannedRegistryMatches(runCtx, intention)
+	if err != nil {
+		// ErrRegistryDivergence here means a planned op-id is present with a
+		// mismatched payload — treat as "not ours" and let the caller refresh
+		// the snapshot.
+		if errors.Is(err, ErrRegistryDivergence) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, match := range matches {
+		if match != nil {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ---- Cleanup ----
@@ -1687,7 +1856,10 @@ func rollbackOnOtherRunSentinel(ctx context.Context, pr int, runCtx internalio.R
 		if !errors.Is(err, ErrBlockedBySentinel) {
 			return false, err
 		}
-		return true, handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
+		// All call sites are post-push (driveRegistry / driveDecision /
+		// appendPlannedRegistryEntries / resumeBranchPushed), so ownership
+		// is confirmed.
+		return true, handleRollback(ctx, pr, runCtx, pkg, targetFromIntention(pkg, intention), intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, pushOwned)
 	}
 	return false, nil
 }
