@@ -91,13 +91,25 @@ func RunSunset(ctx context.Context, opts Opts) (Result, error) {
 			return result, errBlockedBySentinel
 		}
 		opID := ComputeOpID(opts.SunsetRunID, t.RuleID, transitionKey(t))
-		if existing, ok, err := findByOpID(registryPath, opID); err != nil {
-			return result, err
-		} else if ok {
-			_ = existing
-			result.SkippedOpIDs = append(result.SkippedOpIDs, opID)
+		// F19: accept legacy plain-concat op-id so entries appended before the
+		// length-prefixed encoding are still recognised as already-applied.
+		foundExisting := false
+		for _, candidate := range opIDCandidates(opts.SunsetRunID, t.RuleID, transitionKey(t)) {
+			existing, ok, err := findByOpID(registryPath, candidate)
+			if err != nil {
+				return result, err
+			}
+			if ok {
+				_ = existing
+				result.SkippedOpIDs = append(result.SkippedOpIDs, candidate)
+				foundExisting = true
+				break
+			}
+		}
+		if foundExisting {
 			continue
 		}
+		_ = opID
 
 		entry, err := buildRegistryEntry(registryPath, t, opts.SunsetRunID, opID, opts.Now())
 		if err != nil {
@@ -227,6 +239,28 @@ func ComputeOpID(sunsetRunID, ruleID, transition string) string {
 	}
 	sum := sha256.Sum256(payload.Bytes())
 	return hex.EncodeToString(sum[:])
+}
+
+// computeLegacyOpID reproduces the pre-length-prefixed plain-concat op-id
+// encoding that predates the unambiguous tuple scheme. Kept for backward
+// compatibility with in-flight marker / registry state written before the
+// encoding change so findByOpID / markerTailProgressPrefixLen can recognise
+// partially-applied sunset transitions after an upgrade (F19).
+func computeLegacyOpID(sunsetRunID, ruleID, transition string) string {
+	sum := sha256.Sum256([]byte(sunsetRunID + ruleID + transition))
+	return hex.EncodeToString(sum[:])
+}
+
+// opIDCandidates returns the current and legacy op-id encodings. Callers that
+// reconcile persisted state (registry lookup, stale marker replay) must accept
+// both so an upgrade mid-sunset does not re-apply or strand entries.
+func opIDCandidates(sunsetRunID, ruleID, transition string) []string {
+	current := ComputeOpID(sunsetRunID, ruleID, transition)
+	legacy := computeLegacyOpID(sunsetRunID, ruleID, transition)
+	if current == legacy {
+		return []string{current}
+	}
+	return []string{current, legacy}
 }
 
 func applyDefaults(o Opts) Opts {
@@ -441,10 +475,19 @@ func reconcileStaleMarker(ctx context.Context, opts Opts) error {
 		}
 	}
 	for _, transition := range marker.Transitions {
-		opID := ComputeOpID(marker.SunsetRunID, transition.RuleID, transitionKey(transition))
-		if _, ok, err := findByOpID(filepath.Join(opts.RunsBase, "rules-registry.jsonl"), opID); err != nil {
-			return err
-		} else if ok {
+		found := false
+		// F19: accept both legacy plain-concat and current length-prefixed
+		// op-id encodings so reconcile does not re-apply transitions that
+		// predate the op-id scheme change.
+		for _, candidate := range opIDCandidates(marker.SunsetRunID, transition.RuleID, transitionKey(transition)) {
+			if _, ok, err := findByOpID(filepath.Join(opts.RunsBase, "rules-registry.jsonl"), candidate); err != nil {
+				return err
+			} else if ok {
+				found = true
+				break
+			}
+		}
+		if found {
 			continue
 		}
 		missing = append(missing, transition)
@@ -476,18 +519,22 @@ func markerTailProgressPrefixLen(runsBase string, marker sunsetMarker) (int, err
 	if len(lines) == 0 || len(marker.Transitions) == 0 {
 		return 0, nil
 	}
-	planned := make([]string, 0, len(marker.Transitions))
+	// F19: accept both the current length-prefixed op-id encoding and the
+	// legacy plain-concat encoding so markers written before the format
+	// change are still recognised as progress.
+	plannedCandidates := make([][]string, 0, len(marker.Transitions))
 	for _, transition := range marker.Transitions {
-		planned = append(planned, ComputeOpID(marker.SunsetRunID, transition.RuleID, transitionKey(transition)))
+		plannedCandidates = append(plannedCandidates, opIDCandidates(marker.SunsetRunID, transition.RuleID, transitionKey(transition)))
 	}
-	maxPrefix := len(planned)
+	maxPrefix := len(plannedCandidates)
 	if len(lines) < maxPrefix {
 		maxPrefix = len(lines)
 	}
 	for prefix := maxPrefix; prefix > 0; prefix-- {
 		matched := true
 		for idx := 0; idx < prefix; idx++ {
-			if registryOpID(lines[len(lines)-prefix+idx].Entry) != planned[idx] {
+			entryOpID := registryOpID(lines[len(lines)-prefix+idx].Entry)
+			if !stringInSlice(entryOpID, plannedCandidates[idx]) {
 				matched = false
 				break
 			}
@@ -497,6 +544,15 @@ func markerTailProgressPrefixLen(runsBase string, marker sunsetMarker) (int, err
 		}
 	}
 	return 0, nil
+}
+
+func stringInSlice(needle string, haystack []string) bool {
+	for _, candidate := range haystack {
+		if candidate == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func registryOpID(entry contracts.RuleRegistryEntry) string {

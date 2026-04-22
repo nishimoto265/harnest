@@ -291,6 +291,80 @@ func TestComputeOpID_UsesUnambiguousTupleEncoding(t *testing.T) {
 	assert.NotEqual(t, first, second)
 }
 
+// F19: registry rows written with the pre-length-prefixed plain-concat op-id
+// encoding must still be recognised as already-applied so an upgrade mid-sunset
+// does not duplicate transitions or strand them behind permanent "diverged"
+// markers.
+func TestRunSunset_RecognisesLegacyOpIDEncoding(t *testing.T) {
+	runsBase := realTempDir(t)
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	sunsetRunID := "legacy-sunset-run"
+	transition := deprecateTransition("rule-1")
+	seedArchiveRuleState(t, registryPath, "rule-1", contracts.RuleStatusActive)
+
+	legacyOpID := computeLegacyOpID(sunsetRunID, transition.RuleID, transitionKey(transition))
+	entry, err := buildRegistryEntry(registryPath, transition, sunsetRunID, legacyOpID, time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	_, err = internalio.AppendRegistryEntry(registryPath, entry)
+	require.NoError(t, err)
+
+	result, err := RunSunset(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: sunsetRunID,
+		Transitions: []Transition{transition},
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.AppendedOpIDs, "legacy encoded entry must suppress re-application")
+	require.Len(t, result.SkippedOpIDs, 1)
+	assert.Equal(t, legacyOpID, result.SkippedOpIDs[0])
+
+	lines := readRegistryLinesForTest(t, registryPath)
+	assert.Len(t, lines, 2, "no duplicate entry appended after recognising legacy op-id")
+}
+
+// F19: stale marker replay must honour both the current and legacy op-id
+// encodings when computing progress, otherwise an interrupted sunset that was
+// partially committed under the old scheme would be flagged as diverged.
+func TestRunSunsetWithLock_ReconcilesMarkerWithLegacyOpIDProgress(t *testing.T) {
+	runsBase := realTempDir(t)
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	sunsetRunID := "legacy-marker-run"
+	first := deprecateTransition("rule-1")
+	second := archiveTransition("rule-1", contracts.RuleStatusDeprecated)
+	seedArchiveRuleState(t, registryPath, "rule-1", contracts.RuleStatusActive)
+
+	legacyOpID := computeLegacyOpID(sunsetRunID, first.RuleID, transitionKey(first))
+	entry, err := buildRegistryEntry(registryPath, first, sunsetRunID, legacyOpID, time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	_, err = internalio.AppendRegistryEntry(registryPath, entry)
+	require.NoError(t, err)
+
+	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runsBase, markerFilename), sunsetMarker{
+		RecordedStartTime: time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC),
+		SunsetRunID:       sunsetRunID,
+		Transitions:       []Transition{first, second},
+	}))
+
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "current-run",
+		Transitions: []Transition{first, second},
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.AppendedOpIDs)
+	assert.NoFileExists(t, filepath.Join(runsBase, markerFilename))
+	assert.NoFileExists(t, filepath.Join(runsBase, divergedMarkerFile))
+
+	lines := readRegistryLinesForTest(t, registryPath)
+	require.Len(t, lines, 3)
+	// Second transition is written under the new length-prefixed encoding; the
+	// first (legacy) row is retained as-is.
+	assert.Equal(t, legacyOpID, opIDFromEntry(lines[1].Entry))
+	assert.Equal(t, ComputeOpID(sunsetRunID, second.RuleID, transitionKey(second)), opIDFromEntry(lines[2].Entry))
+}
+
 func TestRunSunset_RejectsTransitionForMissingRule(t *testing.T) {
 	runsBase := realTempDir(t)
 	_, err := RunSunset(context.Background(), Opts{
