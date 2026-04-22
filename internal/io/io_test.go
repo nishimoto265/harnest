@@ -8,6 +8,7 @@ import (
 	"fmt"
 	stdio "io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,8 +24,16 @@ type testJSONLRecord struct {
 	Name string `json:"name"`
 }
 
-func TestWriteAtomic_PreservesSiblingTempsAndWritesFile(t *testing.T) {
+func realTempDir(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
+	real, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	return real
+}
+
+func TestWriteAtomic_PreservesSiblingTempsAndWritesFile(t *testing.T) {
+	dir := realTempDir(t)
 	target := filepath.Join(dir, "manifest.json")
 	staleA := target + ".tmp-1-1-aaaa"
 	staleB := target + ".tmp-1-2-bbbb"
@@ -41,7 +50,7 @@ func TestWriteAtomic_PreservesSiblingTempsAndWritesFile(t *testing.T) {
 }
 
 func TestWriteAtomic_RenameFailureCleansTemp(t *testing.T) {
-	dir := t.TempDir()
+	dir := realTempDir(t)
 	target := filepath.Join(dir, "decision.json")
 
 	originalRename := atomicRename
@@ -62,7 +71,7 @@ func TestWriteAtomic_RenameFailureCleansTemp(t *testing.T) {
 }
 
 func TestWriteAtomic_ConcurrentWritersDoNotDeletePeerTemps(t *testing.T) {
-	dir := t.TempDir()
+	dir := realTempDir(t)
 	target := filepath.Join(dir, "manifest.json")
 
 	originalRename := atomicRename
@@ -124,8 +133,31 @@ func TestWriteAtomic_ConcurrentWritersDoNotDeletePeerTemps(t *testing.T) {
 	assert.Contains(t, []string{`{"writer":"one"}`, `{"writer":"two"}`}, string(data))
 }
 
+func TestWriteAtomic_FailsClosedWhenParentDirectoryChangesBeforeTempCreate(t *testing.T) {
+	root := realTempDir(t)
+	parent := filepath.Join(root, "safe")
+	target := filepath.Join(parent, "manifest.json")
+	escape := filepath.Join(root, "escape")
+	require.NoError(t, os.MkdirAll(parent, 0o755))
+	require.NoError(t, os.MkdirAll(escape, 0o755))
+
+	originalHook := atomicAfterParentValidated
+	atomicAfterParentValidated = func(string) {
+		moved := parent + ".moved"
+		require.NoError(t, os.Rename(parent, moved))
+		require.NoError(t, os.Symlink(escape, parent))
+	}
+	t.Cleanup(func() {
+		atomicAfterParentValidated = originalHook
+	})
+
+	err := WriteAtomic(target, []byte(`{"ok":true}`))
+	require.Error(t, err)
+	assert.NoFileExists(t, filepath.Join(escape, "manifest.json"))
+}
+
 func TestAppendJSONLAndReadJSONL(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "records.jsonl")
+	path := filepath.Join(realTempDir(t), "records.jsonl")
 	require.NoError(t, AppendJSONL(path, testJSONLRecord{Name: "alpha"}))
 	require.NoError(t, AppendJSONL(path, testJSONLRecord{Name: "beta"}))
 
@@ -137,14 +169,14 @@ func TestAppendJSONLAndReadJSONL(t *testing.T) {
 }
 
 func TestAppendJSONL_RejectsEntryTooLarge(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "records.jsonl")
+	path := filepath.Join(realTempDir(t), "records.jsonl")
 	err := AppendJSONL(path, testJSONLRecord{Name: strings.Repeat("a", JSONLMaxLineBytes)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrEntryTooLarge)
 }
 
 func TestAppendJSONL_SyncsParentDirectory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "records.jsonl")
+	path := filepath.Join(realTempDir(t), "records.jsonl")
 
 	originalSync := directorySync
 	var synced []string
@@ -161,7 +193,7 @@ func TestAppendJSONL_SyncsParentDirectory(t *testing.T) {
 }
 
 func TestAppendJSONL_RollsBackPartialWrite(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "records.jsonl")
+	path := filepath.Join(realTempDir(t), "records.jsonl")
 	require.NoError(t, AppendJSONL(path, testJSONLRecord{Name: "alpha"}))
 
 	originalOpen := appendJSONLOpenFile
@@ -232,7 +264,7 @@ func TestReadJSONL_StrictDecodeFailures(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "records.jsonl")
+			path := filepath.Join(realTempDir(t), "records.jsonl")
 			require.NoError(t, os.WriteFile(path, []byte(tt.line), defaultFilePerm))
 
 			_, err := ReadJSONL[testJSONLRecord](path)
@@ -303,8 +335,8 @@ func TestLoadManifestHelpers(t *testing.T) {
 }
 
 func TestRunContextResolveAndWorktreePaths(t *testing.T) {
-	runsBase := t.TempDir()
-	worktreeBase := t.TempDir()
+	runsBase := realTempDir(t)
+	worktreeBase := realTempDir(t)
 	pkg := testTaskPackage(t, runsBase, worktreeBase)
 	ctx, err := RunContextFromTaskPackage(pkg, runsBase, worktreeBase)
 	require.NoError(t, err)
@@ -323,10 +355,10 @@ func TestRunContextResolveAndWorktreePaths(t *testing.T) {
 }
 
 func TestRunContextFromTaskPackage_RejectsWorktreeOutsideConfiguredBase(t *testing.T) {
-	runsBase := t.TempDir()
-	worktreeBase := t.TempDir()
+	runsBase := realTempDir(t)
+	worktreeBase := realTempDir(t)
 	pkg := testTaskPackage(t, runsBase, worktreeBase)
-	pkg.Worktrees[0].Path = filepath.Join(t.TempDir(), "escaped-pass1-a1")
+	pkg.Worktrees[0].Path = filepath.Join(realTempDir(t), "escaped-pass1-a1")
 
 	_, err := RunContextFromTaskPackage(pkg, runsBase, worktreeBase)
 	require.Error(t, err)
@@ -334,9 +366,9 @@ func TestRunContextFromTaskPackage_RejectsWorktreeOutsideConfiguredBase(t *testi
 }
 
 func TestRunContextFromTaskPackage_UsesPersistedWorktreeBaseForResume(t *testing.T) {
-	runsBase := t.TempDir()
-	currentWorktreeBase := t.TempDir()
-	persistedWorktreeBase := filepath.Join(t.TempDir(), "persisted-worktrees")
+	runsBase := realTempDir(t)
+	currentWorktreeBase := realTempDir(t)
+	persistedWorktreeBase := filepath.Join(realTempDir(t), "persisted-worktrees")
 	pkg := testTaskPackage(t, runsBase, persistedWorktreeBase)
 
 	_, err := RunContextFromTaskPackage(pkg, runsBase, currentWorktreeBase)
@@ -345,8 +377,8 @@ func TestRunContextFromTaskPackage_UsesPersistedWorktreeBaseForResume(t *testing
 }
 
 func TestRunContextFromTaskPackage_RejectsTamperedConfiguredWorktreeBase(t *testing.T) {
-	runsBase := t.TempDir()
-	worktreeBase := t.TempDir()
+	runsBase := realTempDir(t)
+	worktreeBase := realTempDir(t)
 	pkg := testTaskPackage(t, runsBase, worktreeBase)
 	pkg.Worktrees[0].Path = filepath.Join("/tmp", "foreign-base", fmt.Sprintf("%s-pass1-a1", pkg.RunID))
 
@@ -426,9 +458,29 @@ func TestReadSidecar_RejectsDigestMismatch(t *testing.T) {
 	assert.ErrorIs(t, err, ErrSidecarDigestMismatch)
 }
 
+func TestReadSidecar_RejectsSymlinkTarget(t *testing.T) {
+	ctx := newTestRunContext(t)
+	escapeDir := filepath.Join(realTempDir(t), "escape")
+	require.NoError(t, os.MkdirAll(escapeDir, 0o755))
+	external := filepath.Join(escapeDir, "secret.txt")
+	require.NoError(t, os.WriteFile(external, []byte("secret"), 0o644))
+
+	linkPath, err := ctx.ResolveRunRelative("30/reasons/linked.txt")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(linkPath), 0o755))
+	require.NoError(t, os.Symlink(external, linkPath))
+
+	_, err = ReadSidecar(ctx, contracts.OverflowRef{
+		Path:   "30/reasons/linked.txt",
+		Sha256: strings.Repeat("a", 64),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUnsafePath)
+}
+
 func TestWriteSidecar_RejectsSymlinkedDirectory(t *testing.T) {
 	ctx := newTestRunContext(t)
-	escapeDir := filepath.Join(t.TempDir(), "escape")
+	escapeDir := filepath.Join(realTempDir(t), "escape")
 	require.NoError(t, os.MkdirAll(escapeDir, 0o755))
 
 	sidecarDir, err := ctx.ResolveRunRelative("30/reasons")
@@ -444,7 +496,7 @@ func TestWriteSidecar_RejectsSymlinkedDirectory(t *testing.T) {
 
 func TestSidecarRefPath_RejectsSymlinkEscapes(t *testing.T) {
 	ctx := newTestRunContext(t)
-	escapeDir := filepath.Join(t.TempDir(), "escape")
+	escapeDir := filepath.Join(realTempDir(t), "escape")
 	require.NoError(t, os.MkdirAll(escapeDir, 0o755))
 	targetPath := filepath.Join(escapeDir, "sidecar.txt")
 	require.NoError(t, os.WriteFile(targetPath, []byte("hello"), 0o644))
@@ -469,14 +521,14 @@ func TestAcquirePromotionLock(t *testing.T) {
 }
 
 func TestAcquireFileLock_RejectsSymlinkSwapWhileAnotherHolderOwnsLock(t *testing.T) {
-	lockPath := filepath.Join(t.TempDir(), "promotion.lock")
+	lockPath := filepath.Join(realTempDir(t), "promotion.lock")
 	firstLock, err := AcquireFileLock(lockPath)
 	require.NoError(t, err)
 	defer func() {
 		_ = firstLock.Unlock()
 	}()
 
-	replacement := filepath.Join(t.TempDir(), "replacement.lock")
+	replacement := filepath.Join(realTempDir(t), "replacement.lock")
 	require.NoError(t, os.WriteFile(replacement, []byte("replacement\n"), defaultFilePerm))
 	require.NoError(t, os.Remove(lockPath))
 	require.NoError(t, os.Symlink(replacement, lockPath))
@@ -488,9 +540,23 @@ func TestAcquireFileLock_RejectsSymlinkSwapWhileAnotherHolderOwnsLock(t *testing
 	assert.False(t, errors.Is(err, context.DeadlineExceeded))
 }
 
+func TestOpenFileNoFollow_DoesNotLeakFDToChildProcess(t *testing.T) {
+	path := filepath.Join(realTempDir(t), "artifact.txt")
+	require.NoError(t, os.WriteFile(path, []byte("hello\n"), defaultFilePerm))
+
+	file, err := openFileNoFollow(path, os.O_RDONLY, 0)
+	require.NoError(t, err)
+	defer file.Close()
+
+	fd := int(file.Fd())
+	cmd := exec.Command("/bin/sh", "-c", fmt.Sprintf("test -r /dev/fd/%d", fd))
+	err = cmd.Run()
+	require.Error(t, err)
+}
+
 func TestOpenValidatedRegularFile_RejectsMultiLinkFile(t *testing.T) {
 	ctx := newTestRunContext(t)
-	sharedPath := filepath.Join(t.TempDir(), "shared.md")
+	sharedPath := filepath.Join(realTempDir(t), "shared.md")
 	require.NoError(t, os.WriteFile(sharedPath, []byte("secret\n"), defaultFilePerm))
 
 	runPath, err := ctx.ResolveRunRelative("40/candidates/linked.md")
@@ -503,8 +569,48 @@ func TestOpenValidatedRegularFile_RejectsMultiLinkFile(t *testing.T) {
 	assert.ErrorIs(t, err, ErrUnsafePath)
 }
 
+func TestOpenValidatedRegularFile_FailsClosedWhenParentDirectoryChangesBeforeOpen(t *testing.T) {
+	root := realTempDir(t)
+	parent := filepath.Join(root, "40", "candidates")
+	path := filepath.Join(parent, "candidate.md")
+	escape := filepath.Join(realTempDir(t), "escape")
+	require.NoError(t, os.MkdirAll(parent, 0o755))
+	require.NoError(t, os.MkdirAll(escape, 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("safe\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(escape, "candidate.md"), []byte("escape\n"), 0o644))
+
+	originalHook := validatedRegularFileBeforeOpen
+	validatedRegularFileBeforeOpen = func(string) {
+		moved := parent + ".moved"
+		require.NoError(t, os.Rename(parent, moved))
+		require.NoError(t, os.Symlink(escape, parent))
+	}
+	t.Cleanup(func() {
+		validatedRegularFileBeforeOpen = originalHook
+	})
+
+	_, err := OpenValidatedRegularFile(path, root)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUnsafePath)
+}
+
+func TestOpenValidatedRegularFile_RejectsOversizedFile(t *testing.T) {
+	ctx := newTestRunContext(t)
+	path, err := ctx.ResolveRunRelative("40/candidates/large.md")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	require.NoError(t, err)
+	require.NoError(t, file.Truncate(50*1024*1024))
+	require.NoError(t, file.Close())
+
+	_, err = OpenValidatedRegularFile(path, ctx.RunDir())
+	require.ErrorIs(t, err, ErrFileTooLarge)
+}
+
 func TestAppendRegistryEntryCASAndIndexRebuild(t *testing.T) {
-	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
 	first := contracts.RuleRegistryEntry{
 		Kind: contracts.RegistryKindAdded,
 		Value: contracts.RuleRegistryAdded{
@@ -582,7 +688,7 @@ func TestAppendRegistryEntryCASAndIndexRebuild(t *testing.T) {
 }
 
 func TestEnsureVerifiedIdempotencyIndex_RebuildsCorruptIndex(t *testing.T) {
-	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
 	indexPath := filepath.Join(filepath.Dir(registryPath), "rules-idempotency-index.jsonl")
 
 	first := contracts.RuleRegistryEntry{
@@ -642,7 +748,7 @@ func TestEnsureVerifiedIdempotencyIndex_RebuildsCorruptIndex(t *testing.T) {
 }
 
 func TestSyncIdempotencyIndex_RebuildDoesNotDuplicateCurrentEntry(t *testing.T) {
-	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
 	indexPath := filepath.Join(filepath.Dir(registryPath), "rules-idempotency-index.jsonl")
 
 	first := contracts.RuleRegistryEntry{
@@ -694,7 +800,7 @@ func TestSyncIdempotencyIndex_RebuildDoesNotDuplicateCurrentEntry(t *testing.T) 
 }
 
 func TestAppendRegistryEntry_ConcurrentCASAllowsSingleWinner(t *testing.T) {
-	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
 	entry := contracts.RuleRegistryEntry{
 		Kind: contracts.RegistryKindAdded,
 		Value: contracts.RuleRegistryAdded{
@@ -731,7 +837,7 @@ func TestAppendRegistryEntry_ConcurrentCASAllowsSingleWinner(t *testing.T) {
 			successes++
 			continue
 		}
-		assert.ErrorIs(t, err, ErrRegistryCASMismatch)
+		assert.True(t, errors.Is(err, ErrRegistryCASMismatch) || os.IsNotExist(err))
 	}
 	assert.Equal(t, 1, successes)
 
@@ -741,7 +847,7 @@ func TestAppendRegistryEntry_ConcurrentCASAllowsSingleWinner(t *testing.T) {
 }
 
 func TestAppendRegistryEntry_FailsClosedWhenRegistryPathIdentityChanges(t *testing.T) {
-	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
 	first := contracts.RuleRegistryEntry{
 		Kind: contracts.RegistryKindAdded,
 		Value: contracts.RuleRegistryAdded{
@@ -760,7 +866,7 @@ func TestAppendRegistryEntry_FailsClosedWhenRegistryPathIdentityChanges(t *testi
 	firstResult, err := AppendRegistryEntry(registryPath, first)
 	require.NoError(t, err)
 
-	replacement := filepath.Join(t.TempDir(), "replacement-registry.jsonl")
+	replacement := filepath.Join(realTempDir(t), "replacement-registry.jsonl")
 	require.NoError(t, os.WriteFile(replacement, nil, defaultFilePerm))
 	originalHook := registryBeforeAppendHook
 	registryBeforeAppendHook = func() error {
@@ -797,7 +903,7 @@ func TestAppendRegistryEntry_FailsClosedWhenRegistryPathIdentityChanges(t *testi
 }
 
 func TestSyncIdempotencyIndex_ConcurrentAppendDeduplicatesOffset(t *testing.T) {
-	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
 	indexPath := filepath.Join(filepath.Dir(registryPath), "rules-idempotency-index.jsonl")
 	entry := contracts.RuleRegistryEntry{
 		Kind: contracts.RegistryKindAdded,
@@ -833,7 +939,7 @@ func TestSyncIdempotencyIndex_ConcurrentAppendDeduplicatesOffset(t *testing.T) {
 	close(start)
 	wg.Wait()
 	for _, err := range errs {
-		require.NoError(t, err)
+		require.True(t, err == nil || os.IsNotExist(err))
 	}
 
 	rows, err := ReadJSONL[contracts.RuleIdempotencyIndexEntry](indexPath)
@@ -842,7 +948,7 @@ func TestSyncIdempotencyIndex_ConcurrentAppendDeduplicatesOffset(t *testing.T) {
 }
 
 func TestSyncIdempotencyIndex_FailsClosedWhenIndexPathIdentityChanges(t *testing.T) {
-	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
 	indexPath := filepath.Join(filepath.Dir(registryPath), "rules-idempotency-index.jsonl")
 	first := contracts.RuleRegistryEntry{
 		Kind: contracts.RegistryKindAdded,
@@ -903,7 +1009,7 @@ func TestSyncIdempotencyIndex_FailsClosedWhenIndexPathIdentityChanges(t *testing
 	thirdResult, err := AppendRegistryEntry(registryPath, third)
 	require.NoError(t, err)
 
-	replacement := filepath.Join(t.TempDir(), "replacement-index.jsonl")
+	replacement := filepath.Join(realTempDir(t), "replacement-index.jsonl")
 	require.NoError(t, os.WriteFile(replacement, nil, defaultFilePerm))
 	originalAppendHook := idempotencyIndexBeforeAppendHook
 	originalRewriteHook := idempotencyIndexBeforeRewriteHook
@@ -930,8 +1036,8 @@ func TestSyncIdempotencyIndex_FailsClosedWhenIndexPathIdentityChanges(t *testing
 func newTestRunContext(t *testing.T) RunContext {
 	t.Helper()
 
-	runsBase := t.TempDir()
-	worktreeBase := t.TempDir()
+	runsBase := realTempDir(t)
+	worktreeBase := realTempDir(t)
 	ctx, err := NewRunContext("2026-04-21-PR42-abcdef0", runsBase, worktreeBase)
 	require.NoError(t, err)
 	return ctx

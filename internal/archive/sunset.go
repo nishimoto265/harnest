@@ -3,6 +3,7 @@
 package archive
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -219,7 +220,12 @@ func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 }
 
 func ComputeOpID(sunsetRunID, ruleID, transition string) string {
-	sum := sha256.Sum256([]byte(sunsetRunID + ruleID + transition))
+	var payload bytes.Buffer
+	for _, field := range []string{sunsetRunID, ruleID, transition} {
+		fmt.Fprintf(&payload, "%08x:", len(field))
+		payload.WriteString(field)
+	}
+	sum := sha256.Sum256(payload.Bytes())
 	return hex.EncodeToString(sum[:])
 }
 
@@ -269,6 +275,9 @@ func registryPrevHashForVersion(versionSeq int64, prevHash string) string {
 func buildRegistryEntry(path string, t Transition, sunsetRunID, opID string, at time.Time) (contracts.RuleRegistryEntry, error) {
 	lines, err := readRegistryLines(path)
 	if err != nil {
+		return contracts.RuleRegistryEntry{}, err
+	}
+	if err := validateTransitionAgainstRegistry(lines, t); err != nil {
 		return contracts.RuleRegistryEntry{}, err
 	}
 	prevHash := ""
@@ -324,6 +333,25 @@ func buildRegistryEntry(path string, t Transition, sunsetRunID, opID string, at 
 	default:
 		return contracts.RuleRegistryEntry{}, fmt.Errorf("archive: unsupported transition kind=%q", t.Kind)
 	}
+}
+
+func validateTransitionAgainstRegistry(lines []registryLine, t Transition) error {
+	entries := make([]contracts.RuleRegistryEntry, 0, len(lines))
+	for _, line := range lines {
+		entries = append(entries, line.Entry)
+	}
+	states, err := registryview.Build(entries)
+	if err != nil {
+		return err
+	}
+	state, ok := states[t.RuleID]
+	if !ok || (state.RuleID == "" && state.Status == "" && !state.Exists) {
+		return fmt.Errorf("archive: rule not found in registry: rule_id=%s", t.RuleID)
+	}
+	if state.Status != t.PrevStatus {
+		return fmt.Errorf("archive: registry status mismatch: rule_id=%s have=%s want=%s", t.RuleID, state.Status, t.PrevStatus)
+	}
+	return nil
 }
 
 func nextRegistryVersion(lines []registryLine, _ string) int64 {

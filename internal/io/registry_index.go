@@ -60,7 +60,7 @@ func SyncIdempotencyIndex(registryPath, indexPath string, entry contracts.RuleRe
 	if err := ensureWritableParentDir(indexPath); err != nil {
 		return err
 	}
-	indexFile, identity, err := openTrackedFileNoFollow(indexPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, defaultFilePerm)
+	indexFile, identity, err := openTrackedFileNoFollowRetry(indexPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, defaultFilePerm)
 	if err != nil {
 		return err
 	}

@@ -36,11 +36,14 @@ func ReadSidecar(ctx RunContext, ref contracts.OverflowRef) (string, error) {
 	if err := ref.Validate(); err != nil {
 		return "", err
 	}
+	if err := validateSidecarRefPath(ref.Path); err != nil {
+		return "", err
+	}
 	path, err := ctx.ResolveRunRelative(ref.Path)
 	if err != nil {
 		return "", err
 	}
-	data, err := osReadFile(path)
+	data, err := ReadValidatedRegularFile(path)
 	if err != nil {
 		return "", err
 	}
@@ -49,10 +52,6 @@ func ReadSidecar(ctx RunContext, ref contracts.OverflowRef) (string, error) {
 		return "", ErrSidecarDigestMismatch
 	}
 	return string(data), nil
-}
-
-var osReadFile = func(path string) ([]byte, error) {
-	return os.ReadFile(path)
 }
 
 func SidecarRefPath(runDir, absolutePath string) (string, error) {
@@ -84,6 +83,18 @@ func SidecarRefPath(runDir, absolutePath string) (string, error) {
 		return "", err
 	}
 	return rel, nil
+}
+
+func validateSidecarRefPath(path string) error {
+	if !strings.HasSuffix(path, sidecarFilenameExt) {
+		return fmt.Errorf("%w: invalid sidecar extension: %s", ErrUnsafePath, path)
+	}
+	for _, prefix := range []string{"30/reasons", "40", "60/reasons", "processed-details"} {
+		if err := contracts.EnsureRelativePathUnderPrefix(path, prefix); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: invalid sidecar prefix: %s", ErrUnsafePath, path)
 }
 
 func ensureNoSymlinkPathComponents(path string) error {

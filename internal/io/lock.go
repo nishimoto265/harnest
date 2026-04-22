@@ -3,7 +3,9 @@ package io
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -11,7 +13,10 @@ import (
 type FileLock struct {
 	path string
 	file *os.File
+	held bool
 }
+
+var activeLockPaths sync.Map
 
 func AcquirePromotionLock(ctx RunContext) (*FileLock, error) {
 	return AcquireFileLock(ctx.PromotionLockPath())
@@ -27,7 +32,7 @@ func TryAcquireFileLock(path string) (*FileLock, bool, error) {
 // InspectFileLock acquires a shared non-blocking lock on an existing lock file
 // without creating it. The bool reports whether the lock file already exists.
 func InspectFileLock(path string) (*FileLock, bool, error) {
-	f, err := openFileNoFollow(path, os.O_RDONLY, 0)
+	f, identity, err := openTrackedFileNoFollow(path, os.O_RDONLY, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
@@ -38,6 +43,13 @@ func InspectFileLock(path string) (*FileLock, bool, error) {
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, true, nil
+		}
+		return nil, false, err
+	}
+	if err := ensurePathMatchesIdentity(path, identity); err != nil {
+		_ = f.Close()
+		if errors.Is(err, ErrPathIdentityChanged) || os.IsNotExist(err) {
+			return nil, false, err
 		}
 		return nil, false, err
 	}
@@ -56,40 +68,31 @@ func acquireFileLock(path string, nonBlocking bool, ctx context.Context) (*FileL
 	if err := ensureWritableParentDir(path); err != nil {
 		return nil, err
 	}
-	f, err := openFileNoFollow(path, os.O_CREATE|os.O_RDWR, defaultFilePerm)
-	if err != nil {
-		return nil, err
-	}
-	mode := syscall.LOCK_EX
-	if nonBlocking {
-		mode |= syscall.LOCK_NB
-		for {
-			if err := syscall.Flock(int(f.Fd()), mode); err == nil {
-				return &FileLock{path: path, file: f}, nil
-			} else if !errors.Is(err, syscall.EWOULDBLOCK) {
-				_ = f.Close()
-				return nil, err
-			}
+	for {
+		lock, acquired, err := tryLockFile(path, os.O_CREATE|os.O_RDWR, defaultFilePerm, syscall.LOCK_EX)
+		if err != nil {
+			return nil, err
+		}
+		if acquired {
+			return lock, nil
+		}
+		if nonBlocking {
 			if ctx != nil {
 				select {
 				case <-ctx.Done():
-					_ = f.Close()
 					return nil, ctx.Err()
 				case <-time.After(50 * time.Millisecond):
 				}
 				continue
 			}
+			return nil, syscall.EWOULDBLOCK
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	if err := syscall.Flock(int(f.Fd()), mode); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return &FileLock{path: path, file: f}, nil
 }
 
 func tryLockFile(path string, flags int, perm os.FileMode, lockMode int) (*FileLock, bool, error) {
-	f, err := openFileNoFollow(path, flags, perm)
+	f, identity, err := openTrackedFileNoFollow(path, flags, perm)
 	if err != nil {
 		return nil, false, err
 	}
@@ -100,7 +103,47 @@ func tryLockFile(path string, flags int, perm os.FileMode, lockMode int) (*FileL
 		}
 		return nil, false, err
 	}
-	return &FileLock{path: path, file: f}, true, nil
+	if err := ensurePathMatchesIdentity(path, identity); err != nil {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+		if errors.Is(err, ErrPathIdentityChanged) || os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if err := registerActiveLockPath(path, identity); err != nil {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+		return nil, false, err
+	}
+	return &FileLock{path: path, file: f, held: true}, true, nil
+}
+
+func registerActiveLockPath(path string, identity fileIdentity) error {
+	if current, ok := activeLockPaths.Load(path); ok {
+		if heldIdentity, ok := current.(fileIdentity); ok && heldIdentity != identity {
+			return fmt.Errorf("%w: path=%s", ErrPathIdentityChanged, path)
+		}
+	}
+	activeLockPaths.Store(path, identity)
+	return nil
+}
+
+func unregisterActiveLockPath(path string, file *os.File) {
+	if file == nil {
+		activeLockPaths.Delete(path)
+		return
+	}
+	identity, err := fileIdentityFromFile(file)
+	if err != nil {
+		activeLockPaths.Delete(path)
+		return
+	}
+	if current, ok := activeLockPaths.Load(path); ok {
+		if heldIdentity, ok := current.(fileIdentity); ok && heldIdentity == identity {
+			activeLockPaths.Delete(path)
+		}
+	}
 }
 
 func (l *FileLock) Path() string {
@@ -113,6 +156,10 @@ func (l *FileLock) Path() string {
 func (l *FileLock) Unlock() error {
 	if l == nil || l.file == nil {
 		return nil
+	}
+	if l.held {
+		unregisterActiveLockPath(l.path, l.file)
+		l.held = false
 	}
 	if err := syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN); err != nil {
 		_ = l.file.Close()

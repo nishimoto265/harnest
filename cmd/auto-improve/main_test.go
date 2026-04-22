@@ -13,8 +13,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	real, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	return real
+}
+
 func TestRecoverClearDivergedSunsetClearsMarkerAndUnblocksStep70(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	runsBase := filepath.Join(root, "runs")
 	worktreeBase := filepath.Join(root, "worktrees")
 	require.NoError(t, os.MkdirAll(runsBase, 0o755))
@@ -52,7 +60,7 @@ func TestRecoverClearDivergedSunsetClearsMarkerAndUnblocksStep70(t *testing.T) {
 }
 
 func TestRecoverClearDivergedSunsetRefusesWhenSunsetTransactionStillOpen(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	runsBase := filepath.Join(root, "runs")
 	worktreeBase := filepath.Join(root, "worktrees")
 	require.NoError(t, os.MkdirAll(runsBase, 0o755))
@@ -77,7 +85,7 @@ func TestRecoverClearDivergedSunsetRefusesWhenSunsetTransactionStillOpen(t *test
 }
 
 func TestRecoverClearDivergedSunsetFailsFastWhenPromotionLockHeld(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	runsBase := filepath.Join(root, "runs")
 	worktreeBase := filepath.Join(root, "worktrees")
 	require.NoError(t, os.MkdirAll(runsBase, 0o755))
@@ -106,7 +114,7 @@ func TestRecoverClearDivergedSunsetFailsFastWhenPromotionLockHeld(t *testing.T) 
 }
 
 func TestRecoverInspectReportsRegistryIntegrityError(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	runsBase := filepath.Join(root, "runs")
 	worktreeBase := filepath.Join(root, "worktrees")
 	require.NoError(t, os.MkdirAll(runsBase, 0o755))
@@ -129,7 +137,7 @@ func TestRecoverInspectReportsRegistryIntegrityError(t *testing.T) {
 }
 
 func TestRecoverInspectDoesNotCreatePromotionLockWhenAbsent(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	runsBase := filepath.Join(root, "runs")
 	worktreeBase := filepath.Join(root, "worktrees")
 	require.NoError(t, os.MkdirAll(runsBase, 0o755))

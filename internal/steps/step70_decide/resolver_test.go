@@ -196,7 +196,7 @@ func TestLatestRuleSha256_RejectsInvalidExistingRulePath(t *testing.T) {
 
 func TestMaterializeRuleSidecarRejectsExternalSymlink(t *testing.T) {
 	runCtx := newResolverRunContext(t)
-	externalPath := filepath.Join(t.TempDir(), "external.md")
+	externalPath := filepath.Join(realTempDir(t), "external.md")
 	body := "# external\npwned\n"
 	require.NoError(t, os.WriteFile(externalPath, []byte(body), 0o644))
 
@@ -218,8 +218,8 @@ func TestMaterializeRuleSidecarRejectsExternalSymlink(t *testing.T) {
 
 func newResolverRunContext(t *testing.T) internalio.RunContext {
 	t.Helper()
-	runsBase := filepath.Join(t.TempDir(), "runs")
-	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
+	runsBase := filepath.Join(realTempDir(t), "runs")
+	worktreeBase := filepath.Join(realTempDir(t), "worktrees")
 	runCtx, err := internalio.NewRunContext("2026-04-21-PR42-abcdef0", runsBase, worktreeBase)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))

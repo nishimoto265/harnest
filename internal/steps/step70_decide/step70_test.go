@@ -23,6 +23,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	real, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	return real
+}
+
 func TestRun_NoopWhenNoTarget(t *testing.T) {
 	runCtx, pkg, candidates, store, _ := newFixture(t, "PR1")
 	require.NoError(t, Run(context.Background(), 1, runCtx, pkg, candidates, store, Deps{Now: fixedNow()}))
@@ -736,6 +744,101 @@ func TestRun_RulePublishIntegrityFailuresTransitionToManualRecovery(t *testing.T
 	}
 }
 
+func TestMarkManualRecoveryWithDetail_DoesNotPersistIntentionWhenSentinelWriteFails(t *testing.T) {
+	runCtx, _, candidates, _, resolver := newFixtureWithResolver(t, "PR416")
+	store := newTrackingStore(intentionPath(t, runCtx))
+	writer := state.NewWriter(runCtx)
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+
+	originalWriteSentinel := writeSentinelFn
+	writeSentinelFn = func(string, contracts.RunID, int, contracts.RollbackReason, contracts.FailedStep, time.Time) error {
+		return errors.New("disk full")
+	}
+	t.Cleanup(func() {
+		writeSentinelFn = originalWriteSentinel
+	})
+
+	err := markManualRecoveryWithDetail(416, runCtx, intention, store, writer, Deps{Now: fixedNow()}, contracts.RollbackReasonTransactionalFailure, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "disk full")
+
+	loaded, loadErr := store.Load()
+	require.NoError(t, loadErr)
+	assert.Nil(t, loaded)
+
+	blocked, blockErr := SentinelExists(runCtx.RunsBase)
+	require.NoError(t, blockErr)
+	assert.False(t, blocked)
+}
+
+func TestFindPlannedRegistryMatches_RejectsPayloadMismatchForMatchingOpID(t *testing.T) {
+	runCtx, _, candidates, _, resolver := newFixtureWithResolver(t, "PR417")
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+
+	planned := intention.PlannedAdoption.Entries[0]
+	_, err := internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         planned.RuleID,
+			RulePath:       planned.RulePath,
+			Sha256:         strings.Repeat("f", 64),
+			IdempotencyKey: planned.OpID,
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        runCtx.RunID,
+			At:             fixedNow()(),
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = findPlannedRegistryMatches(runCtx, intention)
+	require.ErrorIs(t, err, ErrRegistryDivergence)
+}
+
+func TestRun_PersistedAdoptDecisionWithStagedRulesButNoIntentionFailsClosed(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR418")
+	resolver.target.RulesToAppend = []contracts.RuleRegistryEntry{
+		adoptAddedEntryWithBody(runCtx.RunID, "rule-a", "rule-a body\n"),
+	}
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	entries, err := registryEntriesFromPlannedAdoption(intention, fixedNow()())
+	require.NoError(t, err)
+	entry, err := deriveRegistryChain(entries[0], runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	appendResult, err := internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), entry)
+	require.NoError(t, err)
+
+	require.NoError(t, internalio.WriteAtomic(mustStagedRulePath(t, runCtx, "rules/rule-a.md"), []byte("rule-a body\n")))
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, contracts.Decision{
+		Action: contracts.DecisionActionAdopt,
+		Value: contracts.DecisionAdopt{
+			Action:               contracts.DecisionActionAdopt,
+			SchemaVersion:        "1",
+			RunID:                runCtx.RunID,
+			IdempotencyKey:       intention.IdempotencyKey,
+			BestShaBefore:        intention.BestShaBefore,
+			TargetSha:            intention.TargetSha,
+			CandidatesHash:       intention.CandidatesHash,
+			RegistryAppendResult: appendResult,
+			DecidedAt:            fixedNow()(),
+		},
+	}))
+
+	err = Run(context.Background(), 418, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.TargetSHA},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	})
+	require.ErrorIs(t, err, errMissingPlannedAdoptionForStaging)
+	assert.FileExists(t, mustStagedRulePath(t, runCtx, "rules/rule-a.md"))
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-a.md"))
+}
+
 func TestRun_ResumeFromDecisionWritten(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR5")
 	registryPath := runCtx.RulesRegistryPath()
@@ -1235,29 +1338,51 @@ func TestPromoteRuleSidecarAndCleanup_FsyncParentDirsAfterDeletion(t *testing.T)
 	assert.Contains(t, calls, filepath.Clean(runCtx.RunDir()))
 }
 
-func TestPromoteRuleSidecar_RewritesMatchingSymlinkDestinationAsRegularFile(t *testing.T) {
+func TestPromoteRuleSidecar_RejectsSymlinkDestination(t *testing.T) {
 	runCtx, _, _, _, _ := newFixtureWithResolver(t, "PR414")
 	body := "rule-a body\n"
 	stagedPath := mustStagedRulePath(t, runCtx, "rules/rule-a.md")
 	require.NoError(t, internalio.WriteAtomic(stagedPath, []byte(body)))
 
-	externalPath := filepath.Join(t.TempDir(), "external-rule.md")
+	externalPath := filepath.Join(realTempDir(t), "external-rule.md")
 	require.NoError(t, os.WriteFile(externalPath, []byte(body), 0o644))
 
 	dstPath := filepath.Join(runCtx.RunsBase, "rules", "rule-a.md")
 	require.NoError(t, os.MkdirAll(filepath.Dir(dstPath), 0o755))
 	require.NoError(t, os.Symlink(externalPath, dstPath))
 
-	require.NoError(t, promoteRuleSidecar(stagedPath, dstPath, sha256String(body)))
+	err := promoteRuleSidecar(stagedPath, dstPath, sha256String(body))
+	require.ErrorIs(t, err, errRulePublishDestinationType)
+	assert.FileExists(t, stagedPath)
+	info, statErr := os.Lstat(dstPath)
+	require.NoError(t, statErr)
+	assert.NotZero(t, info.Mode()&os.ModeSymlink)
+}
 
-	info, err := os.Lstat(dstPath)
-	require.NoError(t, err)
-	assert.Zero(t, info.Mode()&os.ModeSymlink)
+func TestPromoteRuleSidecar_DetectsDestinationSwapToSymlinkBeforeRead(t *testing.T) {
+	runCtx, _, _, _, _ := newFixtureWithResolver(t, "PR4141")
+	body := "rule-a body\n"
+	stagedPath := mustStagedRulePath(t, runCtx, "rules/rule-a.md")
+	require.NoError(t, internalio.WriteAtomic(stagedPath, []byte(body)))
 
-	data, err := os.ReadFile(dstPath)
-	require.NoError(t, err)
-	assert.Equal(t, body, string(data))
-	assert.NoFileExists(t, stagedPath)
+	dstPath := filepath.Join(runCtx.RunsBase, "rules", "rule-a.md")
+	require.NoError(t, internalio.WriteAtomic(dstPath, []byte("old body\n")))
+
+	externalPath := filepath.Join(realTempDir(t), "external-rule.md")
+	require.NoError(t, os.WriteFile(externalPath, []byte(body), 0o644))
+
+	originalHook := promoteRuleSidecarBeforeDestinationRead
+	promoteRuleSidecarBeforeDestinationRead = func(path string) {
+		require.NoError(t, os.Remove(path))
+		require.NoError(t, os.Symlink(externalPath, path))
+	}
+	t.Cleanup(func() {
+		promoteRuleSidecarBeforeDestinationRead = originalHook
+	})
+
+	err := promoteRuleSidecar(stagedPath, dstPath, sha256String(body))
+	require.ErrorIs(t, err, errRulePublishDestinationType)
+	assert.FileExists(t, stagedPath)
 }
 
 func TestFindRegistryByIdempotencyKey_RebuildsMandatoryIndexBeforeLookup(t *testing.T) {
@@ -1520,7 +1645,7 @@ func TestRun_RejectsPersistedDecisionThatFailsRequestBoundValidation(t *testing.
 }
 
 func TestCleanupWorktrees_RejectsPathOutsideWorktreeBase(t *testing.T) {
-	runCtx, err := internalio.NewRunContext("2026-04-21-PR999-abcdef0", t.TempDir(), t.TempDir())
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR999-abcdef0", realTempDir(t), realTempDir(t))
 	require.NoError(t, err)
 	pkg := &contracts.TaskPackage{
 		SchemaVersion:           "1",
@@ -1532,7 +1657,7 @@ func TestCleanupWorktrees_RejectsPathOutsideWorktreeBase(t *testing.T) {
 		ReconstructedTaskPrompt: "cleanup guard",
 		CreatedAt:               time.Now().UTC(),
 		Worktrees: []contracts.WorktreeAllocation{
-			{Agent: "a1", Pass: 1, Path: filepath.Join(t.TempDir(), "escape"), Branch: "stub/pass1/a1", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},
+			{Agent: "a1", Pass: 1, Path: filepath.Join(realTempDir(t), "escape"), Branch: "stub/pass1/a1", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},
 			{Agent: "a2", Pass: 1, Path: filepath.Join(runCtx.WorktreeBase, "pass1-a2"), Branch: "stub/pass1/a2", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},
 			{Agent: "a3", Pass: 1, Path: filepath.Join(runCtx.WorktreeBase, "pass1-a3"), Branch: "stub/pass1/a3", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},
 			{Agent: "a1", Pass: 2, Path: filepath.Join(runCtx.WorktreeBase, "pass2-a1"), Branch: "stub/pass2/a1", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},
@@ -1657,8 +1782,8 @@ func fixedNow() func() time.Time {
 
 func newFixture(t *testing.T, prLabel string) (internalio.RunContext, *contracts.TaskPackage, *contracts.Candidates, IntentionWriter, *fixtureResolver) {
 	t.Helper()
-	tempRuns := t.TempDir()
-	worktreeBase := t.TempDir()
+	tempRuns := realTempDir(t)
+	worktreeBase := realTempDir(t)
 	runID := contracts.RunID("2026-04-21-" + prLabel + "-abcdef0")
 	runCtx, err := internalio.NewRunContext(runID, tempRuns, worktreeBase)
 	require.NoError(t, err)

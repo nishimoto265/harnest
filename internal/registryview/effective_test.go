@@ -154,3 +154,65 @@ func TestBuild_UpdateRequiresMatchingPrevSHA256(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "prev_sha256 mismatch")
 }
+
+func TestBuild_RollbackFailsWhenTargetIsNotCurrentPromotion(t *testing.T) {
+	added := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("2", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        "2026-04-21-PR1-abcdef0",
+			At:             time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+		},
+	}
+	addedResult, nextOffset, err := registryAppendResult(added, 0)
+	require.NoError(t, err)
+
+	updated := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindUpdated,
+		Value: contracts.RuleRegistryUpdated{
+			Kind:           contracts.RegistryKindUpdated,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("3", 64),
+			PrevSha256:     strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("4", 64),
+			VersionSeq:     2,
+			PrevHash:       addedResult.Sha256,
+			ByRunID:        "2026-04-21-PR2-bcdef01",
+			At:             time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC),
+		},
+	}
+	updatedResult, _, err := registryAppendResult(updated, nextOffset)
+	require.NoError(t, err)
+
+	_, err = Build([]contracts.RuleRegistryEntry{
+		added,
+		updated,
+		{
+			Kind: contracts.RegistryKindRolledBack,
+			Value: contracts.RuleRegistryRolledBack{
+				Kind:           contracts.RegistryKindRolledBack,
+				SchemaVersion:  "1",
+				TargetOpID:     strings.Repeat("2", 64),
+				TargetOffset:   addedResult.Offset,
+				TargetSha256:   addedResult.Sha256,
+				ByRunID:        "2026-04-21-PR3-cdef012",
+				RollbackReason: contracts.RollbackReasonTransactionalFailure,
+				FailedStep:     contracts.FailedStep70,
+				VersionSeq:     3,
+				PrevHash:       updatedResult.Sha256,
+				At:             time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not current promotion")
+}

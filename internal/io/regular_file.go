@@ -12,37 +12,46 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 )
 
+const maxValidatedRegularFileBytes int64 = 10 * 1024 * 1024
+
+var validatedRegularFileBeforeOpen = func(string) {}
+
 // OpenValidatedRegularFile reads a regular file beneath runsBaseRoot while
-// rejecting symlink escapes and multi-link files.
+// rejecting symlink escapes, TOCTOU path swaps, multi-link files, and oversized
+// payloads.
 func OpenValidatedRegularFile(path, runsBaseRoot string) ([]byte, error) {
+	return readValidatedRegularFile(path, runsBaseRoot, true)
+}
+
+// ReadValidatedRegularFile reads a regular file by absolute path using the same
+// no-follow and identity checks as OpenValidatedRegularFile, but without a
+// runs-base containment requirement.
+func ReadValidatedRegularFile(path string) ([]byte, error) {
+	return readValidatedRegularFile(path, "", false)
+}
+
+func readValidatedRegularFile(path, runsBaseRoot string, enforceBase bool) ([]byte, error) {
 	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
 		return nil, err
 	}
-	if err := contracts.EnsureCleanAbsolutePath(runsBaseRoot); err != nil {
-		return nil, err
-	}
-
-	realRoot, err := filepath.EvalSymlinks(runsBaseRoot)
-	if err != nil {
-		return nil, err
-	}
-	realPath, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		if symlinkErr := ensureNoSymlinkPathComponents(path); symlinkErr != nil {
-			return nil, unsafePathError(path, symlinkErr)
+	path = canonicalizeTrustedPathPrefix(path)
+	if enforceBase {
+		if err := contracts.EnsureCleanAbsolutePath(runsBaseRoot); err != nil {
+			return nil, err
 		}
-		return nil, err
-	}
-	if !pathWithinBase(realPath, realRoot) {
-		return nil, unsafePathError(path, fmt.Errorf("resolved path escapes root: %s", realPath))
-	}
-	if err := ensureNoSymlinkPathComponents(path); err != nil {
-		return nil, unsafePathError(path, err)
+		runsBaseRoot = canonicalizeTrustedPathPrefix(runsBaseRoot)
+		if err := ensureNoSymlinkPathComponents(runsBaseRoot); err != nil {
+			return nil, unsafePathError(path, err)
+		}
+		if !pathWithinBase(path, runsBaseRoot) {
+			return nil, unsafePathError(path, fmt.Errorf("path escapes root: %s", path))
+		}
 	}
 
+	validatedRegularFileBeforeOpen(path)
 	file, _, err := openTrackedFileNoFollow(path, os.O_RDONLY, 0)
 	if err != nil {
-		if errors.Is(err, ErrPathIdentityChanged) || errors.Is(err, syscall.ELOOP) {
+		if isUnsafeRegularFileOpenError(err) {
 			return nil, unsafePathError(path, err)
 		}
 		return nil, err
@@ -56,12 +65,8 @@ func OpenValidatedRegularFile(path, runsBaseRoot string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, unsafePathError(path, fmt.Errorf("not a regular file"))
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return nil, unsafePathError(path, fmt.Errorf("missing stat_t"))
-	}
-	if stat.Nlink > 1 {
-		return nil, unsafePathError(path, fmt.Errorf("multiple hard links"))
+	if info.Size() > maxValidatedRegularFileBytes {
+		return nil, fmt.Errorf("%w: path=%s size=%d limit=%d", ErrFileTooLarge, path, info.Size(), maxValidatedRegularFileBytes)
 	}
 	return stdio.ReadAll(file)
 }
@@ -79,4 +84,8 @@ func pathWithinBase(path, base string) bool {
 		return true
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func isUnsafeRegularFileOpenError(err error) bool {
+	return err != nil && (errors.Is(err, ErrUnsafePath) || errors.Is(err, ErrPathIdentityChanged) || errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR))
 }

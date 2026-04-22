@@ -19,8 +19,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	real, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	return real
+}
+
 func TestRunSunsetWithLock_Respects24hGate(t *testing.T) {
-	runsBase := t.TempDir()
+	runsBase := realTempDir(t)
+	seedArchiveRuleState(t, filepath.Join(runsBase, "rules-registry.jsonl"), "rule-1", contracts.RuleStatusActive)
 	now := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
 	opts := Opts{
 		RunsBase:    runsBase,
@@ -39,14 +48,15 @@ func TestRunSunsetWithLock_Respects24hGate(t *testing.T) {
 	assert.Empty(t, result.AppendedOpIDs)
 
 	lines := readRegistryLinesForTest(t, filepath.Join(runsBase, "rules-registry.jsonl"))
-	assert.Len(t, lines, 1)
+	assert.Len(t, lines, 2)
 }
 
 func TestRunSunsetWithLock_ReconcilesCompletedMarker(t *testing.T) {
-	runsBase := t.TempDir()
+	runsBase := realTempDir(t)
 	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
 	staleRunID := "stale-run"
 	transition := deprecateTransition("rule-1")
+	seedArchiveRuleState(t, registryPath, "rule-1", contracts.RuleStatusActive)
 
 	entry, err := buildRegistryEntry(registryPath, transition, staleRunID, ComputeOpID(staleRunID, transition.RuleID, transitionKey(transition)), time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC))
 	require.NoError(t, err)
@@ -71,15 +81,16 @@ func TestRunSunsetWithLock_ReconcilesCompletedMarker(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(runsBase, markerFilename))
 
 	lines := readRegistryLinesForTest(t, registryPath)
-	assert.Len(t, lines, 1)
+	assert.Len(t, lines, 2)
 }
 
 func TestRunSunsetWithLock_ReconcilesInterruptedMarker(t *testing.T) {
-	runsBase := t.TempDir()
+	runsBase := realTempDir(t)
 	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
 	staleRunID := "stale-run"
 	first := deprecateTransition("rule-1")
 	second := archiveTransition("rule-1", contracts.RuleStatusDeprecated)
+	seedArchiveRuleState(t, registryPath, "rule-1", contracts.RuleStatusActive)
 
 	entry, err := buildRegistryEntry(registryPath, first, staleRunID, ComputeOpID(staleRunID, first.RuleID, transitionKey(first)), time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC))
 	require.NoError(t, err)
@@ -103,13 +114,13 @@ func TestRunSunsetWithLock_ReconcilesInterruptedMarker(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(runsBase, markerFilename))
 
 	lines := readRegistryLinesForTest(t, registryPath)
-	require.Len(t, lines, 2)
-	assert.Equal(t, ComputeOpID(staleRunID, first.RuleID, transitionKey(first)), opIDFromEntry(lines[0].Entry))
-	assert.Equal(t, ComputeOpID(staleRunID, second.RuleID, transitionKey(second)), opIDFromEntry(lines[1].Entry))
+	require.Len(t, lines, 3)
+	assert.Equal(t, ComputeOpID(staleRunID, first.RuleID, transitionKey(first)), opIDFromEntry(lines[1].Entry))
+	assert.Equal(t, ComputeOpID(staleRunID, second.RuleID, transitionKey(second)), opIDFromEntry(lines[2].Entry))
 }
 
 func TestRunSunsetWithLock_ReconcilesOwnPartialTailProgress(t *testing.T) {
-	runsBase := t.TempDir()
+	runsBase := realTempDir(t)
 	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
 	staleRunID := "stale-run"
 	transitions := []Transition{
@@ -117,6 +128,7 @@ func TestRunSunsetWithLock_ReconcilesOwnPartialTailProgress(t *testing.T) {
 		archiveTransition("rule-1", contracts.RuleStatusDeprecated),
 		restoreTransition("rule-1"),
 	}
+	seedArchiveRuleState(t, registryPath, "rule-1", contracts.RuleStatusActive)
 
 	require.NoError(t, writeMarker(Opts{
 		RunsBase:    runsBase,
@@ -143,12 +155,12 @@ func TestRunSunsetWithLock_ReconcilesOwnPartialTailProgress(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(runsBase, markerFilename))
 
 	lines := readRegistryLinesForTest(t, registryPath)
-	require.Len(t, lines, 3)
-	assert.Equal(t, ComputeOpID(staleRunID, transitions[2].RuleID, transitionKey(transitions[2])), opIDFromEntry(lines[2].Entry))
+	require.Len(t, lines, 4)
+	assert.Equal(t, ComputeOpID(staleRunID, transitions[2].RuleID, transitionKey(transitions[2])), opIDFromEntry(lines[3].Entry))
 }
 
 func TestRunSunsetWithLock_DetectsStaleMarkerRegistryDivergence(t *testing.T) {
-	runsBase := t.TempDir()
+	runsBase := realTempDir(t)
 	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
 	staleRunID := "stale-run"
 	first := deprecateTransition("rule-1")
@@ -219,7 +231,7 @@ func TestRunSunsetWithLock_DetectsStaleMarkerRegistryDivergence(t *testing.T) {
 }
 
 func TestRunSunsetWithLock_ReconcilesUsingPersistedTransitionPlan(t *testing.T) {
-	runsBase := t.TempDir()
+	runsBase := realTempDir(t)
 	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
 	staleRunID := "stale-run"
 	persisted := []Transition{deprecateTransition("rule-1")}
@@ -227,6 +239,7 @@ func TestRunSunsetWithLock_ReconcilesUsingPersistedTransitionPlan(t *testing.T) 
 		deprecateTransition("rule-1"),
 		archiveTransition("rule-1", contracts.RuleStatusDeprecated),
 	}
+	seedArchiveRuleState(t, registryPath, "rule-1", contracts.RuleStatusActive)
 
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runsBase, markerFilename), sunsetMarker{
 		RecordedStartTime: time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC),
@@ -244,14 +257,15 @@ func TestRunSunsetWithLock_ReconcilesUsingPersistedTransitionPlan(t *testing.T) 
 	assert.Empty(t, result.AppendedOpIDs)
 
 	lines := readRegistryLinesForTest(t, registryPath)
-	require.Len(t, lines, 1)
-	entry := lines[0].Entry.Value.(contracts.RuleRegistryStatusChanged)
+	require.Len(t, lines, 2)
+	entry := lines[1].Entry.Value.(contracts.RuleRegistryStatusChanged)
 	assert.Equal(t, staleRunID, entry.BySunsetRunID)
 	assert.Equal(t, time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC), entry.At)
 }
 
 func TestRunSunset_PerOpIdempotency(t *testing.T) {
-	runsBase := t.TempDir()
+	runsBase := realTempDir(t)
+	seedArchiveRuleState(t, filepath.Join(runsBase, "rules-registry.jsonl"), "rule-1", contracts.RuleStatusActive)
 	opts := Opts{
 		RunsBase:    runsBase,
 		SunsetRunID: "sunset-1",
@@ -268,11 +282,30 @@ func TestRunSunset_PerOpIdempotency(t *testing.T) {
 	assert.Len(t, second.SkippedOpIDs, 1)
 
 	lines := readRegistryLinesForTest(t, filepath.Join(runsBase, "rules-registry.jsonl"))
-	assert.Len(t, lines, 1)
+	assert.Len(t, lines, 2)
+}
+
+func TestComputeOpID_UsesUnambiguousTupleEncoding(t *testing.T) {
+	first := ComputeOpID("ab", "c", "d")
+	second := ComputeOpID("a", "bc", "d")
+	assert.NotEqual(t, first, second)
+}
+
+func TestRunSunset_RejectsTransitionForMissingRule(t *testing.T) {
+	runsBase := realTempDir(t)
+	_, err := RunSunset(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "sunset-missing",
+		Transitions: []Transition{deprecateTransition("missing-rule")},
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rule not found")
 }
 
 func TestRunSunset_RegistryChain(t *testing.T) {
-	runsBase := t.TempDir()
+	runsBase := realTempDir(t)
+	seedArchiveRuleState(t, filepath.Join(runsBase, "rules-registry.jsonl"), "rule-1", contracts.RuleStatusActive)
 	opts := Opts{
 		RunsBase:    runsBase,
 		SunsetRunID: "sunset-1",
@@ -286,17 +319,17 @@ func TestRunSunset_RegistryChain(t *testing.T) {
 	require.NoError(t, err)
 
 	lines := readRegistryLinesForTest(t, filepath.Join(runsBase, "rules-registry.jsonl"))
-	require.Len(t, lines, 2)
+	require.Len(t, lines, 3)
 
-	first := lines[0].Entry.Value.(contracts.RuleRegistryStatusChanged)
-	second := lines[1].Entry.Value.(contracts.RuleRegistryArchived)
-	assert.EqualValues(t, 1, first.VersionSeq)
-	assert.EqualValues(t, 2, second.VersionSeq)
-	assert.Equal(t, lines[0].Sha256, second.PrevHash)
+	first := lines[1].Entry.Value.(contracts.RuleRegistryStatusChanged)
+	second := lines[2].Entry.Value.(contracts.RuleRegistryArchived)
+	assert.EqualValues(t, 2, first.VersionSeq)
+	assert.EqualValues(t, 3, second.VersionSeq)
+	assert.Equal(t, lines[1].Sha256, second.PrevHash)
 }
 
 func TestRunSunset_IndexSyncFailureDoesNotAbortCommittedRegistryAppend(t *testing.T) {
-	runsBase := t.TempDir()
+	runsBase := realTempDir(t)
 	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
 	writeArchiveSeedRegistryAdds(t, registryPath, 1499)
 	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, "rules-idempotency-index.jsonl"), 0o755))
@@ -315,7 +348,7 @@ func TestRunSunset_IndexSyncFailureDoesNotAbortCommittedRegistryAppend(t *testin
 }
 
 func TestRunSunsetWithLock_ReconcilesLegacyTwoLineMarker(t *testing.T) {
-	runsBase := t.TempDir()
+	runsBase := realTempDir(t)
 	path := filepath.Join(runsBase, markerFilename)
 	require.NoError(t, os.WriteFile(path, []byte("2026-04-21T09:00:00Z\nlegacy-run\n"), 0o644))
 
@@ -335,7 +368,7 @@ func TestRunSunsetWithLock_ReconcilesLegacyTwoLineMarker(t *testing.T) {
 }
 
 func TestRunSunsetWithLock_AutoTickTimesOutOnPromotionLock(t *testing.T) {
-	runsBase := t.TempDir()
+	runsBase := realTempDir(t)
 	lock, err := internalio.AcquireFileLock(filepath.Join(runsBase, "promotion.lock"))
 	require.NoError(t, err)
 	defer func() { _ = lock.Unlock() }()
@@ -354,8 +387,8 @@ func TestRunSunsetWithLock_AutoTickTimesOutOnPromotionLock(t *testing.T) {
 }
 
 func TestRunSunsetWithLock_BlocksOnNeedsManualRecoveryStateWithoutSentinelFile(t *testing.T) {
-	runsBase := t.TempDir()
-	worktreeBase := t.TempDir()
+	runsBase := realTempDir(t)
+	worktreeBase := realTempDir(t)
 	runCtx, err := internalio.NewRunContext("2026-04-21-PR77-deadbee", runsBase, worktreeBase)
 	require.NoError(t, err)
 	writer, err := state.NewWriterPath(filepath.Join(runsBase, "processed.jsonl"))
@@ -385,8 +418,9 @@ func TestRunSunsetWithLock_BlocksOnNeedsManualRecoveryStateWithoutSentinelFile(t
 }
 
 func TestRunSunsetWithLock_ProceedsAfterFinalizeCleanupWritesClearedMarker(t *testing.T) {
-	runsBase := t.TempDir()
-	worktreeBase := t.TempDir()
+	runsBase := realTempDir(t)
+	worktreeBase := realTempDir(t)
+	seedArchiveRuleState(t, filepath.Join(runsBase, "rules-registry.jsonl"), "rule-1", contracts.RuleStatusActive)
 	runCtx, err := internalio.NewRunContext("2026-04-21-PR78-deadbee", runsBase, worktreeBase)
 	require.NoError(t, err)
 	writer, err := state.NewWriterPath(filepath.Join(runsBase, "processed.jsonl"))
@@ -417,7 +451,8 @@ func TestRunSunsetWithLock_ProceedsAfterFinalizeCleanupWritesClearedMarker(t *te
 }
 
 func TestRunSunsetWithLock_StopsMutatingWhenSentinelAppearsMidRun(t *testing.T) {
-	runsBase := t.TempDir()
+	runsBase := realTempDir(t)
+	seedArchiveRuleState(t, filepath.Join(runsBase, "rules-registry.jsonl"), "rule-1", contracts.RuleStatusActive)
 	original := appendRegistryEntry
 	appendCount := 0
 	appendRegistryEntry = func(path string, entry contracts.RuleRegistryEntry) (contracts.RegistryAppendResult, error) {
@@ -450,7 +485,7 @@ func TestRunSunsetWithLock_StopsMutatingWhenSentinelAppearsMidRun(t *testing.T) 
 	assert.Len(t, result.AppendedOpIDs, 1)
 	assert.FileExists(t, filepath.Join(runsBase, markerFilename))
 	assert.NoFileExists(t, filepath.Join(runsBase, lastSunsetFilename))
-	assert.Len(t, readRegistryLinesForTest(t, filepath.Join(runsBase, "rules-registry.jsonl")), 1)
+	assert.Len(t, readRegistryLinesForTest(t, filepath.Join(runsBase, "rules-registry.jsonl")), 2)
 }
 
 func readRegistryLinesForTest(t *testing.T, path string) []registryLine {
@@ -537,4 +572,49 @@ func writeArchiveSeedRegistryAdds(t *testing.T, path string, count int) {
 		prevHash = hex.EncodeToString(sum[:])
 	}
 	require.NoError(t, internalio.WriteAtomic(path, buffer.Bytes()))
+}
+
+func seedArchiveRuleState(t *testing.T, registryPath, ruleID string, status contracts.RuleStatus) {
+	t.Helper()
+
+	added := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         ruleID,
+			RulePath:       fmt.Sprintf("rules/%s.md", ruleID),
+			Sha256:         fmt.Sprintf("%064x", 1),
+			IdempotencyKey: fmt.Sprintf("%064x", 1001),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        "2026-04-21-PR1-aaaaaaa",
+			At:             time.Date(2026, 4, 21, 8, 0, 0, 0, time.UTC),
+		},
+	}
+	result, err := internalio.AppendRegistryEntry(registryPath, added)
+	require.NoError(t, err)
+
+	if status == contracts.RuleStatusActive {
+		return
+	}
+
+	entry := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindStatusChanged,
+		Value: contracts.RuleRegistryStatusChanged{
+			Kind:          contracts.RegistryKindStatusChanged,
+			SchemaVersion: "1",
+			RuleID:        ruleID,
+			PrevStatus:    contracts.RuleStatusActive,
+			NewStatus:     status,
+			Transition:    contracts.SunsetTransitionDeprecate,
+			OpID:          ComputeOpID("seed-sunset", ruleID, string(contracts.SunsetTransitionDeprecate)),
+			VersionSeq:    2,
+			PrevHash:      result.Sha256,
+			BySunsetRunID: "seed-sunset",
+			At:            time.Date(2026, 4, 21, 8, 30, 0, 0, time.UTC),
+		},
+	}
+	_, err = internalio.AppendRegistryEntry(registryPath, entry)
+	require.NoError(t, err)
 }

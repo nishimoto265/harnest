@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
-	"strings"
+	"unicode"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
@@ -71,14 +71,13 @@ func LoadRulePayloads(candidatesPath string) ([]RulePayload, error) {
 }
 
 func validatePromptIdentifier(field, value string) error {
-	switch {
-	case value == "":
+	if value == "" {
 		return nil
-	case value == "." || value == "..":
-		return fmt.Errorf("invalid %s %q", field, value)
-	case filepath.Clean(value) != value:
-		return fmt.Errorf("invalid %s %q", field, value)
-	case strings.Contains(value, "/"), strings.Contains(value, `\`):
+	}
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' {
+			continue
+		}
 		return fmt.Errorf("invalid %s %q", field, value)
 	}
 	return nil

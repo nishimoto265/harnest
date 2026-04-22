@@ -32,11 +32,14 @@ const registryMandatoryIndexAt = 1800
 var appendRegistryEntry = internalio.AppendRegistryEntry
 var promoteRuleSidecarFn = promoteRuleSidecar
 var syncStagingParentDir = syncDir
+var writeSentinelFn = writeSentinel
+var promoteRuleSidecarBeforeDestinationRead = func(string) {}
 
 var errRulePublishConflict = errors.New("step70: canonical rule sidecar conflict")
 var errRulePublishIntegrity = errors.New("step70: canonical rule sidecar integrity failure")
 var errRulePublishDestinationType = errors.New("step70: canonical rule sidecar destination type mismatch")
 var errRulePublishStagedMissing = errors.New("step70: canonical rule sidecar staged file missing")
+var errMissingPlannedAdoptionForStaging = errors.New("step70: staged rule sidecars exist without persisted planned_adoption")
 
 // TargetResolver is injected by the caller (orchestrator) to derive the
 // promotion target (best candidate head) from candidates + manifests.
@@ -539,10 +542,10 @@ func markManualRecoveryWithDetail(pr int, runCtx internalio.RunContext, intentio
 	intention.Stage = contracts.IntentionStageNeedsManualRecovery
 	intention.RecoveryReason = reason
 	intention.FailedStep = contracts.FailedStep70
-	if err := store.Save(intention); err != nil {
+	if err := writeSentinelFn(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, deps.Now()); err != nil {
 		return err
 	}
-	if err := writeSentinel(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, deps.Now()); err != nil {
+	if err := store.Save(intention); err != nil {
 		return err
 	}
 	if err := appendStateOnce(runCtx, writer, contracts.StateKindNeedsManualRecovery, needsManualRecoveryEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, detail, deps.Now())); err != nil {
@@ -658,7 +661,13 @@ func findPlannedRegistryMatches(runCtx internalio.RunContext, intention contract
 	for i := len(lines) - 1; i >= 0; i-- {
 		switch v := lines[i].Entry.Value.(type) {
 		case contracts.RuleRegistryAdded:
-			if idx, ok := wanted[v.IdempotencyKey]; ok && matches[idx] == nil {
+			if idx, ok := wanted[v.IdempotencyKey]; ok {
+				if err := plannedRegistryEntryMatches(intention.PlannedAdoption.Entries[idx], lines[i].Entry); err != nil {
+					return nil, err
+				}
+				if matches[idx] != nil {
+					continue
+				}
 				matches[idx] = &plannedRegistryMatch{
 					EntryIndex: idx,
 					OpID:       v.IdempotencyKey,
@@ -666,7 +675,13 @@ func findPlannedRegistryMatches(runCtx internalio.RunContext, intention contract
 				}
 			}
 		case contracts.RuleRegistryUpdated:
-			if idx, ok := wanted[v.IdempotencyKey]; ok && matches[idx] == nil {
+			if idx, ok := wanted[v.IdempotencyKey]; ok {
+				if err := plannedRegistryEntryMatches(intention.PlannedAdoption.Entries[idx], lines[i].Entry); err != nil {
+					return nil, err
+				}
+				if matches[idx] != nil {
+					continue
+				}
 				matches[idx] = &plannedRegistryMatch{
 					EntryIndex: idx,
 					OpID:       v.IdempotencyKey,
@@ -676,6 +691,22 @@ func findPlannedRegistryMatches(runCtx internalio.RunContext, intention contract
 		}
 	}
 	return matches, nil
+}
+
+func plannedRegistryEntryMatches(planned contracts.PlannedAdoptionEntry, entry contracts.RuleRegistryEntry) error {
+	switch v := entry.Value.(type) {
+	case contracts.RuleRegistryAdded:
+		if planned.Kind != contracts.RegistryKindAdded || planned.RuleID != v.RuleID || planned.RulePath != v.RulePath || planned.Sha256 != v.Sha256 || planned.PrevSha256 != "" {
+			return ErrRegistryDivergence
+		}
+	case contracts.RuleRegistryUpdated:
+		if planned.Kind != contracts.RegistryKindUpdated || planned.RuleID != v.RuleID || planned.RulePath != v.RulePath || planned.Sha256 != v.Sha256 || planned.PrevSha256 != v.PrevSha256 {
+			return ErrRegistryDivergence
+		}
+	default:
+		return ErrRegistryDivergence
+	}
+	return nil
 }
 
 func completePlannedRegistryMatches(matches []*plannedRegistryMatch) (contracts.RegistryAppendResult, bool) {
@@ -1007,7 +1038,7 @@ func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contract
 		return err
 	}
 	if intention == nil || intention.PlannedAdoption == nil {
-		return cleanupStagedRuleSidecars(runCtx)
+		return errMissingPlannedAdoptionForStaging
 	}
 	for _, entry := range intention.PlannedAdoption.Entries {
 		stagedPath, err := stagedRuleSidecarPath(runCtx, entry.RulePath)
@@ -1023,7 +1054,7 @@ func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contract
 }
 
 func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
-	data, err := os.ReadFile(stagedPath)
+	data, err := internalio.ReadValidatedRegularFile(stagedPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("%w: path=%s", errRulePublishStagedMissing, stagedPath)
@@ -1035,23 +1066,15 @@ func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
 		return fmt.Errorf("%w: path=%s", errRulePublishIntegrity, stagedPath)
 	}
 
-	rewriteDestination := false
 	if info, err := os.Lstat(dstPath); err == nil {
 		switch {
 		case info.Mode()&os.ModeSymlink != 0:
-			dstData, err := os.ReadFile(dstPath)
-			if err != nil {
-				return fmt.Errorf("%w: read destination=%s: %v", errRulePublishIntegrity, dstPath, err)
-			}
-			sum := sha256.Sum256(dstData)
-			if hex.EncodeToString(sum[:]) != wantSHA {
-				return fmt.Errorf("%w: path=%s", errRulePublishDestinationType, dstPath)
-			}
-			rewriteDestination = true
+			return fmt.Errorf("%w: path=%s", errRulePublishDestinationType, dstPath)
 		case info.Mode().IsRegular():
-			dstData, err := os.ReadFile(dstPath)
+			promoteRuleSidecarBeforeDestinationRead(dstPath)
+			dstData, err := internalio.ReadValidatedRegularFile(dstPath)
 			if err != nil {
-				return fmt.Errorf("%w: read destination=%s: %v", errRulePublishIntegrity, dstPath, err)
+				return fmt.Errorf("%w: read destination=%s: %v", errRulePublishDestinationType, dstPath, err)
 			}
 			sum := sha256.Sum256(dstData)
 			if hex.EncodeToString(sum[:]) == wantSHA {
@@ -1068,11 +1091,6 @@ func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
 		return err
 	}
 
-	if rewriteDestination {
-		if err := removePathAndSyncParent(dstPath); err != nil {
-			return err
-		}
-	}
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 		return err
 	}

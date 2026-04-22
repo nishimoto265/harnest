@@ -261,19 +261,17 @@ func applyRollback(states map[string]RuleState, history map[string][]promotionSn
 	if !ok {
 		return fmt.Errorf("registryview: rollback target op_id not found: op_id=%s", targetOpID)
 	}
-	matchedTarget := false
 	for i := len(targets) - 1; i >= 0; i-- {
 		target := targets[i]
 		if target.offset != targetOffset || target.sha256 != targetSha256 {
 			continue
 		}
-		matchedTarget = true
 		current, ok := states[target.ruleID]
 		if !ok {
-			continue
+			return fmt.Errorf("registryview: rollback target is not current promotion: rule_id=%s target_op_id=%s", target.ruleID, targetOpID)
 		}
 		if current.LastPromotionSeq != target.seq {
-			continue
+			return fmt.Errorf("registryview: rollback target is not current promotion: rule_id=%s target_op_id=%s current_seq=%d target_seq=%d", target.ruleID, targetOpID, current.LastPromotionSeq, target.seq)
 		}
 		if !target.hadPrevious {
 			delete(states, target.ruleID)
@@ -282,10 +280,7 @@ func applyRollback(states map[string]RuleState, history map[string][]promotionSn
 		states[target.ruleID] = target.previous
 		return nil
 	}
-	if !matchedTarget {
-		return fmt.Errorf("registryview: rollback target mismatch: op_id=%s target_offset=%d target_sha256=%s", targetOpID, targetOffset, targetSha256)
-	}
-	return nil
+	return fmt.Errorf("registryview: rollback target mismatch: op_id=%s target_offset=%d target_sha256=%s", targetOpID, targetOffset, targetSha256)
 }
 
 func MustGet(states map[string]RuleState, ruleID string) (RuleState, error) {

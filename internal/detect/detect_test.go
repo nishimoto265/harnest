@@ -13,8 +13,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	real, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	return real
+}
+
 func TestDetectMergedPRsParsesAndFiltersPRs(t *testing.T) {
-	processedPath := filepath.Join(t.TempDir(), "processed.jsonl")
+	processedPath := filepath.Join(realTempDir(t), "processed.jsonl")
 	require.NoError(t, internalio.AppendJSONL(processedPath, contracts.StateEntry{
 		Kind: contracts.StateKindCompleted,
 		Value: contracts.StateEntryCompleted{

@@ -25,6 +25,7 @@ var (
 	ErrRegistryCASMismatch      = errors.New("io: registry compare-and-swap failed")
 	ErrRegistryUnsupportedKind  = errors.New("io: unsupported registry entry kind")
 	ErrRegistryIndexOffsetDrift = errors.New("io: registry index offset/hash mismatch")
+	ErrFileTooLarge             = errors.New("io: file too large")
 
 	ErrNotScorable   = stepio.ErrNotScorable
 	ErrEntryTooLarge = stepio.ErrEntryTooLarge

@@ -10,14 +10,16 @@ import (
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"golang.org/x/sys/unix"
 )
 
 var (
-	atomicNowFunc                      = time.Now
-	atomicRename                       = os.Rename
-	atomicRand            stdio.Reader = crand.Reader
-	directorySync                      = syncDirectory
-	atomicAfterTempCreate              = func(string) {}
+	atomicNowFunc                           = time.Now
+	atomicRename                            = os.Rename
+	atomicRand                 stdio.Reader = crand.Reader
+	directorySync                           = syncDirectory
+	atomicAfterParentValidated              = func(string) {}
+	atomicAfterTempCreate                   = func(string) {}
 )
 
 // WriteAtomic writes data to `<path>.tmp-<pid>-<ms>-<rand>` and renames it into
@@ -30,20 +32,33 @@ func WriteAtomic(path string, data []byte) error {
 		return err
 	}
 	parent := filepath.Dir(path)
+	atomicAfterParentValidated(parent)
+
+	parentDir, err := openDirectoryNoFollow(parent)
+	if err != nil {
+		return err
+	}
+	defer parentDir.Close()
 
 	tmpPath, err := newAtomicTempPath(path)
 	if err != nil {
 		return err
 	}
+	tmpName := filepath.Base(tmpPath)
 
-	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, defaultFilePerm)
+	fd, err := unix.Openat(int(parentDir.Fd()), tmpName, unix.O_CREAT|unix.O_WRONLY|unix.O_EXCL|unix.O_CLOEXEC, defaultFilePerm)
 	if err != nil {
 		return err
+	}
+	tmpFile := os.NewFile(uintptr(fd), tmpPath)
+	if tmpFile == nil {
+		_ = unix.Close(fd)
+		return fmt.Errorf("io: open temp file returned nil: %s", tmpPath)
 	}
 	atomicAfterTempCreate(tmpPath)
 
 	cleanupTmp := func() {
-		_ = os.Remove(tmpPath)
+		_ = unix.Unlinkat(int(parentDir.Fd()), tmpName, 0)
 	}
 
 	if _, err := tmpFile.Write(data); err != nil {
@@ -65,7 +80,7 @@ func WriteAtomic(path string, data []byte) error {
 		cleanupTmp()
 		return err
 	}
-	if err := directorySync(parent); err != nil {
+	if err := parentDir.Sync(); err != nil {
 		return err
 	}
 	return nil

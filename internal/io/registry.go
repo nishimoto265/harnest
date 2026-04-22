@@ -20,6 +20,14 @@ type RegistryLine struct {
 
 var registryBeforeAppendHook = func() error { return nil }
 
+func openTrackedFileNoFollowRetry(path string, flags int, perm os.FileMode) (*os.File, fileIdentity, error) {
+	file, identity, err := openTrackedFileNoFollow(path, flags, perm)
+	if os.IsNotExist(err) {
+		return openTrackedFileNoFollow(path, flags, perm)
+	}
+	return file, identity, err
+}
+
 func RegistryLines(path string) ([]RegistryLine, error) {
 	return readRegistryLines(path)
 }
@@ -43,7 +51,7 @@ func AppendRegistryEntry(path string, entry contracts.RuleRegistryEntry) (contra
 	if err := ensureWritableParentDir(path); err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
-	f, identity, err := openTrackedFileNoFollow(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, defaultFilePerm)
+	f, identity, err := openTrackedFileNoFollowRetry(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, defaultFilePerm)
 	if err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
@@ -133,7 +141,7 @@ func RebuildIdempotencyIndex(registryPath, indexPath string) ([]contracts.RuleId
 	if err := ensureWritableParentDir(indexPath); err != nil {
 		return nil, err
 	}
-	indexFile, identity, err := openTrackedFileNoFollow(indexPath, os.O_CREATE|os.O_RDWR, defaultFilePerm)
+	indexFile, identity, err := openTrackedFileNoFollowRetry(indexPath, os.O_CREATE|os.O_RDWR, defaultFilePerm)
 	if err != nil {
 		return nil, err
 	}
