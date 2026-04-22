@@ -35,6 +35,12 @@ var (
 	ErrNoScorablePass2Agents     = errors.New("step60: no scorable pass2 agents found")
 	ErrPass1ScoresIncomplete     = errors.New("step60: pass1 scores incomplete")
 	ErrDuplicateComplianceRuleID = errors.New("step60: duplicate compliance rule_id")
+	// ErrPass1VersionMismatch fires when step30 scores-A.jsonl / compliance-A.jsonl
+	// were generated under a different rubric_version or prompt_version than
+	// step60 is currently executing. Pairwise comparisons are only meaningful
+	// when pass1 and pass2 share their scoring assumptions, so step60 must
+	// fail closed and demand step30 rerun.
+	ErrPass1VersionMismatch = errors.New("step60: pass1 score/compliance rubric_version or prompt_version does not match step60")
 )
 
 var canonicalDimensions = []contracts.Dimension{
@@ -157,11 +163,11 @@ func Run(ctx context.Context, in Input) error {
 	if err := request.Validate(); err != nil {
 		return err
 	}
-	pass1ScoresByAgent, err := loadPass1Scores(in.IO)
+	pass1ScoresByAgent, err := loadPass1Scores(in.IO, in.RubricVersion, in.PromptVersion)
 	if err != nil {
 		return err
 	}
-	pass1ComplianceRuleIDs, err := loadPass1ComplianceRuleIDs(in.IO)
+	pass1ComplianceRuleIDs, err := loadPass1ComplianceRuleIDs(in.IO, in.RubricVersion, in.PromptVersion)
 	if err != nil {
 		return err
 	}
@@ -189,11 +195,14 @@ func Run(ctx context.Context, in Input) error {
 		if err != nil {
 			return fmt.Errorf("step60: hash pass2 output for agent=%s: %w", run.Agent, err)
 		}
+		// F18: derive the expected compliance coverage ONLY from current
+		// pass1 inputs and the rubric fallback. Previously we unioned in
+		// rule IDs observed in step60's own raw artifacts, which let a
+		// stale raw-only rule ID keep satisfying coverage on every resume
+		// — judges would be skipped and the stale evidence preserved.
 		expectedCompliance := expectedComplianceRuleIDsForAgent(
 			run.Agent,
 			pass1ComplianceRuleIDs,
-			rawState.final[run.Agent],
-			rawState.observedComplianceRuleIDs(run.Agent),
 			fallbackComplianceRuleIDs,
 		)
 		if result, ok, err := tryReuseRawPanelResult(in.IO, rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion, expectedCompliance); err != nil {
@@ -1480,7 +1489,7 @@ func makeRawComplianceEntry(
 	}
 }
 
-func loadPass1Scores(runIO internalio.RunContext) (map[contracts.AgentID][]contracts.ScoreEntry, error) {
+func loadPass1Scores(runIO internalio.RunContext, rubricVersion, promptVersion string) (map[contracts.AgentID][]contracts.ScoreEntry, error) {
 	path, err := runIO.ResolveRunRelative("30/scores-A.jsonl")
 	if err != nil {
 		return nil, fmt.Errorf("step60: resolve pass1 scores path: %w", err)
@@ -1488,6 +1497,18 @@ func loadPass1Scores(runIO internalio.RunContext) (map[contracts.AgentID][]contr
 	rows, err := internalio.ReadJSONL[contracts.ScoreEntry](path)
 	if err != nil {
 		return nil, fmt.Errorf("step60: read pass1 scores: %w", err)
+	}
+	// F8: fail closed when step30 was run under a different scoring
+	// contract. Pairwise winner=A/B/tie otherwise reflects version drift,
+	// not actual pass2 regression/improvement.
+	for _, row := range rows {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return nil, fmt.Errorf(
+				"%w: path=%s agent=%s dimension=%s pass1_rubric=%s pass1_prompt=%s step60_rubric=%s step60_prompt=%s",
+				ErrPass1VersionMismatch, path, row.Agent, row.Dimension,
+				row.RubricVersion, row.PromptVersion, rubricVersion, promptVersion,
+			)
+		}
 	}
 	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ScoreEntry) scoreKey {
 		return scoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
@@ -1499,7 +1520,7 @@ func loadPass1Scores(runIO internalio.RunContext) (map[contracts.AgentID][]contr
 	return byAgent, nil
 }
 
-func loadPass1ComplianceRuleIDs(runIO internalio.RunContext) (map[contracts.AgentID]map[string]struct{}, error) {
+func loadPass1ComplianceRuleIDs(runIO internalio.RunContext, rubricVersion, promptVersion string) (map[contracts.AgentID]map[string]struct{}, error) {
 	path, err := runIO.ResolveRunRelative("30/compliance-A.jsonl")
 	if err != nil {
 		return nil, fmt.Errorf("step60: resolve pass1 compliance path: %w", err)
@@ -1510,6 +1531,18 @@ func loadPass1ComplianceRuleIDs(runIO internalio.RunContext) (map[contracts.Agen
 			return map[contracts.AgentID]map[string]struct{}{}, nil
 		}
 		return nil, fmt.Errorf("step60: read pass1 compliance: %w", err)
+	}
+	// F8: compliance rule-id identity depends on the rubric that produced
+	// the row. Mismatched versions would silently accept stale rule IDs
+	// into expectedCompliance. Fail closed.
+	for _, row := range rows {
+		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
+			return nil, fmt.Errorf(
+				"%w: path=%s agent=%s rule_id=%s pass1_rubric=%s pass1_prompt=%s step60_rubric=%s step60_prompt=%s",
+				ErrPass1VersionMismatch, path, row.Agent, row.RuleID,
+				row.RubricVersion, row.PromptVersion, rubricVersion, promptVersion,
+			)
+		}
 	}
 	collapsed := scorecore.CollapseFinalCompliance(rows)
 	byAgent := make(map[contracts.AgentID]map[string]struct{}, len(collapsed))
@@ -1522,21 +1555,19 @@ func loadPass1ComplianceRuleIDs(runIO internalio.RunContext) (map[contracts.Agen
 	return byAgent, nil
 }
 
+// expectedComplianceRuleIDsForAgent computes the rule-id set that pass2 raw
+// compliance rows must cover for the given agent. F18: the set is derived
+// solely from the current pass1 compliance rows (or the rubric fallback
+// when pass1 has no rules yet). Rule IDs that only appear in the agent's
+// existing step60 raw/final artifacts are treated as stale so a rerun is
+// forced to rejudge rather than self-authorize historical evidence.
 func expectedComplianceRuleIDsForAgent(
 	agent contracts.AgentID,
 	pass1Rules map[contracts.AgentID]map[string]struct{},
-	finalRules map[string]contracts.ComplianceEntry,
-	rawRules map[string]struct{},
 	fallbackRules []string,
 ) map[string]struct{} {
 	rules := make(map[string]struct{})
 	for ruleID := range pass1Rules[agent] {
-		rules[ruleID] = struct{}{}
-	}
-	for ruleID := range finalRules {
-		rules[ruleID] = struct{}{}
-	}
-	for ruleID := range rawRules {
 		rules[ruleID] = struct{}{}
 	}
 	if len(rules) == 0 {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -317,10 +318,15 @@ func TestPanelResolver_Resolve_RejectsIncompleteArbiterComplianceCoverage(t *tes
 	runCtx := newTestRunContext(t)
 	input := testJudgeInput(runCtx.RunID)
 
-	outWithRules := func(role judges.Role, score int, rules ...string) judges.JudgeOutput {
+	outWithVerdicts := func(role judges.Role, score int, verdicts map[string]contracts.ComplianceVerdict) judges.JudgeOutput {
+		rules := make([]string, 0, len(verdicts))
+		for id := range verdicts {
+			rules = append(rules, id)
+		}
+		sort.Strings(rules)
 		compliance := make([]contracts.ComplianceEntry, 0, len(rules))
 		for _, ruleID := range rules {
-			compliance = append(compliance, complianceEntry(runCtx.RunID, ruleID, contracts.ComplianceVerdictCompliant))
+			compliance = append(compliance, complianceEntry(runCtx.RunID, ruleID, verdicts[ruleID]))
 		}
 		return judges.JudgeOutput{
 			Scores:     allDimScores(runCtx.RunID, role, score),
@@ -329,11 +335,22 @@ func TestPanelResolver_Resolve_RejectsIncompleteArbiterComplianceCoverage(t *tes
 		}
 	}
 
+	// Primary and secondary disagree on both rule-a and rule-b. Arbiter
+	// covers only rule-a — rule-b is still disputed, so coverage must fail
+	// under the disputed-only contract (F5).
 	resolver := NewPanelResolver()
 	_, err := resolver.Resolve(context.Background(), PanelInput{
-		Primary:               fakeJudge{out: outWithRules(judges.RolePrimary, 80, "rule-a", "rule-b")},
-		Secondary:             fakeJudge{out: outWithRules(judges.RoleSecondary, 60, "rule-a", "rule-b")},
-		Arbiter:               fakeJudge{out: outWithRules(judges.RoleArbiter, 75, "rule-a")},
+		Primary: fakeJudge{out: outWithVerdicts(judges.RolePrimary, 80, map[string]contracts.ComplianceVerdict{
+			"rule-a": contracts.ComplianceVerdictCompliant,
+			"rule-b": contracts.ComplianceVerdictCompliant,
+		})},
+		Secondary: fakeJudge{out: outWithVerdicts(judges.RoleSecondary, 60, map[string]contracts.ComplianceVerdict{
+			"rule-a": contracts.ComplianceVerdictViolated,
+			"rule-b": contracts.ComplianceVerdictViolated,
+		})},
+		Arbiter: fakeJudge{out: outWithVerdicts(judges.RoleArbiter, 75, map[string]contracts.ComplianceVerdict{
+			"rule-a": contracts.ComplianceVerdictCompliant,
+		})},
 		JudgeInput:            input,
 		OutputSha256:          testSha256Hex,
 		DisagreementThreshold: 5,
@@ -353,10 +370,15 @@ func TestBuildFinalResultFromRaw_RejectsIncompleteArbiterComplianceCoverage(t *t
 		RunContext:            runCtx,
 		StepDir:               "30",
 	}
-	outWithRules := func(role judges.Role, score int, rules ...string) judges.JudgeOutput {
+	outWithVerdicts := func(role judges.Role, score int, verdicts map[string]contracts.ComplianceVerdict) judges.JudgeOutput {
+		rules := make([]string, 0, len(verdicts))
+		for id := range verdicts {
+			rules = append(rules, id)
+		}
+		sort.Strings(rules)
 		compliance := make([]contracts.ComplianceEntry, 0, len(rules))
 		for _, ruleID := range rules {
-			compliance = append(compliance, complianceEntry(runCtx.RunID, ruleID, contracts.ComplianceVerdictCompliant))
+			compliance = append(compliance, complianceEntry(runCtx.RunID, ruleID, verdicts[ruleID]))
 		}
 		return judges.JudgeOutput{
 			Scores:     allDimScores(runCtx.RunID, role, score),
@@ -365,11 +387,17 @@ func TestBuildFinalResultFromRaw_RejectsIncompleteArbiterComplianceCoverage(t *t
 		}
 	}
 
+	// Primary and secondary disagree on rule-a and rule-b. Arbiter covers
+	// rule-a only — rule-b is still disputed, so the disputed-only contract
+	// (F5) must fail coverage.
 	primary, err := resolver.ResolveRole(
 		context.Background(),
 		panelInput,
 		contracts.JudgeRolePrimary,
-		fakeJudge{out: outWithRules(judges.RolePrimary, 80, "rule-a", "rule-b")},
+		fakeJudge{out: outWithVerdicts(judges.RolePrimary, 80, map[string]contracts.ComplianceVerdict{
+			"rule-a": contracts.ComplianceVerdictCompliant,
+			"rule-b": contracts.ComplianceVerdictCompliant,
+		})},
 		nil,
 		nil,
 		nil,
@@ -381,7 +409,10 @@ func TestBuildFinalResultFromRaw_RejectsIncompleteArbiterComplianceCoverage(t *t
 		context.Background(),
 		panelInput,
 		contracts.JudgeRoleSecondary,
-		fakeJudge{out: outWithRules(judges.RoleSecondary, 60, "rule-a", "rule-b")},
+		fakeJudge{out: outWithVerdicts(judges.RoleSecondary, 60, map[string]contracts.ComplianceVerdict{
+			"rule-a": contracts.ComplianceVerdictViolated,
+			"rule-b": contracts.ComplianceVerdictViolated,
+		})},
 		nil,
 		nil,
 		nil,
@@ -393,7 +424,9 @@ func TestBuildFinalResultFromRaw_RejectsIncompleteArbiterComplianceCoverage(t *t
 		context.Background(),
 		panelInput,
 		contracts.JudgeRoleArbiter,
-		fakeJudge{out: outWithRules(judges.RoleArbiter, 75, "rule-a")},
+		fakeJudge{out: outWithVerdicts(judges.RoleArbiter, 75, map[string]contracts.ComplianceVerdict{
+			"rule-a": contracts.ComplianceVerdictCompliant,
+		})},
 		primary.RawScores,
 		secondary.RawScores,
 		primary.RawCompliance,
@@ -447,6 +480,92 @@ func TestPanelResolver_ResolveRole_RejectsJudgeOutputIdentityMismatch(t *testing
 		nil,
 	)
 	require.ErrorIs(t, err, judges.ErrJudgeOutputMissingInput)
+}
+
+// TestBuildFinalResultFromRaw_AcceptsDisputedOnlyArbiterCompliance asserts
+// the F5 contract: when primary/secondary agree on all compliance rules
+// (empty disputed set), BuildFinalResultFromRaw must succeed even if the
+// arbiter returned zero compliance rows. The shape is identical to step60's
+// disputed-only contract, so step30 and step60 both consume it via the same
+// scorecore primitives.
+func TestBuildFinalResultFromRaw_AcceptsDisputedOnlyArbiterCompliance(t *testing.T) {
+	runCtx := newTestRunContext(t)
+	resolver := NewPanelResolver()
+	panelInput := PanelInput{
+		JudgeInput:            testJudgeInput(runCtx.RunID),
+		OutputSha256:          testSha256Hex,
+		DisagreementThreshold: 5,
+		RunContext:            runCtx,
+		StepDir:               "30",
+	}
+	outWithVerdicts := func(role judges.Role, score int, verdicts map[string]contracts.ComplianceVerdict) judges.JudgeOutput {
+		rules := make([]string, 0, len(verdicts))
+		for id := range verdicts {
+			rules = append(rules, id)
+		}
+		sort.Strings(rules)
+		compliance := make([]contracts.ComplianceEntry, 0, len(rules))
+		for _, ruleID := range rules {
+			compliance = append(compliance, complianceEntry(runCtx.RunID, ruleID, verdicts[ruleID]))
+		}
+		return judges.JudgeOutput{
+			Scores:     allDimScores(runCtx.RunID, role, score),
+			Compliance: compliance,
+			Arbiter:    role == judges.RoleArbiter,
+		}
+	}
+
+	// Primary and secondary agree on both rules (no disputed set).
+	primary, err := resolver.ResolveRole(
+		context.Background(),
+		panelInput,
+		contracts.JudgeRolePrimary,
+		fakeJudge{out: outWithVerdicts(judges.RolePrimary, 80, map[string]contracts.ComplianceVerdict{
+			"rule-a": contracts.ComplianceVerdictCompliant,
+			"rule-b": contracts.ComplianceVerdictCompliant,
+		})},
+		nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	secondary, err := resolver.ResolveRole(
+		context.Background(),
+		panelInput,
+		contracts.JudgeRoleSecondary,
+		// Score disagreement forces arbiter entry.
+		fakeJudge{out: outWithVerdicts(judges.RoleSecondary, 60, map[string]contracts.ComplianceVerdict{
+			"rule-a": contracts.ComplianceVerdictCompliant,
+			"rule-b": contracts.ComplianceVerdictCompliant,
+		})},
+		nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	arbiter, err := resolver.ResolveRole(
+		context.Background(),
+		panelInput,
+		contracts.JudgeRoleArbiter,
+		// Arbiter emits zero compliance rows — legitimate under disputed-only.
+		fakeJudge{out: outWithVerdicts(judges.RoleArbiter, 75, map[string]contracts.ComplianceVerdict{})},
+		primary.RawScores,
+		secondary.RawScores,
+		primary.RawCompliance,
+		secondary.RawCompliance,
+	)
+	require.NoError(t, err)
+
+	result, err := BuildFinalResultFromRaw(
+		primary.RawScores,
+		secondary.RawScores,
+		arbiter.RawScores,
+		primary.RawCompliance,
+		secondary.RawCompliance,
+		arbiter.RawCompliance,
+		5,
+		true,
+		true,
+	)
+	require.NoError(t, err)
+	// Agreement on both rules: final compliance finalizes from primary.
+	assert.Len(t, result.FinalCompliance, 2)
 }
 
 func TestWriteOverflowSidecar(t *testing.T) {

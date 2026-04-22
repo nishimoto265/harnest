@@ -549,6 +549,10 @@ func TestRun_RerunWithoutMarker_PreservesSeparateScoreAndComplianceVerdictPaths(
 		writePass1Score:        true,
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
 	})
+	// F18: expected compliance coverage is derived from pass1 rows, so the
+	// test must seed pass1 compliance for rule "disputed" for step60 to
+	// admit the reuse path on a marker-less resume.
+	writePass1Compliance(t, runIO, pkg.RunID, "a1", map[string]contracts.ComplianceVerdict{"disputed": contracts.ComplianceVerdictCompliant})
 	now := time.Date(2026, 4, 21, 11, 35, 0, 0, time.UTC)
 
 	require.NoError(t, Run(context.Background(), Input{
@@ -605,6 +609,13 @@ func TestRun_RerunWithoutMarker_ReusesDisputedOnlyArbiterCompliance(t *testing.T
 		writePass1Score:        true,
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
 	})
+	// F18: pass1 must declare the rule-id coverage expected during step60
+	// reuse. Without this seeding, the raw rows' "agreed"/"disputed" rule
+	// IDs are treated as stale and judges are re-invoked.
+	writePass1Compliance(t, runIO, pkg.RunID, "a1", map[string]contracts.ComplianceVerdict{
+		"agreed":   contracts.ComplianceVerdictCompliant,
+		"disputed": contracts.ComplianceVerdictCompliant,
+	})
 	now := time.Date(2026, 4, 21, 11, 40, 0, 0, time.UTC)
 
 	require.NoError(t, Run(context.Background(), Input{
@@ -653,6 +664,91 @@ func TestRun_RerunWithoutMarker_ReusesDisputedOnlyArbiterCompliance(t *testing.T
 	assert.Equal(t, beforeCompliance, mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl"))
 }
 
+// TestExpectedComplianceRuleIDsForAgent_IgnoresRawRuleIDs is the F18
+// contract: raw rows may contain historical rule IDs that no longer appear
+// in pass1. They MUST NOT authorize themselves during reuse — the expected
+// set is derived purely from the current pass1 rules (falling back to the
+// rubric default when pass1 is silent).
+func TestExpectedComplianceRuleIDsForAgent_IgnoresRawRuleIDs(t *testing.T) {
+	t.Run("pass1 drives coverage", func(t *testing.T) {
+		got := expectedComplianceRuleIDsForAgent(
+			"a1",
+			map[contracts.AgentID]map[string]struct{}{
+				"a1": {"pass1-rule": {}},
+			},
+			[]string{"fallback-rule"},
+		)
+		assert.Equal(t, map[string]struct{}{"pass1-rule": {}}, got)
+	})
+
+	t.Run("fallback used when pass1 silent", func(t *testing.T) {
+		got := expectedComplianceRuleIDsForAgent(
+			"a1",
+			map[contracts.AgentID]map[string]struct{}{},
+			[]string{"fallback-rule"},
+		)
+		assert.Equal(t, map[string]struct{}{"fallback-rule": {}}, got)
+	})
+
+	t.Run("empty pass1 and empty fallback yields nil", func(t *testing.T) {
+		got := expectedComplianceRuleIDsForAgent(
+			"a1",
+			map[contracts.AgentID]map[string]struct{}{},
+			nil,
+		)
+		assert.Nil(t, got)
+	})
+}
+
+// TestRun_RerunRejectsRawOnlyRuleIDsAfterPass1Shrink exercises F18 end-to-end:
+// step60 first writes raw rows for rule "stale-rule", then pass1 no longer
+// declares any compliance rule. On a marker-less resume the raw-only rule
+// must not self-authorize the reuse path; judges must be re-invoked so the
+// stale compliance evidence is refreshed.
+func TestRun_RerunRejectsRawOnlyRuleIDsAfterPass1Shrink(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	writePass1Compliance(t, runIO, pkg.RunID, "a1", map[string]contracts.ComplianceVerdict{"stale-rule": contracts.ComplianceVerdictCompliant})
+	now := time.Date(2026, 4, 21, 11, 45, 0, 0, time.UTC)
+
+	// First run: emit raw rows for "stale-rule".
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     scriptedJudge{score: 80, reasonPrefix: "primary", compliance: map[string]contracts.ComplianceVerdict{"stale-rule": contracts.ComplianceVerdictCompliant}},
+		Secondary:   scriptedJudge{score: 79, reasonPrefix: "secondary", compliance: map[string]contracts.ComplianceVerdict{"stale-rule": contracts.ComplianceVerdictCompliant}},
+		Arbiter:     scriptedJudge{score: 78, reasonPrefix: "arbiter", compliance: map[string]contracts.ComplianceVerdict{"stale-rule": contracts.ComplianceVerdictCompliant}},
+		Now:         func() time.Time { return now },
+	}))
+
+	// Simulate pass1 shrinking: delete the pass1 compliance file entirely.
+	// The raw rows for "stale-rule" still sit under 60/.
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "30/compliance-A.jsonl")))
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
+
+	// A rubric fallback provides coverage for stubRuleID, which is not in
+	// the raw rows. So the rerun must re-invoke the judges to regenerate
+	// coverage for the new expected rule set rather than trusting
+	// "stale-rule" raw rows.
+	var called bool
+	callTracker := unexpectedCallJudge{called: &called}
+	err := Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     callTracker,
+		Secondary:   callTracker,
+		Arbiter:     callTracker,
+		Now:         func() time.Time { return now.Add(time.Minute) },
+	})
+	// The test asserts the judges are re-invoked — unexpectedCallJudge
+	// fails the run, which confirms F18 forced a rejudge instead of
+	// silently reusing stale raw compliance.
+	require.Error(t, err)
+	assert.True(t, called, "F18: raw-only rule IDs must not authorize themselves; judges must run")
+}
+
 func TestRun_RerunWithoutMarker_IgnoresStaleFinalComplianceRows(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score: true,
@@ -695,10 +791,15 @@ func TestRun_RerunWithoutMarker_IgnoresStaleFinalComplianceRows(t *testing.T) {
 }
 
 func TestRun_RerunsWhenRubricVersionChanges(t *testing.T) {
+	// Pass1 must already share step60's scoring versions; otherwise F8 fails
+	// closed before rerun logic is exercised.
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
-		writePass1Score: true,
+		writePass1Score:    true,
+		pass1RubricVersion: "rubric-v1",
+		pass1PromptVersion: "prompt-v1",
 	})
 	now := time.Date(2026, 4, 21, 11, 30, 0, 0, time.UTC)
+	agents := []contracts.AgentID{"a1", "a2", "a3"}
 
 	require.NoError(t, Run(context.Background(), Input{
 		IO:            runIO,
@@ -710,6 +811,10 @@ func TestRun_RerunsWhenRubricVersionChanges(t *testing.T) {
 		Arbiter:       judges.NewArbiterStub(),
 		Now:           func() time.Time { return now },
 	}))
+
+	// Simulate step30 being rerun at the new rubric version before step60
+	// reruns — F8 demands matching pass1 version metadata.
+	rewritePass1ScoresAt(t, runIO, pkg.RunID, agents, "rubric-v2", "prompt-v1")
 
 	var called bool
 	noJudge := unexpectedCallJudge{called: &called}
@@ -727,11 +832,42 @@ func TestRun_RerunsWhenRubricVersionChanges(t *testing.T) {
 	assert.True(t, called)
 }
 
-func TestRun_IgnoresHistoricalRawVersionsAfterMigration(t *testing.T) {
+// TestRun_FailsClosedOnPass1VersionMismatch is the F8 contract: when pass1
+// scores were generated under a different rubric/prompt version than step60
+// is running, pairwise winner classification is meaningless, so Run must
+// abort with ErrPass1VersionMismatch before invoking any judge.
+func TestRun_FailsClosedOnPass1VersionMismatch(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
-		writePass1Score: true,
+		writePass1Score:    true,
+		pass1RubricVersion: "rubric-v1",
+		pass1PromptVersion: "prompt-v1",
 	})
 	now := time.Date(2026, 4, 21, 11, 30, 0, 0, time.UTC)
+
+	var called bool
+	noJudge := unexpectedCallJudge{called: &called}
+	err := Run(context.Background(), Input{
+		IO:            runIO,
+		TaskPackage:   &pkg,
+		RubricVersion: "rubric-v2",
+		PromptVersion: "prompt-v1",
+		Primary:       noJudge,
+		Secondary:     noJudge,
+		Arbiter:       noJudge,
+		Now:           func() time.Time { return now },
+	})
+	require.ErrorIs(t, err, ErrPass1VersionMismatch)
+	assert.False(t, called, "judges must not run before pass1 version gate passes")
+}
+
+func TestRun_IgnoresHistoricalRawVersionsAfterMigration(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:    true,
+		pass1RubricVersion: "rubric-v1",
+		pass1PromptVersion: "prompt-v1",
+	})
+	now := time.Date(2026, 4, 21, 11, 30, 0, 0, time.UTC)
+	agents := []contracts.AgentID{"a1", "a2", "a3"}
 
 	require.NoError(t, Run(context.Background(), Input{
 		IO:            runIO,
@@ -743,6 +879,11 @@ func TestRun_IgnoresHistoricalRawVersionsAfterMigration(t *testing.T) {
 		Arbiter:       judges.NewArbiterStub(),
 		Now:           func() time.Time { return now },
 	}))
+
+	// Simulate step30 being rerun under the new rubric/prompt before step60
+	// migrates forward. Without this step, F8 fails closed.
+	rewritePass1ScoresAt(t, runIO, pkg.RunID, agents, "rubric-v2", "prompt-v2")
+
 	require.NoError(t, Run(context.Background(), Input{
 		IO:            runIO,
 		TaskPackage:   &pkg,
@@ -1613,6 +1754,11 @@ type fixtureOptions struct {
 	missingPass2Agents     map[contracts.AgentID]bool
 	nonScorablePass1Agents map[contracts.AgentID]bool
 	nonScorablePass2Agents map[contracts.AgentID]bool
+	// pass1RubricVersion / pass1PromptVersion override the scoring-version
+	// metadata stamped on the pass1 scores-A.jsonl fixture rows. Leaving them
+	// empty keeps the historical stub defaults (default / phase0-stub).
+	pass1RubricVersion string
+	pass1PromptVersion string
 }
 
 type scriptedJudge struct {
@@ -1870,7 +2016,15 @@ func seedStep60Fixture(t *testing.T, opts fixtureOptions) (internalio.RunContext
 	}
 
 	if opts.writePass1Score {
-		writePass1Scores(t, runIO, runID, agents)
+		rubricVersion := opts.pass1RubricVersion
+		if rubricVersion == "" {
+			rubricVersion = "default"
+		}
+		promptVersion := opts.pass1PromptVersion
+		if promptVersion == "" {
+			promptVersion = "phase0-stub"
+		}
+		writePass1ScoresAt(t, runIO, runID, agents, rubricVersion, promptVersion)
 	}
 
 	return runIO, pkg
@@ -1937,13 +2091,33 @@ func writeManifestError(t *testing.T, runIO internalio.RunContext, runID contrac
 
 func writePass1Scores(t *testing.T, runIO internalio.RunContext, runID contracts.RunID, agents []contracts.AgentID) {
 	t.Helper()
+	writePass1ScoresAt(t, runIO, runID, agents, "default", "phase0-stub")
+}
+
+// writePass1ScoresAt lets tests seed step30 scores-A.jsonl with a specific
+// rubric/prompt version so F8's fail-closed version check exercises the
+// matching path.
+func writePass1ScoresAt(t *testing.T, runIO internalio.RunContext, runID contracts.RunID, agents []contracts.AgentID, rubricVersion, promptVersion string) {
+	t.Helper()
 
 	path := mustResolve(t, runIO, "30/scores-A.jsonl")
 	for _, agent := range agents {
 		for _, entry := range primaryStubScores(runID, 1, agent) {
+			entry.RubricVersion = rubricVersion
+			entry.PromptVersion = promptVersion
 			require.NoError(t, internalio.AppendJSONL(path, entry))
 		}
 	}
+}
+
+// rewritePass1ScoresAt clobbers the existing pass1 scores-A.jsonl with rows
+// stamped at the supplied version — used by tests that simulate step30 being
+// rerun after step60 picked a new rubric/prompt version.
+func rewritePass1ScoresAt(t *testing.T, runIO internalio.RunContext, runID contracts.RunID, agents []contracts.AgentID, rubricVersion, promptVersion string) {
+	t.Helper()
+	path := mustResolve(t, runIO, "30/scores-A.jsonl")
+	require.NoError(t, os.Remove(path))
+	writePass1ScoresAt(t, runIO, runID, agents, rubricVersion, promptVersion)
 }
 
 func primaryStubScores(runID contracts.RunID, pass int, agent contracts.AgentID) []contracts.ScoreEntry {
