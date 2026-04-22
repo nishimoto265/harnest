@@ -304,6 +304,10 @@ func TestStep30Score_AllowsEmptyComplianceAcrossPanel(t *testing.T) {
 	assert.Empty(t, complianceFinal)
 }
 
+// F5 disputed-only arbiter contract: primary/secondary disagree on rule-b,
+// arbiter covers only rule-a, so disputed-rule coverage fails and step30
+// must not write the done.marker. (Under the pre-r16 full-coverage contract
+// step30 also failed, but for a different — and stricter — reason.)
 func TestStep30Score_DoesNotWriteDoneMarkerOnIncompleteArbiterComplianceCoverage(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
 	provider := &fakePanelProvider{
@@ -311,13 +315,18 @@ func TestStep30Score_DoesNotWriteDoneMarkerOnIncompleteArbiterComplianceCoverage
 			score := 80
 			rules := []ruleVerdict{
 				{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
-				{ruleID: "rule-b", verdict: contracts.ComplianceVerdictViolated},
+				{ruleID: "rule-b", verdict: contracts.ComplianceVerdictCompliant},
 			}
 			switch role {
 			case contracts.JudgeRoleSecondary:
 				score = 60
+				rules = []ruleVerdict{
+					{ruleID: "rule-a", verdict: contracts.ComplianceVerdictViolated},
+					{ruleID: "rule-b", verdict: contracts.ComplianceVerdictViolated},
+				}
 			case contracts.JudgeRoleArbiter:
 				score = 75
+				// Arbiter misses rule-b even though it is disputed.
 				rules = []ruleVerdict{
 					{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
 				}
@@ -335,6 +344,42 @@ func TestStep30Score_DoesNotWriteDoneMarkerOnIncompleteArbiterComplianceCoverage
 	_, statErr := os.Stat(markerPath)
 	require.Error(t, statErr)
 	assert.True(t, os.IsNotExist(statErr))
+}
+
+// F5 regression: step30 under the disputed-only contract must accept an
+// arbiter that returns only the disputed subset (or even zero rows when no
+// rules are disputed, as here) and still emit the done.marker. This
+// exercises the shared step30 / step60 contract.
+func TestStep30Score_AcceptsArbiterCoveringOnlyDisputedRules(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			rules := []ruleVerdict{
+				{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
+				{ruleID: "rule-b", verdict: contracts.ComplianceVerdictCompliant},
+			}
+			switch role {
+			case contracts.JudgeRoleSecondary:
+				// Score disagrees but compliance agrees — disputed set is empty.
+				score = 60
+			case contracts.JudgeRoleArbiter:
+				score = 75
+				// Arbiter is free to return an empty or narrow compliance
+				// set when nothing is actually disputed.
+				rules = []ruleVerdict{}
+			}
+			return makeJudgeOutput(input, role, score, rules)
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
+	require.NoError(t, err)
+	_, err = os.Stat(markerPath)
+	require.NoError(t, err)
 }
 
 func TestStep30Score_PreservesComplianceHistoryAfterRuleShrink(t *testing.T) {

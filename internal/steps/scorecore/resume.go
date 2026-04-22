@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/judges"
 )
+
+func sortRuleIDs(ids []string) { sort.Strings(ids) }
 
 var (
 	ErrPanelJudgeRequired       = errors.New("scorecore: judge is required")
@@ -125,7 +128,16 @@ func BuildFinalResultFromRaw(
 	if !arbiterPresent {
 		return PanelResult{}, ErrPanelArbiterRequired
 	}
-	if len(arbiterScores) == 0 || (len(primaryCompliance) > 0 && len(arbiterCompliance) == 0) {
+	// Arbiter scores are always required (one row per dimension). Arbiter
+	// compliance rows are only required when the primary/secondary panel
+	// actually disagrees on at least one rule — see F5 for the rationale
+	// (step60 switched to disputed-only arbiter contract in r15; step30
+	// shares the same primitives via scorecore).
+	if len(arbiterScores) == 0 {
+		return PanelResult{}, ErrPanelArbiterRowsRequired
+	}
+	disputed := disputedComplianceRuleIDsFromRaw(primaryCompliance, secondaryCompliance)
+	if len(disputed) > 0 && len(arbiterCompliance) == 0 {
 		return PanelResult{}, ErrPanelArbiterRowsRequired
 	}
 	if err := validateArbiterComplianceCoverage(primaryCompliance, secondaryCompliance, arbiterCompliance); err != nil {
@@ -145,7 +157,66 @@ func BuildFinalResultFromRaw(
 		RawScores:       concatRawScores(primaryScores, secondaryScores, arbiterScores),
 		RawCompliance:   concatRawCompliance(primaryCompliance, secondaryCompliance, arbiterCompliance),
 		FinalScores:     finalScoresFromRaw(arbiterScores, verdict),
-		FinalCompliance: finalComplianceFromRaw(arbiterCompliance, verdict),
+		FinalCompliance: finalizeComplianceDisputedOnly(primaryCompliance, secondaryCompliance, arbiterCompliance, verdict),
 		VerdictPath:     verdict,
 	}, nil
+}
+
+// finalizeComplianceDisputedOnly builds the final compliance set for the
+// disputed-only arbiter contract: agreement rules finalize from primary,
+// disputed rules finalize from arbiter. This keeps the contract identical
+// to step60's rebuildFinalComplianceFromRaw path.
+func finalizeComplianceDisputedOnly(
+	primary, secondary, arbiter []contracts.RawComplianceEntry,
+	verdict contracts.VerdictPath,
+) []contracts.ComplianceEntry {
+	primaryByRule := make(map[string]contracts.RawComplianceEntry, len(primary))
+	for _, row := range primary {
+		primaryByRule[row.RuleID] = row
+	}
+	secondaryByRule := make(map[string]contracts.RawComplianceEntry, len(secondary))
+	for _, row := range secondary {
+		secondaryByRule[row.RuleID] = row
+	}
+	arbiterByRule := make(map[string]contracts.RawComplianceEntry, len(arbiter))
+	for _, row := range arbiter {
+		arbiterByRule[row.RuleID] = row
+	}
+
+	allRules := make(map[string]struct{}, len(primaryByRule)+len(secondaryByRule)+len(arbiterByRule))
+	for id := range primaryByRule {
+		allRules[id] = struct{}{}
+	}
+	for id := range secondaryByRule {
+		allRules[id] = struct{}{}
+	}
+	for id := range arbiterByRule {
+		allRules[id] = struct{}{}
+	}
+	sortedIDs := make([]string, 0, len(allRules))
+	for id := range allRules {
+		sortedIDs = append(sortedIDs, id)
+	}
+	sortRuleIDs(sortedIDs)
+
+	out := make([]contracts.ComplianceEntry, 0, len(sortedIDs))
+	for _, ruleID := range sortedIDs {
+		pRow, pOK := primaryByRule[ruleID]
+		sRow, sOK := secondaryByRule[ruleID]
+		aRow, aOK := arbiterByRule[ruleID]
+		switch {
+		case pOK && sOK && pRow.Verdict == sRow.Verdict:
+			// Agreement — arbiter row (if present) is dead weight; finalize
+			// from primary with the shared verdict path.
+			out = append(out, finalComplianceFromRaw([]contracts.RawComplianceEntry{pRow}, verdict)...)
+		case aOK:
+			// Disputed or single-side rule with arbiter coverage.
+			out = append(out, finalComplianceFromRaw([]contracts.RawComplianceEntry{aRow}, verdict)...)
+		case pOK:
+			out = append(out, finalComplianceFromRaw([]contracts.RawComplianceEntry{pRow}, verdict)...)
+		case sOK:
+			out = append(out, finalComplianceFromRaw([]contracts.RawComplianceEntry{sRow}, verdict)...)
+		}
+	}
+	return out
 }
