@@ -1023,25 +1023,6 @@ func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contract
 }
 
 func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
-	if info, err := os.Stat(dstPath); err == nil && info.Mode().IsRegular() {
-		data, err := os.ReadFile(dstPath)
-		if err != nil {
-			return fmt.Errorf("%w: read destination=%s: %v", errRulePublishIntegrity, dstPath, err)
-		}
-		sum := sha256.Sum256(data)
-		if hex.EncodeToString(sum[:]) == wantSHA {
-			if err := removePathAndSyncParent(stagedPath); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			return nil
-		}
-		return fmt.Errorf("%w: path=%s", errRulePublishConflict, dstPath)
-	} else if err == nil {
-		return fmt.Errorf("%w: path=%s", errRulePublishDestinationType, dstPath)
-	} else if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
 	data, err := os.ReadFile(stagedPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1052,6 +1033,45 @@ func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != wantSHA {
 		return fmt.Errorf("%w: path=%s", errRulePublishIntegrity, stagedPath)
+	}
+
+	rewriteDestination := false
+	if info, err := os.Lstat(dstPath); err == nil {
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			dstData, err := os.ReadFile(dstPath)
+			if err != nil {
+				return fmt.Errorf("%w: read destination=%s: %v", errRulePublishIntegrity, dstPath, err)
+			}
+			sum := sha256.Sum256(dstData)
+			if hex.EncodeToString(sum[:]) != wantSHA {
+				return fmt.Errorf("%w: path=%s", errRulePublishDestinationType, dstPath)
+			}
+			rewriteDestination = true
+		case info.Mode().IsRegular():
+			dstData, err := os.ReadFile(dstPath)
+			if err != nil {
+				return fmt.Errorf("%w: read destination=%s: %v", errRulePublishIntegrity, dstPath, err)
+			}
+			sum := sha256.Sum256(dstData)
+			if hex.EncodeToString(sum[:]) == wantSHA {
+				if err := removePathAndSyncParent(stagedPath); err != nil && !os.IsNotExist(err) {
+					return err
+				}
+				return nil
+			}
+			return fmt.Errorf("%w: path=%s", errRulePublishConflict, dstPath)
+		default:
+			return fmt.Errorf("%w: path=%s", errRulePublishDestinationType, dstPath)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	if rewriteDestination {
+		if err := removePathAndSyncParent(dstPath); err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 		return err

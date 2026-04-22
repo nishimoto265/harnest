@@ -128,6 +128,36 @@ func TestRecoverInspectReportsRegistryIntegrityError(t *testing.T) {
 	assert.Contains(t, err.Error(), "rules-registry.jsonl integrity check failed")
 }
 
+func TestRecoverInspectDoesNotCreatePromotionLockWhenAbsent(t *testing.T) {
+	root := t.TempDir()
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+
+	writeTestConfig(t, root, runsBase, worktreeBase)
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() {
+		_ = os.Chdir(originalWD)
+	})
+
+	var stdout bytes.Buffer
+	cmd := newRootCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stdout)
+	cmd.SetArgs([]string{"recover", "--inspect"})
+	require.NoError(t, cmd.Execute())
+
+	assert.NoFileExists(t, filepath.Join(runsBase, "promotion.lock"))
+
+	var payload map[string]string
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &payload))
+	assert.Equal(t, "recover_inspect", payload["event"])
+	assert.Equal(t, runsBase, payload["runs_base"])
+}
+
 func TestRecoverRejectsInspectAndRunTogether(t *testing.T) {
 	cmd := newRootCmd()
 	cmd.SetArgs([]string{"recover", "--inspect", "--run", "2026-04-21-PR42-abcdef0"})

@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -223,7 +222,7 @@ func materializeRuleSidecar(runCtx internalio.RunContext, candidate contracts.Ca
 	if err != nil {
 		return err
 	}
-	body, err := os.ReadFile(srcPath)
+	body, err := internalio.OpenValidatedRegularFile(srcPath, runCtx.RunDir())
 	if err != nil {
 		return err
 	}
