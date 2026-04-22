@@ -21,7 +21,8 @@ type RealGitOps struct {
 func (g RealGitOps) RemoteHead(ctx context.Context, branch string) (string, error) {
 	remote := g.remoteName()
 	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "ls-remote", "--heads", remote, branch)
-	cmd.Env = processenv.Sanitize()
+	// ls-remote hits the network; preserve SSH_AUTH_SOCK / GIT_ASKPASS / GH_TOKEN.
+	cmd.Env = processenv.SanitizeForNetworkExec()
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -41,7 +42,8 @@ func (g RealGitOps) PushForceWithLease(ctx context.Context, branch, targetSHA, e
 	refspec := fmt.Sprintf("%s:%s", targetSHA, branch)
 	lease := fmt.Sprintf("--force-with-lease=%s:%s", branch, expected)
 	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "push", remote, refspec, lease)
-	cmd.Env = processenv.Sanitize()
+	// push hits the network; preserve SSH_AUTH_SOCK / GIT_ASKPASS / GH_TOKEN.
+	cmd.Env = processenv.SanitizeForNetworkExec()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
