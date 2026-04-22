@@ -96,17 +96,20 @@ func TestResumeIfNeeded_AdoptsExistingRescueAfterCrashBeforeResumeStateSave(t *t
 	}))
 	require.NoError(t, touchHeartbeat(agentDir, oldTime))
 	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "dirty.txt"), []byte("dirty\n"), 0o644))
+	currentDirtyFingerprint, err := agentrunner.ComputeDirtyFingerprint(context.Background(), allocation.Path)
+	require.NoError(t, err)
 
 	rescueDir := filepath.Join(agentDir, rescuedDirName, "existing-rescue")
 	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
 	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
-		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
-		RescuedHeadSHA:  allocation.BaseSHA,
-		RetryCount:      1,
-		CommitCount:     0,
-		BundleMode:      agentrunner.RescueBundleModeNone,
-		CreatedAt:       time.Now().UTC(),
-		Artifacts:       []agentrunner.RescueArtifactDigest{},
+		ExpectedBaseSHA:  env.run.TaskPackage.BaseSHA,
+		RescuedHeadSHA:   allocation.BaseSHA,
+		RetryCount:       1,
+		CommitCount:      0,
+		BundleMode:       agentrunner.RescueBundleModeNone,
+		CreatedAt:        time.Now().UTC(),
+		Artifacts:        []agentrunner.RescueArtifactDigest{},
+		DirtyFingerprint: currentDirtyFingerprint,
 	}))
 
 	originalWorktreePIDs := rescueWorktreeProcessIDs
@@ -127,6 +130,51 @@ func TestResumeIfNeeded_AdoptsExistingRescueAfterCrashBeforeResumeStateSave(t *t
 	assert.Zero(t, state.Pid)
 	assert.Equal(t, 1, state.RetryCount)
 	assert.Len(t, rescueDirEntries(t, agentDir), 1)
+}
+
+func TestResumeIfNeeded_SkipsStaleRescueDirWhenDirtyFingerprintDrifts(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+
+	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	require.NoError(t, saveResumeState(agentDir, resumeState{
+		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
+		StartedAt:       oldTime,
+		Pid:             999999,
+		LeaderStartTime: "stale-start",
+		RetryCount:      0,
+		LastHeartbeat:   oldTime,
+	}))
+	require.NoError(t, touchHeartbeat(agentDir, oldTime))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "new-change.txt"), []byte("post-crash\n"), 0o644))
+
+	rescueDir := filepath.Join(agentDir, rescuedDirName, "stale-rescue")
+	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
+	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
+		ExpectedBaseSHA:  env.run.TaskPackage.BaseSHA,
+		RescuedHeadSHA:   allocation.BaseSHA,
+		RetryCount:       1,
+		CommitCount:      0,
+		BundleMode:       agentrunner.RescueBundleModeNone,
+		CreatedAt:        time.Now().UTC(),
+		Artifacts:        []agentrunner.RescueArtifactDigest{},
+		DirtyFingerprint: "deadbeef" + strings.Repeat("0", 56),
+	}))
+
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) { return nil, nil }
+	t.Cleanup(func() {
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+	})
+
+	step := newStep(env.run.Config, stepOptions{now: time.Now, heartbeatInterval: 10 * time.Millisecond, staleAfter: time.Second})
+	retryCount, err := step.resumeIfNeeded(context.Background(), env.run, allocation, agentDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, retryCount)
+	assert.GreaterOrEqual(t, len(rescueDirEntries(t, agentDir)), 2, "new rescue dir must be captured when fingerprint drifts")
 }
 
 func TestEnsureRescueLeaseQuiesced_PreservesTimeoutSentinel(t *testing.T) {

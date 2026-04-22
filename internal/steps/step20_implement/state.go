@@ -1,13 +1,16 @@
 package step20_implement
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 	"github.com/nishimoto265/auto-improve/internal/validation"
@@ -48,10 +51,47 @@ func loadResumeState(agentDir string) (resumeState, bool, error) {
 		return resumeState{}, false, err
 	}
 	state, err := internalio.ReadJSON[resumeState](path)
-	if err != nil {
+	if err == nil {
+		return state, true, nil
+	}
+	// Backward-compatible load: pre-leader_start_time resume-state files
+	// stored an active lease (pid != 0) without a leader_start_time field.
+	// Treat such legacy records as a migration case — decode structurally but
+	// clear the active-lease portion so resumeIfNeeded sees an inactive lease
+	// and proceeds via the normal rescue / retry path, rather than hard
+	// failing because Validate() rejects the missing field.
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return resumeState{}, false, readErr
+	}
+	legacy, legacyErr := decodeLegacyResumeState(data)
+	if legacyErr != nil {
 		return resumeState{}, false, err
 	}
-	return state, true, nil
+	if legacy.Pid != 0 && legacy.LeaderStartTime == "" {
+		legacy.StartedAt = time.Time{}
+		legacy.LastHeartbeat = time.Time{}
+		legacy.Pid = 0
+		legacy.Pgid = 0
+	}
+	return legacy, true, nil
+}
+
+// decodeLegacyResumeState parses a resume-state JSON document without invoking
+// Validate() so older schemas (active lease without leader_start_time) can be
+// loaded and migrated. Duplicate keys / unknown fields / trailing tokens are
+// still rejected via the contracts strict helpers.
+func decodeLegacyResumeState(data []byte) (resumeState, error) {
+	var out resumeState
+	if err := contracts.RejectDuplicateJSONKeys(data); err != nil {
+		return resumeState{}, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&out); err != nil {
+		return resumeState{}, err
+	}
+	return out, nil
 }
 
 type heartbeatConfig struct {
