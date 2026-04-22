@@ -488,6 +488,21 @@ func TestAcquireFileLock_RejectsSymlinkSwapWhileAnotherHolderOwnsLock(t *testing
 	assert.False(t, errors.Is(err, context.DeadlineExceeded))
 }
 
+func TestOpenValidatedRegularFile_RejectsMultiLinkFile(t *testing.T) {
+	ctx := newTestRunContext(t)
+	sharedPath := filepath.Join(t.TempDir(), "shared.md")
+	require.NoError(t, os.WriteFile(sharedPath, []byte("secret\n"), defaultFilePerm))
+
+	runPath, err := ctx.ResolveRunRelative("40/candidates/linked.md")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(runPath), defaultDirectoryPerm))
+	require.NoError(t, os.Link(sharedPath, runPath))
+
+	_, err = OpenValidatedRegularFile(runPath, ctx.RunDir())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUnsafePath)
+}
+
 func TestAppendRegistryEntryCASAndIndexRebuild(t *testing.T) {
 	registryPath := filepath.Join(t.TempDir(), "rules-registry.jsonl")
 	first := contracts.RuleRegistryEntry{

@@ -21,14 +21,23 @@ func TryAcquireFileLock(path string) (*FileLock, bool, error) {
 	if err := ensureWritableParentDir(path); err != nil {
 		return nil, false, err
 	}
-	f, err := openFileNoFollow(path, os.O_CREATE|os.O_RDWR, defaultFilePerm)
+	return tryLockFile(path, os.O_CREATE|os.O_RDWR, defaultFilePerm, syscall.LOCK_EX)
+}
+
+// InspectFileLock acquires a shared non-blocking lock on an existing lock file
+// without creating it. The bool reports whether the lock file already exists.
+func InspectFileLock(path string) (*FileLock, bool, error) {
+	f, err := openFileNoFollow(path, os.O_RDONLY, 0)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
 		return nil, false, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, false, nil
+			return nil, true, nil
 		}
 		return nil, false, err
 	}
@@ -77,6 +86,21 @@ func acquireFileLock(path string, nonBlocking bool, ctx context.Context) (*FileL
 		return nil, err
 	}
 	return &FileLock{path: path, file: f}, nil
+}
+
+func tryLockFile(path string, flags int, perm os.FileMode, lockMode int) (*FileLock, bool, error) {
+	f, err := openFileNoFollow(path, flags, perm)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := syscall.Flock(int(f.Fd()), lockMode|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return &FileLock{path: path, file: f}, true, nil
 }
 
 func (l *FileLock) Path() string {

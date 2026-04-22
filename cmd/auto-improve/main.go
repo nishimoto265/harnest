@@ -90,13 +90,15 @@ func newRecoverCmd() *cobra.Command {
 }
 
 func runRecoverInspect(cmd *cobra.Command) error {
-	runsBase, lock, err := recoverRunsBaseAndLock()
+	runsBase, lock, err := recoverRunsBaseAndInspectLock()
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = lock.Unlock()
-	}()
+	if lock != nil {
+		defer func() {
+			_ = lock.Unlock()
+		}()
+	}
 	if err := validateRegistryIntegrity(runsBase); err != nil {
 		return err
 	}
@@ -136,18 +138,41 @@ func runRecoverClearDivergedSunset(cmd *cobra.Command) error {
 	})
 }
 
-func recoverRunsBaseAndLock() (string, *internalio.FileLock, error) {
+func recoverPaths() (string, string, error) {
 	cfg, err := config.LoadDefault()
 	if err != nil {
-		return "", nil, commandExitError{code: 2, msg: err.Error()}
+		return "", "", commandExitError{code: 2, msg: err.Error()}
 	}
 	runsBase, err := cfg.RunsBase()
 	if err != nil {
-		return "", nil, commandExitError{code: 2, msg: err.Error()}
+		return "", "", commandExitError{code: 2, msg: err.Error()}
 	}
 	lockPath, err := cfg.PromotionLockPath()
 	if err != nil {
-		return "", nil, commandExitError{code: 2, msg: err.Error()}
+		return "", "", commandExitError{code: 2, msg: err.Error()}
+	}
+	return runsBase, lockPath, nil
+}
+
+func recoverRunsBaseAndInspectLock() (string, *internalio.FileLock, error) {
+	runsBase, lockPath, err := recoverPaths()
+	if err != nil {
+		return "", nil, err
+	}
+	lock, exists, err := internalio.InspectFileLock(lockPath)
+	if err != nil {
+		return "", nil, err
+	}
+	if exists && lock == nil {
+		return "", nil, commandExitError{code: 2, msg: "recover: promotion.lock is held by another process"}
+	}
+	return runsBase, lock, nil
+}
+
+func recoverRunsBaseAndLock() (string, *internalio.FileLock, error) {
+	runsBase, lockPath, err := recoverPaths()
+	if err != nil {
+		return "", nil, err
 	}
 	lock, acquired, err := internalio.TryAcquireFileLock(lockPath)
 	if err != nil {

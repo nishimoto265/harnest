@@ -3,6 +3,7 @@ package step70_decide
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,6 +192,28 @@ func TestLatestRuleSha256_RejectsInvalidExistingRulePath(t *testing.T) {
 
 	_, err := latestRuleSha256(lines, "rule-a")
 	require.ErrorContains(t, err, "invalid rule_path")
+}
+
+func TestMaterializeRuleSidecarRejectsExternalSymlink(t *testing.T) {
+	runCtx := newResolverRunContext(t)
+	externalPath := filepath.Join(t.TempDir(), "external.md")
+	body := "# external\npwned\n"
+	require.NoError(t, os.WriteFile(externalPath, []byte(body), 0o644))
+
+	srcPath := mustResolveResolverPath(t, runCtx, "40/candidates/loot.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(srcPath), 0o755))
+	require.NoError(t, os.Symlink(externalPath, srcPath))
+
+	err := materializeRuleSidecar(runCtx, contracts.Candidate{
+		CandidateID:        "loot",
+		Kind:               contracts.CandidateKindNew,
+		Title:              "Loot",
+		ProposedBodyPath:   "40/candidates/loot.md",
+		ProposedBodySha256: sha256String(body),
+	}, "rules/r-loot.md")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, internalio.ErrUnsafePath))
+	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, "rules/r-loot.md"))
 }
 
 func newResolverRunContext(t *testing.T) internalio.RunContext {
