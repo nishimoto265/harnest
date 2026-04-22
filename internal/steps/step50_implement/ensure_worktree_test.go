@@ -96,4 +96,3 @@ func TestEnsureAllocationWorktree_ExistingDirAcceptedEvenIfHeadAdvanced(t *testi
 	advancedHead := strings.TrimSpace(runCommand(t, allocation.Path, "git", "rev-parse", "HEAD"))
 	assert.NotEqual(t, allocation.HeadSHA, advancedHead)
 }
-

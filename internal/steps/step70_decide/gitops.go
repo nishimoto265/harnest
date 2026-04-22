@@ -24,6 +24,6 @@ type GitOps interface {
 // "fresh planning" decision tree treats the branch as untouched.
 type NoopGitOps struct{}
 
-func (NoopGitOps) RemoteHead(context.Context, string) (string, error)                       { return "", nil }
-func (NoopGitOps) PushForceWithLease(context.Context, string, string, string) error         { return nil }
-func (NoopGitOps) RemoveWorktree(context.Context, string) error                             { return nil }
+func (NoopGitOps) RemoteHead(context.Context, string) (string, error)               { return "", nil }
+func (NoopGitOps) PushForceWithLease(context.Context, string, string, string) error { return nil }
+func (NoopGitOps) RemoveWorktree(context.Context, string) error                     { return nil }
