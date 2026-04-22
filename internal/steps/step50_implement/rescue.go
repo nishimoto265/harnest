@@ -132,7 +132,15 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		}
 	}
 	nextRetry := state.RetryCount + 1
-	rescueDir, adopted, err := findExistingRescueDir(agentDir, state.ExpectedBaseSHA, nextRetry)
+	currentHead, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
+	if err != nil {
+		return 0, err
+	}
+	currentDirtyFingerprint, err := agentrunner.ComputeDirtyFingerprint(ctx, allocation.Path)
+	if err != nil {
+		return 0, err
+	}
+	rescueDir, adopted, err := findExistingRescueDir(agentDir, state.ExpectedBaseSHA, nextRetry, currentHead, currentDirtyFingerprint)
 	if err != nil {
 		return 0, err
 	}
@@ -150,10 +158,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		}()
 		budget := agentrunner.NewRescueArtifactBudget()
 
-		headSHA, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
-		if err != nil {
-			return 0, err
-		}
+		headSHA := currentHead
 		artifacts := make([]rescueArtifactDigest, 0, 8)
 
 		commitCount, bundleMode, err := writeCommitBundle(ctx, allocation.Path, rescueDir, state.ExpectedBaseSHA)
@@ -225,13 +230,14 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		}
 
 		rescueState := rescueStateFile{
-			ExpectedBaseSHA: state.ExpectedBaseSHA,
-			RescuedHeadSHA:  headSHA,
-			RetryCount:      nextRetry,
-			CommitCount:     commitCount,
-			BundleMode:      bundleMode,
-			CreatedAt:       s.now().UTC(),
-			Artifacts:       artifacts,
+			ExpectedBaseSHA:  state.ExpectedBaseSHA,
+			RescuedHeadSHA:   headSHA,
+			RetryCount:       nextRetry,
+			CommitCount:      commitCount,
+			BundleMode:       bundleMode,
+			CreatedAt:        s.now().UTC(),
+			Artifacts:        artifacts,
+			DirtyFingerprint: currentDirtyFingerprint,
 		}
 		if err := agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), rescueState); err != nil {
 			return 0, err
@@ -270,7 +276,14 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	return nextRetry, nil
 }
 
-func findExistingRescueDir(agentDir, expectedBaseSHA string, nextRetry int) (string, bool, error) {
+// findExistingRescueDir selects the newest verified rescue dir matching
+// ExpectedBaseSHA + RetryCount whose stored worktree fingerprint still matches
+// the live worktree (HEAD + dirty-status digest). Adoption is refused when:
+//   - stored RescuedHeadSHA differs from currentHead (worktree moved)
+//   - stored DirtyFingerprint differs from currentDirtyFingerprint
+//   - stored DirtyFingerprint is empty (legacy rescue dir) AND current
+//     worktree is dirty (would silently discard uncaptured edits)
+func findExistingRescueDir(agentDir, expectedBaseSHA string, nextRetry int, currentHead, currentDirtyFingerprint string) (string, bool, error) {
 	rescueRoot := filepath.Join(agentDir, rescuedDirName)
 	entries, err := os.ReadDir(rescueRoot)
 	if err != nil {
@@ -297,6 +310,16 @@ func findExistingRescueDir(agentDir, expectedBaseSHA string, nextRetry int) (str
 		if state.ExpectedBaseSHA != expectedBaseSHA || state.RetryCount != nextRetry {
 			continue
 		}
+		if state.RescuedHeadSHA != currentHead {
+			continue
+		}
+		if state.DirtyFingerprint == "" {
+			if currentDirtyFingerprint != emptyDirtyFingerprint {
+				continue
+			}
+		} else if state.DirtyFingerprint != currentDirtyFingerprint {
+			continue
+		}
 		if err := verifyRescueState(candidateDir); err != nil {
 			continue
 		}
@@ -310,6 +333,10 @@ func findExistingRescueDir(agentDir, expectedBaseSHA string, nextRetry int) (str
 	}
 	return selectedDir, true, nil
 }
+
+// emptyDirtyFingerprint is the digest ComputeDirtyFingerprint returns for a
+// clean worktree (zero porcelain entries). sha256 over empty input.
+const emptyDirtyFingerprint = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 type rescueLock struct {
 	file *os.File

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -80,17 +81,20 @@ func TestResumeIfNeeded_AdoptsExistingRescueAfterCrashBeforeResumeStateSave(t *t
 	}))
 	require.NoError(t, touchHeartbeat(fx.agentDir, oldTime))
 	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, "dirty.txt"), []byte("dirty\n"), 0o644))
+	currentDirtyFingerprint, err := agentrunner.ComputeDirtyFingerprint(context.Background(), fx.worktree)
+	require.NoError(t, err)
 
 	rescueDir := filepath.Join(fx.agentDir, rescuedDirName, "existing-rescue")
 	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
 	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
-		ExpectedBaseSHA: fx.baseSHA,
-		RescuedHeadSHA:  allocation.BaseSHA,
-		RetryCount:      1,
-		CommitCount:     0,
-		BundleMode:      agentrunner.RescueBundleModeNone,
-		CreatedAt:       time.Now().UTC(),
-		Artifacts:       []agentrunner.RescueArtifactDigest{},
+		ExpectedBaseSHA:  fx.baseSHA,
+		RescuedHeadSHA:   allocation.BaseSHA,
+		RetryCount:       1,
+		CommitCount:      0,
+		BundleMode:       agentrunner.RescueBundleModeNone,
+		CreatedAt:        time.Now().UTC(),
+		Artifacts:        []agentrunner.RescueArtifactDigest{},
+		DirtyFingerprint: currentDirtyFingerprint,
 	}))
 
 	retryCount, err := fx.step.resumeIfNeeded(context.Background(), fx.run, allocation, fx.agentDir)
@@ -104,6 +108,45 @@ func TestResumeIfNeeded_AdoptsExistingRescueAfterCrashBeforeResumeStateSave(t *t
 	assert.Zero(t, state.Pid)
 	assert.Equal(t, 1, state.RetryCount)
 	assert.Len(t, rescueDirEntries(t, fx.agentDir), 1)
+}
+
+func TestResumeIfNeeded_SkipsStaleRescueDirWhenDirtyFingerprintDrifts(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	allocation, err := worktreeFor(fx.run.TaskPackage, fx.run.Pass, fx.run.Agent)
+	require.NoError(t, err)
+	stubQuiescentRescueWorktree(t)
+
+	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	require.NoError(t, saveResumeState(fx.agentDir, resumeState{
+		ExpectedBaseSHA: fx.baseSHA,
+		StartedAt:       oldTime,
+		Pid:             999999,
+		LeaderStartTime: "stale-start",
+		RetryCount:      0,
+		LastHeartbeat:   oldTime,
+	}))
+	require.NoError(t, touchHeartbeat(fx.agentDir, oldTime))
+	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, "new-change.txt"), []byte("post-crash\n"), 0o644))
+
+	rescueDir := filepath.Join(fx.agentDir, rescuedDirName, "stale-rescue")
+	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
+	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
+		ExpectedBaseSHA:  fx.baseSHA,
+		RescuedHeadSHA:   allocation.BaseSHA,
+		RetryCount:       1,
+		CommitCount:      0,
+		BundleMode:       agentrunner.RescueBundleModeNone,
+		CreatedAt:        time.Now().UTC(),
+		Artifacts:        []agentrunner.RescueArtifactDigest{},
+		DirtyFingerprint: "deadbeef" + strings.Repeat("0", 56),
+	}))
+
+	retryCount, err := fx.step.resumeIfNeeded(context.Background(), fx.run, allocation, fx.agentDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, retryCount)
+	// The stale rescue dir must be retained; a new rescue dir must be created
+	// to capture the post-crash worktree state before reset --hard clears it.
+	assert.GreaterOrEqual(t, len(rescueDirEntries(t, fx.agentDir)), 2, "new rescue dir must be captured when fingerprint drifts")
 }
 
 func TestEnsureRescueLeaseQuiesced_PreservesTimeoutSentinel(t *testing.T) {
