@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"os/exec"
 	"runtime"
 	"sort"
@@ -32,6 +33,14 @@ var lookupProcessStartTime = processStartTime
 var killPIDSignal = func(pid int, sig syscall.Signal) error {
 	return syscall.Kill(pid, sig)
 }
+var cleanupNow = time.Now
+var cleanupSleep = time.Sleep
+var sessionProcessesUntilGoneList = sessionProcesses
+var processGroupMembersUntilGoneList = processGroupMembers
+var killProcessGroupUntilGoneSignal = KillProcessGroup
+var killSessionProcessesUntilGoneKill = killPIDs
+
+var ErrCleanupTimeout = errors.New("agentrunner: process cleanup timed out")
 
 func StartDescendantTracker(rootPID int, interval time.Duration) *DescendantTracker {
 	if rootPID <= 0 {
@@ -228,23 +237,24 @@ func KillSessionProcessesUntilGone(sessionID int, maxWait, interval time.Duratio
 	if maxWait <= 0 {
 		maxWait = 500 * time.Millisecond
 	}
-	deadline := time.Now().Add(maxWait)
+	deadline := cleanupNow().Add(maxWait)
 	var lastErr error
 	for {
-		pids, err := sessionProcesses(sessionID)
+		pids, err := sessionProcessesUntilGoneList(sessionID)
 		if err != nil {
 			return errors.Join(lastErr, err)
 		}
 		if len(pids) == 0 {
 			return lastErr
 		}
-		if err := killPIDs(pids); err != nil {
+		if err := killSessionProcessesUntilGoneKill(pids); err != nil {
 			lastErr = err
 		}
-		if !time.Now().Before(deadline) {
-			return lastErr
+		if !cleanupNow().Before(deadline) {
+			timeoutErr := fmt.Errorf("%w: session_id=%d survivors=%v", ErrCleanupTimeout, sessionID, pids)
+			return errors.Join(timeoutErr, lastErr)
 		}
-		time.Sleep(interval)
+		cleanupSleep(interval)
 	}
 }
 
@@ -346,23 +356,24 @@ func KillProcessGroupUntilGone(pgid int, maxWait, interval time.Duration) error 
 	if maxWait <= 0 {
 		maxWait = 500 * time.Millisecond
 	}
-	deadline := time.Now().Add(maxWait)
+	deadline := cleanupNow().Add(maxWait)
 	var lastErr error
 	for {
-		if err := KillProcessGroup(pgid); err != nil {
+		if err := killProcessGroupUntilGoneSignal(pgid); err != nil {
 			lastErr = err
 		}
-		members, err := processGroupMembers(pgid)
+		members, err := processGroupMembersUntilGoneList(pgid)
 		if err != nil {
 			return errors.Join(lastErr, err)
 		}
 		if len(members) == 0 {
 			return lastErr
 		}
-		if !time.Now().Before(deadline) {
-			return lastErr
+		if !cleanupNow().Before(deadline) {
+			timeoutErr := fmt.Errorf("%w: pgid=%d survivors=%v", ErrCleanupTimeout, pgid, members)
+			return errors.Join(timeoutErr, lastErr)
 		}
-		time.Sleep(interval)
+		cleanupSleep(interval)
 	}
 }
 

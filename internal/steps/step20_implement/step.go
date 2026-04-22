@@ -97,6 +97,9 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 	if run.TaskPackage == nil {
 		return errors.New("step20: task package is required")
 	}
+	if run.TaskPackage.RunID != run.IO.RunID {
+		return fmt.Errorf("step20: task package run_id mismatch: task_package=%s io=%s", run.TaskPackage.RunID, run.IO.RunID)
+	}
 	if run.Config == nil {
 		run.Config = s.cfg
 	}
@@ -109,6 +112,9 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 		return err
 	}
 	if err := run.IO.ValidateWorktreeAllocation(allocation); err != nil {
+		return err
+	}
+	if err := ensureAllocationWorktree(ctx, run.Config, allocation); err != nil {
 		return err
 	}
 	timeout, err := stepTimeout(run.Config, "step20")
@@ -219,6 +225,11 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 	if runResult.ExitCode != 0 {
 		return s.writeErrorManifest(ctx, run, runResult)
 	}
+	if runResult.CleanupErr != nil {
+		runResult.ExitCode = 1
+		runResult.StderrSnippet = appendCleanupDetail(runResult.StderrSnippet, runResult.CleanupErr)
+		return s.writeErrorManifest(ctx, run, runResult)
+	}
 	return s.writeSuccessArtifacts(ctx, run, allocation, runResult)
 }
 
@@ -257,6 +268,19 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	}
 	if len(diffBytes) == 0 {
 		return s.writeNoChangeManifest(ctx, run, runResult)
+	}
+	if headSHA == allocation.BaseSHA {
+		headSHA, err = synthesizeSuccessCommit(collectCtx, allocation, run)
+		if err != nil {
+			return err
+		}
+		if err := agentrunner.ValidateSuccessHead(collectCtx, allocation, headSHA, "step20"); err != nil {
+			return err
+		}
+		diffBytes, err = successDiffBytes(collectCtx, allocation.Path, allocation.BaseSHA)
+		if err != nil {
+			return err
+		}
 	}
 	if err := internalio.WriteAtomic(diffPath, diffBytes); err != nil {
 		return err
@@ -373,6 +397,99 @@ func ensureDir(path string) error {
 
 func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte, error) {
 	return agentrunner.SuccessDiffBytes(ctx, worktreePath, baseSHA, "step20")
+}
+
+func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeAllocation, run RunContext) (string, error) {
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "add", "-A", "--", ".", ":(exclude)"+checklistFileName); err != nil {
+		return "", err
+	}
+	staged, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "diff", "--cached", "--name-only", "--", ".", ":(exclude)"+checklistFileName)
+	if err != nil {
+		return "", err
+	}
+	if staged == "" {
+		return "", errors.New("step20: synthetic success commit found no staged changes")
+	}
+	parent, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	tree, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "write-tree")
+	if err != nil {
+		return "", err
+	}
+	commitSHA, err := gitOutputContext(
+		ctx,
+		strings.TrimSpace,
+		allocation.Path,
+		"commit-tree",
+		tree,
+		"-p",
+		parent,
+		"-m",
+		fmt.Sprintf("auto-improve: synthesize step20 success for %s %s", run.IO.RunID, run.Agent),
+	)
+	if err != nil {
+		return "", err
+	}
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "update-ref", "refs/heads/"+allocation.Branch, commitSHA, parent); err != nil {
+		return "", err
+	}
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "reset", "--mixed", "HEAD"); err != nil {
+		return "", err
+	}
+	return commitSHA, nil
+}
+
+func ensureAllocationWorktree(ctx context.Context, cfg *config.Config, allocation contracts.WorktreeAllocation) error {
+	info, err := os.Stat(allocation.Path)
+	if err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("step20: worktree path is not a directory: %s", allocation.Path)
+		}
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	if cfg == nil {
+		return errors.New("step20: config is required to recreate missing worktree")
+	}
+	repoRoot, err := cfg.RepoRoot()
+	if err != nil {
+		return err
+	}
+	if err := ensureDir(filepath.Dir(allocation.Path)); err != nil {
+		return err
+	}
+	if _, err := gitOutputContext(ctx, identity, repoRoot, "worktree", "prune"); err != nil {
+		return err
+	}
+	if _, err := gitOutputContext(ctx, identity, repoRoot, "worktree", "add", allocation.Path, allocation.Branch); err != nil {
+		detail := err.Error()
+		switch {
+		case strings.Contains(detail, "invalid reference"),
+			strings.Contains(detail, "not a valid object name"),
+			strings.Contains(detail, "unknown revision"):
+			if _, addErr := gitOutputContext(ctx, identity, repoRoot, "worktree", "add", "-b", allocation.Branch, allocation.Path, allocation.BaseSHA); addErr != nil {
+				return addErr
+			}
+		default:
+			return err
+		}
+	}
+	return restoreAllocationWorktree(ctx, allocation, allocation.BaseSHA)
+}
+
+func appendCleanupDetail(stderrSnippet []byte, cleanupErr error) []byte {
+	detail := strings.TrimSpace(string(stderrSnippet))
+	if cleanupErr == nil {
+		return stderrSnippet
+	}
+	if detail == "" {
+		return []byte(cleanupErr.Error())
+	}
+	return []byte(detail + "\ncleanup: " + cleanupErr.Error())
 }
 
 func manifestPrefix(pass int, agent contracts.AgentID) string {

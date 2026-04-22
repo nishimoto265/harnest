@@ -47,3 +47,33 @@ func TestEnsureRescueLeaseQuiesced_FailsClosedOnEnumerationError(t *testing.T) {
 	require.ErrorAs(t, err, &enumerateErr)
 	assert.ErrorIs(t, enumerateErr.Err, want)
 }
+
+func TestEnsureRescueLeaseQuiesced_PropagatesSavedProcessGroupKillError(t *testing.T) {
+	want := errors.New("kill group failed")
+	err := EnsureRescueLeaseQuiesced(context.Background(), t.TempDir(), RescueLeaseState{
+		PID:             4242,
+		PGID:            4242,
+		LeaderStartTime: "Tue Apr 22 10:00:00 2026",
+	}, RescueLeaseQuiesceOptions{
+		KillProcessGroupUntilGone: func(int, time.Duration, time.Duration) error { return want },
+		WorktreeProcessIDs:        func(context.Context, string) ([]int, error) { return nil, nil },
+		KillPID:                   func(int, syscall.Signal) error { return nil },
+		Sleep:                     func(time.Duration) {},
+		Now:                       func() time.Time { return time.Unix(0, 0) },
+		PIDAlive:                  func(int) bool { return true },
+		LookupProcessStartTime:    func(int) (string, error) { return "Tue Apr 22 10:00:00 2026", nil },
+	})
+	require.ErrorIs(t, err, want)
+}
+
+func TestWorktreeProcessIDs_PromotesLsofWarningsToEnumerationError(t *testing.T) {
+	_, err := WorktreeProcessIDs(context.Background(), t.TempDir(), WorktreeProcessIDsOptions{
+		LookPath: func(string) (string, error) { return "lsof", nil },
+		CommandContext: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+			return exec.CommandContext(ctx, "sh", "-c", "printf \"lsof: WARNING: can't stat (permission denied)\\n\" >&2; exit 1")
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRescueLeaseQuiesceEnumerate)
+	assert.Contains(t, err.Error(), "permission denied")
+}

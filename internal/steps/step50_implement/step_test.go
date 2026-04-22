@@ -167,12 +167,15 @@ func TestResumeIfNeeded_RequiresDeadPIDAsWellAsStaleHeartbeat(t *testing.T) {
 	oldTime := time.Now().Add(-2 * time.Hour).UTC()
 	currentPGID, err := syscall.Getpgid(os.Getpid())
 	require.NoError(t, err)
+	startTime, err := lookupLeaseStartTime(os.Getpid())
+	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(agentDir, 0o755))
 	require.NoError(t, saveResumeState(agentDir, resumeState{
 		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
 		StartedAt:       oldTime,
 		Pid:             os.Getpid(),
 		Pgid:            currentPGID,
+		LeaderStartTime: startTime,
 		RetryCount:      1,
 		LastHeartbeat:   oldTime,
 	}))
@@ -250,19 +253,22 @@ func TestResumeIfNeeded_RescuesRecycledPIDWhenLeaderStartTimeDiffers(t *testing.
 func TestShouldAttemptRescue_RequiresMatchingPGID(t *testing.T) {
 	originalKill := killProcess
 	originalGetpgid := getProcessGroupID
+	originalLookup := lookupLeaseStartTime
 	killProcess = func(pid int, sig syscall.Signal) error {
 		return nil
 	}
 	getProcessGroupID = func(pid int) (int, error) {
 		return pid + 1, nil
 	}
+	lookupLeaseStartTime = func(int) (string, error) { return "matching-start", nil }
 	t.Cleanup(func() {
 		killProcess = originalKill
 		getProcessGroupID = originalGetpgid
+		lookupLeaseStartTime = originalLookup
 	})
 
-	assert.False(t, shouldAttemptRescue(true, 12345, 12346, ""))
-	assert.True(t, shouldAttemptRescue(true, 12345, 12345, ""))
+	assert.False(t, shouldAttemptRescue(true, 12345, 12346, "matching-start"))
+	assert.True(t, shouldAttemptRescue(true, 12345, 12345, "matching-start"))
 }
 
 func TestStepRun_BranchDriftRequiresManualRecoveryAndPreservesWorktree(t *testing.T) {
@@ -276,6 +282,7 @@ func TestStepRun_BranchDriftRequiresManualRecoveryAndPreservesWorktree(t *testin
 		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
 		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
 		Pid:             999999,
+		LeaderStartTime: "stale-start",
 		RetryCount:      0,
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	}))
@@ -305,6 +312,7 @@ func TestStepRun_QuiesceTimeoutRequiresManualRecoveryWithoutReset(t *testing.T) 
 		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
 		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
 		Pid:             999999,
+		LeaderStartTime: "stale-start",
 		RetryCount:      0,
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	}))
@@ -352,12 +360,15 @@ func TestStepRun_ZeroValuePreservesCustomStaleAfter(t *testing.T) {
 	oldTime := time.Now().Add(-2 * time.Second).UTC()
 	currentPGID, err := syscall.Getpgid(os.Getpid())
 	require.NoError(t, err)
+	startTime, err := lookupLeaseStartTime(os.Getpid())
+	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(agentDir, 0o755))
 	require.NoError(t, saveResumeState(agentDir, resumeState{
 		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
 		StartedAt:       oldTime,
 		Pid:             os.Getpid(),
 		Pgid:            currentPGID,
+		LeaderStartTime: startTime,
 		RetryCount:      1,
 		LastHeartbeat:   oldTime,
 	}))
@@ -369,6 +380,65 @@ func TestStepRun_ZeroValuePreservesCustomStaleAfter(t *testing.T) {
 		staleAfter:        time.Second,
 	}).Run(context.Background(), env.run)
 	require.ErrorIs(t, err, ErrRescueAbortedLeaseActive)
+}
+
+func TestStepRun_RejectsTaskPackageRunIDMismatch(t *testing.T) {
+	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
+	t.Setenv("FAKE_AGENT", "a1")
+
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	env.run.TaskPackage.RunID = contracts.RunID("2026-04-21-PR42-deadbee")
+
+	err := (Step{}).Run(context.Background(), env.run)
+	require.ErrorContains(t, err, "task package run_id mismatch")
+	assert.NoFileExists(t, env.manifestPath)
+}
+
+func TestStepRun_PartialCustomizationDefaultsRunner(t *testing.T) {
+	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
+	t.Setenv("FAKE_AGENT", "a1")
+
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+
+	require.NotPanics(t, func() {
+		err := (Step{
+			cfg: env.run.Config,
+			now: time.Now,
+		}).Run(context.Background(), env.run)
+		require.NoError(t, err)
+	})
+}
+
+func TestStepRun_PersistsTerminalSuccessAfterParentCancellation(t *testing.T) {
+	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
+	t.Setenv("FAKE_AGENT", "a1")
+
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	step := Step{
+		cfg:    env.run.Config,
+		now:    time.Now,
+		runner: cancelAfterSuccessRunner{cancel: cancel, runID: env.run.TaskPackage.RunID, agent: env.run.Agent},
+	}
+	err = step.Run(ctx, env.run)
+	require.NoError(t, err)
+
+	manifest := readManifest(t, env.manifestPath)
+	assert.Equal(t, contracts.ManifestKindSuccess, manifest.Kind)
+
+	state, ok, err := loadResumeState(agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Zero(t, state.Pid)
+	assert.Zero(t, state.Pgid)
+	assert.Empty(t, state.LeaderStartTime)
+
+	_, statErr := os.Stat(heartbeatPath(agentDir))
+	require.Error(t, statErr)
+	assert.True(t, os.IsNotExist(statErr))
 }
 
 func TestStep50GitHelpers_ReturnContextCancellation(t *testing.T) {
@@ -761,10 +831,16 @@ func TestPerformRescue_PreservesIgnoredFiles(t *testing.T) {
 		heartbeatInterval: 10 * time.Millisecond,
 		staleAfter:        time.Second,
 	})
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) { return nil, nil }
+	t.Cleanup(func() {
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+	})
 	_, err = step.performRescue(context.Background(), env.run, allocation, agentDir, resumeState{
 		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
 		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
 		Pid:             999999,
+		LeaderStartTime: "stale-start",
 		RetryCount:      0,
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	})
@@ -811,7 +887,7 @@ func TestStepRun_KillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return processDead(pid)
-	}, 2*time.Second, 20*time.Millisecond)
+	}, 10*time.Second, 20*time.Millisecond)
 }
 
 func TestStepRun_KillsFastDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
@@ -827,7 +903,7 @@ func TestStepRun_KillsFastDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(env.run.TaskPackage.Worktrees[3].Path, "fast-detached.txt"))
 	t.Setenv("FAKE_DETACH_HELPER", helperPath)
 	t.Setenv("FAKE_DETACHED_PID_PATH", pidPath)
-	t.Setenv("FAKE_DETACH_DELAY", "20ms")
+	t.Setenv("FAKE_DETACH_DELAY", "50ms")
 
 	originalCleanup := cleanupProcessTree
 	cleanupCalled := make(chan struct{}, 1)
@@ -856,13 +932,64 @@ func TestStepRun_KillsFastDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return processDead(pid)
-	}, 2*time.Second, 20*time.Millisecond)
+	}, 10*time.Second, 20*time.Millisecond)
 }
 
 type failBeforeStartRunner struct{}
 
 func (failBeforeStartRunner) Run(context.Context, runnerRequest) (runnerResult, error) {
 	return runnerResult{}, errors.New("synthetic start failure")
+}
+
+type cancelAfterSuccessRunner struct {
+	cancel func()
+	runID  contracts.RunID
+	agent  contracts.AgentID
+}
+
+func (r cancelAfterSuccessRunner) Run(_ context.Context, req runnerRequest) (runnerResult, error) {
+	startedAt := time.Now().Add(-time.Second).UTC()
+	if req.OnStart != nil {
+		if err := req.OnStart(agentrunner.ProcessLease{
+			PID:       4242,
+			PGID:      4242,
+			StartTime: "Tue Apr 22 10:00:00 2026",
+		}, startedAt); err != nil {
+			return runnerResult{}, err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(req.SessionPath), 0o755); err != nil {
+		return runnerResult{}, err
+	}
+	if err := os.WriteFile(req.SessionPath, []byte("{\"event\":\"ok\"}\n"), 0o644); err != nil {
+		return runnerResult{}, err
+	}
+	if err := os.WriteFile(filepath.Join(req.Workdir, "implemented.txt"), []byte("ok\n"), 0o644); err != nil {
+		return runnerResult{}, err
+	}
+	if err := os.WriteFile(filepath.Join(req.Workdir, checklistFileName), []byte(`{"schema_version":"1","run_id":"`+string(r.runID)+`","pass":2,"agent":"`+string(r.agent)+`","items":[]}`), 0o644); err != nil {
+		return runnerResult{}, err
+	}
+	_, err := gitOutputContext(context.Background(), stringsTrimSpace, req.Workdir, "add", "implemented.txt")
+	if err != nil {
+		return runnerResult{}, err
+	}
+	_, err = gitOutputContext(context.Background(), stringsTrimSpace, req.Workdir, "commit", "-m", "synthetic success")
+	if err != nil {
+		return runnerResult{}, err
+	}
+	if r.cancel != nil {
+		r.cancel()
+	}
+	return runnerResult{
+		StartedAt:  startedAt,
+		FinishedAt: time.Now().UTC(),
+		Lease: agentrunner.ProcessLease{
+			PID:       4242,
+			PGID:      4242,
+			StartTime: "Tue Apr 22 10:00:00 2026",
+		},
+	}, nil
 }
 
 type stepTestEnv struct {

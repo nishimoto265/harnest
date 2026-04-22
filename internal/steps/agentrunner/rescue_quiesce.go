@@ -1,6 +1,7 @@
 package agentrunner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -97,7 +98,9 @@ func EnsureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state R
 	}
 
 	if ShouldKillSavedProcessGroup(state, opts.PIDAlive, opts.LookupProcessStartTime) {
-		_ = opts.KillProcessGroupUntilGone(state.PGID, 500*time.Millisecond, 25*time.Millisecond)
+		if err := opts.KillProcessGroupUntilGone(state.PGID, 500*time.Millisecond, 25*time.Millisecond); err != nil {
+			return err
+		}
 	}
 
 	deadline := opts.Now().Add(opts.MaxWait)
@@ -120,6 +123,9 @@ func EnsureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state R
 		if len(activePIDs) == 0 {
 			emptyChecks++
 			if emptyChecks >= 2 {
+				if savedLeaseOwnerAlive(state, opts.PIDAlive, opts.LookupProcessStartTime) {
+					return ErrRescueLeaseQuiesceTimedOut
+				}
 				return nil
 			}
 		} else {
@@ -149,6 +155,8 @@ func WorktreeProcessIDs(ctx context.Context, worktreePath string, opts WorktreeP
 		return nil, fmt.Errorf("lsof is required for rescue quiesce: %w", err)
 	}
 	cmd := commandContext(ctx, lsofPath, "-t", "+D", worktreePath)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err == nil {
 		return ParsePIDList(string(output)), nil
@@ -158,9 +166,13 @@ func WorktreeProcessIDs(ctx context.Context, worktreePath string, opts WorktreeP
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return nil, nil
+		stderrText := strings.TrimSpace(stderr.String())
+		if stderrText == "" || isLsofNoMatches(stderrText) {
+			return ParsePIDList(string(output)), nil
+		}
+		return nil, fmt.Errorf("%w: lsof +D %s exited %d: %s", ErrRescueLeaseQuiesceEnumerate, worktreePath, exitErr.ExitCode(), stderrText)
 	}
-	return nil, fmt.Errorf("enumerate worktree processes with lsof: %w", err)
+	return nil, fmt.Errorf("%w: enumerate worktree processes with lsof: %v", ErrRescueLeaseQuiesceEnumerate, err)
 }
 
 func ShouldKillSavedProcessGroup(state RescueLeaseState, pidAlive func(int) bool, lookupProcessStartTime func(int) (string, error)) bool {
@@ -178,6 +190,28 @@ func ShouldKillSavedProcessGroup(state RescueLeaseState, pidAlive func(int) bool
 		return false
 	}
 	return startTime == state.LeaderStartTime
+}
+
+func savedLeaseOwnerAlive(state RescueLeaseState, pidAlive func(int) bool, lookupProcessStartTime func(int) (string, error)) bool {
+	if state.PID <= 0 || state.LeaderStartTime == "" {
+		return false
+	}
+	if pidAlive != nil && !pidAlive(state.PID) {
+		return false
+	}
+	if lookupProcessStartTime == nil {
+		lookupProcessStartTime = LookupProcessStartTime
+	}
+	startTime, err := lookupProcessStartTime(state.PID)
+	if err != nil {
+		return false
+	}
+	return startTime == state.LeaderStartTime
+}
+
+func isLsofNoMatches(stderr string) bool {
+	stderr = strings.ToLower(strings.TrimSpace(stderr))
+	return strings.Contains(stderr, "no matches found")
 }
 
 func ParsePIDList(output string) []int {

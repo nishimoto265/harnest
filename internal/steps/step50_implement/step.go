@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
@@ -92,7 +93,7 @@ func newStep(cfg *config.Config, opts stepOptions) *Step {
 
 func (s Step) Run(ctx context.Context, run RunContext) error {
 	step := s
-	if step.now == nil {
+	if step.now == nil || step.heartbeatInterval <= 0 || step.staleAfter <= 0 || step.runner == nil {
 		impl := newStep(step.cfg, stepOptions{
 			now:               step.now,
 			heartbeatInterval: step.heartbeatInterval,
@@ -110,6 +111,9 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	}
 	if run.TaskPackage == nil {
 		return errors.New("step50: task package is required")
+	}
+	if run.TaskPackage.RunID != run.IO.RunID {
+		return fmt.Errorf("step50: task package run_id mismatch: task_package=%s io=%s", run.TaskPackage.RunID, run.IO.RunID)
 	}
 	if run.Config == nil {
 		run.Config = s.cfg
@@ -237,13 +241,22 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 		return err
 	}
 
+	finalizeCtx := context.Background()
+	if err := clearActiveLease(agentDir); err != nil {
+		return err
+	}
 	if runResult.TimedOut {
-		return s.writeTimeoutManifest(ctx, run, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
+		return s.writeTimeoutManifest(finalizeCtx, run, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
+	}
+	if runResult.CleanupErr != nil {
+		runResult.ExitCode = 1
+		runResult.StderrSnippet = appendCleanupDetail(runResult.StderrSnippet, runResult.CleanupErr)
+		return s.writeErrorManifest(finalizeCtx, run, runResult)
 	}
 	if runResult.ExitCode != 0 {
-		return s.writeErrorManifest(ctx, run, runResult)
+		return s.writeErrorManifest(finalizeCtx, run, runResult)
 	}
-	return s.writeSuccessArtifacts(ctx, run, allocation, runResult)
+	return s.writeSuccessArtifacts(finalizeCtx, run, allocation, runResult)
 }
 
 func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, runResult runnerResult) error {
@@ -410,4 +423,15 @@ func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte
 
 func shouldWriteTimeoutManifest(err error, execCtx context.Context) bool {
 	return err != nil && errors.Is(execCtx.Err(), context.DeadlineExceeded)
+}
+
+func appendCleanupDetail(stderrSnippet []byte, cleanupErr error) []byte {
+	detail := strings.TrimSpace(string(stderrSnippet))
+	if cleanupErr == nil {
+		return stderrSnippet
+	}
+	if detail == "" {
+		return []byte(cleanupErr.Error())
+	}
+	return []byte(detail + "\ncleanup: " + cleanupErr.Error())
 }
