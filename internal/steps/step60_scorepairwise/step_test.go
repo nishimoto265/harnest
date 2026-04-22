@@ -549,6 +549,10 @@ func TestRun_RerunWithoutMarker_PreservesSeparateScoreAndComplianceVerdictPaths(
 		writePass1Score:        true,
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
 	})
+	// F18: expected compliance coverage is derived from pass1 rows, so the
+	// test must seed pass1 compliance for rule "disputed" for step60 to
+	// admit the reuse path on a marker-less resume.
+	writePass1Compliance(t, runIO, pkg.RunID, "a1", map[string]contracts.ComplianceVerdict{"disputed": contracts.ComplianceVerdictCompliant})
 	now := time.Date(2026, 4, 21, 11, 35, 0, 0, time.UTC)
 
 	require.NoError(t, Run(context.Background(), Input{
@@ -605,6 +609,13 @@ func TestRun_RerunWithoutMarker_ReusesDisputedOnlyArbiterCompliance(t *testing.T
 		writePass1Score:        true,
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
 	})
+	// F18: pass1 must declare the rule-id coverage expected during step60
+	// reuse. Without this seeding, the raw rows' "agreed"/"disputed" rule
+	// IDs are treated as stale and judges are re-invoked.
+	writePass1Compliance(t, runIO, pkg.RunID, "a1", map[string]contracts.ComplianceVerdict{
+		"agreed":   contracts.ComplianceVerdictCompliant,
+		"disputed": contracts.ComplianceVerdictCompliant,
+	})
 	now := time.Date(2026, 4, 21, 11, 40, 0, 0, time.UTC)
 
 	require.NoError(t, Run(context.Background(), Input{
@@ -651,6 +662,91 @@ func TestRun_RerunWithoutMarker_ReusesDisputedOnlyArbiterCompliance(t *testing.T
 	}))
 	assert.False(t, called)
 	assert.Equal(t, beforeCompliance, mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl"))
+}
+
+// TestExpectedComplianceRuleIDsForAgent_IgnoresRawRuleIDs is the F18
+// contract: raw rows may contain historical rule IDs that no longer appear
+// in pass1. They MUST NOT authorize themselves during reuse — the expected
+// set is derived purely from the current pass1 rules (falling back to the
+// rubric default when pass1 is silent).
+func TestExpectedComplianceRuleIDsForAgent_IgnoresRawRuleIDs(t *testing.T) {
+	t.Run("pass1 drives coverage", func(t *testing.T) {
+		got := expectedComplianceRuleIDsForAgent(
+			"a1",
+			map[contracts.AgentID]map[string]struct{}{
+				"a1": {"pass1-rule": {}},
+			},
+			[]string{"fallback-rule"},
+		)
+		assert.Equal(t, map[string]struct{}{"pass1-rule": {}}, got)
+	})
+
+	t.Run("fallback used when pass1 silent", func(t *testing.T) {
+		got := expectedComplianceRuleIDsForAgent(
+			"a1",
+			map[contracts.AgentID]map[string]struct{}{},
+			[]string{"fallback-rule"},
+		)
+		assert.Equal(t, map[string]struct{}{"fallback-rule": {}}, got)
+	})
+
+	t.Run("empty pass1 and empty fallback yields nil", func(t *testing.T) {
+		got := expectedComplianceRuleIDsForAgent(
+			"a1",
+			map[contracts.AgentID]map[string]struct{}{},
+			nil,
+		)
+		assert.Nil(t, got)
+	})
+}
+
+// TestRun_RerunRejectsRawOnlyRuleIDsAfterPass1Shrink exercises F18 end-to-end:
+// step60 first writes raw rows for rule "stale-rule", then pass1 no longer
+// declares any compliance rule. On a marker-less resume the raw-only rule
+// must not self-authorize the reuse path; judges must be re-invoked so the
+// stale compliance evidence is refreshed.
+func TestRun_RerunRejectsRawOnlyRuleIDsAfterPass1Shrink(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	writePass1Compliance(t, runIO, pkg.RunID, "a1", map[string]contracts.ComplianceVerdict{"stale-rule": contracts.ComplianceVerdictCompliant})
+	now := time.Date(2026, 4, 21, 11, 45, 0, 0, time.UTC)
+
+	// First run: emit raw rows for "stale-rule".
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     scriptedJudge{score: 80, reasonPrefix: "primary", compliance: map[string]contracts.ComplianceVerdict{"stale-rule": contracts.ComplianceVerdictCompliant}},
+		Secondary:   scriptedJudge{score: 79, reasonPrefix: "secondary", compliance: map[string]contracts.ComplianceVerdict{"stale-rule": contracts.ComplianceVerdictCompliant}},
+		Arbiter:     scriptedJudge{score: 78, reasonPrefix: "arbiter", compliance: map[string]contracts.ComplianceVerdict{"stale-rule": contracts.ComplianceVerdictCompliant}},
+		Now:         func() time.Time { return now },
+	}))
+
+	// Simulate pass1 shrinking: delete the pass1 compliance file entirely.
+	// The raw rows for "stale-rule" still sit under 60/.
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "30/compliance-A.jsonl")))
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
+
+	// A rubric fallback provides coverage for stubRuleID, which is not in
+	// the raw rows. So the rerun must re-invoke the judges to regenerate
+	// coverage for the new expected rule set rather than trusting
+	// "stale-rule" raw rows.
+	var called bool
+	callTracker := unexpectedCallJudge{called: &called}
+	err := Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     callTracker,
+		Secondary:   callTracker,
+		Arbiter:     callTracker,
+		Now:         func() time.Time { return now.Add(time.Minute) },
+	})
+	// The test asserts the judges are re-invoked — unexpectedCallJudge
+	// fails the run, which confirms F18 forced a rejudge instead of
+	// silently reusing stale raw compliance.
+	require.Error(t, err)
+	assert.True(t, called, "F18: raw-only rule IDs must not authorize themselves; judges must run")
 }
 
 func TestRun_RerunWithoutMarker_IgnoresStaleFinalComplianceRows(t *testing.T) {

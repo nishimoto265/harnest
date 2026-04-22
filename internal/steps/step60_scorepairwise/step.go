@@ -195,11 +195,14 @@ func Run(ctx context.Context, in Input) error {
 		if err != nil {
 			return fmt.Errorf("step60: hash pass2 output for agent=%s: %w", run.Agent, err)
 		}
+		// F18: derive the expected compliance coverage ONLY from current
+		// pass1 inputs and the rubric fallback. Previously we unioned in
+		// rule IDs observed in step60's own raw artifacts, which let a
+		// stale raw-only rule ID keep satisfying coverage on every resume
+		// — judges would be skipped and the stale evidence preserved.
 		expectedCompliance := expectedComplianceRuleIDsForAgent(
 			run.Agent,
 			pass1ComplianceRuleIDs,
-			rawState.final[run.Agent],
-			rawState.observedComplianceRuleIDs(run.Agent),
 			fallbackComplianceRuleIDs,
 		)
 		if result, ok, err := tryReuseRawPanelResult(in.IO, rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion, expectedCompliance); err != nil {
@@ -1552,21 +1555,19 @@ func loadPass1ComplianceRuleIDs(runIO internalio.RunContext, rubricVersion, prom
 	return byAgent, nil
 }
 
+// expectedComplianceRuleIDsForAgent computes the rule-id set that pass2 raw
+// compliance rows must cover for the given agent. F18: the set is derived
+// solely from the current pass1 compliance rows (or the rubric fallback
+// when pass1 has no rules yet). Rule IDs that only appear in the agent's
+// existing step60 raw/final artifacts are treated as stale so a rerun is
+// forced to rejudge rather than self-authorize historical evidence.
 func expectedComplianceRuleIDsForAgent(
 	agent contracts.AgentID,
 	pass1Rules map[contracts.AgentID]map[string]struct{},
-	finalRules map[string]contracts.ComplianceEntry,
-	rawRules map[string]struct{},
 	fallbackRules []string,
 ) map[string]struct{} {
 	rules := make(map[string]struct{})
 	for ruleID := range pass1Rules[agent] {
-		rules[ruleID] = struct{}{}
-	}
-	for ruleID := range finalRules {
-		rules[ruleID] = struct{}{}
-	}
-	for ruleID := range rawRules {
 		rules[ruleID] = struct{}{}
 	}
 	if len(rules) == 0 {
