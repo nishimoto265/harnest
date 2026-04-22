@@ -66,31 +66,54 @@ func TestWriteAtomic_ConcurrentWritersDoNotDeletePeerTemps(t *testing.T) {
 	target := filepath.Join(dir, "manifest.json")
 
 	originalRename := atomicRename
-	enteredRename := make(chan struct{}, 2)
+	originalAfterTempCreate := atomicAfterTempCreate
+	enteredRename := make(chan string, 2)
 	releaseRename := make(chan struct{})
+	firstTempCreated := make(chan string, 1)
+	secondTempCreated := make(chan string, 1)
+	releaseFirstWriter := make(chan struct{})
+	var tempCreateMu sync.Mutex
+	tempCreateCount := 0
 	atomicRename = func(oldPath, newPath string) error {
-		enteredRename <- struct{}{}
+		enteredRename <- oldPath
 		<-releaseRename
 		return originalRename(oldPath, newPath)
 	}
 	t.Cleanup(func() {
 		atomicRename = originalRename
+		atomicAfterTempCreate = originalAfterTempCreate
 	})
+	atomicAfterTempCreate = func(tmpPath string) {
+		tempCreateMu.Lock()
+		tempCreateCount++
+		count := tempCreateCount
+		tempCreateMu.Unlock()
+		switch count {
+		case 1:
+			firstTempCreated <- tmpPath
+			<-releaseFirstWriter
+		case 2:
+			secondTempCreated <- tmpPath
+		}
+	}
 
-	start := make(chan struct{})
 	errs := make(chan error, 2)
 	go func() {
-		<-start
 		errs <- WriteAtomic(target, []byte(`{"writer":"one"}`))
 	}()
+	firstTemp := <-firstTempCreated
+	assert.FileExists(t, firstTemp)
 	go func() {
-		<-start
 		errs <- WriteAtomic(target, []byte(`{"writer":"two"}`))
 	}()
-	close(start)
+	secondTemp := <-secondTempCreated
+	assert.FileExists(t, secondTemp)
+
+	close(releaseFirstWriter)
 
 	<-enteredRename
 	<-enteredRename
+	assert.FileExists(t, secondTemp)
 	close(releaseRename)
 
 	require.NoError(t, <-errs)

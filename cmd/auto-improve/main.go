@@ -68,58 +68,102 @@ func newRecoverCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !clearDivergedSunset {
-				return commandExitError{code: 2, msg: "recover: not implemented"}
+			if inspect && runID != "" {
+				return commandExitError{code: 2, msg: "recover: --inspect and --run are mutually exclusive"}
 			}
-			if inspect || runID != "" {
-				return commandExitError{code: 2, msg: "recover: --clear-diverged-sunset does not accept --inspect or --run"}
+			if clearDivergedSunset {
+				if inspect || runID != "" {
+					return commandExitError{code: 2, msg: "recover: --clear-diverged-sunset does not accept --inspect or --run"}
+				}
+				return runRecoverClearDivergedSunset(cmd)
 			}
-
-			cfg, err := config.LoadDefault()
-			if err != nil {
-				return commandExitError{code: 2, msg: err.Error()}
+			if inspect {
+				return runRecoverInspect(cmd)
 			}
-			runsBase, err := cfg.RunsBase()
-			if err != nil {
-				return commandExitError{code: 2, msg: err.Error()}
-			}
-			lockPath, err := cfg.PromotionLockPath()
-			if err != nil {
-				return commandExitError{code: 2, msg: err.Error()}
-			}
-
-			lock, err := internalio.AcquireFileLock(lockPath)
-			if err != nil {
-				return err
-			}
-			defer func() {
-				_ = lock.Unlock()
-			}()
-
-			markerPath := filepath.Join(runsBase, "sunset-running.marker")
-			if _, err := os.Stat(markerPath); err == nil {
-				return commandExitError{code: 2, msg: "recover: sunset-running.marker still exists; refusing to clear sunset divergence during an in-progress transaction"}
-			} else if err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			if _, err := internalio.RegistryLines(filepath.Join(runsBase, "rules-registry.jsonl")); err != nil {
-				return err
-			}
-			if err := archive.ClearDivergedMarker(runsBase); err != nil {
-				return err
-			}
-
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]string{
-				"event":     "diverged_sunset_cleared",
-				"runs_base": runsBase,
-				"at":        time.Now().UTC().Format(time.RFC3339Nano),
-			})
+			return commandExitError{code: 2, msg: "recover: not implemented"}
 		},
 	}
 	cmd.Flags().BoolVar(&inspect, "inspect", false, "Inspect recovery state without making changes")
 	cmd.Flags().StringVar(&runID, "run", "", "Run ID to inspect or recover")
 	cmd.Flags().BoolVar(&clearDivergedSunset, "clear-diverged-sunset", false, "Clear the durable sunset divergence block after verifying sunset is not mid-transaction")
 	return cmd
+}
+
+func runRecoverInspect(cmd *cobra.Command) error {
+	runsBase, lock, err := recoverRunsBaseAndLock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = lock.Unlock()
+	}()
+	if err := validateRegistryIntegrity(runsBase); err != nil {
+		return err
+	}
+	return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]string{
+		"event":     "recover_inspect",
+		"runs_base": runsBase,
+		"at":        time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func runRecoverClearDivergedSunset(cmd *cobra.Command) error {
+	runsBase, lock, err := recoverRunsBaseAndLock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = lock.Unlock()
+	}()
+
+	markerPath := filepath.Join(runsBase, "sunset-running.marker")
+	if _, err := os.Stat(markerPath); err == nil {
+		return commandExitError{code: 2, msg: "recover: sunset-running.marker still exists; refusing to clear sunset divergence during an in-progress transaction"}
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := validateRegistryIntegrity(runsBase); err != nil {
+		return err
+	}
+	if err := archive.ClearDivergedMarker(runsBase); err != nil {
+		return err
+	}
+
+	return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]string{
+		"event":     "diverged_sunset_cleared",
+		"runs_base": runsBase,
+		"at":        time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func recoverRunsBaseAndLock() (string, *internalio.FileLock, error) {
+	cfg, err := config.LoadDefault()
+	if err != nil {
+		return "", nil, commandExitError{code: 2, msg: err.Error()}
+	}
+	runsBase, err := cfg.RunsBase()
+	if err != nil {
+		return "", nil, commandExitError{code: 2, msg: err.Error()}
+	}
+	lockPath, err := cfg.PromotionLockPath()
+	if err != nil {
+		return "", nil, commandExitError{code: 2, msg: err.Error()}
+	}
+	lock, acquired, err := internalio.TryAcquireFileLock(lockPath)
+	if err != nil {
+		return "", nil, err
+	}
+	if !acquired {
+		return "", nil, commandExitError{code: 2, msg: "recover: promotion.lock is held by another process"}
+	}
+	return runsBase, lock, nil
+}
+
+func validateRegistryIntegrity(runsBase string) error {
+	if _, err := internalio.RegistryLines(filepath.Join(runsBase, "rules-registry.jsonl")); err != nil {
+		return commandExitError{code: 2, msg: fmt.Sprintf("recover: rules-registry.jsonl integrity check failed: %v", err)}
+	}
+	return nil
 }
 
 func notImplementedCommand(use, short string) *cobra.Command {

@@ -1332,7 +1332,7 @@ func TestStepRunResumeStatePersistsChildPIDAndPGID(t *testing.T) {
 		if err != nil || !ok {
 			return false
 		}
-		return state.Pid > 0 && state.Pgid > 0
+		return state.Pid > 0 && state.Pgid > 0 && state.LeaderStartTime != ""
 	}, time.Second, 10*time.Millisecond)
 
 	state, ok, err := loadResumeState(fx.agentDir)
@@ -1340,9 +1340,59 @@ func TestStepRunResumeStatePersistsChildPIDAndPGID(t *testing.T) {
 	require.True(t, ok)
 	assert.NotEqual(t, os.Getpid(), state.Pid)
 	assert.NotZero(t, state.Pgid)
+	assert.NotEmpty(t, state.LeaderStartTime)
 
 	cancel()
 	require.ErrorIs(t, <-errCh, context.Canceled)
+}
+
+func TestResumeIfNeeded_RescuesRecycledPIDWhenLeaderStartTimeDiffers(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	stubQuiescentRescueWorktree(t)
+
+	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	currentPGID, err := syscall.Getpgid(os.Getpid())
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(fx.agentDir, 0o755))
+	require.NoError(t, saveResumeState(fx.agentDir, resumeState{
+		ExpectedBaseSHA: fx.baseSHA,
+		StartedAt:       oldTime,
+		Pid:             os.Getpid(),
+		Pgid:            currentPGID,
+		LeaderStartTime: "stale-start-time",
+		RetryCount:      0,
+		LastHeartbeat:   oldTime,
+	}))
+	require.NoError(t, touchHeartbeat(fx.agentDir, oldTime))
+
+	originalKill := killProcess
+	originalGetpgid := getProcessGroupID
+	originalLookup := lookupLeaseStartTime
+	killProcess = func(int, syscall.Signal) error { return nil }
+	getProcessGroupID = func(int) (int, error) { return currentPGID, nil }
+	lookupLeaseStartTime = func(int) (string, error) { return "current-start-time", nil }
+	t.Cleanup(func() {
+		killProcess = originalKill
+		getProcessGroupID = originalGetpgid
+		lookupLeaseStartTime = originalLookup
+	})
+
+	allocation, err := worktreeFor(fx.run.TaskPackage, fx.run.Pass, fx.run.Agent)
+	require.NoError(t, err)
+
+	retryCount, err := fx.step.resumeIfNeeded(context.Background(), fx.run, allocation, fx.agentDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, retryCount)
+
+	state, ok, err := loadResumeState(fx.agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Zero(t, state.Pid)
+	assert.Zero(t, state.Pgid)
+	assert.Empty(t, state.LeaderStartTime)
+
+	rescueDir := latestRescueDir(t, fx.agentDir)
+	require.FileExists(t, filepath.Join(rescueDir, "state.json"))
 }
 
 func writeFakeGitWrapper(t *testing.T, dir string) {

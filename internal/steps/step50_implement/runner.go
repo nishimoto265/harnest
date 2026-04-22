@@ -45,6 +45,11 @@ type commandRunner struct {
 	now func() time.Time
 }
 
+var (
+	startDescendantTracker = agentrunner.StartDescendantTracker
+	cleanupProcessTree     = agentrunner.CleanupProcessTree
+)
+
 func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult, error) {
 	if req.Binary == "" {
 		return runnerResult{}, errors.New("step50: claude binary is required")
@@ -82,7 +87,7 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 		_ = cmd.Wait()
 		return runnerResult{}, err
 	}
-	tracker := agentrunner.StartDescendantTracker(lease.PID, 25*time.Millisecond)
+	tracker := startDescendantTracker(lease.PID, 25*time.Millisecond)
 	if tracker != nil {
 		tracker.CaptureBurst(250 * time.Millisecond)
 	}
@@ -93,7 +98,7 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 				tracker.Stop()
 				defer func() { tracker = nil }()
 			}
-			_ = agentrunner.CleanupProcessTree(lease, lease.PID, tracker)
+			_ = cleanupProcessTree(lease, lease.PID, tracker)
 			_ = cmd.Wait()
 			return runnerResult{}, err
 		}
@@ -114,7 +119,7 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 		tracker.CaptureBurst(25 * time.Millisecond)
 		tracker.Stop()
 	}
-	_ = agentrunner.CleanupProcessTree(lease, lease.PID, tracker)
+	_ = cleanupProcessTree(lease, lease.PID, tracker)
 	result.FinishedAt = r.now().UTC()
 	result.StdoutSnippet = stdoutTail.Bytes()
 	result.StderrSnippet = stderrTail.Bytes()

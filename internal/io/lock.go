@@ -17,6 +17,24 @@ func AcquirePromotionLock(ctx RunContext) (*FileLock, error) {
 	return AcquireFileLock(ctx.PromotionLockPath())
 }
 
+func TryAcquireFileLock(path string) (*FileLock, bool, error) {
+	if err := ensureWritableParentDir(path); err != nil {
+		return nil, false, err
+	}
+	f, err := openFileNoFollow(path, os.O_CREATE|os.O_RDWR, defaultFilePerm)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return &FileLock{path: path, file: f}, true, nil
+}
+
 func AcquireFileLock(path string) (*FileLock, error) {
 	return acquireFileLock(path, false, nil)
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,6 +74,66 @@ func TestRecoverClearDivergedSunsetRefusesWhenSunsetTransactionStillOpen(t *test
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sunset-running.marker still exists")
 	assert.FileExists(t, filepath.Join(runsBase, "sunset-running.marker.diverged"))
+}
+
+func TestRecoverClearDivergedSunsetFailsFastWhenPromotionLockHeld(t *testing.T) {
+	root := t.TempDir()
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+
+	writeTestConfig(t, root, runsBase, worktreeBase)
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() {
+		_ = os.Chdir(originalWD)
+	})
+
+	lockPath := filepath.Join(runsBase, "promotion.lock")
+	lock, err := internalio.AcquireFileLock(lockPath)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, lock.Unlock())
+	}()
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"recover", "--clear-diverged-sunset"})
+	err = cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "promotion.lock is held by another process")
+}
+
+func TestRecoverInspectReportsRegistryIntegrityError(t *testing.T) {
+	root := t.TempDir()
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "rules-registry.jsonl"), []byte("{\"kind\":\"added\"\n"), 0o644))
+
+	writeTestConfig(t, root, runsBase, worktreeBase)
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() {
+		_ = os.Chdir(originalWD)
+	})
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"recover", "--inspect"})
+	err = cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rules-registry.jsonl integrity check failed")
+}
+
+func TestRecoverRejectsInspectAndRunTogether(t *testing.T) {
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"recover", "--inspect", "--run", "2026-04-21-PR42-abcdef0"})
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--inspect and --run are mutually exclusive")
 }
 
 func writeTestConfig(t *testing.T, root, runsBase, worktreeBase string) {

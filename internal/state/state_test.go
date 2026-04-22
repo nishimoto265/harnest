@@ -123,7 +123,7 @@ func TestReaderLastEventForPR_CorruptLineReturnsTypedError(t *testing.T) {
 	assert.True(t, errors.Is(err, contracts.ErrDuplicateJSONKey) || errors.Is(err, contracts.ErrUnknownStateKind))
 }
 
-func TestLatestRunForPR_IgnoresPartialTrailingLineDuringConcurrentAppend(t *testing.T) {
+func TestLatestRunForPR_ReturnsErrPartialStateLineForTruncatedTail(t *testing.T) {
 	runsBase := t.TempDir()
 	worktreeBase := t.TempDir()
 	ctx := testRunContext(t, "2026-04-21-PR42-abcdef0", runsBase, worktreeBase)
@@ -136,33 +136,57 @@ func TestLatestRunForPR_IgnoresPartialTrailingLineDuringConcurrentAppend(t *test
 	fullLine := append(append([]byte{}, payload...), '\n')
 	require.NoError(t, os.WriteFile(path, fullLine, 0o644))
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
-	require.NoError(t, err)
-	defer f.Close()
 	stepDone := stepDoneEntry(42, ctx.RunID, contracts.FailedStep20, time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC))
 	stepPayload, err := contracts.MarshalStrict(stepDone)
 	require.NoError(t, err)
+	partial := stepPayload[:len(stepPayload)/2]
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	require.NoError(t, err)
+	_, err = f.Write(partial)
+	require.NoError(t, err)
+	require.NoError(t, f.Sync())
+	require.NoError(t, f.Close())
 
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		for i := 0; i < 200; i++ {
-			half := len(stepPayload) / 2
-			_, _ = f.Write(stepPayload[:half])
-			_ = f.Sync()
-			time.Sleep(1 * time.Millisecond)
-			_, _ = f.Write(stepPayload[half:])
-			_, _ = f.Write([]byte{'\n'})
-			_ = f.Sync()
-		}
+	_, err = LatestRunForPR(ctx, 42)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPartialStateLine)
+}
+
+func TestLatestRunForPR_IgnoresPartialTrailingLineWhileWriterHoldsStateLock(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	ctx := testRunContext(t, "2026-04-21-PR42-abcdef0", runsBase, worktreeBase)
+	path := ctx.ProcessedPath()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+
+	entry := startedEntry(42, ctx.RunID, time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC))
+	payload, err := contracts.MarshalStrict(entry)
+	require.NoError(t, err)
+	fullLine := append(append([]byte{}, payload...), '\n')
+	require.NoError(t, os.WriteFile(path, fullLine, 0o644))
+
+	lock, err := internalio.AcquireFileLock(filepath.Join(filepath.Dir(path), "state.lock"))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, lock.Unlock())
 	}()
 
-	for i := 0; i < 200; i++ {
-		latest, err := LatestRunForPR(ctx, 42)
-		require.NoError(t, err)
-		require.NotNil(t, latest.LastEvent)
-	}
-	<-writerDone
+	stepDone := stepDoneEntry(42, ctx.RunID, contracts.FailedStep20, time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC))
+	stepPayload, err := contracts.MarshalStrict(stepDone)
+	require.NoError(t, err)
+	partial := stepPayload[:len(stepPayload)/2]
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	require.NoError(t, err)
+	_, err = f.Write(partial)
+	require.NoError(t, err)
+	require.NoError(t, f.Sync())
+	require.NoError(t, f.Close())
+
+	latest, err := LatestRunForPR(ctx, 42)
+	require.NoError(t, err)
+	require.NotNil(t, latest.LastEvent)
+	assert.Equal(t, contracts.StateKindStarted, latest.LastEvent.Kind)
 }
 
 func TestClassifyNextAction_CoversAllStateKinds(t *testing.T) {

@@ -145,7 +145,7 @@ func TestStepRun_PersistsChildPIDAndPGIDInResumeState(t *testing.T) {
 		if err != nil || !ok {
 			return false
 		}
-		return state.Pid > 0 && state.Pgid > 0
+		return state.Pid > 0 && state.Pgid > 0 && state.LeaderStartTime != ""
 	}, time.Second, 10*time.Millisecond)
 
 	state, ok, err := loadResumeState(agentDir)
@@ -153,6 +153,7 @@ func TestStepRun_PersistsChildPIDAndPGIDInResumeState(t *testing.T) {
 	require.True(t, ok)
 	assert.NotEqual(t, os.Getpid(), state.Pid)
 	assert.NotZero(t, state.Pgid)
+	assert.NotEmpty(t, state.LeaderStartTime)
 
 	cancel()
 	require.ErrorIs(t, <-errCh, context.Canceled)
@@ -186,6 +187,64 @@ func TestResumeIfNeeded_RequiresDeadPIDAsWellAsStaleHeartbeat(t *testing.T) {
 
 	_, err = step.resumeIfNeeded(context.Background(), env.run, allocation, agentDir)
 	require.ErrorIs(t, err, ErrRescueAbortedLeaseActive)
+}
+
+func TestResumeIfNeeded_RescuesRecycledPIDWhenLeaderStartTimeDiffers(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+
+	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	currentPGID, err := syscall.Getpgid(os.Getpid())
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	require.NoError(t, saveResumeState(agentDir, resumeState{
+		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
+		StartedAt:       oldTime,
+		Pid:             os.Getpid(),
+		Pgid:            currentPGID,
+		LeaderStartTime: "stale-start-time",
+		RetryCount:      0,
+		LastHeartbeat:   oldTime,
+	}))
+	require.NoError(t, touchHeartbeat(agentDir, oldTime))
+
+	originalKill := killProcess
+	originalGetpgid := getProcessGroupID
+	originalLookup := lookupLeaseStartTime
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	killProcess = func(int, syscall.Signal) error { return nil }
+	getProcessGroupID = func(int) (int, error) { return currentPGID, nil }
+	lookupLeaseStartTime = func(int) (string, error) { return "current-start-time", nil }
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) { return nil, nil }
+	t.Cleanup(func() {
+		killProcess = originalKill
+		getProcessGroupID = originalGetpgid
+		lookupLeaseStartTime = originalLookup
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+	})
+
+	step := newStep(env.run.Config, stepOptions{
+		now:               time.Now,
+		heartbeatInterval: 10 * time.Millisecond,
+		staleAfter:        time.Second,
+	})
+	retryCount, err := step.resumeIfNeeded(context.Background(), env.run, allocation, agentDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, retryCount)
+
+	state, ok, err := loadResumeState(agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Zero(t, state.Pid)
+	assert.Zero(t, state.Pgid)
+	assert.Empty(t, state.LeaderStartTime)
+
+	entries, err := os.ReadDir(filepath.Join(agentDir, rescuedDirName))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
 }
 
 func TestShouldAttemptRescue_RequiresMatchingPGID(t *testing.T) {
@@ -231,6 +290,8 @@ func TestStepRun_BranchDriftRequiresManualRecoveryAndPreservesWorktree(t *testin
 	assert.Equal(t, contracts.RollbackReasonLeaseFailure, manual.Reason)
 	assert.FileExists(t, driftedPath)
 	assert.Equal(t, "manual-recovery-drift", strings.TrimSpace(runCommand(t, allocation.Path, "git", "branch", "--show-current")))
+	assert.NoFileExists(t, env.manifestPath)
+	assert.NoDirExists(t, filepath.Join(agentDir, rescuedDirName))
 }
 
 func TestStepRun_QuiesceTimeoutRequiresManualRecoveryWithoutReset(t *testing.T) {
@@ -279,6 +340,8 @@ func TestStepRun_QuiesceTimeoutRequiresManualRecoveryWithoutReset(t *testing.T) 
 	require.NoError(t, readErr)
 	require.True(t, ok)
 	assert.Equal(t, 999999, state.Pid)
+	assert.NoFileExists(t, env.manifestPath)
+	assert.NoDirExists(t, filepath.Join(agentDir, rescuedDirName))
 }
 
 func TestStepRun_ZeroValuePreservesCustomStaleAfter(t *testing.T) {
@@ -721,7 +784,25 @@ func TestStepRun_KillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 	t.Setenv("FAKE_DETACHED_PID_PATH", pidPath)
 	t.Setenv("FAKE_DETACH_DELAY", "250ms")
 
+	originalCleanup := cleanupProcessTree
+	cleanupCalled := make(chan struct{}, 1)
+	cleanupProcessTree = func(lease agentrunner.ProcessLease, sessionID int, tracker *agentrunner.DescendantTracker) error {
+		select {
+		case cleanupCalled <- struct{}{}:
+		default:
+		}
+		return originalCleanup(lease, sessionID, tracker)
+	}
+	t.Cleanup(func() {
+		cleanupProcessTree = originalCleanup
+	})
+
 	require.NoError(t, (Step{}).Run(context.Background(), env.run))
+	select {
+	case <-cleanupCalled:
+	default:
+		t.Fatal("expected cleanupProcessTree to run before Step.Run returned")
+	}
 
 	pidBytes, err := os.ReadFile(pidPath)
 	require.NoError(t, err)
@@ -730,7 +811,7 @@ func TestStepRun_KillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return processDead(pid)
-	}, 15*time.Second, 20*time.Millisecond)
+	}, 2*time.Second, 20*time.Millisecond)
 }
 
 func TestStepRun_KillsFastDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
@@ -748,7 +829,25 @@ func TestStepRun_KillsFastDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 	t.Setenv("FAKE_DETACHED_PID_PATH", pidPath)
 	t.Setenv("FAKE_DETACH_DELAY", "20ms")
 
+	originalCleanup := cleanupProcessTree
+	cleanupCalled := make(chan struct{}, 1)
+	cleanupProcessTree = func(lease agentrunner.ProcessLease, sessionID int, tracker *agentrunner.DescendantTracker) error {
+		select {
+		case cleanupCalled <- struct{}{}:
+		default:
+		}
+		return originalCleanup(lease, sessionID, tracker)
+	}
+	t.Cleanup(func() {
+		cleanupProcessTree = originalCleanup
+	})
+
 	require.NoError(t, (Step{}).Run(context.Background(), env.run))
+	select {
+	case <-cleanupCalled:
+	default:
+		t.Fatal("expected cleanupProcessTree to run before Step.Run returned")
+	}
 
 	pidBytes, err := os.ReadFile(pidPath)
 	require.NoError(t, err)
@@ -757,7 +856,7 @@ func TestStepRun_KillsFastDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return processDead(pid)
-	}, 5*time.Second, 20*time.Millisecond)
+	}, 2*time.Second, 20*time.Millisecond)
 }
 
 type failBeforeStartRunner struct{}

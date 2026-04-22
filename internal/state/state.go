@@ -18,6 +18,8 @@ import (
 
 const processedDetailsDir = "processed-details"
 
+var ErrPartialStateLine = errors.New("state: partial processed.jsonl line")
+
 type NextAction string
 
 const (
@@ -326,7 +328,7 @@ func (w Writer) Append(entry contracts.StateEntry) error {
 	if err != nil {
 		return err
 	}
-	lock, err := internalio.AcquireFileLock(filepath.Join(filepath.Dir(w.path), "state.lock"))
+	lock, err := internalio.AcquireFileLock(stateLockPath(w.path))
 	if err != nil {
 		return err
 	}
@@ -344,6 +346,12 @@ type processedLine struct {
 	Number int
 	Offset int64
 	Data   []byte
+}
+
+type processedFileSnapshot struct {
+	Data    []byte
+	Size    int64
+	ModTime time.Time
 }
 
 func latestEntriesByPRPath(path string) (map[int]contracts.StateEntry, error) {
@@ -423,23 +431,29 @@ func readProcessedLines(path string) ([]processedLine, error) {
 	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	snapshot, err := readProcessedSnapshot(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
 	}
-	if len(data) == 0 {
+	if len(snapshot.Data) == 0 {
 		return nil, nil
 	}
+	data := snapshot.Data
 	if data[len(data)-1] != '\n' {
+		initialSnapshot := snapshot
 		time.Sleep(10 * time.Millisecond)
-		retried, retryErr := os.ReadFile(path)
-		if retryErr == nil && len(retried) > 0 {
-			data = retried
+		retried, retryErr := readProcessedSnapshot(path)
+		if retryErr != nil {
+			return nil, retryErr
+		}
+		if len(retried.Data) > 0 {
+			data = retried.Data
+			snapshot = retried
 		}
 		if len(data) > 0 && data[len(data)-1] != '\n' {
+			if !processedWriterInFlight(path, initialSnapshot, retried) {
+				return nil, fmt.Errorf("%w: path=%s", ErrPartialStateLine, path)
+			}
 			lastNewline := bytes.LastIndexByte(data, '\n')
 			if lastNewline < 0 {
 				return nil, nil
@@ -470,6 +484,51 @@ func readProcessedLines(path string) ([]processedLine, error) {
 		start = end + 1
 	}
 	return lines, nil
+}
+
+func stateLockPath(path string) string {
+	return filepath.Join(filepath.Dir(path), "state.lock")
+}
+
+func readProcessedSnapshot(path string) (processedFileSnapshot, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return processedFileSnapshot{}, nil
+		}
+		return processedFileSnapshot{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return processedFileSnapshot{}, nil
+		}
+		return processedFileSnapshot{}, err
+	}
+	return processedFileSnapshot{
+		Data:    data,
+		Size:    info.Size(),
+		ModTime: info.ModTime(),
+	}, nil
+}
+
+func processedWriterInFlight(path string, before, after processedFileSnapshot) bool {
+	if after.Size > before.Size || after.ModTime.After(before.ModTime) {
+		return true
+	}
+	lockPath := stateLockPath(path)
+	if _, err := os.Stat(lockPath); err != nil {
+		return false
+	}
+	lock, acquired, err := internalio.TryAcquireFileLock(lockPath)
+	if err != nil {
+		return false
+	}
+	if acquired {
+		_ = lock.Unlock()
+		return false
+	}
+	return true
 }
 
 func decodeStateLine(line processedLine) (contracts.StateEntry, error) {

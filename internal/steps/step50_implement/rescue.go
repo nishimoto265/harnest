@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -514,104 +513,58 @@ func syncDir(path string) error {
 }
 
 func ensureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state resumeState) error {
-	if err := ctx.Err(); err != nil {
+	err := agentrunner.EnsureRescueLeaseQuiesced(ctx, worktreePath, agentrunner.RescueLeaseState{
+		PID:             state.Pid,
+		PGID:            state.Pgid,
+		LeaderStartTime: state.LeaderStartTime,
+	}, agentrunner.RescueLeaseQuiesceOptions{
+		KillProcessGroupUntilGone: rescueKillProcessGroupUntilGone,
+		WorktreeProcessIDs:        rescueWorktreeProcessIDs,
+		KillPID:                   rescueKillPID,
+		Sleep:                     rescueSleep,
+		Now:                       time.Now,
+		PIDAlive:                  pidAlive,
+		LookupProcessStartTime:    lookupLeaseStartTime,
+		MaxWait:                   rescueQuiesceMaxWait,
+		Interval:                  rescueQuiesceInterval,
+	})
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, agentrunner.ErrRescueLeaseQuiesceTimedOut):
+		return &agentrunner.ManualRecoveryRequiredError{
+			Reason: contracts.RollbackReasonLeaseFailure,
+			Detail: "step50: rescue lease quiesce timed out while worktree remained busy",
+		}
+	case errors.Is(err, agentrunner.ErrRescueLeaseQuiesceEnumerate):
+		return &agentrunner.ManualRecoveryRequiredError{
+			Reason: contracts.RollbackReasonLeaseFailure,
+			Detail: fmt.Sprintf("step50: rescue lease quiesce failed to enumerate worktree processes: %v", err),
+		}
+	default:
 		return err
-	}
-	if shouldKillSavedProcessGroup(state) {
-		_ = rescueKillProcessGroupUntilGone(state.Pgid, 500*time.Millisecond, 25*time.Millisecond)
-	}
-	deadline := time.Now().Add(rescueQuiesceMaxWait)
-	emptyChecks := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		pids, err := rescueWorktreeProcessIDs(ctx, worktreePath)
-		if err != nil {
-			return &agentrunner.ManualRecoveryRequiredError{
-				Reason: contracts.RollbackReasonLeaseFailure,
-				Detail: fmt.Sprintf("step50: rescue lease quiesce failed to enumerate worktree processes: %v", err),
-			}
-		}
-		activePIDs := make([]int, 0, len(pids))
-		for _, pid := range pids {
-			if pid <= 0 || pid == os.Getpid() {
-				continue
-			}
-			activePIDs = append(activePIDs, pid)
-		}
-		if len(activePIDs) == 0 {
-			emptyChecks++
-			if emptyChecks >= 2 {
-				return nil
-			}
-		} else {
-			emptyChecks = 0
-			for _, pid := range activePIDs {
-				_ = rescueKillPID(pid, syscall.SIGKILL)
-			}
-		}
-		if !time.Now().Before(deadline) {
-			return &agentrunner.ManualRecoveryRequiredError{
-				Reason: contracts.RollbackReasonLeaseFailure,
-				Detail: "step50: rescue lease quiesce timed out while worktree remained busy",
-			}
-		}
-		rescueSleep(rescueQuiesceInterval)
 	}
 }
 
 func worktreeProcessIDs(ctx context.Context, worktreePath string) ([]int, error) {
-	lsofPath, err := rescueExecLookPath("lsof")
+	pids, err := agentrunner.WorktreeProcessIDs(ctx, worktreePath, agentrunner.WorktreeProcessIDsOptions{
+		LookPath:       rescueExecLookPath,
+		CommandContext: rescueCommandContext,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("step50: lsof is required for rescue quiesce: %w", err)
+		return nil, fmt.Errorf("step50: %w", err)
 	}
-	cmd := rescueCommandContext(ctx, lsofPath, "-t", "+D", worktreePath)
-	output, err := cmd.Output()
-	if err == nil {
-		return parsePIDList(string(output)), nil
-	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return nil, nil
-	}
-	return nil, fmt.Errorf("step50: enumerate worktree processes with lsof: %w", err)
+	return pids, nil
 }
 
 func shouldKillSavedProcessGroup(state resumeState) bool {
-	if state.Pgid <= 0 || state.Pid <= 0 || state.LeaderStartTime == "" {
-		return false
-	}
-	if !pidAlive(state.Pid) {
-		return false
-	}
-	startTime, err := lookupLeaseStartTime(state.Pid)
-	if err != nil {
-		return false
-	}
-	return startTime == state.LeaderStartTime
+	return agentrunner.ShouldKillSavedProcessGroup(agentrunner.RescueLeaseState{
+		PID:             state.Pid,
+		PGID:            state.Pgid,
+		LeaderStartTime: state.LeaderStartTime,
+	}, pidAlive, lookupLeaseStartTime)
 }
 
 func parsePIDList(output string) []int {
-	seen := make(map[int]struct{})
-	pids := make([]int, 0)
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		pid, err := strconv.Atoi(line)
-		if err != nil || pid <= 0 {
-			continue
-		}
-		if _, ok := seen[pid]; ok {
-			continue
-		}
-		seen[pid] = struct{}{}
-		pids = append(pids, pid)
-	}
-	return pids
+	return agentrunner.ParsePIDList(output)
 }
