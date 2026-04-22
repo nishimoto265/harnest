@@ -90,12 +90,14 @@ func newRecoverCmd() *cobra.Command {
 }
 
 func runRecoverInspect(cmd *cobra.Command) error {
-	runsBase, lock, err := recoverRunsBaseAndLock()
+	runsBase, lock, err := recoverRunsBaseAndInspectLock()
 	if err != nil {
 		return err
 	}
 	defer func() {
-		_ = lock.Unlock()
+		if lock != nil {
+			_ = lock.Unlock()
+		}
 	}()
 	if err := validateRegistryIntegrity(runsBase); err != nil {
 		return err
@@ -105,6 +107,36 @@ func runRecoverInspect(cmd *cobra.Command) error {
 		"runs_base": runsBase,
 		"at":        time.Now().UTC().Format(time.RFC3339Nano),
 	})
+}
+
+// recoverRunsBaseAndInspectLock returns the runs_base and, if promotion.lock
+// already exists, a read-only shared lock on it. When the lock file does not
+// yet exist (fresh runs_base, before any promoter has ever run), this returns
+// a nil *FileLock — inspect is allowed to proceed without materializing it.
+func recoverRunsBaseAndInspectLock() (string, *internalio.FileLock, error) {
+	cfg, err := config.LoadDefault()
+	if err != nil {
+		return "", nil, commandExitError{code: 2, msg: err.Error()}
+	}
+	runsBase, err := cfg.RunsBase()
+	if err != nil {
+		return "", nil, commandExitError{code: 2, msg: err.Error()}
+	}
+	lockPath, err := cfg.PromotionLockPath()
+	if err != nil {
+		return "", nil, commandExitError{code: 2, msg: err.Error()}
+	}
+	lock, acquired, err := internalio.InspectFileLock(lockPath)
+	if err != nil {
+		return "", nil, err
+	}
+	if !acquired && lock == nil {
+		return runsBase, nil, nil
+	}
+	if !acquired {
+		return "", nil, commandExitError{code: 2, msg: "recover: promotion.lock is held by another process"}
+	}
+	return runsBase, lock, nil
 }
 
 func runRecoverClearDivergedSunset(cmd *cobra.Command) error {

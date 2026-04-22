@@ -3,6 +3,7 @@ package step20_implement
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -48,6 +49,11 @@ type commandRunner struct {
 var (
 	startDescendantTracker = agentrunner.StartDescendantTracker
 	cleanupProcessTree     = agentrunner.CleanupProcessTree
+	// cleanupProcessTreeFailClosed controls whether an error returned by
+	// cleanupProcessTree on the success path becomes a runner-level
+	// failure (M5). Defaults to true so regressions surface loudly; tests
+	// that inject detached descendants can disable it via the seam.
+	cleanupProcessTreeFailClosed = true
 )
 
 func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult, error) {
@@ -119,13 +125,22 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 		tracker.CaptureBurst(25 * time.Millisecond)
 		tracker.Stop()
 	}
-	_ = cleanupProcessTree(lease, lease.PID, tracker)
+	cleanupErr := cleanupProcessTree(lease, lease.PID, tracker)
 	result.FinishedAt = r.now().UTC()
 	result.StdoutSnippet = stdoutTail.Bytes()
 	result.StderrSnippet = stderrTail.Bytes()
 
 	switch {
 	case waitErr == nil:
+		// M5: fail closed on the success path when cleanupProcessTree
+		// reports an error that is not a known-harmless race (process
+		// already exited). `agentrunner.CleanupProcessTree` already
+		// filters ESRCH internally; any non-nil return reaching us is
+		// a real failure that could mean descendants survived
+		// cmd.Wait and may still be mutating the worktree.
+		if cleanupErr != nil && cleanupProcessTreeFailClosed {
+			return runnerResult{}, fmt.Errorf("step20: cleanup process tree after success: %w", cleanupErr)
+		}
 		return result, nil
 	case timeoutCtx.Err() == context.DeadlineExceeded:
 		result.TimedOut = true

@@ -196,5 +196,8 @@ func (s resumeState) Validate() error {
 	if s.StartedAt.IsZero() || s.LastHeartbeat.IsZero() {
 		return errors.New("step50: resume state: active lease requires started_at and last_heartbeat")
 	}
+	if s.LeaderStartTime == "" {
+		return errors.New("step50: resume state: active lease requires leader_start_time")
+	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package agentrunner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,11 @@ import (
 var (
 	ErrRescueLeaseQuiesceEnumerate = errors.New("agentrunner: rescue lease quiesce enumerate worktree processes")
 	ErrRescueLeaseQuiesceTimedOut  = errors.New("agentrunner: rescue lease quiesce timed out while worktree remained busy")
+	// ErrRescueLeaseQuiesceKillFailed indicates that
+	// KillProcessGroupUntilGone returned a fatal error AND the saved leader
+	// (PID+start_time) is still alive. We must not silently retry in that
+	// case because a subsequent rescue would race against the leader.
+	ErrRescueLeaseQuiesceKillFailed = errors.New("agentrunner: rescue lease quiesce kill failed with leader still alive")
 )
 
 type RescueLeaseState struct {
@@ -97,7 +103,17 @@ func EnsureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state R
 	}
 
 	if ShouldKillSavedProcessGroup(state, opts.PIDAlive, opts.LookupProcessStartTime) {
-		_ = opts.KillProcessGroupUntilGone(state.PGID, 500*time.Millisecond, 25*time.Millisecond)
+		killErr := opts.KillProcessGroupUntilGone(state.PGID, 500*time.Millisecond, 25*time.Millisecond)
+		if killErr != nil {
+			// Recheck the saved leader identity. If the PID is gone OR
+			// its start_time has rolled over, the kill effectively
+			// succeeded and we can proceed to the enumeration loop.
+			// Otherwise the leader is still alive — escalate so the
+			// caller routes to manual recovery.
+			if ShouldKillSavedProcessGroup(state, opts.PIDAlive, opts.LookupProcessStartTime) {
+				return fmt.Errorf("%w: pgid=%d: %v", ErrRescueLeaseQuiesceKillFailed, state.PGID, killErr)
+			}
+		}
 	}
 
 	deadline := opts.Now().Add(opts.MaxWait)
@@ -149,6 +165,12 @@ func WorktreeProcessIDs(ctx context.Context, worktreePath string, opts WorktreeP
 		return nil, fmt.Errorf("lsof is required for rescue quiesce: %w", err)
 	}
 	cmd := commandContext(ctx, lsofPath, "-t", "+D", worktreePath)
+	// We need stderr to distinguish "no matching processes" (lsof exits 1
+	// silently) from a real failure like "permission denied" or "path does
+	// not exist". Use a pipe so CombinedOutput-like semantics aren't
+	// available, but the stdout pids and stderr diagnostic are separate.
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 	output, err := cmd.Output()
 	if err == nil {
 		return ParsePIDList(string(output)), nil
@@ -158,7 +180,24 @@ func WorktreeProcessIDs(ctx context.Context, worktreePath string, opts WorktreeP
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return nil, nil
+		// lsof documents exit=1 when "there are no matching files" — i.e.
+		// no processes hold any file under worktreePath. In that case
+		// stderr is empty (or may carry an informational note) and
+		// stdout is empty. Treat as "no PIDs", not as an error.
+		stderrText := strings.TrimSpace(stderrBuf.String())
+		stdoutText := strings.TrimSpace(string(output))
+		if stderrText == "" && stdoutText == "" {
+			return nil, nil
+		}
+		// lsof commonly emits harmless warnings to stderr (e.g. about
+		// kernel module mismatches on linux) but still returns valid
+		// stdout. If stdout has any PID-like lines, honor them.
+		if stdoutText != "" {
+			return ParsePIDList(stdoutText), nil
+		}
+		// Real failure path: exit=1 with nothing on stdout AND a
+		// diagnostic on stderr. Bubble up as an enumerate error.
+		return nil, fmt.Errorf("%w: lsof %s: %s", ErrRescueLeaseQuiesceEnumerate, exitErr, stderrText)
 	}
 	return nil, fmt.Errorf("enumerate worktree processes with lsof: %w", err)
 }

@@ -3,6 +3,7 @@ package step50_implement
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -48,6 +49,8 @@ type commandRunner struct {
 var (
 	startDescendantTracker = agentrunner.StartDescendantTracker
 	cleanupProcessTree     = agentrunner.CleanupProcessTree
+	// cleanupProcessTreeFailClosed: see step20 runner.go equivalent.
+	cleanupProcessTreeFailClosed = true
 )
 
 func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult, error) {
@@ -119,13 +122,17 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 		tracker.CaptureBurst(25 * time.Millisecond)
 		tracker.Stop()
 	}
-	_ = cleanupProcessTree(lease, lease.PID, tracker)
+	cleanupErr := cleanupProcessTree(lease, lease.PID, tracker)
 	result.FinishedAt = r.now().UTC()
 	result.StdoutSnippet = stdoutTail.Bytes()
 	result.StderrSnippet = stderrTail.Bytes()
 
 	switch {
 	case waitErr == nil:
+		// M5: fail closed on success path (see step20 runner).
+		if cleanupErr != nil && cleanupProcessTreeFailClosed {
+			return runnerResult{}, fmt.Errorf("step50: cleanup process tree after success: %w", cleanupErr)
+		}
 		return result, nil
 	case timeoutCtx.Err() == context.DeadlineExceeded:
 		result.TimedOut = true

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"os/exec"
 	"runtime"
 	"sort"
@@ -13,6 +14,12 @@ import (
 	"syscall"
 	"time"
 )
+
+// ErrCleanupTimeout indicates that a *UntilGone helper ran out of time before
+// confirming that every target PID was gone. Callers MUST NOT assume
+// successful cleanup when this error is returned — survivors may still be
+// writing to the worktree.
+var ErrCleanupTimeout = errors.New("agentrunner: cleanup timed out with processes still alive")
 
 type DescendantTracker struct {
 	rootPID int
@@ -242,7 +249,11 @@ func KillSessionProcessesUntilGone(sessionID int, maxWait, interval time.Duratio
 			lastErr = err
 		}
 		if !time.Now().Before(deadline) {
-			return lastErr
+			// M4: see KillProcessGroupUntilGone.
+			return errors.Join(
+				lastErr,
+				fmt.Errorf("%w: session=%d survivors=%d", ErrCleanupTimeout, sessionID, len(pids)),
+			)
 		}
 		time.Sleep(interval)
 	}
@@ -360,7 +371,12 @@ func KillProcessGroupUntilGone(pgid int, maxWait, interval time.Duration) error 
 			return lastErr
 		}
 		if !time.Now().Before(deadline) {
-			return lastErr
+			// M4: timeout with survivors must surface. Returning nil
+			// here would let callers mis-report a clean cleanup.
+			return errors.Join(
+				lastErr,
+				fmt.Errorf("%w: pgid=%d survivors=%d", ErrCleanupTimeout, pgid, len(members)),
+			)
 		}
 		time.Sleep(interval)
 	}

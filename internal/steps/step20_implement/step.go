@@ -97,6 +97,9 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 	if run.TaskPackage == nil {
 		return errors.New("step20: task package is required")
 	}
+	if run.TaskPackage.RunID != run.IO.RunID {
+		return fmt.Errorf("step20: task package run_id mismatch: task_package=%s io=%s", run.TaskPackage.RunID, run.IO.RunID)
+	}
 	if run.Config == nil {
 		run.Config = s.cfg
 	}
@@ -236,6 +239,20 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	if err := agentrunner.ValidateSuccessHead(collectCtx, allocation, headSHA, "step20"); err != nil {
 		return err
 	}
+	// H3: Refuse to write a success manifest when HEAD==BaseSHA but the
+	// working tree is dirty — the agent wrote files but never committed
+	// them, so there is nothing durable to adopt. Promoting such a run
+	// would silently drop the agent's work. Route through the no-change
+	// / error path instead so the run is retried or fails loudly.
+	if headSHA == allocation.BaseSHA {
+		dirty, dirtyErr := worktreeIsDirty(collectCtx, allocation.Path)
+		if dirtyErr != nil {
+			return dirtyErr
+		}
+		if dirty {
+			return s.writeUncommittedManifest(ctx, run, runResult)
+		}
+	}
 	checklistPath, err := artifactPath(run.IO, run.Pass, run.Agent, checklistFileName)
 	if err != nil {
 		return err
@@ -278,6 +295,69 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 			SessionPath:   filepath.Join(prefix, sessionFileName),
 			ChecklistPath: filepath.Join(prefix, checklistFileName),
 			PromptVersion: promptVersion,
+			StartedAt:     runResult.StartedAt.UTC(),
+			FinishedAt:    runResult.FinishedAt.UTC(),
+		},
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return writeManifest(run.IO, run.Pass, run.Agent, manifest)
+}
+
+// worktreeIsDirty reports true when there are uncommitted changes that would
+// otherwise be silently adopted: staged/unstaged edits to tracked files, or
+// untracked files OTHER than the checklist artifact (the checklist is always
+// produced by the agent and collected out-of-band). Used in the H3 success
+// guard.
+func worktreeIsDirty(ctx context.Context, worktreePath string) (bool, error) {
+	// Tracked dirty (staged or unstaged): `git diff --quiet HEAD` exits 1
+	// when differences exist. We use ls-files plus `diff` for clarity.
+	out, err := gitOutputContext(ctx, strings.TrimSpace, worktreePath, "status", "--porcelain", "-z")
+	if err != nil {
+		return false, err
+	}
+	if out == "" {
+		return false, nil
+	}
+	// Each status entry is "XY path\x00" possibly followed by another
+	// "\x00origin" for renames. Only reject when at least one entry is
+	// something other than the checklist artifact.
+	for _, entry := range strings.Split(out, "\x00") {
+		entry = strings.TrimRight(entry, "\x00")
+		if len(entry) < 3 {
+			continue
+		}
+		path := strings.TrimSpace(entry[3:])
+		if path == "" {
+			continue
+		}
+		// checklist-result.json is the agent-produced artifact we
+		// expect to find untracked — skip it.
+		if path == checklistFileName {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// writeUncommittedManifest persists an error manifest indicating that the
+// agent produced uncommitted changes without advancing HEAD. This is treated
+// as a failed run (retriable) rather than a silent "no diff" so operators see
+// the discrepancy.
+func (s *Step) writeUncommittedManifest(ctx context.Context, run RunContext, runResult runnerResult) error {
+	manifest := contracts.Manifest{
+		Kind: contracts.ManifestKindError,
+		Value: contracts.ManifestError{
+			Kind:          contracts.ManifestKindError,
+			SchemaVersion: "1",
+			RunID:         run.IO.RunID,
+			Pass:          run.Pass,
+			Agent:         run.Agent,
+			ExitCode:      0,
+			Reason:        "unknown",
+			Detail:        "agent exited 0 without committing; worktree HEAD==BaseSHA but dirty",
 			StartedAt:     runResult.StartedAt.UTC(),
 			FinishedAt:    runResult.FinishedAt.UTC(),
 		},

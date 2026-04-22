@@ -4,13 +4,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 )
+
+// maxCandidateBodyBytes caps individual candidate proposed-body reads at 8 MiB
+// to prevent an attacker-controlled sidecar from exhausting memory.
+const maxCandidateBodyBytes = 8 << 20
 
 // RulePayload is the prompt-ready candidate rule body loaded from the run's 40/
 // sidecars.
@@ -52,7 +55,7 @@ func LoadRulePayloads(candidatesPath string) ([]RulePayload, error) {
 		}
 
 		bodyPath := filepath.Join(runDir, candidate.ProposedBodyPath)
-		body, err := os.ReadFile(bodyPath)
+		body, err := internalio.ReadValidatedRegularFile(bodyPath, maxCandidateBodyBytes)
 		if err != nil {
 			return nil, fmt.Errorf("read candidate %q proposed body: %w", candidate.CandidateID, err)
 		}

@@ -107,6 +107,9 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 	if req.TaskPackage == nil {
 		return ErrNoTaskPackage
 	}
+	if req.TaskPackage.RunID != req.RunContext.RunID {
+		return fmt.Errorf("step30_score: task package run_id mismatch: task_package=%s io=%s", req.TaskPackage.RunID, req.RunContext.RunID)
+	}
 
 	paths, err := stepPaths(req.RunContext)
 	if err != nil {
@@ -824,14 +827,29 @@ func (s *Step) resolveRubricPath(runCtx internalio.RunContext) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.WriteFile(path, []byte("# phase0 stub rubric\n"), 0o644); err != nil {
+	// L3: If an attacker pre-seeds a symlink at `path`, a naive
+	// os.WriteFile would follow the link and write the stub rubric
+	// anywhere on disk. Lstat detects the symlink and refuses.
+	info, statErr := os.Lstat(path)
+	switch {
+	case statErr == nil:
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("step30_score: rubric path is a symlink (refusing to follow): %s", path)
+		}
+		if !info.Mode().IsRegular() {
+			return "", fmt.Errorf("step30_score: rubric path is not a regular file: %s", path)
+		}
+		return path, nil
+	case os.IsNotExist(statErr):
+		// Use WriteAtomic to avoid races with concurrent writers, and
+		// to never follow symlinks placed after our Lstat.
+		if err := internalio.WriteAtomic(path, []byte("# phase0 stub rubric\n")); err != nil {
 			return "", err
 		}
-	} else if err != nil {
-		return "", err
+		return path, nil
+	default:
+		return "", statErr
 	}
-	return path, nil
 }
 
 func fileSha256(path string) (string, error) {

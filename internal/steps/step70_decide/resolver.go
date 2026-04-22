@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -14,6 +13,10 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/registryview"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 )
+
+// maxStep70SidecarBytes caps individual rule sidecar reads when staging for
+// promotion. 8 MiB is an upper bound on what a prompt-ready rule could ever be.
+const maxStep70SidecarBytes = 8 << 20
 
 // FilesystemResolver is the production TargetResolver used by the orchestrator.
 // It reads step40/50/60 artifacts to choose the pass2 candidate that cleared
@@ -223,7 +226,7 @@ func materializeRuleSidecar(runCtx internalio.RunContext, candidate contracts.Ca
 	if err != nil {
 		return err
 	}
-	body, err := os.ReadFile(srcPath)
+	body, err := internalio.ReadValidatedRegularFile(srcPath, maxStep70SidecarBytes)
 	if err != nil {
 		return err
 	}

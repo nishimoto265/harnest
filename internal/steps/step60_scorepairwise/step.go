@@ -352,6 +352,9 @@ func applyDefaults(in Input) (Input, error) {
 	if err := in.TaskPackage.Validate(); err != nil {
 		return Input{}, err
 	}
+	if in.TaskPackage.RunID != in.IO.RunID {
+		return Input{}, fmt.Errorf("step60: task package run_id mismatch: task_package=%s io=%s", in.TaskPackage.RunID, in.IO.RunID)
+	}
 	if in.Now == nil {
 		in.Now = time.Now
 	}

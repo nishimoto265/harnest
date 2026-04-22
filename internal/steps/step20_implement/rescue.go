@@ -28,6 +28,15 @@ type RescueExhaustedError struct {
 
 const maxRescueUntrackedBytes = 32 << 20
 
+// maxRescuePatchBytes is the per-patch cap on tracked/staged diffs collected
+// during rescue. Anything larger indicates the agent has produced a diff that
+// will not fit in memory; escalate to manual recovery rather than OOM.
+const maxRescuePatchBytes = 32 << 20
+
+// ErrRescuePatchOverflow signals that git diff produced > maxRescuePatchBytes.
+// Wrapped by a ManualRecoveryRequiredError to force operator attention.
+var ErrRescuePatchOverflow = errors.New("step20: rescue diff exceeded size limit")
+
 func (e *RescueExhaustedError) Error() string {
 	return fmt.Sprintf("step20: rescue exhausted: agent=%s retry_count=%d", e.Rescue.Agent, e.Rescue.RetryCount)
 }
@@ -146,8 +155,8 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv"); err != nil {
-		return 0, err
+	if err := writeGitOutputStreamingContext(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), maxRescuePatchBytes, "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv"); err != nil {
+		return 0, rescueDiffOverflowToManualRecovery(err)
 	}
 	if digest, err := fileDigest(filepath.Join(rescueDir, "tracked.patch")); err == nil {
 		artifacts = append(artifacts, rescueArtifactDigest{Path: "tracked.patch", SHA256: digest})
@@ -158,8 +167,8 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"); err != nil {
-		return 0, err
+	if err := writeGitOutputStreamingContext(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), maxRescuePatchBytes, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"); err != nil {
+		return 0, rescueDiffOverflowToManualRecovery(err)
 	}
 	if digest, err := fileDigest(filepath.Join(rescueDir, "staged.patch")); err == nil {
 		artifacts = append(artifacts, rescueArtifactDigest{Path: "staged.patch", SHA256: digest})
@@ -318,6 +327,90 @@ func writeGitOutputContext(ctx context.Context, worktreePath, target string, arg
 		return err
 	}
 	return internalio.WriteAtomic(target, out)
+}
+
+// writeGitOutputStreamingContext runs `git <args>` in worktreePath, streams
+// stdout into `target` through io.Copy+LimitReader, and returns
+// ErrRescuePatchOverflow if more than sizeLimit bytes were produced. Used by
+// rescue to protect against multi-gigabyte tracked/staged.patch OOMs.
+func writeGitOutputStreamingContext(ctx context.Context, worktreePath, target string, sizeLimit int64, args ...string) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	tmpFile, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	cleanup := func(retErr error) error {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return retErr
+	}
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = worktreePath
+	cmd.Env = processenv.Sanitize()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return cleanup(err)
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return cleanup(err)
+	}
+
+	// LimitReader enforces sizeLimit+1 bytes max; anything beyond is an
+	// overflow signal rather than a streaming error.
+	limitedReader := io.LimitReader(stdout, sizeLimit+1)
+	written, copyErr := io.Copy(tmpFile, limitedReader)
+
+	// Drain any remaining bytes so git can close its stdout cleanly.
+	overflow := written > sizeLimit
+	if overflow {
+		_, _ = io.Copy(io.Discard, stdout)
+	}
+
+	waitErr := cmd.Wait()
+	if copyErr != nil {
+		if ctx.Err() != nil {
+			return cleanup(ctx.Err())
+		}
+		return cleanup(fmt.Errorf("step20: write git output stream: %w", copyErr))
+	}
+	if overflow {
+		return cleanup(fmt.Errorf("%w: target=%s bytes>=%d", ErrRescuePatchOverflow, target, sizeLimit+1))
+	}
+	if waitErr != nil {
+		if ctx.Err() != nil {
+			return cleanup(ctx.Err())
+		}
+		return cleanup(fmt.Errorf("step20: git %s: %w: %s", strings.Join(args, " "), waitErr, strings.TrimSpace(stderr.String())))
+	}
+	if err := tmpFile.Sync(); err != nil {
+		return cleanup(err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return cleanup(err)
+	}
+	return os.Rename(tmpPath, target)
+}
+
+// rescueDiffOverflowToManualRecovery escalates diff-overflow failures to a
+// ManualRecoveryRequiredError so operators are forced to inspect the worktree
+// before the runner retries. Non-overflow errors are returned verbatim.
+func rescueDiffOverflowToManualRecovery(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrRescuePatchOverflow) {
+		return &agentrunner.ManualRecoveryRequiredError{
+			Reason: contracts.RollbackReasonLeaseFailure,
+			Detail: fmt.Sprintf("step20: rescue aborted: diff exceeds size cap: %v", err),
+		}
+	}
+	return err
 }
 
 func copyUntrackedFiles(ctx context.Context, worktreePath, rescueDir string) ([]rescueArtifactDigest, error) {

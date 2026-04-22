@@ -1023,7 +1023,16 @@ func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contract
 }
 
 func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
-	if info, err := os.Stat(dstPath); err == nil && info.Mode().IsRegular() {
+	// Use Lstat (not Stat) so we detect when the destination is a
+	// dangling or attacker-created symlink pointing outside the runs_base.
+	// Stat would follow the link and silently read a remote file.
+	if info, err := os.Lstat(dstPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: path=%s is a symlink", errRulePublishDestinationType, dstPath)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%w: path=%s", errRulePublishDestinationType, dstPath)
+		}
 		data, err := os.ReadFile(dstPath)
 		if err != nil {
 			return fmt.Errorf("%w: read destination=%s: %v", errRulePublishIntegrity, dstPath, err)
@@ -1036,8 +1045,6 @@ func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
 			return nil
 		}
 		return fmt.Errorf("%w: path=%s", errRulePublishConflict, dstPath)
-	} else if err == nil {
-		return fmt.Errorf("%w: path=%s", errRulePublishDestinationType, dstPath)
 	} else if err != nil && !os.IsNotExist(err) {
 		return err
 	}

@@ -127,6 +127,7 @@ func TestStepRun(t *testing.T) {
 			timeoutSec: 5,
 			env: map[string]string{
 				"FAKE_CLAUDE_STDOUT": `{"event":"rescued"}` + "\n",
+				"FAKE_CLAUDE_COMMIT": "1",
 			},
 			prepare: func(t *testing.T, fx *testFixture) {
 				t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "rescued.txt"))
@@ -154,6 +155,7 @@ func TestStepRun(t *testing.T) {
 			timeoutSec: 5,
 			env: map[string]string{
 				"FAKE_CLAUDE_STDOUT": `{"event":"missing-heartbeat"}` + "\n",
+				"FAKE_CLAUDE_COMMIT": "1",
 			},
 			prepare: func(t *testing.T, fx *testFixture) {
 				t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "missing-heartbeat.txt"))
@@ -516,6 +518,7 @@ func (fx *testFixture) seedResumeState(t *testing.T, retryCount int) {
 		ExpectedBaseSHA: fx.baseSHA,
 		StartedAt:       oldTime,
 		Pid:             999999,
+		LeaderStartTime: "00000000000",
 		RetryCount:      retryCount,
 		LastHeartbeat:   oldTime,
 	}))
@@ -530,6 +533,7 @@ func (fx *testFixture) seedResumeStateWithoutHeartbeat(t *testing.T, retryCount 
 		ExpectedBaseSHA: fx.baseSHA,
 		StartedAt:       oldTime,
 		Pid:             999999,
+		LeaderStartTime: "00000000000",
 		RetryCount:      retryCount,
 		LastHeartbeat:   oldTime,
 	}))
@@ -539,10 +543,13 @@ func (fx *testFixture) seedActiveLeaseState(t *testing.T) {
 	t.Helper()
 	now := time.Now().UTC()
 	require.NoError(t, os.MkdirAll(fx.agentDir, 0o755))
+	currentLeaderStart, err := agentrunner.LookupProcessStartTime(os.Getpid())
+	require.NoError(t, err)
 	require.NoError(t, saveResumeState(fx.agentDir, resumeState{
 		ExpectedBaseSHA: fx.baseSHA,
 		StartedAt:       now,
 		Pid:             os.Getpid(),
+		LeaderStartTime: currentLeaderStart,
 		RetryCount:      1,
 		LastHeartbeat:   now,
 	}))
@@ -844,7 +851,13 @@ func TestWriteCommitBundleFallsBackToFullHeadWhenBaseIsUnreachable(t *testing.T)
 	require.Contains(t, verifyOut, "is okay")
 }
 
-func TestWriteSuccessArtifacts_CapturesDirtyTrackedDiffWhenHeadIsUnchanged(t *testing.T) {
+// TestWriteSuccessArtifacts_RefusesSuccessWhenHeadUnchangedAndDirty (r12/H3):
+// previously this was
+// TestWriteSuccessArtifacts_CapturesDirtyTrackedDiffWhenHeadIsUnchanged and
+// expected the step to promote a dirty-but-uncommitted tree as a success.
+// That behavior would silently adopt work the agent never committed. After
+// the H3 fix the step refuses and writes an error manifest instead.
+func TestWriteSuccessArtifacts_RefusesSuccessWhenHeadUnchangedAndDirty(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, "README.md"), []byte("dirty worktree\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, checklistFileName), []byte(`{"schema_version":"1","run_id":"2026-04-21-PR42-abcdef0","pass":1,"agent":"a1","items":[]}`), 0o644))
@@ -856,11 +869,9 @@ func TestWriteSuccessArtifacts_CapturesDirtyTrackedDiffWhenHeadIsUnchanged(t *te
 	require.NoError(t, err)
 
 	manifest := fx.readManifest(t)
-	success := manifest.Value.(contracts.ManifestSuccess)
-	require.Equal(t, fx.baseSHA, success.HeadSHA)
-	diffBytes, readErr := os.ReadFile(fx.diffPath())
-	require.NoError(t, readErr)
-	require.Contains(t, string(diffBytes), "README.md")
+	errManifest, ok := manifest.Value.(contracts.ManifestError)
+	require.True(t, ok, "expected error manifest when HEAD==BaseSHA and worktree dirty, got: %T", manifest.Value)
+	assert.Contains(t, errManifest.Detail, "without committing")
 }
 
 func TestStepRunMissingChecklistFailsClosed(t *testing.T) {
@@ -979,11 +990,18 @@ func TestStepRunCancelsChildProcessGroupOnContextCancellation(t *testing.T) {
 }
 
 func TestStepRunSweepsGrandchildrenAfterSuccessfulExit(t *testing.T) {
+	// Detached helpers may race with cleanup; disable M5 fail-closed
+	// to keep this test focused on the grandchild-sweep assertion.
+	originalFailClosed := cleanupProcessTreeFailClosed
+	cleanupProcessTreeFailClosed = false
+	t.Cleanup(func() { cleanupProcessTreeFailClosed = originalFailClosed })
+
 	fx := newTestFixture(t, 5)
 	helperPath := writeBackgroundSentinelHelper(t, t.TempDir())
 	sentinelPath := filepath.Join(t.TempDir(), "background-child.txt")
 	pidPath := sentinelPath + ".pid"
 	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "background.txt"))
+	t.Setenv("FAKE_CLAUDE_COMMIT", "1")
 	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_HELPER", helperPath)
 	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_PATH", sentinelPath)
 	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_DELAY", "200ms")
@@ -1005,7 +1023,12 @@ func TestStepRunSweepsGrandchildrenAfterSuccessfulExit(t *testing.T) {
 }
 
 func TestStepRunKillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
+	originalFailClosed := cleanupProcessTreeFailClosed
+	cleanupProcessTreeFailClosed = false
+	t.Cleanup(func() { cleanupProcessTreeFailClosed = originalFailClosed })
+
 	fx := newTestFixture(t, 5)
+	t.Setenv("FAKE_CLAUDE_COMMIT", "1")
 	helperPath := writeDetachedSleepHelper(t, t.TempDir())
 	pidPath := filepath.Join(t.TempDir(), "detached-child.pid")
 	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "detached.txt"))
@@ -1052,6 +1075,7 @@ func TestStepRun_FailsWhenSuccessDiffOverflows(t *testing.T) {
 	fx := newTestFixture(t, 30)
 	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "huge.bin"))
 	t.Setenv("FAKE_CLAUDE_WRITE_SIZE", fmt.Sprintf("%d", (16<<20)+1))
+	t.Setenv("FAKE_CLAUDE_COMMIT", "1")
 
 	err := fx.step.Run(context.Background(), fx.run)
 	require.Error(t, err)
@@ -1073,6 +1097,7 @@ func TestPerformRescue_BranchDriftRequiresManualRecoveryInsteadOfResettingMain(t
 		ExpectedBaseSHA: fx.baseSHA,
 		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
 		Pid:             999999,
+		LeaderStartTime: "00000000000",
 		RetryCount:      0,
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	})
@@ -1094,6 +1119,7 @@ func TestPerformRescue_PreservesIgnoredFiles(t *testing.T) {
 		ExpectedBaseSHA: fx.baseSHA,
 		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
 		Pid:             999999,
+		LeaderStartTime: "00000000000",
 		RetryCount:      0,
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	})
@@ -1138,6 +1164,7 @@ func TestPerformRescue_KillsDetachedWorktreeWriterBeforeCapture(t *testing.T) {
 		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
 		Pid:             parentPID,
 		Pgid:            parentPGID,
+		LeaderStartTime: "00000000000",
 		RetryCount:      0,
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	})
@@ -1221,6 +1248,7 @@ func TestStepRunSuccessArtifactsHonorContextCancellation(t *testing.T) {
 func TestStepRun_RescueStartFailureLeavesNoPhantomLease(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	fx.seedResumeState(t, 0)
+	stubQuiescentRescueWorktree(t)
 
 	failingStep := newStep(fx.cfg, stepOptions{
 		now:               time.Now,
@@ -1257,12 +1285,15 @@ func TestStepRun_GitCommandsIgnoreInheritedGitDir(t *testing.T) {
 	t.Setenv("GIT_DIR", filepath.Join(otherRepo, ".git"))
 	t.Setenv("GIT_WORK_TREE", otherRepo)
 	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "local-change.txt"))
+	t.Setenv("FAKE_CLAUDE_COMMIT", "1")
 
 	require.NoError(t, fx.step.Run(context.Background(), fx.run))
 
 	manifest := fx.readManifest(t)
 	success := manifest.Value.(contracts.ManifestSuccess)
-	assert.Equal(t, fx.baseSHA, success.HeadSHA)
+	// HEAD should advance to the new commit made inside the allocation
+	// worktree, not match the foreign GIT_DIR's HEAD.
+	assert.NotEqual(t, fx.baseSHA, success.HeadSHA, "agent commit must advance HEAD")
 	assert.NotEqual(t, otherHead, success.HeadSHA)
 }
 

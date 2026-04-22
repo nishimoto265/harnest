@@ -167,12 +167,15 @@ func TestResumeIfNeeded_RequiresDeadPIDAsWellAsStaleHeartbeat(t *testing.T) {
 	oldTime := time.Now().Add(-2 * time.Hour).UTC()
 	currentPGID, err := syscall.Getpgid(os.Getpid())
 	require.NoError(t, err)
+	currentLeaderStart, err := agentrunner.LookupProcessStartTime(os.Getpid())
+	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(agentDir, 0o755))
 	require.NoError(t, saveResumeState(agentDir, resumeState{
 		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
 		StartedAt:       oldTime,
 		Pid:             os.Getpid(),
 		Pgid:            currentPGID,
+		LeaderStartTime: currentLeaderStart,
 		RetryCount:      1,
 		LastHeartbeat:   oldTime,
 	}))
@@ -276,6 +279,7 @@ func TestStepRun_BranchDriftRequiresManualRecoveryAndPreservesWorktree(t *testin
 		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
 		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
 		Pid:             999999,
+		LeaderStartTime: "00000000000",
 		RetryCount:      0,
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	}))
@@ -305,6 +309,7 @@ func TestStepRun_QuiesceTimeoutRequiresManualRecoveryWithoutReset(t *testing.T) 
 		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
 		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
 		Pid:             999999,
+		LeaderStartTime: "00000000000",
 		RetryCount:      0,
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	}))
@@ -353,11 +358,14 @@ func TestStepRun_ZeroValuePreservesCustomStaleAfter(t *testing.T) {
 	currentPGID, err := syscall.Getpgid(os.Getpid())
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	currentLeaderStart, err := agentrunner.LookupProcessStartTime(os.Getpid())
+	require.NoError(t, err)
 	require.NoError(t, saveResumeState(agentDir, resumeState{
 		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
 		StartedAt:       oldTime,
 		Pid:             os.Getpid(),
 		Pgid:            currentPGID,
+		LeaderStartTime: currentLeaderStart,
 		RetryCount:      1,
 		LastHeartbeat:   oldTime,
 	}))
@@ -765,6 +773,7 @@ func TestPerformRescue_PreservesIgnoredFiles(t *testing.T) {
 		ExpectedBaseSHA: env.run.TaskPackage.BaseSHA,
 		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
 		Pid:             999999,
+		LeaderStartTime: "00000000000",
 		RetryCount:      0,
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	})
@@ -773,6 +782,13 @@ func TestPerformRescue_PreservesIgnoredFiles(t *testing.T) {
 }
 
 func TestStepRun_KillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
+	// Detached helpers may leave transient cleanup errors unrelated to
+	// what this test asserts. Disable M5 fail-closed so the test can
+	// focus on descendant-kill behavior.
+	originalFailClosed := cleanupProcessTreeFailClosed
+	cleanupProcessTreeFailClosed = false
+	t.Cleanup(func() { cleanupProcessTreeFailClosed = originalFailClosed })
+
 	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
 	t.Setenv("FAKE_AGENT", "a1")
 
@@ -818,6 +834,11 @@ func TestStepRun_KillsFastDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 	if raceBuild {
 		t.Skip("timing-sensitive detached-child regression is covered in non-race mode")
 	}
+	// See sibling test: disable M5 fail-closed for detached-helper tests.
+	originalFailClosed := cleanupProcessTreeFailClosed
+	cleanupProcessTreeFailClosed = false
+	t.Cleanup(func() { cleanupProcessTreeFailClosed = originalFailClosed })
+
 	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
 	t.Setenv("FAKE_AGENT", "a1")
 

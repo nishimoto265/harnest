@@ -92,7 +92,11 @@ func newStep(cfg *config.Config, opts stepOptions) *Step {
 
 func (s Step) Run(ctx context.Context, run RunContext) error {
 	step := s
-	if step.now == nil {
+	// A caller constructing a zero-value Step{} (or a partially-filled Step
+	// with only cfg/now) would otherwise nil-dereference s.runner at line
+	// s.runner.Run below. Always re-fill through newStep when any required
+	// field (now/runner/timings) is unset.
+	if step.now == nil || step.runner == nil || step.heartbeatInterval <= 0 || step.staleAfter <= 0 {
 		impl := newStep(step.cfg, stepOptions{
 			now:               step.now,
 			heartbeatInterval: step.heartbeatInterval,
@@ -110,6 +114,9 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	}
 	if run.TaskPackage == nil {
 		return errors.New("step50: task package is required")
+	}
+	if run.TaskPackage.RunID != run.IO.RunID {
+		return fmt.Errorf("step50: task package run_id mismatch: task_package=%s io=%s", run.TaskPackage.RunID, run.IO.RunID)
 	}
 	if run.Config == nil {
 		run.Config = s.cfg

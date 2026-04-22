@@ -135,6 +135,19 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := ensureDir(filepath.Join(rescueDir, "untracked")); err != nil {
 		return 0, err
 	}
+	// If performRescue returns before state.json is written and verified,
+	// leaving a partial rescueDir on disk is actively harmful: the next
+	// rescue attempt increments retry_count and walks past it, so the
+	// partial artifacts are never reclaimed and may be mistakenly counted
+	// as a successful rescue by operators. Remove it unless we explicitly
+	// clear rescueSucceeded at the end.
+	rescueSucceeded := false
+	defer func() {
+		if rescueSucceeded {
+			return
+		}
+		_ = os.RemoveAll(rescueDir)
+	}()
 
 	headSHA, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
@@ -214,6 +227,9 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := verifyRescueState(rescueDir); err != nil {
 		return 0, err
 	}
+	// state.json has been written and verified; the rescue dir is now
+	// durable. Any subsequent failure should not nuke it.
+	rescueSucceeded = true
 
 	if err := ctx.Err(); err != nil {
 		return 0, err

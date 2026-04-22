@@ -35,6 +35,32 @@ func TryAcquireFileLock(path string) (*FileLock, bool, error) {
 	return &FileLock{path: path, file: f}, true, nil
 }
 
+// InspectFileLock acquires a shared lock on `path` in read-only mode, without
+// creating the file. Used by `recover --inspect` so that inspecting a fresh
+// runs_base never materializes promotion.lock. Returns (nil, false, nil) when
+// the lock file does not exist yet (inspect has nothing to block on).
+//
+// If the lock file exists but is held exclusively by another promoter, the
+// call returns (nil, false, nil) so inspect remains non-blocking. All real
+// errors (EACCES, EIO, unexpected) are surfaced.
+func InspectFileLock(path string) (*FileLock, bool, error) {
+	f, err := openFileNoFollow(path, os.O_RDONLY, 0)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return &FileLock{path: path, file: f}, true, nil
+}
+
 func AcquireFileLock(path string) (*FileLock, error) {
 	return acquireFileLock(path, false, nil)
 }

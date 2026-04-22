@@ -420,7 +420,16 @@ func bestDuplicateMatch(candidateBody string, activeRuleBodies map[string]string
 	if strings.TrimSpace(normalizedCandidate) == "" {
 		return "", 0
 	}
-	for ruleID, body := range activeRuleBodies {
+	// Iterate in sorted rule-ID order so that when two rule bodies have
+	// identical similarity to the candidate, the lexicographically smaller
+	// rule_id wins every time — regardless of Go's map iteration order.
+	ruleIDs := make([]string, 0, len(activeRuleBodies))
+	for ruleID := range activeRuleBodies {
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	sort.Strings(ruleIDs)
+	for _, ruleID := range ruleIDs {
+		body := activeRuleBodies[ruleID]
 		normalizedBody := normalizeRuleContent(body)
 		if strings.TrimSpace(normalizedBody) == "" {
 			continue
