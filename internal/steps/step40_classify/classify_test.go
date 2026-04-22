@@ -299,11 +299,10 @@ func TestRun_ClassifiesDuplicateWhenExistingRuleBodyMatchesCandidate(t *testing.
 		Kind:             contracts.CandidateKindNew,
 		Title:            "Rule candidate for rule-dup",
 		Problem:          "Pass1 recorded 1 violation(s) for rule rule-dup.",
-		Rationale:        "Derived from 1 compliance violation rationale(s) and 1 score reason(s) for rule-dup.",
+		Rationale:        "Derived from 1 compliance violation rationale(s) for rule-dup.",
 		ProposedBodyPath: "40/candidates/cand-existing.md",
 	}, candidateEvidence{
 		Compliance: []string{"Rule rule-dup was skipped when the implementation touched the guarded path."},
-		Scores:     []string{"a1/fidelity: Missing the guard lets regressions slip into the changed code path."},
 	})
 	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "rule-existing.md"), []byte(body), 0o644))
 	writeRegistry(t, cfg.registryPath(), contracts.RuleRegistryEntry{
@@ -326,6 +325,129 @@ func TestRun_ClassifiesDuplicateWhenExistingRuleBodyMatchesCandidate(t *testing.
 	require.Len(t, got.Candidates, 1)
 	assert.Equal(t, contracts.CandidateKindDuplicate, got.Candidates[0].Kind)
 	assert.Equal(t, "rule-existing", got.Candidates[0].TargetRuleID)
+}
+
+func TestRun_IgnoresSupersededComplianceVerdicts(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+
+	path, err := cfg.IO.ResolveRunRelative(compliancePath)
+	require.NoError(t, err)
+	writeJSONL(t, path,
+		contracts.ComplianceEntry{
+			SchemaVersion: "1",
+			RunID:         cfg.IO.RunID,
+			Pass:          1,
+			Agent:         "a1",
+			RuleID:        "rule-a",
+			Verdict:       contracts.ComplianceVerdictViolated,
+			Rationale:     "stale violation",
+			VerdictPath:   contracts.VerdictPathSingle,
+			RubricVersion: "default",
+			PromptVersion: "phase0",
+			ResolvedAt:    time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC),
+		},
+		contracts.ComplianceEntry{
+			SchemaVersion: "1",
+			RunID:         cfg.IO.RunID,
+			Pass:          1,
+			Agent:         "a1",
+			RuleID:        "rule-a",
+			Verdict:       contracts.ComplianceVerdictCompliant,
+			Rationale:     "fresh compliant verdict",
+			VerdictPath:   contracts.VerdictPathAgreement,
+			RubricVersion: "default",
+			PromptVersion: "phase0",
+			ResolvedAt:    time.Date(2026, 4, 21, 11, 5, 0, 0, time.UTC),
+		},
+	)
+	refreshStep30Marker(t, cfg.IO)
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	assert.Empty(t, got.Candidates)
+}
+
+func TestRun_OmitsScoreEvidenceFromUnrelatedCandidates(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO,
+		contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         cfg.IO.RunID,
+			Pass:          1,
+			Agent:         "a1",
+			Dimension:     contracts.DimensionFidelity,
+			Score:         80,
+			Reasons:       "rule-a-only scoring note",
+			VerdictPath:   contracts.VerdictPathSingle,
+			RubricVersion: "default",
+			PromptVersion: "phase0",
+			ResolvedAt:    time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC),
+		},
+	)
+	writeCompliance(t, cfg.IO,
+		testComplianceEntry(cfg.IO.RunID, "rule-a", contracts.ComplianceVerdictViolated),
+		testComplianceEntry(cfg.IO.RunID, "rule-b", contracts.ComplianceVerdictViolated),
+	)
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Len(t, got.Candidates, 2)
+	for _, candidate := range got.Candidates {
+		bodyPath, resolveErr := cfg.IO.ResolveRunRelative(candidate.ProposedBodyPath)
+		require.NoError(t, resolveErr)
+		bodyBytes, readErr := os.ReadFile(bodyPath)
+		require.NoError(t, readErr)
+		assert.NotContains(t, string(bodyBytes), "rule-a-only scoring note")
+	}
+}
+
+func TestRun_UsesComplianceOverflowSidecarWhenInlineRationaleIsEmpty(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+
+	reasonsDir, err := cfg.IO.ResolveRunRelative("30/reasons")
+	require.NoError(t, err)
+	refPath, err := scorecore.WriteOverflowSidecar(cfg.IO, "30", "overflow compliance rationale")
+	require.NoError(t, err)
+	require.DirExists(t, reasonsDir)
+
+	path, err := cfg.IO.ResolveRunRelative(compliancePath)
+	require.NoError(t, err)
+	writeJSONL(t, path, contracts.ComplianceEntry{
+		SchemaVersion:        "1",
+		RunID:                cfg.IO.RunID,
+		Pass:                 1,
+		Agent:                "a1",
+		RuleID:               "rule-a",
+		Verdict:              contracts.ComplianceVerdictViolated,
+		Rationale:            "",
+		RationaleOverflowRef: &refPath,
+		VerdictPath:          contracts.VerdictPathSingle,
+		RubricVersion:        "default",
+		PromptVersion:        "phase0",
+		ResolvedAt:           time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC),
+	})
+	refreshStep30Marker(t, cfg.IO)
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Len(t, got.Candidates, 1)
+	bodyPath, err := cfg.IO.ResolveRunRelative(got.Candidates[0].ProposedBodyPath)
+	require.NoError(t, err)
+	bodyBytes, err := os.ReadFile(bodyPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(bodyBytes), "overflow compliance rationale")
+}
+
+func TestBestDuplicateMatch_UsesLexicographicTieBreak(t *testing.T) {
+	candidateBody := "# candidate\n"
+	ruleID, score := bestDuplicateMatch(candidateBody, map[string]string{
+		"rule-b": "# candidate\n",
+		"rule-a": "# candidate\n",
+	})
+	assert.Equal(t, "rule-a", ruleID)
+	assert.Equal(t, 1.0, score)
 }
 
 func TestRun_RejectsPartialStep30WithoutDoneMarker(t *testing.T) {

@@ -91,16 +91,12 @@ func newStep(cfg *config.Config, opts stepOptions) *Step {
 }
 
 func (s Step) Run(ctx context.Context, run RunContext) error {
-	step := s
-	if step.now == nil {
-		impl := newStep(step.cfg, stepOptions{
-			now:               step.now,
-			heartbeatInterval: step.heartbeatInterval,
-			staleAfter:        step.staleAfter,
-			runner:            step.runner,
-		})
-		step = *impl
-	}
+	step := newStep(s.cfg, stepOptions{
+		now:               s.now,
+		heartbeatInterval: s.heartbeatInterval,
+		staleAfter:        s.staleAfter,
+		runner:            s.runner,
+	})
 	return step.run(ctx, run)
 }
 
@@ -116,6 +112,9 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	}
 	if run.Config == nil {
 		return errors.New("step50: config is required")
+	}
+	if run.TaskPackage.RunID != run.IO.RunID {
+		return fmt.Errorf("step50: task package run_id mismatch: task_package=%s io=%s", run.TaskPackage.RunID, run.IO.RunID)
 	}
 
 	allocation, err := worktreeFor(run.TaskPackage, run.Pass, run.Agent)
@@ -237,13 +236,17 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 		return err
 	}
 
-	if runResult.TimedOut {
-		return s.writeTimeoutManifest(ctx, run, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
+	terminalCtx := context.WithoutCancel(ctx)
+	var manifestErr error
+	switch {
+	case runResult.TimedOut:
+		manifestErr = s.writeTimeoutManifest(terminalCtx, run, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
+	case runResult.ExitCode != 0:
+		manifestErr = s.writeErrorManifest(terminalCtx, run, runResult)
+	default:
+		manifestErr = s.writeSuccessArtifacts(terminalCtx, run, allocation, runResult)
 	}
-	if runResult.ExitCode != 0 {
-		return s.writeErrorManifest(ctx, run, runResult)
-	}
-	return s.writeSuccessArtifacts(ctx, run, allocation, runResult)
+	return errors.Join(manifestErr, clearTerminalLeaseState(agentDir))
 }
 
 func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, runResult runnerResult) error {
@@ -410,4 +413,23 @@ func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte
 
 func shouldWriteTimeoutManifest(err error, execCtx context.Context) bool {
 	return err != nil && errors.Is(execCtx.Err(), context.DeadlineExceeded)
+}
+
+func clearTerminalLeaseState(agentDir string) error {
+	state, ok, err := loadResumeState(agentDir)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Remove(heartbeatPath(agentDir)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	state.StartedAt = time.Time{}
+	state.LastHeartbeat = time.Time{}
+	state.Pid = 0
+	state.Pgid = 0
+	state.LeaderStartTime = ""
+	return saveResumeState(agentDir, state)
 }

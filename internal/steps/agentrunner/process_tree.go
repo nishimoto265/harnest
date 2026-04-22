@@ -32,6 +32,12 @@ var lookupProcessStartTime = processStartTime
 var killPIDSignal = func(pid int, sig syscall.Signal) error {
 	return syscall.Kill(pid, sig)
 }
+var processTreeKillProcessGroup = KillProcessGroup
+var processTreeKillPIDs = killPIDs
+var processTreeSessionProcesses = sessionProcesses
+var processTreeProcessGroupMembers = processGroupMembers
+var processTreeNow = time.Now
+var processTreeSleep = time.Sleep
 
 func StartDescendantTracker(rootPID int, interval time.Duration) *DescendantTracker {
 	if rootPID <= 0 {
@@ -228,23 +234,26 @@ func KillSessionProcessesUntilGone(sessionID int, maxWait, interval time.Duratio
 	if maxWait <= 0 {
 		maxWait = 500 * time.Millisecond
 	}
-	deadline := time.Now().Add(maxWait)
+	deadline := processTreeNow().Add(maxWait)
 	var lastErr error
 	for {
-		pids, err := sessionProcesses(sessionID)
+		pids, err := processTreeSessionProcesses(sessionID)
 		if err != nil {
 			return errors.Join(lastErr, err)
 		}
 		if len(pids) == 0 {
 			return lastErr
 		}
-		if err := killPIDs(pids); err != nil {
+		if err := processTreeKillPIDs(pids); err != nil {
 			lastErr = err
 		}
-		if !time.Now().Before(deadline) {
-			return lastErr
+		if !processTreeNow().Before(deadline) {
+			if lastErr != nil {
+				return errors.Join(lastErr, ErrCleanupTimeout)
+			}
+			return ErrCleanupTimeout
 		}
-		time.Sleep(interval)
+		processTreeSleep(interval)
 	}
 }
 
@@ -346,23 +355,26 @@ func KillProcessGroupUntilGone(pgid int, maxWait, interval time.Duration) error 
 	if maxWait <= 0 {
 		maxWait = 500 * time.Millisecond
 	}
-	deadline := time.Now().Add(maxWait)
+	deadline := processTreeNow().Add(maxWait)
 	var lastErr error
 	for {
-		if err := KillProcessGroup(pgid); err != nil {
+		if err := processTreeKillProcessGroup(pgid); err != nil {
 			lastErr = err
 		}
-		members, err := processGroupMembers(pgid)
+		members, err := processTreeProcessGroupMembers(pgid)
 		if err != nil {
 			return errors.Join(lastErr, err)
 		}
 		if len(members) == 0 {
 			return lastErr
 		}
-		if !time.Now().Before(deadline) {
-			return lastErr
+		if !processTreeNow().Before(deadline) {
+			if lastErr != nil {
+				return errors.Join(lastErr, ErrCleanupTimeout)
+			}
+			return ErrCleanupTimeout
 		}
-		time.Sleep(interval)
+		processTreeSleep(interval)
 	}
 }
 

@@ -1235,6 +1235,28 @@ func TestPromoteRuleSidecarAndCleanup_FsyncParentDirsAfterDeletion(t *testing.T)
 	assert.Contains(t, calls, filepath.Clean(runCtx.RunDir()))
 }
 
+func TestPromoteRuleSidecar_ReplacesMatchingSymlinkDestinationWithRegularFile(t *testing.T) {
+	runCtx, _, _, _, _ := newFixtureWithResolver(t, "PR414")
+	stagedPath := mustStagedRulePath(t, runCtx, "rules/rule-a.md")
+	body := "rule-a body\n"
+	require.NoError(t, internalio.WriteAtomic(stagedPath, []byte(body)))
+
+	externalPath := filepath.Join(t.TempDir(), "external-rule.md")
+	require.NoError(t, os.WriteFile(externalPath, []byte(body), 0o644))
+	dstPath := filepath.Join(runCtx.RunsBase, "rules", "rule-a.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(dstPath), 0o755))
+	require.NoError(t, os.Symlink(externalPath, dstPath))
+
+	require.NoError(t, promoteRuleSidecar(stagedPath, dstPath, sha256String(body)))
+
+	info, err := os.Lstat(dstPath)
+	require.NoError(t, err)
+	assert.False(t, info.Mode()&os.ModeSymlink != 0)
+	content, err := os.ReadFile(dstPath)
+	require.NoError(t, err)
+	assert.Equal(t, body, string(content))
+}
+
 func TestFindRegistryByIdempotencyKey_RebuildsMandatoryIndexBeforeLookup(t *testing.T) {
 	runCtx, _, candidates, _, _ := newFixture(t, "PR14")
 	targetKey := contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), strings.Repeat("2", 40), strings.Repeat("1", 40), candidates.CandidatesHash)

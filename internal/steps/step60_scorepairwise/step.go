@@ -149,6 +149,11 @@ func Run(ctx context.Context, in Input) error {
 	if err != nil {
 		return err
 	}
+	expectedCompliance, err := loadExpectedComplianceRuleIDs(in.IO, expectedAgents)
+	if err != nil {
+		return err
+	}
+	rawState.expected = expectedCompliance
 	request := stepio.Step60Request{
 		TaskPackage:    *in.TaskPackage,
 		ScorableAgents: expectedAgents,
@@ -351,6 +356,9 @@ func applyDefaults(in Input) (Input, error) {
 	}
 	if err := in.TaskPackage.Validate(); err != nil {
 		return Input{}, err
+	}
+	if in.TaskPackage.RunID != in.IO.RunID {
+		return Input{}, fmt.Errorf("step60: task package run_id mismatch: task_package=%s io=%s", in.TaskPackage.RunID, in.IO.RunID)
 	}
 	if in.Now == nil {
 		in.Now = time.Now
@@ -898,6 +906,7 @@ type step60RawState struct {
 	scores     map[contracts.AgentID]map[contracts.JudgeRole]map[contracts.Dimension]contracts.RawScoreEntry
 	compliance map[contracts.AgentID]map[contracts.JudgeRole]map[string]contracts.RawComplianceEntry
 	final      map[contracts.AgentID]map[string]contracts.ComplianceEntry
+	expected   map[contracts.AgentID]map[string]struct{}
 }
 
 func loadStep60RawState(paths step60Paths) (step60RawState, error) {
@@ -917,6 +926,7 @@ func loadStep60RawState(paths step60Paths) (step60RawState, error) {
 		scores:     map[contracts.AgentID]map[contracts.JudgeRole]map[contracts.Dimension]contracts.RawScoreEntry{},
 		compliance: map[contracts.AgentID]map[contracts.JudgeRole]map[string]contracts.RawComplianceEntry{},
 		final:      map[contracts.AgentID]map[string]contracts.ComplianceEntry{},
+		expected:   map[contracts.AgentID]map[string]struct{}{},
 	}
 	for _, row := range reduceRawScores(scoreRows) {
 		state.ensureAgent(row.Agent)
@@ -1096,6 +1106,13 @@ func rawArbiterComplianceUsable(rows []contracts.RawComplianceEntry, outputHash,
 }
 
 func (s step60RawState) expectedComplianceRuleIDs(agent contracts.AgentID) map[string]struct{} {
+	if expected := s.expected[agent]; len(expected) > 0 {
+		cloned := make(map[string]struct{}, len(expected))
+		for ruleID := range expected {
+			cloned[ruleID] = struct{}{}
+		}
+		return cloned
+	}
 	rules := make(map[string]struct{})
 	for _, role := range []contracts.JudgeRole{
 		contracts.JudgeRolePrimary,
@@ -1110,6 +1127,32 @@ func (s step60RawState) expectedComplianceRuleIDs(agent contracts.AgentID) map[s
 		rules[ruleID] = struct{}{}
 	}
 	return rules
+}
+
+func loadExpectedComplianceRuleIDs(runIO internalio.RunContext, agents []contracts.AgentID) (map[contracts.AgentID]map[string]struct{}, error) {
+	path, err := runIO.ResolveRunRelative("30/compliance-A.jsonl")
+	if err != nil {
+		return nil, err
+	}
+	rows, err := internalio.ReadJSONL[contracts.ComplianceEntry](path)
+	if err != nil {
+		return nil, err
+	}
+	expected := make(map[contracts.AgentID]map[string]struct{}, len(agents))
+	allowed := make(map[contracts.AgentID]struct{}, len(agents))
+	for _, agent := range agents {
+		expected[agent] = map[string]struct{}{}
+		allowed[agent] = struct{}{}
+	}
+	for _, row := range internalio.CollapseByKey(rows, func(entry contracts.ComplianceEntry) complianceKey {
+		return complianceKey{Agent: entry.Agent, RuleID: entry.RuleID}
+	}) {
+		if _, ok := allowed[row.Agent]; !ok {
+			continue
+		}
+		expected[row.Agent][row.RuleID] = struct{}{}
+	}
+	return expected, nil
 }
 
 func readJSONLOrEmpty[T any](path string) ([]T, error) {

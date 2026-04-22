@@ -127,9 +127,11 @@ func TestStepRun(t *testing.T) {
 			timeoutSec: 5,
 			env: map[string]string{
 				"FAKE_CLAUDE_STDOUT": `{"event":"rescued"}` + "\n",
+				"FAKE_CLAUDE_COMMIT": "1",
 			},
 			prepare: func(t *testing.T, fx *testFixture) {
 				t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "rescued.txt"))
+				stubDeadLeasePID(t)
 				stubQuiescentRescueWorktree(t)
 				fx.seedResumeState(t, 0)
 			},
@@ -154,9 +156,11 @@ func TestStepRun(t *testing.T) {
 			timeoutSec: 5,
 			env: map[string]string{
 				"FAKE_CLAUDE_STDOUT": `{"event":"missing-heartbeat"}` + "\n",
+				"FAKE_CLAUDE_COMMIT": "1",
 			},
 			prepare: func(t *testing.T, fx *testFixture) {
 				t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "missing-heartbeat.txt"))
+				stubDeadLeasePID(t)
 				stubQuiescentRescueWorktree(t)
 				fx.seedResumeStateWithoutHeartbeat(t, 0)
 			},
@@ -197,7 +201,11 @@ func TestStepRun(t *testing.T) {
 			name:       "rescue exhausted",
 			timeoutSec: 5,
 			prepare: func(t *testing.T, fx *testFixture) {
-				fx.seedResumeState(t, 3)
+				require.NoError(t, os.MkdirAll(fx.agentDir, 0o755))
+				require.NoError(t, saveResumeState(fx.agentDir, resumeState{
+					ExpectedBaseSHA: fx.baseSHA,
+					RetryCount:      3,
+				}))
 			},
 			assertion: func(t *testing.T, fx *testFixture, err error) {
 				var exhausted *RescueExhaustedError
@@ -497,6 +505,15 @@ func stubQuiescentRescueWorktree(t *testing.T) {
 	})
 }
 
+func stubDeadLeasePID(t *testing.T) {
+	t.Helper()
+	originalKill := killProcess
+	killProcess = func(int, syscall.Signal) error { return syscall.ESRCH }
+	t.Cleanup(func() {
+		killProcess = originalKill
+	})
+}
+
 func (fx *testFixture) heartbeatLeasePath() string {
 	return heartbeatPath(fx.agentDir)
 }
@@ -511,11 +528,13 @@ func (fx *testFixture) readManifest(t *testing.T) contracts.Manifest {
 func (fx *testFixture) seedResumeState(t *testing.T, retryCount int) {
 	t.Helper()
 	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	stubDeadLeasePID(t)
 	require.NoError(t, os.MkdirAll(fx.agentDir, 0o755))
 	require.NoError(t, saveResumeState(fx.agentDir, resumeState{
 		ExpectedBaseSHA: fx.baseSHA,
 		StartedAt:       oldTime,
 		Pid:             999999,
+		LeaderStartTime: "stale-start",
 		RetryCount:      retryCount,
 		LastHeartbeat:   oldTime,
 	}))
@@ -525,11 +544,13 @@ func (fx *testFixture) seedResumeState(t *testing.T, retryCount int) {
 func (fx *testFixture) seedResumeStateWithoutHeartbeat(t *testing.T, retryCount int) {
 	t.Helper()
 	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	stubDeadLeasePID(t)
 	require.NoError(t, os.MkdirAll(fx.agentDir, 0o755))
 	require.NoError(t, saveResumeState(fx.agentDir, resumeState{
 		ExpectedBaseSHA: fx.baseSHA,
 		StartedAt:       oldTime,
 		Pid:             999999,
+		LeaderStartTime: "stale-start",
 		RetryCount:      retryCount,
 		LastHeartbeat:   oldTime,
 	}))
@@ -538,11 +559,17 @@ func (fx *testFixture) seedResumeStateWithoutHeartbeat(t *testing.T, retryCount 
 func (fx *testFixture) seedActiveLeaseState(t *testing.T) {
 	t.Helper()
 	now := time.Now().UTC()
+	currentPGID, err := syscall.Getpgid(os.Getpid())
+	require.NoError(t, err)
+	startTime, err := agentrunner.LookupProcessStartTime(os.Getpid())
+	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(fx.agentDir, 0o755))
 	require.NoError(t, saveResumeState(fx.agentDir, resumeState{
 		ExpectedBaseSHA: fx.baseSHA,
 		StartedAt:       now,
 		Pid:             os.Getpid(),
+		Pgid:            currentPGID,
+		LeaderStartTime: startTime,
 		RetryCount:      1,
 		LastHeartbeat:   now,
 	}))
@@ -844,7 +871,7 @@ func TestWriteCommitBundleFallsBackToFullHeadWhenBaseIsUnreachable(t *testing.T)
 	require.Contains(t, verifyOut, "is okay")
 }
 
-func TestWriteSuccessArtifacts_CapturesDirtyTrackedDiffWhenHeadIsUnchanged(t *testing.T) {
+func TestWriteSuccessArtifacts_FailsClosedWhenHeadIsUnchangedAndDiffExists(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, "README.md"), []byte("dirty worktree\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, checklistFileName), []byte(`{"schema_version":"1","run_id":"2026-04-21-PR42-abcdef0","pass":1,"agent":"a1","items":[]}`), 0o644))
@@ -856,11 +883,10 @@ func TestWriteSuccessArtifacts_CapturesDirtyTrackedDiffWhenHeadIsUnchanged(t *te
 	require.NoError(t, err)
 
 	manifest := fx.readManifest(t)
-	success := manifest.Value.(contracts.ManifestSuccess)
-	require.Equal(t, fx.baseSHA, success.HeadSHA)
-	diffBytes, readErr := os.ReadFile(fx.diffPath())
-	require.NoError(t, readErr)
-	require.Contains(t, string(diffBytes), "README.md")
+	failure := manifest.Value.(contracts.ManifestError)
+	require.Equal(t, 0, failure.ExitCode)
+	require.Contains(t, failure.Detail, "without advancing HEAD")
+	assert.NoFileExists(t, fx.diffPath())
 }
 
 func TestStepRunMissingChecklistFailsClosed(t *testing.T) {
@@ -869,6 +895,35 @@ func TestStepRunMissingChecklistFailsClosed(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	err := fx.step.Run(context.Background(), fx.run)
 	require.ErrorContains(t, err, "missing checklist artifact")
+}
+
+func TestStepRun_RejectsTaskPackageRunIDMismatch(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	pkg := *fx.run.TaskPackage
+	pkg.RunID = "2026-04-22-PR99-deadbee"
+	fx.run.TaskPackage = &pkg
+
+	err := fx.step.Run(context.Background(), fx.run)
+	require.ErrorContains(t, err, "task package run_id mismatch")
+}
+
+func TestStepRun_FailsClosedWhenCleanupFails(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	t.Setenv("FAKE_CLAUDE_STDOUT", `{"event":"ok"}`+"\n")
+	t.Setenv("FAKE_CLAUDE_COMMIT", "1")
+	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "cleanup.txt"))
+
+	originalCleanup := cleanupProcessTree
+	cleanupProcessTree = func(lease agentrunner.ProcessLease, sessionID int, tracker *agentrunner.DescendantTracker) error {
+		return errors.New("cleanup failed")
+	}
+	t.Cleanup(func() {
+		cleanupProcessTree = originalCleanup
+	})
+
+	err := fx.step.Run(context.Background(), fx.run)
+	require.ErrorContains(t, err, "cleanup failed")
+	assert.NoFileExists(t, fx.manifestPath())
 }
 
 func TestStepRunReturnsLeaseContendedDuringConcurrentStartup(t *testing.T) {
@@ -938,6 +993,120 @@ func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr))
 }
 
+func TestWriteGitOutputContext_RejectsOversizedGitOutput(t *testing.T) {
+	wrapperDir := t.TempDir()
+	wrapperPath := filepath.Join(wrapperDir, "git")
+	script := "#!/bin/sh\nhead -c 34603009 /dev/zero | tr '\\000' x\n"
+	require.NoError(t, os.WriteFile(wrapperPath, []byte(script), 0o755))
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dest := filepath.Join(t.TempDir(), "tracked.patch")
+	err := writeGitOutputContext(context.Background(), t.TempDir(), dest, "diff", "HEAD")
+	require.Error(t, err)
+	var tooLarge *agentrunner.RescueArtifactTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+	assert.NoFileExists(t, dest)
+}
+
+func TestPerformRescue_RejectsAggregateArtifactBudgetOverflow(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	allocation, err := worktreeFor(fx.run.TaskPackage, 1, "a1")
+	require.NoError(t, err)
+
+	originalBudget := rescueAggregateMaxBytes
+	rescueAggregateMaxBytes = 512
+	t.Cleanup(func() {
+		rescueAggregateMaxBytes = originalBudget
+	})
+
+	for i := 0; i < 100; i++ {
+		path := filepath.Join(fx.worktree, fmt.Sprintf("bulk-%03d.txt", i))
+		require.NoError(t, os.WriteFile(path, []byte("1234567890abcdef"), 0o644))
+	}
+
+	_, err = fx.step.performRescue(context.Background(), fx.run, allocation, fx.agentDir, resumeState{
+		ExpectedBaseSHA: fx.baseSHA,
+		StartedAt:       time.Now().Add(-2 * time.Hour).UTC(),
+		Pid:             999999,
+		RetryCount:      0,
+		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
+	})
+	var manual *agentrunner.ManualRecoveryRequiredError
+	require.ErrorAs(t, err, &manual)
+	assert.Equal(t, contracts.RollbackReasonTransactionalFailure, manual.Reason)
+}
+
+func TestStepRun_RecreatesDeletedWorktreeOnResume(t *testing.T) {
+	root := t.TempDir()
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	repoDir := filepath.Join(root, "repo")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+
+	repoRoot := mustRepoRoot(t)
+	scriptPath := writeFakeClaudeScript(t, root)
+	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
+	runIO, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
+	require.NoError(t, err)
+
+	runGit(t, "", "init", "-b", "main", repoDir)
+	runGit(t, repoDir, "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "config", "user.name", "Step20 Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repoDir, "add", "README.md")
+	runGit(t, repoDir, "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+
+	pass1Path := filepath.Join(worktreeBase, "pass1-a1")
+	peerPath := filepath.Join(worktreeBase, "pass1-a2")
+	runGit(t, repoDir, "worktree", "add", "-b", "auto-improve/"+string(runID)+"/pass1/a1", pass1Path, "HEAD")
+	runGit(t, repoDir, "worktree", "add", "-b", "auto-improve/"+string(runID)+"/pass1/a2", peerPath, "HEAD")
+
+	pkg := buildTaskPackage(t, runID, worktreeBase, pass1Path, baseSHA)
+	cfg := &config.Config{
+		Repo: config.RepoConfig{
+			Root:          repoRoot,
+			DefaultBranch: "main",
+			BestBranch:    "best",
+		},
+		Worktree:                  config.WorktreeConfig{Base: worktreeBase},
+		Paths:                     config.PathsConfig{Runs: runsBase},
+		ClaudeCLIPath:             scriptPath,
+		RescueMaxRetries:          3,
+		RegistryHighThreshold:     config.DefaultRegistryHighThreshold,
+		RegistryCriticalThreshold: config.DefaultRegistryCriticalThreshold,
+		StepTimeouts: map[string]int{
+			"step20": 5,
+		},
+	}
+	step := newStep(cfg, stepOptions{now: time.Now, heartbeatInterval: 10 * time.Millisecond, staleAfter: time.Second})
+	run := RunContext{
+		Config:      cfg,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PR:          42,
+		Pass:        1,
+		Agent:       "a1",
+		IO:          runIO,
+		TaskPackage: &pkg,
+	}
+	manifestPath, err := runIO.ManifestPath(1, "a1")
+	require.NoError(t, err)
+
+	require.NoError(t, os.RemoveAll(pass1Path))
+	t.Setenv("FAKE_CLAUDE_STDOUT", `{"event":"ok"}`+"\n")
+	t.Setenv("FAKE_CLAUDE_COMMIT", "1")
+	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(pass1Path, "recreated.txt"))
+
+	err = step.Run(context.Background(), run)
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(pass1Path, ".git"))
+	manifest, readErr := internalio.ReadJSON[contracts.Manifest](manifestPath)
+	require.NoError(t, readErr)
+	_, ok := manifest.Value.(contracts.ManifestSuccess)
+	require.True(t, ok)
+}
+
 func TestStepRunCancelsChildProcessGroupOnContextCancellation(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	t.Setenv("FAKE_CLAUDE_FORK_SESSION_WRITER", "1")
@@ -984,6 +1153,7 @@ func TestStepRunSweepsGrandchildrenAfterSuccessfulExit(t *testing.T) {
 	sentinelPath := filepath.Join(t.TempDir(), "background-child.txt")
 	pidPath := sentinelPath + ".pid"
 	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "background.txt"))
+	t.Setenv("FAKE_CLAUDE_COMMIT", "1")
 	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_HELPER", helperPath)
 	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_PATH", sentinelPath)
 	t.Setenv("FAKE_CLAUDE_BACKGROUND_SENTINEL_DELAY", "200ms")
@@ -997,7 +1167,7 @@ func TestStepRunSweepsGrandchildrenAfterSuccessfulExit(t *testing.T) {
 	require.NoError(t, parseErr)
 	require.Eventually(t, func() bool {
 		return !pidAlive(pid)
-	}, 2*time.Second, 20*time.Millisecond)
+	}, 4*time.Second, 20*time.Millisecond)
 
 	manifest := fx.readManifest(t)
 	_, ok := manifest.Value.(contracts.ManifestSuccess)
@@ -1009,6 +1179,7 @@ func TestStepRunKillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 	helperPath := writeDetachedSleepHelper(t, t.TempDir())
 	pidPath := filepath.Join(t.TempDir(), "detached-child.pid")
 	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "detached.txt"))
+	t.Setenv("FAKE_CLAUDE_COMMIT", "1")
 	t.Setenv("FAKE_CLAUDE_DETACH_HELPER", helperPath)
 	t.Setenv("FAKE_CLAUDE_DETACHED_PID_PATH", pidPath)
 	t.Setenv("FAKE_CLAUDE_DETACH_DELAY", "250ms")
@@ -1036,7 +1207,7 @@ func TestCopyUntrackedFiles_SkipsFIFOWithinBoundedTime(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	start := time.Now()
-	artifacts, err := copyUntrackedFiles(ctx, fx.worktree, rescueDir)
+	artifacts, err := copyUntrackedFiles(ctx, fx.worktree, rescueDir, agentrunner.NewRescueArtifactBudget(0, 0))
 	require.NoError(t, err)
 	assert.Less(t, time.Since(start), time.Second)
 	assert.NoFileExists(t, filepath.Join(rescueDir, "untracked", "poison"))
@@ -1257,12 +1428,13 @@ func TestStepRun_GitCommandsIgnoreInheritedGitDir(t *testing.T) {
 	t.Setenv("GIT_DIR", filepath.Join(otherRepo, ".git"))
 	t.Setenv("GIT_WORK_TREE", otherRepo)
 	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "local-change.txt"))
+	t.Setenv("FAKE_CLAUDE_COMMIT", "1")
 
 	require.NoError(t, fx.step.Run(context.Background(), fx.run))
 
 	manifest := fx.readManifest(t)
 	success := manifest.Value.(contracts.ManifestSuccess)
-	assert.Equal(t, fx.baseSHA, success.HeadSHA)
+	assert.NotEqual(t, fx.baseSHA, success.HeadSHA)
 	assert.NotEqual(t, otherHead, success.HeadSHA)
 }
 
@@ -1300,19 +1472,36 @@ func TestPidAliveTreatsEPERMAsAlive(t *testing.T) {
 func TestShouldAttemptRescue_RequiresMatchingPGID(t *testing.T) {
 	originalKill := killProcess
 	originalGetpgid := getProcessGroupID
+	originalLookup := lookupLeaseStartTime
 	killProcess = func(pid int, sig syscall.Signal) error {
 		return nil
 	}
 	getProcessGroupID = func(pid int) (int, error) {
-		return pid + 1, nil
+		return pid, nil
 	}
+	lookupLeaseStartTime = func(int) (string, error) { return "leader-start", nil }
 	t.Cleanup(func() {
 		killProcess = originalKill
 		getProcessGroupID = originalGetpgid
+		lookupLeaseStartTime = originalLookup
 	})
 
-	assert.False(t, shouldAttemptRescue(true, 12345, 12346, ""))
+	assert.False(t, shouldAttemptRescue(true, 12345, 12345, "leader-start"))
+	getProcessGroupID = func(pid int) (int, error) { return pid + 1, nil }
+	assert.True(t, shouldAttemptRescue(true, 12345, 12345, "leader-start"))
 	assert.True(t, shouldAttemptRescue(true, 12345, 12345, ""))
+}
+
+func TestResumeStateValidate_RejectsActiveLeaseWithoutLeaderStartTime(t *testing.T) {
+	err := (resumeState{
+		ExpectedBaseSHA: strings.Repeat("a", 40),
+		StartedAt:       time.Now().UTC(),
+		Pid:             1234,
+		Pgid:            1234,
+		RetryCount:      1,
+		LastHeartbeat:   time.Now().UTC(),
+	}).Validate()
+	require.ErrorContains(t, err, "leader_start_time")
 }
 
 func TestStepRunResumeStatePersistsChildPIDAndPGID(t *testing.T) {

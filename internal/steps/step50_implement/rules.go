@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -52,7 +51,7 @@ func LoadRulePayloads(candidatesPath string) ([]RulePayload, error) {
 		}
 
 		bodyPath := filepath.Join(runDir, candidate.ProposedBodyPath)
-		body, err := os.ReadFile(bodyPath)
+		body, err := internalio.OpenValidatedRegularFile(bodyPath, runDir)
 		if err != nil {
 			return nil, fmt.Errorf("read candidate %q proposed body: %w", candidate.CandidateID, err)
 		}

@@ -3,7 +3,9 @@ package agentrunner
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -46,4 +48,37 @@ func TestEnsureRescueLeaseQuiesced_FailsClosedOnEnumerationError(t *testing.T) {
 	var enumerateErr *RescueLeaseQuiesceEnumerateError
 	require.ErrorAs(t, err, &enumerateErr)
 	assert.ErrorIs(t, enumerateErr.Err, want)
+}
+
+func TestEnsureRescueLeaseQuiesced_PropagatesSavedProcessGroupKillFailure(t *testing.T) {
+	want := errors.New("kill failed")
+	err := EnsureRescueLeaseQuiesced(context.Background(), t.TempDir(), RescueLeaseState{
+		PID:             4242,
+		PGID:            4242,
+		LeaderStartTime: "saved-start",
+	}, RescueLeaseQuiesceOptions{
+		Now:                    func() time.Time { return time.Unix(0, 0) },
+		Sleep:                  func(time.Duration) {},
+		PIDAlive:               func(int) bool { return true },
+		LookupProcessStartTime: func(int) (string, error) { return "saved-start", nil },
+		KillProcessGroupUntilGone: func(int, time.Duration, time.Duration) error {
+			return want
+		},
+		WorktreeProcessIDs: func(context.Context, string) ([]int, error) { return nil, nil },
+		KillPID:            func(int, syscall.Signal) error { return nil },
+	})
+	require.ErrorIs(t, err, want)
+}
+
+func TestWorktreeProcessIDs_ExitErrorWithStderrFailsClosed(t *testing.T) {
+	cmdPath := filepath.Join(t.TempDir(), "fake-lsof")
+	script := "#!/bin/sh\nprintf 'permission denied\\n' >&2\nexit 1\n"
+	require.NoError(t, os.WriteFile(cmdPath, []byte(script), 0o755))
+
+	_, err := WorktreeProcessIDs(context.Background(), t.TempDir(), WorktreeProcessIDsOptions{
+		LookPath:       func(string) (string, error) { return cmdPath, nil },
+		CommandContext: exec.CommandContext,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRescueLeaseQuiesceEnumerate)
 }

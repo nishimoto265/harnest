@@ -193,6 +193,26 @@ func TestLatestRuleSha256_RejectsInvalidExistingRulePath(t *testing.T) {
 	require.ErrorContains(t, err, "invalid rule_path")
 }
 
+func TestMaterializeRuleSidecar_RejectsSymlinkedCandidateBody(t *testing.T) {
+	runCtx := newResolverRunContext(t)
+	secretPath := filepath.Join(t.TempDir(), "secret.md")
+	require.NoError(t, os.WriteFile(secretPath, []byte("secret body\n"), 0o600))
+
+	bodyPath := mustResolveResolverPath(t, runCtx, "40/candidates/cand-1.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(bodyPath), 0o755))
+	require.NoError(t, os.Symlink(secretPath, bodyPath))
+
+	err := materializeRuleSidecar(runCtx, contracts.Candidate{
+		CandidateID:        "cand-1",
+		Kind:               contracts.CandidateKindNew,
+		Title:              "Candidate",
+		ProposedBodyPath:   "40/candidates/cand-1.md",
+		ProposedBodySha256: sha256String("secret body\n"),
+	}, "rules/r-cand-1.md")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cand-1")
+}
+
 func newResolverRunContext(t *testing.T) internalio.RunContext {
 	t.Helper()
 	runsBase := filepath.Join(t.TempDir(), "runs")

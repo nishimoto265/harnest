@@ -28,6 +28,10 @@ type RescueExhaustedError struct {
 
 const maxRescueUntrackedBytes = 32 << 20
 
+var rescueGitOutputMaxBytes int64 = agentrunner.RescueGitOutputMaxBytes
+var rescueAggregateMaxBytes int64 = agentrunner.RescueAggregateMaxBytes
+var rescueAggregateMaxFiles = agentrunner.RescueAggregateMaxFiles
+
 func (e *RescueExhaustedError) Error() string {
 	return fmt.Sprintf("step50: rescue exhausted: agent=%s retry_count=%d", e.Rescue.Agent, e.Rescue.RetryCount)
 }
@@ -135,6 +139,13 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := ensureDir(filepath.Join(rescueDir, "untracked")); err != nil {
 		return 0, err
 	}
+	rescueStateCommitted := false
+	defer func() {
+		if !rescueStateCommitted {
+			_ = os.RemoveAll(rescueDir)
+		}
+	}()
+	budget := agentrunner.NewRescueArtifactBudget(rescueAggregateMaxBytes, rescueAggregateMaxFiles)
 
 	headSHA, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
@@ -146,42 +157,36 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err != nil {
 		return 0, err
 	}
-	if digest, err := fileDigest(filepath.Join(rescueDir, "commits.bundle")); err == nil {
-		artifacts = append(artifacts, rescueArtifactDigest{Path: "commits.bundle", SHA256: digest})
-	} else {
-		return 0, err
+	if err := appendRescueArtifact(filepath.Join(rescueDir, "commits.bundle"), "commits.bundle", budget, &artifacts); err != nil {
+		return 0, rescueArtifactError(err, "step50")
 	}
 
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
 	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv"); err != nil {
-		return 0, err
+		return 0, rescueArtifactError(err, "step50")
 	}
-	if digest, err := fileDigest(filepath.Join(rescueDir, "tracked.patch")); err == nil {
-		artifacts = append(artifacts, rescueArtifactDigest{Path: "tracked.patch", SHA256: digest})
-	} else {
-		return 0, err
+	if err := appendRescueArtifact(filepath.Join(rescueDir, "tracked.patch"), "tracked.patch", budget, &artifacts); err != nil {
+		return 0, rescueArtifactError(err, "step50")
 	}
 
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
 	if err := writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"); err != nil {
-		return 0, err
+		return 0, rescueArtifactError(err, "step50")
 	}
-	if digest, err := fileDigest(filepath.Join(rescueDir, "staged.patch")); err == nil {
-		artifacts = append(artifacts, rescueArtifactDigest{Path: "staged.patch", SHA256: digest})
-	} else {
-		return 0, err
+	if err := appendRescueArtifact(filepath.Join(rescueDir, "staged.patch"), "staged.patch", budget, &artifacts); err != nil {
+		return 0, rescueArtifactError(err, "step50")
 	}
 
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	untrackedArtifacts, err := copyUntrackedFiles(ctx, allocation.Path, rescueDir)
+	untrackedArtifacts, err := copyUntrackedFiles(ctx, allocation.Path, rescueDir, budget)
 	if err != nil {
-		return 0, err
+		return 0, rescueArtifactError(err, "step50")
 	}
 	artifacts = append(artifacts, untrackedArtifacts...)
 
@@ -190,12 +195,10 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		return 0, err
 	}
 	if err := writeIgnoredList(ctx, allocation.Path, ignoredPath); err != nil {
-		return 0, err
+		return 0, rescueArtifactError(err, "step50")
 	}
-	if digest, err := fileDigest(ignoredPath); err == nil {
-		artifacts = append(artifacts, rescueArtifactDigest{Path: "ignored.txt", SHA256: digest})
-	} else {
-		return 0, err
+	if err := appendRescueArtifact(ignoredPath, "ignored.txt", budget, &artifacts); err != nil {
+		return 0, rescueArtifactError(err, "step50")
 	}
 
 	nextRetry := state.RetryCount + 1
@@ -214,6 +217,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 	if err := verifyRescueState(rescueDir); err != nil {
 		return 0, err
 	}
+	rescueStateCommitted = true
 
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -353,14 +357,23 @@ func gitOutputContext(ctx context.Context, mapFn func(string) string, dir string
 }
 
 func writeGitOutputContext(ctx context.Context, dir, dest string, args ...string) error {
-	output, err := gitOutputBytesContext(ctx, dir, args...)
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = processenv.Sanitize()
+	_, stderr, err := agentrunner.StreamCommandOutputToFile(ctx, cmd, dest, rescueGitOutputMaxBytes)
 	if err != nil {
-		return err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var tooLarge *agentrunner.RescueArtifactTooLargeError
+		if errors.As(err, &tooLarge) {
+			return err
+		}
+		return fmt.Errorf("step50: git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(stderr)))
 	}
-	return writeAtomicImpl(dest, output)
+	return nil
 }
 
-func copyUntrackedFiles(ctx context.Context, repoPath, rescueDir string) ([]rescueArtifactDigest, error) {
+func copyUntrackedFiles(ctx context.Context, repoPath, rescueDir string, budget *agentrunner.RescueArtifactBudget) ([]rescueArtifactDigest, error) {
 	output, err := gitOutputBytesContext(ctx, repoPath, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return nil, err
@@ -407,7 +420,12 @@ func copyUntrackedFiles(ctx context.Context, repoPath, rescueDir string) ([]resc
 			_ = file.Close()
 			return nil, err
 		}
-		if err := copyOpenFileContext(ctx, file, dst, perm, maxRescueUntrackedBytes); err != nil {
+		written, err := copyOpenFileContext(ctx, file, dst, perm, maxRescueUntrackedBytes)
+		if err != nil {
+			return nil, err
+		}
+		relPath := filepath.ToSlash(filepath.Join("untracked", cleaned))
+		if err := budget.AddFile(relPath, written); err != nil {
 			return nil, err
 		}
 		digest, err := fileDigest(dst)
@@ -415,12 +433,19 @@ func copyUntrackedFiles(ctx context.Context, repoPath, rescueDir string) ([]resc
 			return nil, err
 		}
 		artifacts = append(artifacts, rescueArtifactDigest{
-			Path:   filepath.ToSlash(filepath.Join("untracked", cleaned)),
+			Path:   relPath,
 			SHA256: digest,
 		})
 	}
 	symlinkPath := filepath.Join(rescueDir, "untracked-symlinks.txt")
 	if err := writeAtomicImpl(symlinkPath, []byte(strings.Join(skipLog, "\n"))); err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(symlinkPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := budget.AddFile("untracked-symlinks.txt", info.Size()); err != nil {
 		return nil, err
 	}
 	digest, err := fileDigest(symlinkPath)
@@ -460,29 +485,29 @@ func stringsTrimSpace(s string) string {
 	return strings.TrimSpace(s)
 }
 
-func copyOpenFileContext(ctx context.Context, in *os.File, dst string, perm os.FileMode, sizeLimit int64) error {
+func copyOpenFileContext(ctx context.Context, in *os.File, dst string, perm os.FileMode, sizeLimit int64) (int64, error) {
 	defer in.Close()
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	written, err := io.CopyBuffer(out, io.LimitReader(&copyContextReader{ctx: ctx, reader: in}, sizeLimit+1), make([]byte, 32<<10))
 	if err != nil {
 		_ = out.Close()
-		return err
+		return 0, err
 	}
 	if written > sizeLimit {
 		_ = out.Close()
-		return fmt.Errorf("step50: rescue untracked file exceeds size limit: path=%s size=%d limit=%d", dst, written, sizeLimit)
+		return 0, &agentrunner.RescueArtifactTooLargeError{Path: dst, Size: written, Limit: sizeLimit}
 	}
 	if err := out.Sync(); err != nil {
 		_ = out.Close()
-		return err
+		return 0, err
 	}
 	if err := out.Close(); err != nil {
-		return err
+		return 0, err
 	}
-	return syncDir(filepath.Dir(dst))
+	return written, syncDir(filepath.Dir(dst))
 }
 
 type copyContextReader struct {
@@ -567,4 +592,34 @@ func shouldKillSavedProcessGroup(state resumeState) bool {
 
 func parsePIDList(output string) []int {
 	return agentrunner.ParsePIDList(output)
+}
+
+func appendRescueArtifact(path, rel string, budget *agentrunner.RescueArtifactBudget, artifacts *[]rescueArtifactDigest) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if err := budget.AddFile(rel, info.Size()); err != nil {
+		return err
+	}
+	digest, err := fileDigest(path)
+	if err != nil {
+		return err
+	}
+	*artifacts = append(*artifacts, rescueArtifactDigest{Path: rel, SHA256: digest})
+	return nil
+}
+
+func rescueArtifactError(err error, step string) error {
+	var tooLarge *agentrunner.RescueArtifactTooLargeError
+	var budgetErr *agentrunner.RescueArtifactBudgetError
+	switch {
+	case errors.As(err, &tooLarge), errors.As(err, &budgetErr):
+		return &agentrunner.ManualRecoveryRequiredError{
+			Reason: contracts.RollbackReasonTransactionalFailure,
+			Detail: fmt.Sprintf("%s: rescue artifact capture exceeded budget: %v", step, err),
+		}
+	default:
+		return err
+	}
 }

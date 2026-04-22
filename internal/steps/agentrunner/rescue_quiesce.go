@@ -97,7 +97,15 @@ func EnsureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state R
 	}
 
 	if ShouldKillSavedProcessGroup(state, opts.PIDAlive, opts.LookupProcessStartTime) {
-		_ = opts.KillProcessGroupUntilGone(state.PGID, 500*time.Millisecond, 25*time.Millisecond)
+		if err := opts.KillProcessGroupUntilGone(state.PGID, 500*time.Millisecond, 25*time.Millisecond); err != nil {
+			if state.PID > 0 && state.LeaderStartTime != "" && opts.PIDAlive(state.PID) {
+				startTime, lookupErr := opts.LookupProcessStartTime(state.PID)
+				if lookupErr == nil && startTime == state.LeaderStartTime {
+					return err
+				}
+			}
+			return err
+		}
 	}
 
 	deadline := opts.Now().Add(opts.MaxWait)
@@ -158,7 +166,11 @@ func WorktreeProcessIDs(ctx context.Context, worktreePath string, opts WorktreeP
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return nil, nil
+		stderr := strings.TrimSpace(string(exitErr.Stderr))
+		if stderr == "" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("enumerate worktree processes with lsof: %w: %s", ErrRescueLeaseQuiesceEnumerate, stderr)
 	}
 	return nil, fmt.Errorf("enumerate worktree processes with lsof: %w", err)
 }

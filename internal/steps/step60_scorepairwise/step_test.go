@@ -90,6 +90,22 @@ func TestRun_HappyPath(t *testing.T) {
 	assert.Equal(t, marker.RawHashes.ComplianceRaw, mustHashReducedRawCompliance(t, runIO))
 }
 
+func TestRun_RejectsTaskPackageRunIDMismatch(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+	pkg.RunID = "2026-04-22-PR99-deadbee"
+
+	err := Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+	})
+	require.ErrorContains(t, err, "task package run_id mismatch")
+}
+
 func TestAppendJSONLWithParentDirSync_ReturnsAppendError(t *testing.T) {
 	err := appendJSONLWithParentDirSync("relative/path.jsonl", contracts.ScoreEntry{})
 	require.Error(t, err)
@@ -667,6 +683,100 @@ func TestRun_RerunsWhenRawComplianceCoverageIsMissing(t *testing.T) {
 		Now:         func() time.Time { return now },
 	}))
 	assert.False(t, called)
+}
+
+func TestRun_RebuildsWhenRawComplianceRowsArePartial(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	now := time.Date(2026, 4, 21, 11, 30, 0, 0, time.UTC)
+
+	primary := &countingJudge{delegate: scriptedJudge{
+		score:        80,
+		reasonPrefix: "primary",
+		compliance: map[string]contracts.ComplianceVerdict{
+			"rule-a": contracts.ComplianceVerdictCompliant,
+			"rule-b": contracts.ComplianceVerdictViolated,
+		},
+	}}
+	secondary := scriptedJudge{
+		score:        79,
+		reasonPrefix: "secondary",
+		compliance: map[string]contracts.ComplianceVerdict{
+			"rule-a": contracts.ComplianceVerdictCompliant,
+			"rule-b": contracts.ComplianceVerdictViolated,
+		},
+	}
+	pass1CompliancePath := mustResolve(t, runIO, "30/compliance-A.jsonl")
+	require.NoError(t, internalio.WriteAtomic(pass1CompliancePath, nil))
+	for _, row := range []contracts.ComplianceEntry{
+		{
+			SchemaVersion: "1",
+			RunID:         pkg.RunID,
+			Pass:          1,
+			Agent:         "a1",
+			RuleID:        "rule-a",
+			Verdict:       contracts.ComplianceVerdictCompliant,
+			Rationale:     "rule-a",
+			VerdictPath:   contracts.VerdictPathAgreement,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    now,
+		},
+		{
+			SchemaVersion: "1",
+			RunID:         pkg.RunID,
+			Pass:          1,
+			Agent:         "a1",
+			RuleID:        "rule-b",
+			Verdict:       contracts.ComplianceVerdictViolated,
+			Rationale:     "rule-b",
+			VerdictPath:   contracts.VerdictPathAgreement,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    now,
+		},
+	} {
+		require.NoError(t, internalio.AppendJSONL(pass1CompliancePath, row))
+	}
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
+
+	rows := mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl")
+	truncated := make([]contracts.RawComplianceEntry, 0, 2)
+	for _, row := range rows {
+		if row.RuleID == "rule-a" {
+			truncated = append(truncated, row)
+		}
+	}
+	rewriteRawCompliance(t, mustResolve(t, runIO, "60/compliance-B-raw.jsonl"), truncated)
+
+	primary.calls = 0
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+	assert.Greater(t, primary.callCount(), int32(0))
+
+	finalRows := mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl")
+	ruleIDs := make([]string, 0, len(finalRows))
+	for _, row := range finalRows {
+		ruleIDs = append(ruleIDs, row.RuleID)
+	}
+	assert.ElementsMatch(t, []string{"rule-a", "rule-b"}, ruleIDs)
 }
 
 func TestRun_NoScorableAgentsReturnsTypedError(t *testing.T) {
@@ -1806,6 +1916,14 @@ func writeStep60ReasonsSidecar(t *testing.T, runIO internalio.RunContext, conten
 }
 
 func rewriteRawScores(t *testing.T, path string, rows []contracts.RawScoreEntry) {
+	t.Helper()
+	require.NoError(t, os.Remove(path))
+	for _, row := range rows {
+		require.NoError(t, internalio.AppendJSONL(path, row))
+	}
+}
+
+func rewriteRawCompliance(t *testing.T, path string, rows []contracts.RawComplianceEntry) {
 	t.Helper()
 	require.NoError(t, os.Remove(path))
 	for _, row := range rows {

@@ -116,18 +116,24 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 	waitErr := cmd.Wait()
 	close(groupKillDone)
 	if tracker != nil {
-		tracker.CaptureBurst(25 * time.Millisecond)
+		tracker.CaptureBurst(250 * time.Millisecond)
 		tracker.Stop()
 	}
-	_ = cleanupProcessTree(lease, lease.PID, tracker)
+	cleanupErr := cleanupProcessTree(lease, lease.PID, tracker)
 	result.FinishedAt = r.now().UTC()
 	result.StdoutSnippet = stdoutTail.Bytes()
 	result.StderrSnippet = stderrTail.Bytes()
 
 	switch {
 	case waitErr == nil:
+		if cleanupErr != nil {
+			return runnerResult{}, cleanupErr
+		}
 		return result, nil
 	case timeoutCtx.Err() == context.DeadlineExceeded:
+		if cleanupErr != nil {
+			return runnerResult{}, cleanupErr
+		}
 		result.TimedOut = true
 		return result, nil
 	case ctx.Err() != nil:

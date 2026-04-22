@@ -4,9 +4,14 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/nishimoto265/auto-improve/internal/contracts"
 )
+
+var ErrFileLockHeld = errors.New("io: file lock held by another process")
 
 type FileLock struct {
 	path string
@@ -15,6 +20,30 @@ type FileLock struct {
 
 func AcquirePromotionLock(ctx RunContext) (*FileLock, error) {
 	return AcquireFileLock(ctx.PromotionLockPath())
+}
+
+func InspectFileLock(path string) (*FileLock, bool, error) {
+	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
+		return nil, false, err
+	}
+	if err := ensureNoSymlinkPathComponents(filepath.Dir(path)); err != nil {
+		return nil, false, err
+	}
+	f, err := openFileNoFollow(path, os.O_RDONLY, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, true, ErrFileLockHeld
+		}
+		return nil, true, err
+	}
+	return &FileLock{path: path, file: f}, true, nil
 }
 
 func TryAcquireFileLock(path string) (*FileLock, bool, error) {

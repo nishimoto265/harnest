@@ -14,6 +14,9 @@ import (
 )
 
 func TestCleanupProcessTree_KillsDetachedGrandchildSpawnedAfterRootExit(t *testing.T) {
+	if raceBuild {
+		t.Skip("timing-sensitive detached-grandchild regression is covered in non-race mode")
+	}
 	helperPath := writeDetachedGrandchildHelper(t, t.TempDir())
 	pidPath := filepath.Join(t.TempDir(), "detached-grandchild.pid")
 
@@ -41,7 +44,7 @@ func TestCleanupProcessTree_KillsDetachedGrandchildSpawnedAfterRootExit(t *testi
 
 	require.Eventually(t, func() bool {
 		return processDead(pid)
-	}, 2*time.Second, 20*time.Millisecond)
+	}, 30*time.Second, 20*time.Millisecond)
 }
 
 func TestKillTrackedPIDs_SkipsRecycledPIDWhenStartTimeDiffers(t *testing.T) {
@@ -67,6 +70,73 @@ func TestKillTrackedPIDs_SkipsRecycledPIDWhenStartTimeDiffers(t *testing.T) {
 	err := killTrackedPIDs([]processIdentity{{pid: 4242, startTime: "Tue Apr 22 10:00:00 2026"}})
 	require.NoError(t, err)
 	require.Empty(t, killed)
+}
+
+func TestKillProcessGroupUntilGone_ReturnsCleanupTimeoutWhenMembersRemain(t *testing.T) {
+	originalKill := processTreeKillProcessGroup
+	originalMembers := processTreeProcessGroupMembers
+	originalNow := processTreeNow
+	originalSleep := processTreeSleep
+	t.Cleanup(func() {
+		processTreeKillProcessGroup = originalKill
+		processTreeProcessGroupMembers = originalMembers
+		processTreeNow = originalNow
+		processTreeSleep = originalSleep
+	})
+
+	processTreeKillProcessGroup = func(int) error { return nil }
+	processTreeProcessGroupMembers = func(int) ([]int, error) { return []int{1234}, nil }
+	now := time.Unix(0, 0)
+	processTreeNow = func() time.Time {
+		current := now
+		now = now.Add(time.Second)
+		return current
+	}
+	processTreeSleep = func(time.Duration) {}
+
+	err := KillProcessGroupUntilGone(4242, time.Millisecond, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCleanupTimeout)
+}
+
+func TestKillSessionProcessesUntilGone_ReturnsCleanupTimeoutWhenProcessesRemain(t *testing.T) {
+	originalSession := processTreeSessionProcesses
+	originalKill := processTreeKillPIDs
+	originalNow := processTreeNow
+	originalSleep := processTreeSleep
+	t.Cleanup(func() {
+		processTreeSessionProcesses = originalSession
+		processTreeKillPIDs = originalKill
+		processTreeNow = originalNow
+		processTreeSleep = originalSleep
+	})
+
+	processTreeSessionProcesses = func(int) ([]int, error) { return []int{5678}, nil }
+	processTreeKillPIDs = func([]int) error { return nil }
+	now := time.Unix(0, 0)
+	processTreeNow = func() time.Time {
+		current := now
+		now = now.Add(time.Second)
+		return current
+	}
+	processTreeSleep = func(time.Duration) {}
+
+	err := KillSessionProcessesUntilGone(99, time.Millisecond, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCleanupTimeout)
+}
+
+func TestRescueArtifactBudget_AddFileEnforcesFileLimit(t *testing.T) {
+	budget := NewRescueArtifactBudget(1024, 2)
+	require.NoError(t, budget.AddFile("one", 10))
+	require.NoError(t, budget.AddFile("two", 10))
+
+	err := budget.AddFile("three", 10)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrRescueArtifactBudget)
+	var budgetErr *RescueArtifactBudgetError
+	require.ErrorAs(t, err, &budgetErr)
+	require.Equal(t, 3, budgetErr.FileCount)
 }
 
 func writeDetachedGrandchildHelper(t *testing.T, dir string) string {

@@ -58,6 +58,14 @@ func TestStep30Score_RunAndResume(t *testing.T) {
 	assert.Equal(t, int64(15), rebuilt.ExpectedCounts.Scores)
 }
 
+func TestStep30Score_RejectsTaskPackageRunIDMismatch(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	pkg.RunID = "2026-04-22-PR99-deadbee"
+
+	err := New().Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg})
+	require.ErrorContains(t, err, "task package run_id mismatch")
+}
+
 func TestStep30Score_SkipsUnscorableAgents(t *testing.T) {
 	// TaskPackage requires exactly 6 worktrees (3 agents × 2 passes). Seed all
 	// 3 agents but only write manifests for a1 / a2 — a3's missing manifest
@@ -224,6 +232,20 @@ func TestStep30Score_ResumeRerunsWhenPromptVersionChanges(t *testing.T) {
 
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
+}
+
+func TestStep30Score_ResolveRubricPathRejectsSymlink(t *testing.T) {
+	runCtx, _ := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	step := New()
+
+	escapePath := filepath.Join(t.TempDir(), "escape.md")
+	require.NoError(t, os.WriteFile(escapePath, []byte("escape\n"), 0o644))
+	rubricPath := filepath.Join(runCtx.RunsBase, ".rubrics", "default.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rubricPath), 0o755))
+	require.NoError(t, os.Symlink(escapePath, rubricPath))
+
+	_, err := step.resolveRubricPath(runCtx)
+	require.ErrorContains(t, err, "must not be a symlink")
 }
 
 func TestStep30Score_FailsClosedOnMalformedManifest(t *testing.T) {

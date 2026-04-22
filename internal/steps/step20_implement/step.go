@@ -16,6 +16,7 @@ import (
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/prompt"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
+	step10restorebase "github.com/nishimoto265/auto-improve/internal/steps/step10_restorebase"
 )
 
 const (
@@ -103,12 +104,18 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 	if run.Config == nil {
 		return errors.New("step20: config is required")
 	}
+	if run.TaskPackage.RunID != run.IO.RunID {
+		return fmt.Errorf("step20: task package run_id mismatch: task_package=%s io=%s", run.TaskPackage.RunID, run.IO.RunID)
+	}
 
 	allocation, err := worktreeFor(run.TaskPackage, run.Pass, run.Agent)
 	if err != nil {
 		return err
 	}
 	if err := run.IO.ValidateWorktreeAllocation(allocation); err != nil {
+		return err
+	}
+	if err := ensureWorktreeAvailable(ctx, run.TaskPackage, allocation); err != nil {
 		return err
 	}
 	timeout, err := stepTimeout(run.Config, "step20")
@@ -258,6 +265,9 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	if len(diffBytes) == 0 {
 		return s.writeNoChangeManifest(ctx, run, runResult)
 	}
+	if headSHA == allocation.BaseSHA {
+		return s.writeUncommittedDiffManifest(ctx, run, runResult)
+	}
 	if err := internalio.WriteAtomic(diffPath, diffBytes); err != nil {
 		return err
 	}
@@ -300,6 +310,28 @@ func (s *Step) writeNoChangeManifest(ctx context.Context, run RunContext, runRes
 			ExitCode:      0,
 			Reason:        "unknown",
 			Detail:        "agent produced no diff",
+			StartedAt:     runResult.StartedAt.UTC(),
+			FinishedAt:    runResult.FinishedAt.UTC(),
+		},
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return writeManifest(run.IO, run.Pass, run.Agent, manifest)
+}
+
+func (s *Step) writeUncommittedDiffManifest(ctx context.Context, run RunContext, runResult runnerResult) error {
+	manifest := contracts.Manifest{
+		Kind: contracts.ManifestKindError,
+		Value: contracts.ManifestError{
+			Kind:          contracts.ManifestKindError,
+			SchemaVersion: "1",
+			RunID:         run.IO.RunID,
+			Pass:          run.Pass,
+			Agent:         run.Agent,
+			ExitCode:      0,
+			Reason:        "unknown",
+			Detail:        "agent produced diff without advancing HEAD",
 			StartedAt:     runResult.StartedAt.UTC(),
 			FinishedAt:    runResult.FinishedAt.UTC(),
 		},
@@ -435,4 +467,40 @@ func renderPrompt(cfg *config.Config, data promptData) (string, error) {
 
 func loadChecklistArtifact(ctx context.Context, worktreePath string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {
 	return agentrunner.LoadChecklistArtifactContext(ctx, worktreePath, checklistFileName, "step20", runID, pass, agent)
+}
+
+var recreateDeletedWorktreeGitClient = step10restorebase.NewGitClient
+
+func ensureWorktreeAvailable(ctx context.Context, pkg *contracts.TaskPackage, allocation contracts.WorktreeAllocation) error {
+	if _, err := os.Stat(allocation.Path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if pkg == nil {
+		return errors.New("step20: task package is required")
+	}
+	peerPath, err := survivingPeerWorktree(pkg, allocation.Path)
+	if err != nil {
+		return err
+	}
+	if _, err := gitOutputContext(ctx, identity, peerPath, "worktree", "prune"); err != nil {
+		return err
+	}
+	if _, err := recreateDeletedWorktreeGitClient().WorktreeAdd(ctx, peerPath, allocation.Path, allocation.Branch, allocation.BaseSHA); err != nil {
+		return fmt.Errorf("step20: recreate deleted worktree: %w", err)
+	}
+	return nil
+}
+
+func survivingPeerWorktree(pkg *contracts.TaskPackage, missingPath string) (string, error) {
+	for _, wt := range pkg.Worktrees {
+		if wt.Path == missingPath {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(wt.Path, ".git")); err == nil {
+			return wt.Path, nil
+		}
+	}
+	return "", fmt.Errorf("step20: no surviving worktree available to recreate %s", missingPath)
 }

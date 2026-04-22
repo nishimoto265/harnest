@@ -186,13 +186,15 @@ func (r *PanelResolver) Resolve(ctx context.Context, in PanelInput) (PanelResult
 		return PanelResult{}, err
 	}
 
-	verdict := classifyArbiterVerdict(primaryRaw, secondaryRaw, arbiterRaw, in.DisagreementThreshold)
+	scoreVerdict := classifyArbiterVerdict(primaryRaw, secondaryRaw, arbiterRaw, in.DisagreementThreshold)
+	complianceVerdict := classifyComplianceArbiterVerdict(primaryRawCompliance, secondaryRawCompliance, arbiterRawCompliance)
+	verdict := combinedPanelVerdict(scoreVerdict, complianceVerdict)
 
 	result := PanelResult{
 		RawScores:       concatRawScores(primaryRaw, secondaryRaw, arbiterRaw),
 		RawCompliance:   concatRawCompliance(primaryRawCompliance, secondaryRawCompliance, arbiterRawCompliance),
-		FinalScores:     finalScoresFromRaw(arbiterRaw, verdict),
-		FinalCompliance: finalComplianceFromRaw(arbiterRawCompliance, verdict),
+		FinalScores:     finalScoresFromRaw(arbiterRaw, scoreVerdict),
+		FinalCompliance: finalComplianceFromRaw(arbiterRawCompliance, complianceVerdict),
 		VerdictPath:     verdict,
 	}
 	return result, nil
@@ -325,6 +327,39 @@ func classifyArbiterVerdict(primary, secondary, arbiter []contracts.RawScoreEntr
 		return contracts.VerdictPathArbiterOverruled
 	}
 	return contracts.VerdictPathArbitrated
+}
+
+func classifyComplianceArbiterVerdict(primary, secondary, arbiter []contracts.RawComplianceEntry) contracts.VerdictPath {
+	if len(arbiter) == 0 {
+		return contracts.VerdictPathArbitrated
+	}
+	primaryByRule := make(map[string]contracts.ComplianceVerdict, len(primary))
+	for _, row := range primary {
+		primaryByRule[row.RuleID] = row.Verdict
+	}
+	secondaryByRule := make(map[string]contracts.ComplianceVerdict, len(secondary))
+	for _, row := range secondary {
+		secondaryByRule[row.RuleID] = row.Verdict
+	}
+	for _, row := range arbiter {
+		if row.Verdict != primaryByRule[row.RuleID] && row.Verdict != secondaryByRule[row.RuleID] {
+			return contracts.VerdictPathArbiterOverruled
+		}
+	}
+	return contracts.VerdictPathArbitrated
+}
+
+func combinedPanelVerdict(scoreVerdict, complianceVerdict contracts.VerdictPath) contracts.VerdictPath {
+	if scoreVerdict == contracts.VerdictPathArbiterOverruled || complianceVerdict == contracts.VerdictPathArbiterOverruled {
+		return contracts.VerdictPathArbiterOverruled
+	}
+	if scoreVerdict == contracts.VerdictPathArbitrated || complianceVerdict == contracts.VerdictPathArbitrated {
+		return contracts.VerdictPathArbitrated
+	}
+	if scoreVerdict == contracts.VerdictPathAgreement || complianceVerdict == contracts.VerdictPathAgreement {
+		return contracts.VerdictPathAgreement
+	}
+	return scoreVerdict
 }
 
 func refsByDimension(raws []contracts.RawScoreEntry, role contracts.JudgeRole) (map[contracts.Dimension]*contracts.RawJudgeRef, error) {

@@ -107,6 +107,9 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 	if req.TaskPackage == nil {
 		return ErrNoTaskPackage
 	}
+	if req.TaskPackage.RunID != req.RunContext.RunID {
+		return fmt.Errorf("step30_score: task package run_id mismatch: task_package=%s io=%s", req.TaskPackage.RunID, req.RunContext.RunID)
+	}
 
 	paths, err := stepPaths(req.RunContext)
 	if err != nil {
@@ -824,12 +827,18 @@ func (s *Step) resolveRubricPath(runCtx internalio.RunContext) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.WriteFile(path, []byte("# phase0 stub rubric\n"), 0o644); err != nil {
+	info, err := os.Lstat(path)
+	switch {
+	case os.IsNotExist(err):
+		if err := internalio.WriteAtomic(path, []byte("# phase0 stub rubric\n")); err != nil {
 			return "", err
 		}
-	} else if err != nil {
+	case err != nil:
 		return "", err
+	case info.Mode()&os.ModeSymlink != 0:
+		return "", fmt.Errorf("step30_score: rubric stub path must not be a symlink: %s", path)
+	case !info.Mode().IsRegular():
+		return "", fmt.Errorf("step30_score: rubric stub path must be a regular file: %s", path)
 	}
 	return path, nil
 }

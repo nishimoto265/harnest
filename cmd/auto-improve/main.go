@@ -90,13 +90,30 @@ func newRecoverCmd() *cobra.Command {
 }
 
 func runRecoverInspect(cmd *cobra.Command) error {
-	runsBase, lock, err := recoverRunsBaseAndLock()
+	cfg, err := config.LoadDefault()
 	if err != nil {
+		return commandExitError{code: 2, msg: err.Error()}
+	}
+	runsBase, err := cfg.RunsBase()
+	if err != nil {
+		return commandExitError{code: 2, msg: err.Error()}
+	}
+	lockPath, err := cfg.PromotionLockPath()
+	if err != nil {
+		return commandExitError{code: 2, msg: err.Error()}
+	}
+	lock, _, err := internalio.InspectFileLock(lockPath)
+	if err != nil {
+		if errors.Is(err, internalio.ErrFileLockHeld) {
+			return commandExitError{code: 2, msg: "recover: promotion.lock is held by another process"}
+		}
 		return err
 	}
-	defer func() {
-		_ = lock.Unlock()
-	}()
+	if lock != nil {
+		defer func() {
+			_ = lock.Unlock()
+		}()
+	}
 	if err := validateRegistryIntegrity(runsBase); err != nil {
 		return err
 	}
