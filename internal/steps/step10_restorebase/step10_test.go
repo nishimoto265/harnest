@@ -40,14 +40,20 @@ func (s stubGH) PRView(ctx context.Context, pr int, repo string) (PRInfo, error)
 }
 
 type stubGit struct {
-	mu             sync.Mutex
-	known          map[string]string // path → sha (marks "already exists")
-	createdBy      []string
-	resolvedBy     map[string]string
-	mergeBase      map[string]string
-	fetched        []string
-	repoSlug       string
-	repoSlugByRoot map[string]string
+	mu                sync.Mutex
+	known             map[string]string // path → sha (marks "already exists")
+	createdBy         []string
+	resolvedBy        map[string]string
+	mergeBase         map[string]string
+	fetched           []string
+	repoSlug          string
+	repoSlugByRoot    map[string]string
+	changedFiles      []string
+	diffText          string
+	changedFilesErr   error
+	diffErr           error
+	changedFilesCalls int
+	diffCalls         int
 }
 
 func newStubGit() *stubGit {
@@ -114,6 +120,26 @@ func (s *stubGit) RepoSlug(ctx context.Context, repoRoot string) (string, error)
 	return s.repoSlug, nil
 }
 
+func (s *stubGit) ChangedFiles(ctx context.Context, repoRoot, from, to string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.changedFilesCalls++
+	if s.changedFilesErr != nil {
+		return nil, s.changedFilesErr
+	}
+	return append([]string(nil), s.changedFiles...), nil
+}
+
+func (s *stubGit) Diff(ctx context.Context, repoRoot, from, to string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.diffCalls++
+	if s.diffErr != nil {
+		return "", s.diffErr
+	}
+	return s.diffText, nil
+}
+
 type recordingGH struct {
 	repo string
 	info PRInfo
@@ -149,6 +175,8 @@ func TestRun_HappyPath_SixWorktrees(t *testing.T) {
 	rc := newRunCtx(t)
 	git := newStubGit()
 	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
+	git.changedFiles = []string{"internal/foo.go", "internal/foo_test.go"}
+	git.diffText = "diff --git a/internal/foo.go b/internal/foo.go\n+new behavior\n"
 	runner := &Runner{
 		GH: stubGH{info: PRInfo{
 			Number:         42,
@@ -204,8 +232,10 @@ func TestRun_HappyPath_SixWorktrees(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, reloaded.Validate())
 	assert.Equal(t, 42, reloaded.PR)
-	assert.Contains(t, reloaded.ReconstructedTaskPrompt, "# PR #42: improve X")
-	assert.Contains(t, reloaded.ReconstructedTaskPrompt, "## Linked issues")
+	assert.Contains(t, reloaded.ReconstructedTaskPrompt, "# Task Brief")
+	assert.Contains(t, reloaded.ReconstructedTaskPrompt, "## Goal")
+	assert.Contains(t, reloaded.ReconstructedTaskPrompt, "### Linked Issues")
+	assert.Contains(t, reloaded.ReconstructedTaskPrompt, "### PR Title")
 }
 
 func TestRun_FetchesMergeCommitBeforeResolveRef(t *testing.T) {
@@ -394,6 +424,8 @@ func TestRun_RebaseMergedPR_UsesGitMergeBase(t *testing.T) {
 	rc := newRunCtx(t)
 	git := newStubGit()
 	git.mergeBase[testBaseSHA+"::"+testBaseRefOID] = testBaseSHA
+	git.changedFiles = []string{"pkg/change.go"}
+	git.diffText = "diff --git a/pkg/change.go b/pkg/change.go\n"
 	runner := &Runner{
 		GH: stubGH{info: PRInfo{
 			Number:     42,
@@ -417,6 +449,61 @@ func TestRun_RebaseMergedPR_UsesGitMergeBase(t *testing.T) {
 	assert.Equal(t, 6, res.Response.WorktreesCreated)
 	assert.Contains(t, git.fetched, in.RepoRoot+"::"+testBaseSHA)
 	assert.Contains(t, git.fetched, in.RepoRoot+"::"+testBaseRefOID)
+}
+
+func TestRun_TaskPromptSourcePRSkipsDiffContext(t *testing.T) {
+	rc := newRunCtx(t)
+	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
+	git.changedFiles = []string{"internal/foo.go", "internal/foo_test.go"}
+	git.diffText = "diff --git a/internal/foo.go b/internal/foo.go\n+new behavior\n"
+	runner := &Runner{
+		GH:  stubGH{info: PRInfo{Number: 42, Title: "improve X", Body: "body text", MergeCommitOID: testMergeCommitOID}},
+		Git: git,
+	}
+
+	res, err := runner.Run(context.Background(), Input{
+		PR:               42,
+		BestBranch:       "auto-improve/best",
+		TaskPromptSource: "pr",
+		RepoRoot:         t.TempDir(),
+		RunCtx:           rc,
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, res.Response.TaskPackage.ReconstructedTaskPrompt, "### Changed Tests")
+	assert.NotContains(t, res.Response.TaskPackage.ReconstructedTaskPrompt, "### Diff Excerpt")
+	assert.Zero(t, git.changedFilesCalls)
+	assert.Zero(t, git.diffCalls)
+}
+
+func TestRun_TaskPromptSourceIssueSkipsDiffFetch(t *testing.T) {
+	rc := newRunCtx(t)
+	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
+	git.changedFilesErr = errors.New("should not be called")
+	git.diffErr = errors.New("should not be called")
+	runner := &Runner{
+		GH: stubGH{info: PRInfo{
+			Number:         42,
+			Title:          "improve X",
+			Body:           "see linked issue",
+			MergeCommitOID: testMergeCommitOID,
+			LinkedIssues:   []LinkedIssue{{Number: 7, Title: "issue title", Body: "issue goal"}},
+		}},
+		Git: git,
+	}
+
+	res, err := runner.Run(context.Background(), Input{
+		PR:               42,
+		BestBranch:       "auto-improve/best",
+		TaskPromptSource: "issue",
+		RepoRoot:         t.TempDir(),
+		RunCtx:           rc,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, res.Response.TaskPackage.ReconstructedTaskPrompt, "### Linked Issues")
+	assert.Zero(t, git.changedFilesCalls)
+	assert.Zero(t, git.diffCalls)
 }
 
 func TestRun_RebaseMergedPR_WithoutImmutableBaseFailsClosed(t *testing.T) {
@@ -545,10 +632,11 @@ func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 		Git: git,
 	}
 	in := Input{
-		PR:         42,
-		BestBranch: "auto-improve/best",
-		RepoRoot:   repoRoot,
-		RunCtx:     rc,
+		PR:               42,
+		BestBranch:       "auto-improve/best",
+		TaskPromptSource: "pr",
+		RepoRoot:         repoRoot,
+		RunCtx:           rc,
 	}
 
 	_, err := runner.Run(context.Background(), in)
@@ -589,10 +677,11 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 		Git: git,
 	}
 	in := Input{
-		PR:         42,
-		BestBranch: "auto-improve/best",
-		RepoRoot:   repoRoot,
-		RunCtx:     rc,
+		PR:               42,
+		BestBranch:       "auto-improve/best",
+		TaskPromptSource: "pr",
+		RepoRoot:         repoRoot,
+		RunCtx:           rc,
 	}
 
 	_, err := runner.Run(context.Background(), in)
@@ -1045,6 +1134,71 @@ func TestReconstructTaskPrompt_CapsTotalSize(t *testing.T) {
 	got := ReconstructTaskPrompt(42, "hello", body, issues)
 	assert.LessOrEqual(t, len(got), reconstructedPromptMaxBytes)
 	assert.True(t, strings.HasSuffix(got, "\n"))
+}
+
+func TestSynthesizeTaskBrief_AutoWithoutIssuesIncludesDiffContext(t *testing.T) {
+	got := SynthesizeTaskBrief("auto", TaskBriefInput{
+		PR:           42,
+		Title:        "hello",
+		Body:         "Implement the new behavior.",
+		ChangedFiles: []string{"internal/foo.go", "internal/foo_test.go"},
+		Diff:         "diff --git a/internal/foo.go b/internal/foo.go\n+new behavior\n",
+	})
+	assert.Contains(t, got, "## Goal")
+	assert.Contains(t, got, "### Changed Tests")
+	assert.Contains(t, got, "internal/foo_test.go")
+	assert.Contains(t, got, "### Diff Excerpt")
+	assert.NotContains(t, got, "### Linked Issues")
+}
+
+func TestSynthesizeTaskBrief_IssueSourceIncludesIssuesAndSkipsDiffContext(t *testing.T) {
+	got := SynthesizeTaskBrief("issue", TaskBriefInput{
+		PR:    42,
+		Title: "hello",
+		Body:  "Implement the new behavior.",
+		Issues: []LinkedIssue{
+			{Number: 7, Title: "issue title", Body: "issue body"},
+		},
+		ChangedFiles: []string{"internal/foo.go", "internal/foo_test.go"},
+		Diff:         "diff --git a/internal/foo.go b/internal/foo.go\n+new behavior\n",
+	})
+	assert.Contains(t, got, "### Linked Issues")
+	assert.Contains(t, got, "#7: issue title")
+	assert.NotContains(t, got, "### Diff Excerpt")
+}
+
+func TestSynthesizeTaskBrief_AutoWithUsableIssuesAlsoKeepsDiffContext(t *testing.T) {
+	got := SynthesizeTaskBrief("auto", TaskBriefInput{
+		PR:    42,
+		Title: "hello",
+		Body:  "see linked issue",
+		Issues: []LinkedIssue{
+			{Number: 7, Title: "issue title", Body: "Issue body goal."},
+		},
+		ChangedFiles: []string{"tests/test_api.py", "app/service.py"},
+		Diff:         "diff --git a/tests/test_api.py b/tests/test_api.py\n+assert True\n",
+	})
+	assert.Contains(t, got, "### Linked Issues")
+	assert.Contains(t, got, "### Changed Tests")
+	assert.Contains(t, got, "tests/test_api.py")
+	assert.Contains(t, got, "### Diff Excerpt")
+	assert.Contains(t, got, "- Issue body goal.")
+}
+
+func TestSynthesizeTaskBrief_AutoIgnoresPlaceholderIssuesAndFallsBackToDiff(t *testing.T) {
+	got := SynthesizeTaskBrief("auto", TaskBriefInput{
+		PR:    42,
+		Title: "hello",
+		Body:  "Implement the new behavior.",
+		Issues: []LinkedIssue{
+			{Number: 7, Title: "issue title", Body: "[issue #7: fetch failed]"},
+		},
+		ChangedFiles: []string{"spec/bar_spec.rb", "app/service.rb"},
+		Diff:         "diff --git a/spec/bar_spec.rb b/spec/bar_spec.rb\n+expect(true)\n",
+	})
+	assert.NotContains(t, got, "### Linked Issues")
+	assert.Contains(t, got, "### Changed Tests")
+	assert.Contains(t, got, "spec/bar_spec.rb")
 }
 
 func TestTruncateUTF8Bytes_PreservesRuneBoundaries(t *testing.T) {

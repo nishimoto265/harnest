@@ -212,6 +212,44 @@ roles:
 	assert.Equal(t, "codex", profile.Binary)
 }
 
+func TestLoadConfig_DefaultsTaskPromptSourceToAuto(t *testing.T) {
+	path := writeConfigFixture(t, `
+repo:
+  github: "owner/repo"
+  root: "/tmp/auto-improve"
+  default_branch: "main"
+  best_branch: "auto-improve/best"
+paths:
+  runs: "/tmp/auto-improve/runs"
+worktree:
+  base: "/tmp/auto-improve/worktrees"
+`)
+
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "auto", cfg.TaskPromptSource())
+}
+
+func TestLoadConfig_RejectsInvalidTaskPromptSource(t *testing.T) {
+	path := writeConfigFixture(t, `
+repo:
+  github: "owner/repo"
+  root: "/tmp/auto-improve"
+  default_branch: "main"
+  best_branch: "auto-improve/best"
+paths:
+  runs: "/tmp/auto-improve/runs"
+worktree:
+  base: "/tmp/auto-improve/worktrees"
+task_prompt:
+  source: "title_only"
+`)
+
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "TaskPromptSource")
+}
+
 func TestRunsBaseAndWorktreeBase_AreNamespacedByRepoSlug(t *testing.T) {
 	cfg := Config{
 		Repo: RepoConfig{

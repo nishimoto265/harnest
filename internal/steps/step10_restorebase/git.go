@@ -38,6 +38,10 @@ type GitClient interface {
 	// step10 uses this for gh requests so it never inherits the caller cwd or a
 	// stale config-provided repo string.
 	RepoSlug(ctx context.Context, repoRoot string) (string, error)
+	// ChangedFiles returns the changed file list between two commits.
+	ChangedFiles(ctx context.Context, repoRoot, from, to string) ([]string, error)
+	// Diff returns the unified diff between two commits.
+	Diff(ctx context.Context, repoRoot, from, to string) (string, error)
 }
 
 type gitCLI struct {
@@ -188,6 +192,31 @@ func (g gitCLI) RepoSlug(ctx context.Context, repoRoot string) (string, error) {
 		return "", fmt.Errorf("step10: resolve repo slug from origin remote (in %s): %w", repoRoot, err)
 	}
 	return slug, nil
+}
+
+func (g gitCLI) ChangedFiles(ctx context.Context, repoRoot, from, to string) ([]string, error) {
+	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "diff", "--name-only", "--find-renames", from, to, "--")
+	if err != nil {
+		return nil, formatCommandFailure(fmt.Sprintf("step10: git diff --name-only %s %s (in %s)", from, to, repoRoot), err, out, stderr)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	files := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		files = append(files, line)
+	}
+	return files, nil
+}
+
+func (g gitCLI) Diff(ctx context.Context, repoRoot, from, to string) (string, error) {
+	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "diff", "--find-renames", "--unified=3", from, to, "--")
+	if err != nil {
+		return "", formatCommandFailure(fmt.Sprintf("step10: git diff %s %s (in %s)", from, to, repoRoot), err, out, stderr)
+	}
+	return string(out), nil
 }
 
 func (g gitCLI) worktreeBelongsToRepo(ctx context.Context, repoRoot, path string) (bool, error) {

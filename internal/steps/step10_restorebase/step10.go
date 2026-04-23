@@ -36,17 +36,18 @@ var DefaultAgents = []contracts.AgentID{"a1", "a2", "a3"}
 
 // Input is the Runner entry point parameter set.
 type Input struct {
-	PR            int
-	BestBranch    string
-	PolicyBranch  string
-	HarnessFiles  bool
-	ExpectedRunID contracts.RunID // optional; empty disables the guard
-	RepoRoot      string          // clean absolute path to the managed repo
-	Repo          string          // optional expected "owner/name"; validated against repoRoot remote
-	RunCtx        internalio.RunContext
-	Agents        []contracts.AgentID // defaults to DefaultAgents when empty
-	Now           func() time.Time    // test hook; defaults to time.Now().UTC()
-	Logger        *slog.Logger
+	PR               int
+	BestBranch       string
+	PolicyBranch     string
+	TaskPromptSource string
+	HarnessFiles     bool
+	ExpectedRunID    contracts.RunID // optional; empty disables the guard
+	RepoRoot         string          // clean absolute path to the managed repo
+	Repo             string          // optional expected "owner/name"; validated against repoRoot remote
+	RunCtx           internalio.RunContext
+	Agents           []contracts.AgentID // defaults to DefaultAgents when empty
+	Now              func() time.Time    // test hook; defaults to time.Now().UTC()
+	Logger           *slog.Logger
 }
 
 // Result wraps the validated Step10Response.
@@ -109,6 +110,19 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 		}
 		baseSHA = persistedBaseSHA
 	}
+	var changedFiles []string
+	var diffText string
+	if includeDiffContext(normalizeTaskPromptSource(in.TaskPromptSource), usableLinkedIssues(pr.LinkedIssues)) {
+		diffFrom, diffTo := taskPromptDiffRange(pr, baseSHA)
+		changedFiles, err = r.Git.ChangedFiles(ctx, in.RepoRoot, diffFrom, diffTo)
+		if err != nil {
+			return Result{}, fmt.Errorf("step10: changed files for task brief: %w", err)
+		}
+		diffText, err = r.Git.Diff(ctx, in.RepoRoot, diffFrom, diffTo)
+		if err != nil {
+			return Result{}, fmt.Errorf("step10: diff for task brief: %w", err)
+		}
+	}
 	if in.HarnessFiles && strings.TrimSpace(in.PolicyBranch) != "" {
 		if err := policyrepo.HydrateFromBranch(ctx, in.RepoRoot, in.PolicyBranch, in.RunCtx.RunsBase); err != nil {
 			return Result{}, fmt.Errorf("step10: hydrate harness files from policy_branch=%s: %w", in.PolicyBranch, err)
@@ -119,8 +133,14 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-
-	prompt := ReconstructTaskPrompt(pr.Number, pr.Title, pr.Body, pr.LinkedIssues)
+	prompt := SynthesizeTaskBrief(in.TaskPromptSource, TaskBriefInput{
+		PR:           pr.Number,
+		Title:        pr.Title,
+		Body:         pr.Body,
+		Issues:       pr.LinkedIssues,
+		ChangedFiles: changedFiles,
+		Diff:         diffText,
+	})
 
 	pkg := contracts.TaskPackage{
 		SchemaVersion:           "1",
@@ -154,6 +174,16 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 		return Result{}, fmt.Errorf("step10: response validation: %w", err)
 	}
 	return Result{Response: resp}, nil
+}
+
+func taskPromptDiffRange(pr PRInfo, baseSHA string) (string, string) {
+	if pr.MergeCommitOID != "" {
+		return baseSHA, pr.MergeCommitOID
+	}
+	if pr.HeadRefOid != "" {
+		return baseSHA, pr.HeadRefOid
+	}
+	return baseSHA, baseSHA
 }
 
 func readPersistedBaseSHA(path string) (string, bool, error) {
