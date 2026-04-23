@@ -49,7 +49,7 @@ func TestIntegrationConcurrentRunsDifferentPRsSucceed(t *testing.T) {
 func TestIntegrationConcurrentSamePRSecondFailsWithPRLock(t *testing.T) {
 	requireIntegrationEnv(t)
 
-	env := newCLIIntegrationEnv(t, 2*time.Second)
+	env := newCLIIntegrationEnv(t, 5*time.Second)
 	bin := buildIntegrationBinary(t)
 
 	cmd1, stdout1, stderr1 := env.newRunCommand(bin, 42)
@@ -60,7 +60,7 @@ func TestIntegrationConcurrentSamePRSecondFailsWithPRLock(t *testing.T) {
 		}
 	})
 
-	time.Sleep(250 * time.Millisecond)
+	waitForPath(t, filepath.Join(env.runsBase, "pr-locks", "pr-42.lock"), 5*time.Second)
 
 	cmd2, stdout2, stderr2 := env.newRunCommand(bin, 42)
 	err := cmd2.Run()
@@ -324,6 +324,18 @@ func formatSleep(delay time.Duration) string {
 		return "0"
 	}
 	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.3f", delay.Seconds()), "0"), ".")
+}
+
+func waitForPath(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
 }
 
 func sha256String(value string) string {

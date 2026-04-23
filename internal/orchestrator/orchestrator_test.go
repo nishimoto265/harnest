@@ -151,6 +151,31 @@ func TestRun_DefaultStub_EndToEnd(t *testing.T) {
 	assert.Equal(t, contracts.StateKindCompleted, events[len(events)-1].Kind)
 }
 
+func TestRun_DefaultStub_EndToEnd_UsesNamespacedStateWhenEnabled(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repo.GitHub = "owner/repo"
+	cfg.Paths.NamespaceByRepo = true
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps.Step10 = stubStep10{}
+	orch.steps.Step20 = stubAgentSteps()
+	orch.steps.Step50 = stubAgentSteps()
+	orch.steps.Step70 = stubStep70{}
+
+	err = orch.Run(context.Background(), 78, RunOptions{
+		RunID: "2026-04-21-PR78-abcdef0",
+	})
+	require.NoError(t, err)
+
+	runsBase, err := cfg.RunsBase()
+	require.NoError(t, err)
+	worktreeBase, err := cfg.WorktreeBase()
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(filepath.Dir(cfg.Paths.Runs), "owner__repo", "runs"), runsBase)
+	assert.Equal(t, filepath.Join(filepath.Dir(cfg.Worktree.Base), "owner__repo", "worktrees"), worktreeBase)
+	assert.FileExists(t, filepath.Join(runsBase, "2026-04-21-PR78-abcdef0", "70", "decision.json"))
+}
+
 func TestRun_DefaultSteps_RealWiringWithFakeCLIs(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Repo.Root = repoRootFromTestFile(t)

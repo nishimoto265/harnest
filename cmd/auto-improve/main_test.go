@@ -909,6 +909,49 @@ func TestRunDetectLoopUsesConfiguredDefaultBranch(t *testing.T) {
 	assert.Equal(t, []int{101, 102}, stub.prs)
 }
 
+func TestRunDetectLoopUsesNamespacedProcessedPathWhenEnabled(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "config.yaml"), []byte(
+		"repo:\n"+
+			"  github: owner/repo\n"+
+			"  root: "+root+"\n"+
+			"  default_branch: develop\n"+
+			"  best_branch: auto-improve/best\n"+
+			"paths:\n"+
+			"  runs: "+runsBase+"\n"+
+			"  namespace_by_repo: true\n"+
+			"worktree:\n"+
+			"  base: "+worktreeBase+"\n",
+	), 0o644))
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	stub := &stubPipelineRunner{}
+	originalNewPipelineRunner := newPipelineRunner
+	originalDetectMergedPRs := detectMergedPRs
+	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
+		return stub, nil
+	}
+	detectMergedPRs = func(_ context.Context, cfg config.Config, processedPath string) ([]detect.MergedPR, error) {
+		assert.Equal(t, filepath.Join(root, "owner__repo", "runs", "processed.jsonl"), processedPath)
+		return []detect.MergedPR{{Number: 201}}, nil
+	}
+	t.Cleanup(func() {
+		newPipelineRunner = originalNewPipelineRunner
+		detectMergedPRs = originalDetectMergedPRs
+	})
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--detect-loop"})
+	require.NoError(t, cmd.Execute())
+	assert.Equal(t, []int{201}, stub.prs)
+}
+
 func TestSunsetCommandInvokesRunner(t *testing.T) {
 	originalRunSunsetTick := runSunsetTick
 	called := false
@@ -953,7 +996,6 @@ func writeTestConfig(t *testing.T, root, runsBase, worktreeBase string) {
 	t.Helper()
 	configPath := filepath.Join(root, "config.yaml")
 	content := "repo:\n" +
-		"  github: owner/repo\n" +
 		"  root: " + root + "\n" +
 		"  default_branch: main\n" +
 		"  best_branch: auto-improve/best\n" +
