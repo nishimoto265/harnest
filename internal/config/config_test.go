@@ -212,6 +212,108 @@ roles:
 	assert.Equal(t, "codex", profile.Binary)
 }
 
+func TestRunsBaseAndWorktreeBase_AreNamespacedByRepoSlugWhenEnabled(t *testing.T) {
+	cfg := Config{
+		Repo: RepoConfig{
+			GitHub: "Owner/Repo",
+			Root:   "/tmp/project",
+		},
+		Paths: PathsConfig{
+			Runs:            "/var/lib/auto-improve/runs",
+			NamespaceByRepo: true,
+		},
+		Worktree: WorktreeConfig{
+			Base: "/var/lib/auto-improve/worktrees",
+		},
+	}
+
+	runsBase, err := cfg.RunsBase()
+	require.NoError(t, err)
+	worktreeBase, err := cfg.WorktreeBase()
+	require.NoError(t, err)
+
+	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/runs"), runsBase)
+	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/worktrees"), worktreeBase)
+}
+
+func TestRunsBaseAndWorktreeBase_PreserveExplicitRepoScopedPaths(t *testing.T) {
+	cfg := Config{
+		Repo: RepoConfig{
+			GitHub: "owner/repo",
+			Root:   "/tmp/project",
+		},
+		Paths: PathsConfig{
+			Runs:            "/var/lib/auto-improve/owner__repo/runs",
+			NamespaceByRepo: true,
+		},
+		Worktree: WorktreeConfig{
+			Base: "/var/lib/auto-improve/owner__repo/worktrees",
+		},
+	}
+
+	runsBase, err := cfg.RunsBase()
+	require.NoError(t, err)
+	worktreeBase, err := cfg.WorktreeBase()
+	require.NoError(t, err)
+
+	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/runs"), runsBase)
+	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/worktrees"), worktreeBase)
+}
+
+func TestRunsBaseAndWorktreeBase_LeaveCustomLeafPathsUnchanged(t *testing.T) {
+	cfg := Config{
+		Repo: RepoConfig{
+			GitHub: "owner/repo",
+			Root:   "/tmp/project",
+		},
+		Paths: PathsConfig{
+			Runs:            "/var/lib/auto-improve/repo-a-state",
+			NamespaceByRepo: true,
+		},
+		Worktree: WorktreeConfig{
+			Base: "/var/lib/auto-improve/repo-a-wt",
+		},
+	}
+
+	runsBase, err := cfg.RunsBase()
+	require.NoError(t, err)
+	worktreeBase, err := cfg.WorktreeBase()
+	require.NoError(t, err)
+
+	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/repo-a-state"), runsBase)
+	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/repo-a-wt"), worktreeBase)
+}
+
+func TestRunsBaseAndWorktreeBase_PreserveExistingLegacyPathsWhenEnabled(t *testing.T) {
+	root := t.TempDir()
+	legacyRuns := filepath.Join(root, "runs")
+	legacyWorktrees := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(legacyRuns, 0o755))
+	require.NoError(t, os.MkdirAll(legacyWorktrees, 0o755))
+
+	cfg := Config{
+		Repo: RepoConfig{
+			GitHub: "owner/repo",
+			Root:   "/tmp/project",
+		},
+		Paths: PathsConfig{
+			Runs:            legacyRuns,
+			NamespaceByRepo: true,
+		},
+		Worktree: WorktreeConfig{
+			Base: legacyWorktrees,
+		},
+	}
+
+	runsBase, err := cfg.RunsBase()
+	require.NoError(t, err)
+	worktreeBase, err := cfg.WorktreeBase()
+	require.NoError(t, err)
+
+	assert.Equal(t, legacyRuns, runsBase)
+	assert.Equal(t, legacyWorktrees, worktreeBase)
+}
+
 func writeConfigFixture(t *testing.T, body string) string {
 	t.Helper()
 

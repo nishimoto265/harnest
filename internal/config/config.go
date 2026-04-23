@@ -19,6 +19,8 @@ const defaultConfigFile = "config.yaml"
 const (
 	DefaultRegistryHighThreshold     = 1501
 	DefaultRegistryCriticalThreshold = 2001
+	defaultRunsDirName               = "runs"
+	defaultWorktreesDirName          = "worktrees"
 )
 
 var requiredStepTimeoutKeys = []string{
@@ -82,9 +84,10 @@ type AgentsConfig struct {
 }
 
 type PathsConfig struct {
-	Runs          string `yaml:"runs"`
-	StateFile     string `yaml:"state_file"`
-	RulesRegistry string `yaml:"rules_registry"`
+	Runs            string `yaml:"runs"`
+	NamespaceByRepo bool   `yaml:"namespace_by_repo"`
+	StateFile       string `yaml:"state_file"`
+	RulesRegistry   string `yaml:"rules_registry"`
 }
 
 func LoadDefault() (Config, error) {
@@ -180,7 +183,11 @@ func (c Config) RunsBase() (string, error) {
 	if value == "" {
 		return "", errors.New("config: RunsBase is required")
 	}
-	return c.resolvePath(value)
+	resolved, err := c.resolvePath(value)
+	if err != nil {
+		return "", err
+	}
+	return c.namespaceStatePath(resolved, defaultRunsDirName), nil
 }
 
 func (c Config) WorktreeBase() (string, error) {
@@ -191,7 +198,11 @@ func (c Config) WorktreeBase() (string, error) {
 	if value == "" {
 		return "", errors.New("config: WorktreeBase is required")
 	}
-	return c.resolvePath(value)
+	resolved, err := c.resolvePath(value)
+	if err != nil {
+		return "", err
+	}
+	return c.namespaceStatePath(resolved, defaultWorktreesDirName), nil
 }
 
 func (c Config) PolicyBranch() (string, bool) {
@@ -199,6 +210,57 @@ func (c Config) PolicyBranch() (string, bool) {
 		return "", false
 	}
 	return c.Repo.PolicyBranch, true
+}
+
+func (c Config) namespaceStatePath(path, leaf string) string {
+	if !c.Paths.NamespaceByRepo {
+		return path
+	}
+	namespace, ok := c.repoStateNamespace()
+	if !ok {
+		return path
+	}
+	if filepath.Base(path) != leaf {
+		return path
+	}
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	parent := filepath.Dir(path)
+	if filepath.Base(parent) == namespace {
+		return path
+	}
+	return filepath.Join(parent, namespace, leaf)
+}
+
+func (c Config) repoStateNamespace() (string, bool) {
+	repo := strings.TrimSpace(c.Repo.GitHub)
+	if repo == "" {
+		return "", false
+	}
+	return sanitizeRepoNamespace(repo), true
+}
+
+func sanitizeRepoNamespace(repo string) string {
+	var b strings.Builder
+	b.Grow(len(repo) + 2)
+	lastSep := false
+	for _, r := range strings.ToLower(strings.TrimSpace(repo)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+			lastSep = false
+		case r == '/':
+			b.WriteString("__")
+			lastSep = false
+		default:
+			if !lastSep {
+				b.WriteRune('-')
+				lastSep = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-._")
 }
 
 func (c Config) ProcessedPath() (string, error) {
