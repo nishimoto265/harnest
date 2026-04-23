@@ -1,0 +1,277 @@
+package io
+
+import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	stdio "io"
+	"os"
+	"time"
+
+	"github.com/nishimoto265/auto-improve/internal/contracts"
+)
+
+type RegistryLine struct {
+	Offset int64
+	Sha256 string
+	Entry  contracts.RuleRegistryEntry
+}
+
+var registryBeforeAppendHook = func() error { return nil }
+
+func openTrackedFileNoFollowRetry(path string, flags int, perm os.FileMode) (*os.File, fileIdentity, error) {
+	file, identity, err := openTrackedFileNoFollow(path, flags, perm)
+	if os.IsNotExist(err) {
+		return openTrackedFileNoFollow(path, flags, perm)
+	}
+	return file, identity, err
+}
+
+func RegistryLines(path string) ([]RegistryLine, error) {
+	return readRegistryLines(path)
+}
+
+func AppendRegistryEntry(path string, entry contracts.RuleRegistryEntry) (contracts.RegistryAppendResult, error) {
+	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	lock, err := AcquireFileLock(registryLockPath(path))
+	if err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	defer func() {
+		_ = lock.Unlock()
+	}()
+
+	payload, err := marshalJSONLRecord(entry)
+	if err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	if err := ensureWritableParentDir(path); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	f, identity, err := openTrackedFileNoFollowRetry(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, defaultFilePerm)
+	if err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	defer f.Close()
+
+	lines, err := readRegistryLinesHandle(f)
+	if err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	expectedPrevHash, err := registryPrevHash(entry)
+	if err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	actualPrevHash := ""
+	if len(lines) > 0 {
+		actualPrevHash = lines[len(lines)-1].Sha256
+	}
+	if expectedPrevHash != actualPrevHash {
+		return contracts.RegistryAppendResult{}, fmt.Errorf("%w: expected_prev_hash=%q actual_prev_hash=%q", ErrRegistryCASMismatch, expectedPrevHash, actualPrevHash)
+	}
+	if err := registryBeforeAppendHook(); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	if err := ensurePathMatchesIdentity(path, identity); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+
+	offset, err := f.Seek(0, stdio.SeekEnd)
+	if err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	if _, err := f.Write(payload); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	if _, err := f.Write([]byte{'\n'}); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	if err := f.Sync(); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	if err := ensurePathMatchesIdentity(path, identity); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+
+	sum := sha256.Sum256(payload)
+	return contracts.RegistryAppendResult{
+		Offset: offset,
+		Sha256: hex.EncodeToString(sum[:]),
+	}, nil
+}
+
+func registryLockPath(path string) string {
+	return path + ".lock"
+}
+
+func BuildRuleIdempotencyIndexEntry(entry contracts.RuleRegistryEntry, result contracts.RegistryAppendResult) (contracts.RuleIdempotencyIndexEntry, error) {
+	key, at, err := registryIdempotencyFields(entry)
+	if err != nil {
+		return contracts.RuleIdempotencyIndexEntry{}, err
+	}
+	index := contracts.RuleIdempotencyIndexEntry{
+		IdempotencyKey: key,
+		RegistryOffset: result.Offset,
+		RegistrySha256: result.Sha256,
+		Kind:           entry.Kind,
+		At:             at,
+	}
+	if err := index.Validate(); err != nil {
+		return contracts.RuleIdempotencyIndexEntry{}, err
+	}
+	return index, nil
+}
+
+func AppendIdempotencyIndexEntry(path string, entry contracts.RuleIdempotencyIndexEntry) error {
+	return AppendJSONL(path, entry)
+}
+
+func RebuildIdempotencyIndex(registryPath, indexPath string) ([]contracts.RuleIdempotencyIndexEntry, error) {
+	lines, err := readRegistryLines(registryPath)
+	if err != nil {
+		return nil, err
+	}
+	entries, buffer, err := buildIdempotencyIndexBuffer(lines)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureWritableParentDir(indexPath); err != nil {
+		return nil, err
+	}
+	indexFile, identity, err := openTrackedFileNoFollowRetry(indexPath, os.O_CREATE|os.O_RDWR, defaultFilePerm)
+	if err != nil {
+		return nil, err
+	}
+	defer indexFile.Close()
+	if err := writeJSONLBufferHandle(indexPath, indexFile, identity, buffer); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func readRegistryLines(path string) ([]RegistryLine, error) {
+	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
+		return nil, err
+	}
+	f, err := openFileNoFollow(path, os.O_RDONLY, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	return readRegistryLinesHandle(f)
+}
+
+func readRegistryLinesHandle(f *os.File) ([]RegistryLine, error) {
+	if _, err := f.Seek(0, stdio.SeekStart); err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReader(f)
+	var (
+		lines  []RegistryLine
+		offset int64
+		lineNo int
+	)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) == 0 && err != nil {
+			if isEOF(err) {
+				break
+			}
+			return nil, err
+		}
+		lineNo++
+		line = trimJSONLLine(line)
+		if len(line) == 0 {
+			return nil, fmt.Errorf("registry line %d at offset %d: %w", lineNo, offset, contracts.ErrEmptyJSON)
+		}
+		if len(line)+1 > JSONLMaxLineBytes {
+			return nil, fmt.Errorf("registry line %d at offset %d: %w", lineNo, offset, ErrEntryTooLarge)
+		}
+		var entry contracts.RuleRegistryEntry
+		if decodeErr := contracts.DecodeStrictJSON(line, &entry); decodeErr != nil {
+			return nil, fmt.Errorf("registry line %d at offset %d: %w", lineNo, offset, decodeErr)
+		}
+		sum := sha256.Sum256(line)
+		lines = append(lines, RegistryLine{
+			Offset: offset,
+			Sha256: hex.EncodeToString(sum[:]),
+			Entry:  entry,
+		})
+		offset += int64(len(line) + 1)
+		if err != nil {
+			if isEOF(err) {
+				break
+			}
+			return nil, err
+		}
+	}
+	return lines, nil
+}
+
+func registryPrevHash(entry contracts.RuleRegistryEntry) (string, error) {
+	switch v := entry.Value.(type) {
+	case contracts.RuleRegistryAdded:
+		return v.PrevHash, nil
+	case *contracts.RuleRegistryAdded:
+		return v.PrevHash, nil
+	case contracts.RuleRegistryUpdated:
+		return v.PrevHash, nil
+	case *contracts.RuleRegistryUpdated:
+		return v.PrevHash, nil
+	case contracts.RuleRegistryRolledBack:
+		return v.PrevHash, nil
+	case *contracts.RuleRegistryRolledBack:
+		return v.PrevHash, nil
+	case contracts.RuleRegistryStatusChanged:
+		return v.PrevHash, nil
+	case *contracts.RuleRegistryStatusChanged:
+		return v.PrevHash, nil
+	case contracts.RuleRegistryArchived:
+		return v.PrevHash, nil
+	case *contracts.RuleRegistryArchived:
+		return v.PrevHash, nil
+	case contracts.RuleRegistryRestored:
+		return v.PrevHash, nil
+	case *contracts.RuleRegistryRestored:
+		return v.PrevHash, nil
+	default:
+		return "", ErrRegistryUnsupportedKind
+	}
+}
+
+func registryIdempotencyFields(entry contracts.RuleRegistryEntry) (string, time.Time, error) {
+	switch v := entry.Value.(type) {
+	case contracts.RuleRegistryAdded:
+		return v.IdempotencyKey, v.At, nil
+	case *contracts.RuleRegistryAdded:
+		return v.IdempotencyKey, v.At, nil
+	case contracts.RuleRegistryUpdated:
+		return v.IdempotencyKey, v.At, nil
+	case *contracts.RuleRegistryUpdated:
+		return v.IdempotencyKey, v.At, nil
+	case contracts.RuleRegistryRolledBack:
+		return v.TargetOpID, v.At, nil
+	case *contracts.RuleRegistryRolledBack:
+		return v.TargetOpID, v.At, nil
+	case contracts.RuleRegistryStatusChanged:
+		return v.OpID, v.At, nil
+	case *contracts.RuleRegistryStatusChanged:
+		return v.OpID, v.At, nil
+	case contracts.RuleRegistryArchived:
+		return v.OpID, v.At, nil
+	case *contracts.RuleRegistryArchived:
+		return v.OpID, v.At, nil
+	case contracts.RuleRegistryRestored:
+		return v.OpID, v.At, nil
+	case *contracts.RuleRegistryRestored:
+		return v.OpID, v.At, nil
+	default:
+		return "", time.Time{}, ErrRegistryUnsupportedKind
+	}
+}

@@ -1,0 +1,40 @@
+You are the {{ .Role }} judge for step30 pass1 scoring.
+
+Read these local files:
+- output_path: {{ .Input.OutputPath }}
+- rubric_path: {{ .Input.RubricPath }}
+
+Return ONLY one JSON object with this shape:
+{
+  "scores": [
+    {"dimension":"fidelity","score":0-100,"reason":"..."},
+    {"dimension":"correctness","score":0-100,"reason":"..."},
+    {"dimension":"maintainability","score":0-100,"reason":"..."},
+    {"dimension":"discipline","score":0-100,"reason":"..."},
+    {"dimension":"communication","score":0-100,"reason":"..."}
+  ],
+  "compliance": [
+    {"rule_id":"...","verdict":"compliant|violated|valid_exception|invalid_exception|missed|n_a","rationale":"..."}
+  ]
+}
+
+Rules:
+- Output JSON only. No markdown fences. No prose before or after the JSON.
+- Emit exactly one score row per required dimension.
+- Use concise reasons and rationales.
+- If a compliance rule list is provided below, emit one row for each rule_id in that list.
+- When compliance rule_ids are listed, use the matching `## Active Rules` section in the rubric to decide each verdict.
+
+Required dimensions:
+{{- range .Dimensions }}
+- {{ . }}
+{{- end }}
+
+{{- if .ComplianceRuleIDs }}
+Required compliance rule_ids:
+{{- range .ComplianceRuleIDs }}
+- {{ . }}
+{{- end }}
+{{- else }}
+No fixed compliance rule list was supplied. Read the rubric and emit compliance rows for the rules you can identify.
+{{- end }}

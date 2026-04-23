@@ -1,0 +1,368 @@
+{
+  "20-pass1/a1/manifest.json": {
+    "agent": "a1",
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch_name": "auto-improve/2026-04-21-PR43-abcdeff/pass1/a1",
+    "checklist_path": "20-pass1/a1/checklist-result.json",
+    "diff_path": "20-pass1/a1/diff.patch",
+    "finished_at": "__TIME__",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "kind": "success",
+    "pass": 1,
+    "prompt_version": "step20-implement.tmpl",
+    "run_id": "2026-04-21-PR43-abcdeff",
+    "schema_version": "1",
+    "session_path": "20-pass1/a1/session.jsonl",
+    "started_at": "__TIME__"
+  },
+  "20-pass1/a2/manifest.json": {
+    "agent": "a2",
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch_name": "auto-improve/2026-04-21-PR43-abcdeff/pass1/a2",
+    "checklist_path": "20-pass1/a2/checklist-result.json",
+    "diff_path": "20-pass1/a2/diff.patch",
+    "finished_at": "__TIME__",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "kind": "success",
+    "pass": 1,
+    "prompt_version": "step20-implement.tmpl",
+    "run_id": "2026-04-21-PR43-abcdeff",
+    "schema_version": "1",
+    "session_path": "20-pass1/a2/session.jsonl",
+    "started_at": "__TIME__"
+  },
+  "20-pass1/a3/manifest.json": {
+    "agent": "a3",
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch_name": "auto-improve/2026-04-21-PR43-abcdeff/pass1/a3",
+    "checklist_path": "20-pass1/a3/checklist-result.json",
+    "diff_path": "20-pass1/a3/diff.patch",
+    "finished_at": "__TIME__",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "kind": "success",
+    "pass": 1,
+    "prompt_version": "step20-implement.tmpl",
+    "run_id": "2026-04-21-PR43-abcdeff",
+    "schema_version": "1",
+    "session_path": "20-pass1/a3/session.jsonl",
+    "started_at": "__TIME__"
+  },
+  "30/done.marker": {
+    "completed_agents": [
+      "a1",
+      "a2",
+      "a3"
+    ],
+    "content_hashes": {
+      "compliance_final": "__HASH__",
+      "scores_final": "__HASH__"
+    },
+    "dimensions": [
+      "communication",
+      "correctness",
+      "discipline",
+      "fidelity",
+      "maintainability"
+    ],
+    "expected_counts": {
+      "compliance": 3,
+      "scores": 15
+    },
+    "raw_hashes": {
+      "compliance_raw": "__HASH__",
+      "scores_raw": "__HASH__"
+    },
+    "resolved_at": "__TIME__"
+  },
+  "40/candidates.json": {
+    "candidates": [
+      {
+        "candidate_id": "cand-forced-001",
+        "kind": "new",
+        "problem": "problem",
+        "proposed_body_path": "40/candidates/cand-forced-001.md",
+        "proposed_body_sha256": "__HASH__",
+        "rationale": "rationale",
+        "title": "Forced rule"
+      }
+    ],
+    "candidates_hash": "e5d731617df49c50f4c0d8a5e214bc626c3267edde9959110e6f8b28a15bdb40",
+    "created_at": "__TIME__",
+    "run_id": "2026-04-21-PR43-abcdeff",
+    "schema_version": "1"
+  },
+  "40/candidates/cand-forced-001.md": "# Forced rule\n\nUse explicit resource cleanup.",
+  "40/classification.jsonl": null,
+  "50-pass2/a1/manifest.json": {
+    "agent": "a1",
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch_name": "auto-improve/2026-04-21-PR43-abcdeff/pass2/a1",
+    "checklist_path": "50-pass2/a1/checklist-result.json",
+    "diff_path": "50-pass2/a1/diff.patch",
+    "finished_at": "__TIME__",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "kind": "success",
+    "pass": 2,
+    "prompt_version": "step50-implement-pass2.tmpl",
+    "run_id": "2026-04-21-PR43-abcdeff",
+    "schema_version": "1",
+    "session_path": "50-pass2/a1/session.jsonl",
+    "started_at": "__TIME__"
+  },
+  "50-pass2/a2/manifest.json": {
+    "agent": "a2",
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch_name": "auto-improve/2026-04-21-PR43-abcdeff/pass2/a2",
+    "checklist_path": "50-pass2/a2/checklist-result.json",
+    "diff_path": "50-pass2/a2/diff.patch",
+    "finished_at": "__TIME__",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "kind": "success",
+    "pass": 2,
+    "prompt_version": "step50-implement-pass2.tmpl",
+    "run_id": "2026-04-21-PR43-abcdeff",
+    "schema_version": "1",
+    "session_path": "50-pass2/a2/session.jsonl",
+    "started_at": "__TIME__"
+  },
+  "50-pass2/a3/manifest.json": {
+    "agent": "a3",
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch_name": "auto-improve/2026-04-21-PR43-abcdeff/pass2/a3",
+    "checklist_path": "50-pass2/a3/checklist-result.json",
+    "diff_path": "50-pass2/a3/diff.patch",
+    "finished_at": "__TIME__",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "kind": "success",
+    "pass": 2,
+    "prompt_version": "step50-implement-pass2.tmpl",
+    "run_id": "2026-04-21-PR43-abcdeff",
+    "schema_version": "1",
+    "session_path": "50-pass2/a3/session.jsonl",
+    "started_at": "__TIME__"
+  },
+  "60/done.marker": {
+    "completed_agents": [
+      "a1",
+      "a2",
+      "a3"
+    ],
+    "content_hashes": {
+      "compliance_final": "__HASH__",
+      "pairwise_final": "__HASH__",
+      "scores_final": "__HASH__"
+    },
+    "dimensions": [
+      "fidelity",
+      "correctness",
+      "maintainability",
+      "discipline",
+      "communication"
+    ],
+    "expected_counts": {
+      "compliance": 3,
+      "pairwise": 3,
+      "scores": 15
+    },
+    "raw_hashes": {
+      "compliance_raw": "__HASH__",
+      "scores_raw": "__HASH__"
+    },
+    "resolved_at": "__TIME__"
+  },
+  "60/pairwise.jsonl": [
+    {
+      "agent_a": "a1",
+      "agent_b": "a1",
+      "justification": "pass1_avg_tenths=820 pass2_avg_tenths=950",
+      "margin": "decisive",
+      "prompt_version": "phase0-stub",
+      "resolved_at": "__TIME__",
+      "rubric_version": "default",
+      "run_id": "2026-04-21-PR43-abcdeff",
+      "schema_version": "1",
+      "verdict_path": "single",
+      "winner": "B"
+    },
+    {
+      "agent_a": "a2",
+      "agent_b": "a2",
+      "justification": "pass1_avg_tenths=820 pass2_avg_tenths=950",
+      "margin": "decisive",
+      "prompt_version": "phase0-stub",
+      "resolved_at": "__TIME__",
+      "rubric_version": "default",
+      "run_id": "2026-04-21-PR43-abcdeff",
+      "schema_version": "1",
+      "verdict_path": "single",
+      "winner": "B"
+    },
+    {
+      "agent_a": "a3",
+      "agent_b": "a3",
+      "justification": "pass1_avg_tenths=820 pass2_avg_tenths=950",
+      "margin": "decisive",
+      "prompt_version": "phase0-stub",
+      "resolved_at": "__TIME__",
+      "rubric_version": "default",
+      "run_id": "2026-04-21-PR43-abcdeff",
+      "schema_version": "1",
+      "verdict_path": "single",
+      "winner": "B"
+    }
+  ],
+  "70/decision.json": {
+    "action": "adopt",
+    "best_sha_before": "dddddddddddddddddddddddddddddddddddddddd",
+    "candidates_hash": "e5d731617df49c50f4c0d8a5e214bc626c3267edde9959110e6f8b28a15bdb40",
+    "decided_at": "__TIME__",
+    "idempotency_key": "c718e69901653836acd32cdc04e1803f1ee3100d6830e76c325fd854c10a4ef6",
+    "registry_append_result": {
+      "offset": 0,
+      "sha256": "__HASH__"
+    },
+    "run_id": "2026-04-21-PR43-abcdeff",
+    "schema_version": "1",
+    "target_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "processed.jsonl": [
+    {
+      "at": "__TIME__",
+      "kind": "started",
+      "pr": 43,
+      "run_id": "2026-04-21-PR43-abcdeff",
+      "step": "10"
+    },
+    {
+      "at": "__TIME__",
+      "kind": "step_done",
+      "pr": 43,
+      "run_id": "2026-04-21-PR43-abcdeff",
+      "step": "10"
+    },
+    {
+      "at": "__TIME__",
+      "kind": "step_done",
+      "pr": 43,
+      "run_id": "2026-04-21-PR43-abcdeff",
+      "step": "20"
+    },
+    {
+      "at": "__TIME__",
+      "kind": "step_done",
+      "pr": 43,
+      "run_id": "2026-04-21-PR43-abcdeff",
+      "step": "30"
+    },
+    {
+      "at": "__TIME__",
+      "kind": "step_done",
+      "pr": 43,
+      "run_id": "2026-04-21-PR43-abcdeff",
+      "step": "40"
+    },
+    {
+      "at": "__TIME__",
+      "kind": "step_done",
+      "pr": 43,
+      "run_id": "2026-04-21-PR43-abcdeff",
+      "step": "50"
+    },
+    {
+      "at": "__TIME__",
+      "kind": "step_done",
+      "pr": 43,
+      "run_id": "2026-04-21-PR43-abcdeff",
+      "step": "60"
+    },
+    {
+      "at": "__TIME__",
+      "kind": "promoting",
+      "pr": 43,
+      "run_id": "2026-04-21-PR43-abcdeff",
+      "step": "70"
+    },
+    {
+      "at": "__TIME__",
+      "kind": "promoted",
+      "pr": 43,
+      "run_id": "2026-04-21-PR43-abcdeff",
+      "step": "70"
+    }
+  ],
+  "rules-registry.jsonl": [
+    {
+      "at": "__TIME__",
+      "by_run_id": "2026-04-21-PR43-abcdeff",
+      "idempotency_key": "82efefea447aec2c8a2a500b218b82b4a7d8321479ba1ed17d96ffe28f0632af",
+      "kind": "added",
+      "prev_hash": "",
+      "rule_id": "r-bf1d22bf4a85",
+      "rule_path": "rules/r-bf1d22bf4a85.md",
+      "schema_version": "1",
+      "sha256": "__HASH__",
+      "version_seq": 1
+    }
+  ],
+  "rules/r-bf1d22bf4a85.md": "# Forced rule\n\nUse explicit resource cleanup.",
+  "task-package.json": {
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "best_branch": "best",
+    "created_at": "__TIME__",
+    "pr": 43,
+    "reconstructed_task_prompt": "# PR #43: Stub PR 43\n\nStub body\n",
+    "run_id": "2026-04-21-PR43-abcdeff",
+    "schema_version": "1",
+    "title": "Stub PR 43",
+    "worktrees": [
+      {
+        "agent": "a1",
+        "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass1/a1",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "pass": 1,
+        "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass1-a1"
+      },
+      {
+        "agent": "a2",
+        "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass1/a2",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "pass": 1,
+        "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass1-a2"
+      },
+      {
+        "agent": "a3",
+        "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass1/a3",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "pass": 1,
+        "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass1-a3"
+      },
+      {
+        "agent": "a1",
+        "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass2/a1",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "pass": 2,
+        "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass2-a1"
+      },
+      {
+        "agent": "a2",
+        "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass2/a2",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "pass": 2,
+        "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass2-a2"
+      },
+      {
+        "agent": "a3",
+        "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass2/a3",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "pass": 2,
+        "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass2-a3"
+      }
+    ]
+  }
+}

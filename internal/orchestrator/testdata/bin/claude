@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+cat > checklist-result.json <<EOF
+{"schema_version":"1","run_id":"${AUTO_IMPROVE_RUN_ID}","pass":${AUTO_IMPROVE_PASS},"agent":"${AUTO_IMPROVE_AGENT}","items":[]}
+EOF
+
+printf 'generated change\n' > "generated-${AUTO_IMPROVE_PASS}-${AUTO_IMPROVE_AGENT}.txt"
+
+printf '{"event":"ok"}\n'

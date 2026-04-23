@@ -1,0 +1,17 @@
+# Copy to agents.yaml and edit for your runtime.
+
+profiles:
+  claude:
+    provider: claude
+    binary: claude
+  codex:
+    provider: codex
+    binary: codex
+  stub:
+    provider: stub
+
+roles:
+  implementer: claude
+  judge_primary: stub
+  judge_secondary: stub
+  judge_arbiter: stub
