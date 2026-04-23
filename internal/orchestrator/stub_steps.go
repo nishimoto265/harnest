@@ -147,16 +147,17 @@ func (a step10Adapter) Run(ctx context.Context, run *StepRunContext) error {
 		HarnessFiles:  true,
 	}
 	result, err := a.runner.Run(ctx, step10restorebase.Input{
-		PR:            run.PR,
-		BestBranch:    run.Config.Repo.BestBranch,
-		PolicyBranch:  run.Config.Repo.PolicyBranch,
-		HarnessFiles:  true,
-		ExpectedRunID: run.IO.RunID,
-		RepoRoot:      repoRoot,
-		Repo:          run.Config.Repo.GitHub,
-		RunCtx:        run.IO,
-		Agents:        defaultAgents,
-		Logger:        run.Logger,
+		PR:               run.PR,
+		BestBranch:       run.Config.Repo.BestBranch,
+		PolicyBranch:     run.Config.Repo.PolicyBranch,
+		TaskPromptSource: run.Config.TaskPromptSource(),
+		HarnessFiles:     true,
+		ExpectedRunID:    run.IO.RunID,
+		RepoRoot:         repoRoot,
+		Repo:             run.Config.Repo.GitHub,
+		RunCtx:           run.IO,
+		Agents:           defaultAgents,
+		Logger:           run.Logger,
 	})
 	if err != nil {
 		return err

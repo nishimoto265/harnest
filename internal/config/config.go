@@ -44,10 +44,11 @@ var defaultStepTimeouts = map[string]int{
 }
 
 type Config struct {
-	Repo     RepoConfig     `yaml:"repo"`
-	Worktree WorktreeConfig `yaml:"worktree"`
-	Agents   AgentsConfig   `yaml:"agents"`
-	Paths    PathsConfig    `yaml:"paths"`
+	Repo       RepoConfig       `yaml:"repo"`
+	Worktree   WorktreeConfig   `yaml:"worktree"`
+	Agents     AgentsConfig     `yaml:"agents"`
+	Paths      PathsConfig      `yaml:"paths"`
+	TaskPrompt TaskPromptConfig `yaml:"task_prompt"`
 
 	RunsBasePath              string         `yaml:"runs_base"`
 	WorktreeBasePath          string         `yaml:"worktree_base"`
@@ -87,6 +88,10 @@ type PathsConfig struct {
 	Runs          string `yaml:"runs"`
 	StateFile     string `yaml:"state_file"`
 	RulesRegistry string `yaml:"rules_registry"`
+}
+
+type TaskPromptConfig struct {
+	Source string `yaml:"source"`
 }
 
 func LoadDefault() (Config, error) {
@@ -150,6 +155,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Agents.JudgeSecondary == "" {
 		c.Agents.JudgeSecondary = "codex"
+	}
+	if c.TaskPrompt.Source == "" {
+		c.TaskPrompt.Source = "auto"
 	}
 	if c.RegistryHighThreshold == 0 {
 		c.RegistryHighThreshold = DefaultRegistryHighThreshold
@@ -372,17 +380,26 @@ func (c Config) Validate() error {
 	}
 
 	type validationView struct {
-		RegistryHighThreshold     int `validate:"gt=0"`
-		RegistryCriticalThreshold int `validate:"gt=0"`
-		PreflightTimeoutSec       int `validate:"omitempty,gt=0"`
-		RescueMaxRetries          int `validate:"omitempty,gt=0"`
+		RegistryHighThreshold     int    `validate:"gt=0"`
+		RegistryCriticalThreshold int    `validate:"gt=0"`
+		PreflightTimeoutSec       int    `validate:"omitempty,gt=0"`
+		RescueMaxRetries          int    `validate:"omitempty,gt=0"`
+		TaskPromptSource          string `validate:"required,oneof=auto issue pr diff_synth"`
 	}
 	return validation.Instance().Struct(validationView{
 		RegistryHighThreshold:     c.RegistryHighThreshold,
 		RegistryCriticalThreshold: c.RegistryCriticalThreshold,
 		PreflightTimeoutSec:       c.PreflightTimeoutSec,
 		RescueMaxRetries:          c.RescueMaxRetries,
+		TaskPromptSource:          c.TaskPromptSource(),
 	})
+}
+
+func (c Config) TaskPromptSource() string {
+	if strings.TrimSpace(c.TaskPrompt.Source) == "" {
+		return "auto"
+	}
+	return c.TaskPrompt.Source
 }
 
 func (c *Config) loadAgentFile() error {

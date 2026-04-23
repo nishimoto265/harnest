@@ -10,6 +10,8 @@ paths:
   runs: "/abs/path/to/auto-improve-state/runs" # Durable absolute directory for per-run artifacts.
 worktree:
   base: "/abs/path/to/auto-improve-state/worktrees" # Durable absolute directory for git worktrees.
+task_prompt:
+  source: "auto" # auto | issue | pr | diff_synth
 agent_config_path: "./agents.yaml" # Optional; defaults to ./agents.yaml when present, otherwise legacy role defaults.
 claude_cli_path: "claude" # Claude CLI executable path or command name on PATH.
 codex_cli_path: "codex" # Codex CLI executable path or command name on PATH.
