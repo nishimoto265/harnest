@@ -221,7 +221,11 @@ func (c ghCLI) issueView(ctx context.Context, number int, repo string) (LinkedIs
 }
 
 func remainingLinkedIssuePromptBudget(pr int, title, body string) int {
-	budget := reconstructedPromptMaxBytes - len(ReconstructTaskPrompt(pr, title, body, nil))
+	budget := reconstructedPromptMaxBytes - len(SynthesizeTaskBrief(string(TaskPromptSourceIssue), TaskBriefInput{
+		PR:    pr,
+		Title: title,
+		Body:  body,
+	}))
 	if budget < 0 {
 		return 0
 	}
@@ -229,5 +233,12 @@ func remainingLinkedIssuePromptBudget(pr int, title, body string) int {
 }
 
 func linkedIssuePromptBytes(issue LinkedIssue) int {
-	return len(ReconstructTaskPrompt(1, "placeholder", "", []LinkedIssue{issue})) - len(ReconstructTaskPrompt(1, "placeholder", "", nil))
+	return len(SynthesizeTaskBrief(string(TaskPromptSourceIssue), TaskBriefInput{
+		PR:     1,
+		Title:  "placeholder",
+		Issues: []LinkedIssue{issue},
+	})) - len(SynthesizeTaskBrief(string(TaskPromptSourceIssue), TaskBriefInput{
+		PR:    1,
+		Title: "placeholder",
+	}))
 }

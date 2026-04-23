@@ -16,6 +16,7 @@ package step10restorebase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -110,17 +111,25 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 		}
 		baseSHA = persistedBaseSHA
 	}
+	mode := normalizeTaskPromptSource(in.TaskPromptSource)
+	usableIssues := usableLinkedIssues(pr.LinkedIssues)
 	var changedFiles []string
 	var diffText string
-	if includeDiffContext(normalizeTaskPromptSource(in.TaskPromptSource), usableLinkedIssues(pr.LinkedIssues)) {
-		diffFrom, diffTo := taskPromptDiffRange(pr, baseSHA)
-		changedFiles, err = r.Git.ChangedFiles(ctx, in.RepoRoot, diffFrom, diffTo)
-		if err != nil {
-			return Result{}, fmt.Errorf("step10: changed files for task brief: %w", err)
-		}
-		diffText, err = r.Git.Diff(ctx, in.RepoRoot, diffFrom, diffTo)
-		if err != nil {
-			return Result{}, fmt.Errorf("step10: diff for task brief: %w", err)
+	if includeDiffContext(mode, usableIssues) {
+		diffFrom, diffTo, ok := taskPromptDiffRange(pr, baseSHA)
+		if !ok {
+			if mode == TaskPromptSourceDiffSynth {
+				return Result{}, errors.New("step10: diff_synth requires an immutable merged diff source")
+			}
+		} else {
+			changedFiles, err = r.Git.ChangedFiles(ctx, in.RepoRoot, diffFrom, diffTo)
+			if err != nil {
+				return Result{}, fmt.Errorf("step10: changed files for task brief: %w", err)
+			}
+			diffText, err = r.Git.Diff(ctx, in.RepoRoot, diffFrom, diffTo)
+			if err != nil {
+				return Result{}, fmt.Errorf("step10: diff for task brief: %w", err)
+			}
 		}
 	}
 	if in.HarnessFiles && strings.TrimSpace(in.PolicyBranch) != "" {
@@ -176,14 +185,11 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 	return Result{Response: resp}, nil
 }
 
-func taskPromptDiffRange(pr PRInfo, baseSHA string) (string, string) {
+func taskPromptDiffRange(pr PRInfo, baseSHA string) (string, string, bool) {
 	if pr.MergeCommitOID != "" {
-		return baseSHA, pr.MergeCommitOID
+		return baseSHA, pr.MergeCommitOID, true
 	}
-	if pr.HeadRefOid != "" {
-		return baseSHA, pr.HeadRefOid
-	}
-	return baseSHA, baseSHA
+	return "", "", false
 }
 
 func readPersistedBaseSHA(path string) (string, bool, error) {

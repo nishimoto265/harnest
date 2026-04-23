@@ -114,10 +114,10 @@ func SynthesizeTaskBrief(source string, input TaskBriefInput) string {
 	if len(changedNonTests) > 0 {
 		b.WriteString("- Update the affected implementation files as needed to satisfy the task brief.\n")
 	}
-	if includeIssues(mode, input.Issues) {
+	if includeIssues(mode, usableIssues) {
 		b.WriteString("- Preserve the user-visible behavior and constraints described by the linked issues.\n")
 	}
-	if includeDiffContext(mode, input.Issues) {
+	if includeDiffContext(mode, usableIssues) {
 		b.WriteString("- Use the changed file list and diff excerpt as evidence of intended behavior, not as step-by-step instructions.\n")
 	}
 
@@ -169,9 +169,7 @@ func SynthesizeTaskBrief(source string, input TaskBriefInput) string {
 			}
 		}
 		if trimmed := strings.TrimSpace(input.Diff); trimmed != "" {
-			b.WriteString("\n### Diff Excerpt\n```diff\n")
-			b.WriteString(strings.TrimRight(truncateUTF8Bytes(trimmed, diffExcerptMaxBytes), "\n"))
-			b.WriteString("\n```\n")
+			b.WriteString(renderDiffExcerpt(trimmed, b.Len()))
 		}
 	}
 
@@ -307,4 +305,20 @@ func looksLikeTestFile(path string) bool {
 	default:
 		return false
 	}
+}
+
+func renderDiffExcerpt(diff string, currentLen int) string {
+	const wrapperOverhead = len("\n### Diff Excerpt\n```diff\n\n```\n")
+	remaining := reconstructedPromptMaxBytes - currentLen - wrapperOverhead
+	if remaining <= 0 {
+		return ""
+	}
+	if remaining > diffExcerptMaxBytes {
+		remaining = diffExcerptMaxBytes
+	}
+	body := strings.TrimRight(truncateUTF8Bytes(diff, remaining), "\n")
+	if body == "" {
+		return ""
+	}
+	return "\n### Diff Excerpt\n```diff\n" + body + "\n```\n"
 }
