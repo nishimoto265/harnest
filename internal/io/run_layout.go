@@ -305,26 +305,16 @@ func validatePersistedWorktreeAllocation(runID contracts.RunID, allocation contr
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("%w: worktree_base=%q path=%q", ErrWorktreePathEscapesBase, worktreeBase, allocation.Path)
 	}
-	if !persistedWorktreePathMatches(runID, allocation) {
+	if !persistedWorktreePathMatches(runID, allocation, worktreeBase) {
 		wantBase := fmt.Sprintf("%s-pass%d-%s", runID, allocation.Pass, allocation.Agent)
-		return fmt.Errorf("io: persisted worktree path mismatch: got=%q want=%q", allocation.Path, filepath.Join(worktreeBase, wantBase))
+		return fmt.Errorf("%w: persisted worktree path mismatch: got=%q want=%q", ErrWorktreeBaseMismatch, allocation.Path, filepath.Join(worktreeBase, wantBase))
 	}
 	return nil
 }
 
-func persistedWorktreePathMatches(runID contracts.RunID, allocation contracts.WorktreeAllocation) bool {
-	base := filepath.Base(allocation.Path)
-	if base == fmt.Sprintf("%s-pass%d-%s", runID, allocation.Pass, allocation.Agent) {
-		return true
-	}
-	if base == fmt.Sprintf("pass%d-%s", allocation.Pass, allocation.Agent) {
-		return true
-	}
-	parent := filepath.Base(filepath.Dir(allocation.Path))
-	if base == string(allocation.Agent) && parent == fmt.Sprintf("pass%d", allocation.Pass) {
-		return true
-	}
-	return base == fmt.Sprintf("%d", allocation.Pass) && parent == string(allocation.Agent)
+func persistedWorktreePathMatches(runID contracts.RunID, allocation contracts.WorktreeAllocation, worktreeBase string) bool {
+	want := filepath.Join(worktreeBase, fmt.Sprintf("%s-pass%d-%s", runID, allocation.Pass, allocation.Agent))
+	return sameCanonicalPath(allocation.Path, want)
 }
 
 func validateManifestIdentity(manifest contracts.Manifest, runID contracts.RunID, pass int, agent contracts.AgentID) error {

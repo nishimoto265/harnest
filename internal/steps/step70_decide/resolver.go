@@ -142,7 +142,7 @@ func resolveWinningAgent(runCtx internalio.RunContext) (contracts.AgentID, bool,
 func (r FilesystemResolver) buildRegistryEntry(runCtx internalio.RunContext, candidate contracts.Candidate, registryLines []registryLine, idempotencyKey string, at time.Time) (contracts.RuleRegistryEntry, error) {
 	ruleID := candidate.TargetRuleID
 	if candidate.Kind == contracts.CandidateKindNew {
-		ruleID = "r-" + candidate.CandidateID
+		ruleID = generatedRuleID(candidate.CandidateID)
 	}
 	if ruleID == "" {
 		return contracts.RuleRegistryEntry{}, fmt.Errorf("step70: missing rule_id for candidate %s", candidate.CandidateID)
@@ -196,6 +196,11 @@ func (r FilesystemResolver) buildRegistryEntry(runCtx internalio.RunContext, can
 	default:
 		return contracts.RuleRegistryEntry{}, fmt.Errorf("step70: unsupported candidate kind=%q", candidate.Kind)
 	}
+}
+
+func generatedRuleID(candidateID string) string {
+	sum := sha256.Sum256([]byte(candidateID))
+	return "r-" + hex.EncodeToString(sum[:])[:12]
 }
 
 func latestRuleSha256(lines []registryLine, ruleID string) (string, error) {

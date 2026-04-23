@@ -234,6 +234,39 @@ func TestStep30Score_ResumeRerunsWhenPromptVersionChanges(t *testing.T) {
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
 }
 
+// step30 appends new version rows without truncating old rows, so a valid
+// resume must inspect the collapsed latest rows rather than rejecting the
+// file because historical old-version rows still exist on disk.
+func TestStep30Score_IgnoresHistoricalOldVersionsAfterAppendOnlyRerun(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			if role == contracts.JudgeRoleSecondary {
+				score = 79
+			}
+			return makeJudgeOutput(input, role, score, []ruleVerdict{{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant}})
+		},
+	}
+
+	first := New(WithPanelProvider(provider), WithPromptVersion("prompt-v1"))
+	require.NoError(t, first.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	provider.reset()
+	second := New(WithPanelProvider(provider), WithPromptVersion("prompt-v2"))
+	require.NoError(t, second.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
+
+	provider.reset()
+	third := New(WithPanelProvider(provider), WithPromptVersion("prompt-v2"))
+	require.NoError(t, third.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	assert.Zero(t, provider.calls[contracts.JudgeRolePrimary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleArbiter])
+}
+
 func TestStep30Score_FailsClosedOnMalformedManifest(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
 	manifestPath, err := runCtx.ManifestPath(1, "a1")

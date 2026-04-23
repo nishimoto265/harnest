@@ -3,12 +3,14 @@ package preflight
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/config"
 )
 
@@ -80,10 +82,10 @@ func (c Checker) Check(ctx context.Context, cfg config.Config) PreflightResult {
 
 	failures = appendFailure(failures, c.checkVersion(ctx, "git", "git", version{major: 2, minor: 35}, "--version"))
 	failures = appendFailure(failures, c.checkVersion(ctx, "gh", "gh", version{major: 2, minor: 40}, "--version"))
+	failures = appendFailure(failures, c.checkBinary("curl", "curl"))
 	failures = appendFailure(failures, c.checkVersion(ctx, "jq", "jq", version{major: 1, minor: 6}, "--version"))
 	failures = appendFailure(failures, c.checkVersion(ctx, "yq", "yq", version{major: 4, minor: 0}, "--version"))
-	failures = appendFailure(failures, c.checkBinary(cfg.ClaudeBinary(), "claude"))
-	failures = appendFailure(failures, c.checkBinary(cfg.CodexBinary(), "codex"))
+	failures = append(failures, c.checkAgentBinaries(cfg)...)
 	failures = appendFailure(failures, c.checkGHAuth(ctx))
 
 	if runsBase != "" {
@@ -94,6 +96,28 @@ func (c Checker) Check(ctx context.Context, cfg config.Config) PreflightResult {
 	}
 	if promotionLockPath != "" {
 		failures = appendFailure(failures, checkCreatableFile("promotion.lock", promotionLockPath))
+	}
+	if cfg.Repo.GitHub == "" {
+		failures = append(failures, Failure{Name: "repo.github", Detail: "config: repo.github is required"})
+	}
+	if cfg.Repo.DefaultBranch == "" {
+		failures = append(failures, Failure{Name: "repo.default_branch", Detail: "config: repo.default_branch is required"})
+	}
+	if cfg.Repo.BestBranch == "" {
+		failures = append(failures, Failure{Name: "repo.best_branch", Detail: "config: repo.best_branch is required"})
+	}
+	if policyBranch, ok := cfg.PolicyBranch(); ok && policyBranch == cfg.Repo.BestBranch {
+		failures = append(failures, Failure{Name: "repo.policy_branch", Detail: "config: repo.policy_branch must be distinct from repo.best_branch"})
+	}
+	repoRoot, err := cfg.RepoRoot()
+	if err != nil {
+		failures = append(failures, Failure{Name: "repo.root", Detail: err.Error()})
+	} else if cfg.Repo.BestBranch != "" {
+		failures = appendFailure(failures, c.checkRepoSlugMatches(ctx, repoRoot, cfg.Repo.GitHub))
+		failures = appendFailure(failures, c.checkRemoteBranch(ctx, repoRoot, cfg.Repo.BestBranch))
+		if policyBranch, ok := cfg.PolicyBranch(); ok {
+			failures = appendFailure(failures, c.checkRemoteBranchNamed(ctx, repoRoot, policyBranch, "repo.policy_branch"))
+		}
 	}
 
 	return PreflightResult{
@@ -135,6 +159,35 @@ func (c Checker) checkBinary(binary string, failureName string) *Failure {
 	return nil
 }
 
+func (c Checker) checkAgentBinaries(cfg config.Config) []Failure {
+	failures := make([]Failure, 0, 4)
+	seen := make(map[string]struct{})
+	for _, role := range []agents.Role{
+		agents.RoleImplementer,
+		agents.RoleJudgePrimary,
+		agents.RoleJudgeSecondary,
+		agents.RoleJudgeArbiter,
+	} {
+		profile, err := cfg.AgentProfile(role)
+		if err != nil {
+			failures = append(failures, Failure{Name: string(role), Detail: err.Error()})
+			continue
+		}
+		if profile.Provider == agents.ProviderStub || profile.Provider == agents.ProviderStubViolation || profile.Provider == agents.ProviderStubAdopt || profile.Binary == "" {
+			continue
+		}
+		key := string(profile.Provider) + ":" + profile.Binary
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if failure := c.checkBinary(profile.Binary, profile.Binary); failure != nil {
+			failures = append(failures, *failure)
+		}
+	}
+	return failures
+}
+
 func (c Checker) checkGHAuth(ctx context.Context) *Failure {
 	resolved, err := c.deps.LookPath("gh")
 	if err != nil {
@@ -149,6 +202,78 @@ func (c Checker) checkGHAuth(ctx context.Context) *Failure {
 		return &Failure{Name: "gh-auth", Detail: detail}
 	}
 	return nil
+}
+
+func (c Checker) checkRemoteBranch(ctx context.Context, repoRoot, branch string) *Failure {
+	return c.checkRemoteBranchNamed(ctx, repoRoot, branch, "repo.best_branch")
+}
+
+func (c Checker) checkRemoteBranchNamed(ctx context.Context, repoRoot, branch, failureName string) *Failure {
+	resolved, err := c.deps.LookPath("git")
+	if err != nil {
+		return &Failure{Name: failureName, Detail: err.Error()}
+	}
+	output, err := c.deps.Run(ctx, resolved, "-C", repoRoot, "ls-remote", "--heads", "origin", branch)
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return &Failure{Name: failureName, Detail: detail}
+	}
+	if strings.TrimSpace(string(output)) == "" {
+		return &Failure{Name: failureName, Detail: fmt.Sprintf("config: %s %q was not found on origin", failureName, branch)}
+	}
+	return nil
+}
+
+func (c Checker) checkRepoSlugMatches(ctx context.Context, repoRoot, configured string) *Failure {
+	if strings.TrimSpace(configured) == "" {
+		return nil
+	}
+	resolved, err := c.deps.LookPath("git")
+	if err != nil {
+		return &Failure{Name: "repo.github", Detail: err.Error()}
+	}
+	output, err := c.deps.Run(ctx, resolved, "-C", repoRoot, "remote", "get-url", "origin")
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return &Failure{Name: "repo.github", Detail: detail}
+	}
+	slug, err := repoSlugFromRemoteURL(strings.TrimSpace(string(output)))
+	if err != nil {
+		return &Failure{Name: "repo.github", Detail: err.Error()}
+	}
+	if !strings.EqualFold(slug, configured) {
+		return &Failure{Name: "repo.github", Detail: fmt.Sprintf("config: repo.github=%q does not match origin=%q", configured, slug)}
+	}
+	return nil
+}
+
+func repoSlugFromRemoteURL(remoteURL string) (string, error) {
+	if remoteURL == "" {
+		return "", fmt.Errorf("origin remote url is empty")
+	}
+	if strings.HasPrefix(remoteURL, "git@") {
+		parts := strings.SplitN(remoteURL, ":", 2)
+		if len(parts) != 2 || parts[1] == "" {
+			return "", fmt.Errorf("could not parse git remote url: %q", remoteURL)
+		}
+		return strings.TrimSuffix(strings.Trim(parts[1], "/"), ".git"), nil
+	}
+	parsed, err := url.Parse(remoteURL)
+	if err != nil {
+		return "", fmt.Errorf("could not parse git remote url %q: %w", remoteURL, err)
+	}
+	path := strings.Trim(parsed.Path, "/")
+	path = strings.TrimSuffix(path, ".git")
+	if path == "" {
+		return "", fmt.Errorf("could not parse git remote url: %q", remoteURL)
+	}
+	return path, nil
 }
 
 func checkWritableDirectory(name string, path string) *Failure {

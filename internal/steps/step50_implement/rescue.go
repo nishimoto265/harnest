@@ -19,6 +19,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
@@ -388,7 +389,7 @@ func writeCommitBundle(ctx context.Context, repoPath, rescueDir, expectedBaseSHA
 		commits := strings.Fields(string(revListOutput))
 		if len(commits) == 0 {
 			bundlePath := filepath.Join(rescueDir, "commits.bundle")
-			if err := writeAtomicImpl(bundlePath, nil); err != nil {
+			if err := internalio.WriteAtomic(bundlePath, nil); err != nil {
 				return 0, "", err
 			}
 			return 0, agentrunner.RescueBundleModeNone, nil
@@ -521,7 +522,7 @@ func copyUntrackedFilesWithBudget(ctx context.Context, repoPath, rescueDir strin
 		})
 	}
 	symlinkPath := filepath.Join(rescueDir, "untracked-symlinks.txt")
-	if err := writeAtomicImpl(symlinkPath, []byte(strings.Join(skipLog, "\n"))); err != nil {
+	if err := internalio.WriteAtomic(symlinkPath, []byte(strings.Join(skipLog, "\n"))); err != nil {
 		return nil, err
 	}
 	if err := recordRescueArtifact(budget, symlinkPath, "untracked-symlinks.txt"); err != nil {
@@ -548,7 +549,7 @@ func writeIgnoredList(ctx context.Context, repoPath, dest string) error {
 		}
 		lines = append(lines, strconv.Quote(entry))
 	}
-	return writeAtomicImpl(dest, []byte(strings.Join(lines, "\n")))
+	return internalio.WriteAtomic(dest, []byte(strings.Join(lines, "\n")))
 }
 
 func fileDigest(path string) (string, error) {

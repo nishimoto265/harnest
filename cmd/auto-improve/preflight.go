@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/preflight"
@@ -18,7 +20,9 @@ func newPreflightCmd() *cobra.Command {
 				return commandExitError{code: 2, msg: err.Error()}
 			}
 
-			result := preflight.New().Check(cmd.Context(), cfg)
+			checkCtx, cancel := withPreflightTimeout(cmd.Context(), cfg)
+			defer cancel()
+			result := preflight.New().Check(checkCtx, cfg)
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
 			if err := enc.Encode(result); err != nil {
@@ -30,4 +34,11 @@ func newPreflightCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func withPreflightTimeout(ctx context.Context, cfg config.Config) (context.Context, context.CancelFunc) {
+	if cfg.PreflightTimeoutSec <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, time.Duration(cfg.PreflightTimeoutSec)*time.Second)
 }

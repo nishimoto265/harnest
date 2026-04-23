@@ -649,7 +649,10 @@ func (s *resumeAgentState) expectedComplianceRuleIDs() map[string]struct{} {
 	return rules
 }
 
-func (s *resumeAgentState) arbiterCompleteFor(primaryCompliance []contracts.RawComplianceEntry, outputSha, rubricVersion, promptVersion string) bool {
+func (s *resumeAgentState) arbiterCompleteFor(
+	primaryCompliance []contracts.RawComplianceEntry,
+	outputSha, rubricVersion, promptVersion string,
+) bool {
 	if !hasAllDimensions(s.rawScores[contracts.JudgeRoleArbiter]) {
 		return false
 	}
@@ -801,34 +804,25 @@ func step30VersionsMatch(paths stepPathsResult, rubricVersion, promptVersion str
 	if err != nil {
 		return false, err
 	}
-	for _, row := range scoreRaw {
-		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
-			return false, nil
-		}
-	}
-	for _, row := range complianceRaw {
-		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
-			return false, nil
-		}
-	}
-	for _, row := range scoreFinal {
-		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
-			return false, nil
-		}
-	}
-	for _, row := range complianceFinal {
-		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
-			return false, nil
-		}
-	}
-	return true, nil
+	return scorecore.RowsMatchVersion(scorecore.CollapseRawScores(scoreRaw), func(row contracts.RawScoreEntry) (string, string) {
+		return row.RubricVersion, row.PromptVersion
+	}, rubricVersion, promptVersion) &&
+		scorecore.RowsMatchVersion(scorecore.CollapseRawCompliance(complianceRaw), func(row contracts.RawComplianceEntry) (string, string) {
+			return row.RubricVersion, row.PromptVersion
+		}, rubricVersion, promptVersion) &&
+		scorecore.RowsMatchVersion(scorecore.CollapseFinalScores(scoreFinal), func(row contracts.ScoreEntry) (string, string) {
+			return row.RubricVersion, row.PromptVersion
+		}, rubricVersion, promptVersion) &&
+		scorecore.RowsMatchVersion(scorecore.CollapseFinalCompliance(complianceFinal), func(row contracts.ComplianceEntry) (string, string) {
+			return row.RubricVersion, row.PromptVersion
+		}, rubricVersion, promptVersion), nil
 }
 
 func (s *Step) resolveRubricPath(runCtx internalio.RunContext) (string, error) {
 	if s.rubricPathFn != nil {
 		return s.rubricPathFn(runCtx)
 	}
-	path, err := judges.DefaultRubricPath()
+	path, err := judges.ResolveRunRubricPath(runCtx)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrRubricPathUnresolved, err)
 	}

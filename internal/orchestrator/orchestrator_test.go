@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -217,15 +218,21 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs_AdoptFlow(t *testing.T) {
 	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
 	require.NoError(t, err)
 	assert.FileExists(t, filepath.Join(cfg.Paths.Runs, string(runID), "60", "done.marker"))
-
-	decisionPath := filepath.Join(cfg.Paths.Runs, string(runID), "70", "decision.json")
-	decision, err := internalio.ReadJSON[contracts.Decision](decisionPath)
+	got, err := buildCycleArtifactBundle(runCtx)
 	require.NoError(t, err)
-	assert.Equal(t, contracts.DecisionActionAdopt, decision.Action)
-
-	lines, err := internalio.ReadJSONL[contracts.RuleRegistryEntry](runCtx.RulesRegistryPath())
+	fixturePath := filepath.Join(repoRootFromTestFile(t), "testdata", "golden_run", "full_cycle_adopt_real", "bundle.json")
+	if update := strings.TrimSpace(os.Getenv("UPDATE_GOLDEN_BUNDLE_REAL")); update == "1" {
+		data, err := json.MarshalIndent(got, "", "  ")
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(filepath.Dir(fixturePath), 0o755))
+		require.NoError(t, os.WriteFile(fixturePath, append(data, '\n'), 0o644))
+		return
+	}
+	fixtureBytes, err := os.ReadFile(fixturePath)
 	require.NoError(t, err)
-	assert.Len(t, lines, 1)
+	var want cycleArtifactBundle
+	require.NoError(t, json.Unmarshal(fixtureBytes, &want))
+	assert.Equal(t, want, got)
 }
 
 func TestRun_DefaultSteps_RealWiringWithFakeCLIs_BlockedBySentinel(t *testing.T) {
@@ -418,8 +425,13 @@ func TestRun_Step70NeedsManualRecovery_EndToEnd(t *testing.T) {
 	orch.steps.Step60 = scriptedStep60Step{decode: orch.decoders.Step60}
 	orch.steps.Step70 = orchestratorStep70{
 		git: testStep70Git{
-			head:    strings.Repeat("9", 40),
 			pushErr: step70_decide.ErrRemoteDivergence,
+			state: &testStep70GitState{
+				head: strings.Repeat("d", 40),
+				onPush: func(s *testStep70GitState) {
+					s.head = strings.Repeat("9", 40)
+				},
+			},
 		},
 		resolver: testStep70Resolver{},
 	}
@@ -1797,6 +1809,17 @@ case "$subcmd" in
   fetch)
     exit 0
     ;;
+  remote)
+    case "${1:-} ${2:-}" in
+      "get-url origin")
+        printf '%s\n' "git@github.com:owner/repo.git"
+        ;;
+      *)
+        echo "unsupported remote args: $*" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   merge-base)
     if [ "${1:-}" = "--is-ancestor" ]; then
       exit 0
@@ -1911,6 +1934,17 @@ case "$subcmd" in
     ;;
   fetch)
     exit 0
+    ;;
+  remote)
+    case "${1:-} ${2:-}" in
+      "get-url origin")
+        printf '%s\n' "git@github.com:owner/repo.git"
+        ;;
+      *)
+        echo "unsupported remote args: $*" >&2
+        exit 1
+        ;;
+    esac
     ;;
   merge-base)
     if [ "${1:-}" = "--is-ancestor" ]; then
@@ -2191,6 +2225,7 @@ func (testStep70Resolver) Resolve(runCtx internalio.RunContext, pkg *contracts.T
 	if candidates == nil || len(candidates.Candidates) == 0 {
 		return step70_decide.Target{}, false, nil
 	}
+	ruleID := "r-bf1d22bf4a85"
 	return step70_decide.Target{
 		BestBranch:    "best",
 		BestShaBefore: strings.Repeat("1", 40),
@@ -2200,8 +2235,8 @@ func (testStep70Resolver) Resolve(runCtx internalio.RunContext, pkg *contracts.T
 			Value: contracts.RuleRegistryAdded{
 				Kind:          contracts.RegistryKindAdded,
 				SchemaVersion: "1",
-				RuleID:        "r-" + candidates.Candidates[0].CandidateID,
-				RulePath:      "rules/" + candidates.Candidates[0].CandidateID + ".md",
+				RuleID:        ruleID,
+				RulePath:      "rules/" + ruleID + ".md",
 				Sha256:        strings.Repeat("a", 64),
 			},
 		}},
@@ -2211,18 +2246,30 @@ func (testStep70Resolver) Resolve(runCtx internalio.RunContext, pkg *contracts.T
 type testStep70Git struct {
 	head    string
 	pushErr error
+	state   *testStep70GitState
 }
 
 func (g testStep70Git) RemoteHead(context.Context, string) (string, error) {
+	if g.state != nil {
+		return g.state.head, nil
+	}
 	return g.head, nil
 }
 
 func (g testStep70Git) PushForceWithLease(context.Context, string, string, string) error {
+	if g.state != nil && g.state.onPush != nil {
+		g.state.onPush(g.state)
+	}
 	return g.pushErr
 }
 
 func (g testStep70Git) RemoveWorktree(context.Context, string) error {
 	return nil
+}
+
+type testStep70GitState struct {
+	head   string
+	onPush func(*testStep70GitState)
 }
 
 func testConfig(t *testing.T) *config.Config {

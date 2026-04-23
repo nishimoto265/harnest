@@ -67,7 +67,8 @@ func TestRun_DuplicateOnlyCandidatesEmitNoop(t *testing.T) {
 
 func TestFilesystemResolver_LeaseFailureLeavesCanonicalRuleUntouched(t *testing.T) {
 	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
-	rulePath := filepath.Join(runCtx.RunsBase, "rules", "r-cand-1.md")
+	ruleID := generatedRuleID("cand-1")
+	rulePath := filepath.Join(runCtx.RunsBase, "rules", ruleID+".md")
 	require.NoError(t, os.MkdirAll(filepath.Dir(rulePath), 0o755))
 	require.NoError(t, os.WriteFile(rulePath, []byte("canonical-before\n"), 0o644))
 
@@ -94,7 +95,7 @@ func TestFilesystemResolver_LeaseFailureLeavesCanonicalRuleUntouched(t *testing.
 	after, err := os.ReadFile(rulePath)
 	require.NoError(t, err)
 	assert.Equal(t, before, after)
-	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, "rules/r-cand-1.md"))
+	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, filepath.Join("rules", ruleID+".md")))
 }
 
 func TestFilesystemResolver_AdoptPromotesExactSidecarBytes(t *testing.T) {
@@ -115,7 +116,8 @@ func TestFilesystemResolver_AdoptPromotesExactSidecarBytes(t *testing.T) {
 		Now:      fixedNow(),
 	}))
 
-	rulePath := filepath.Join(runCtx.RunsBase, "rules", "r-cand-1.md")
+	ruleID := generatedRuleID("cand-1")
+	rulePath := filepath.Join(runCtx.RunsBase, "rules", ruleID+".md")
 	ruleBytes, err := os.ReadFile(rulePath)
 	require.NoError(t, err)
 	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
@@ -123,7 +125,7 @@ func TestFilesystemResolver_AdoptPromotesExactSidecarBytes(t *testing.T) {
 	require.Len(t, lines, 1)
 	added := lines[0].Entry.Value.(contracts.RuleRegistryAdded)
 	assert.Equal(t, added.Sha256, sha256String(string(ruleBytes)))
-	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, "rules/r-cand-1.md"))
+	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, filepath.Join("rules", ruleID+".md")))
 }
 
 func TestRun_AdoptHappyPath(t *testing.T) {
@@ -451,7 +453,7 @@ func TestRun_MultiEntryAppendFailure_RollbackAppendsMarkersForCommittedRows(t *t
 		appendRegistryEntry = original
 	})
 
-	deps := Deps{Git: &fakeGit{head: resolver.target.TargetSHA}, Resolver: resolver, Now: fixedNow()}
+	deps := Deps{Git: &fakeGit{head: resolver.target.BestShaBefore}, Resolver: resolver, Now: fixedNow()}
 	require.NoError(t, Run(context.Background(), 440, runCtx, pkg, candidates, store, deps))
 
 	rollback := mustDecisionRollback(t, readDecision(t, runCtx))
@@ -594,12 +596,12 @@ func TestRun_ResumeFromPersistedDecisionRepublishesMissingRuleBodies(t *testing.
 
 	originalPromote := promoteRuleSidecarFn
 	callCount := 0
-	promoteRuleSidecarFn = func(stagedPath, dstPath, wantSHA string) error {
+	promoteRuleSidecarFn = func(stagedPath, dstPath, wantSHA, prevSHA string) error {
 		callCount++
 		if callCount == 2 {
 			return errors.New("synthetic crash during rule publish")
 		}
-		return originalPromote(stagedPath, dstPath, wantSHA)
+		return originalPromote(stagedPath, dstPath, wantSHA, prevSHA)
 	}
 	err = Run(context.Background(), 411, runCtx, pkg, candidates, store, Deps{
 		Git:      &fakeGit{head: resolver.target.TargetSHA},
@@ -1018,7 +1020,10 @@ func TestRun_RollbackOnPushFailure(t *testing.T) {
 
 func TestRun_RollbackTreatsMissingRemoteHeadAsManualRecoveryWhenBestShaBeforeKnown(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR601")
-	git := &fakeGit{head: "", pushErr: ErrLeaseFailure}
+	git := &fakeGit{head: resolver.target.BestShaBefore, pushErr: ErrLeaseFailure}
+	git.onPush = func(fakePushCall) {
+		git.head = ""
+	}
 
 	err := Run(context.Background(), 601, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()})
 	require.ErrorIs(t, err, ErrNeedsManualRecovery)
@@ -1044,8 +1049,13 @@ func TestRun_CanceledPushReturnsContextErrorWithoutManualRecovery(t *testing.T) 
 
 func TestRun_NeedsManualRecoveryOnRemoteDivergence(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR7")
-	// Push succeeds, but later rollback path reads an unrelated head.
-	git := &fakeGit{head: strings.Repeat("9", 40), pushErr: ErrRemoteDivergence}
+	git := &fakeGit{
+		head:    resolver.target.BestShaBefore,
+		pushErr: ErrRemoteDivergence,
+	}
+	git.onPush = func(fakePushCall) {
+		git.head = strings.Repeat("9", 40)
+	}
 	deps := Deps{Git: git, Resolver: resolver, Now: fixedNow()}
 	err := Run(context.Background(), 7, runCtx, pkg, candidates, store, deps)
 	require.ErrorIs(t, err, ErrNeedsManualRecovery)
@@ -1062,7 +1072,10 @@ func TestRun_NeedsManualRecoveryOnRemoteDivergence(t *testing.T) {
 func TestRun_RollbackRequiresEmptyBestShaBeforeForEmptyRemoteHead(t *testing.T) {
 	t.Run("fresh rollback blocks on empty remote head when best sha before exists", func(t *testing.T) {
 		runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR701")
-		git := &fakeGit{head: "", pushErr: ErrLeaseFailure}
+		git := &fakeGit{head: resolver.target.BestShaBefore, pushErr: ErrLeaseFailure}
+		git.onPush = func(fakePushCall) {
+			git.head = ""
+		}
 
 		err := Run(context.Background(), 701, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()})
 		require.ErrorIs(t, err, ErrNeedsManualRecovery)
@@ -1359,6 +1372,13 @@ func TestRun_NeedsManualRecoveryStageRequiresExplicitCleanup(t *testing.T) {
 	assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
 
 	require.NoError(t, FinalizeCleanup(runCtx, store))
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	require.Equal(t, contracts.StateKindCompleted, last.Kind)
+	completed, ok := last.Value.(contracts.StateEntryCompleted)
+	require.True(t, ok)
+	assert.Equal(t, "manual_cleanup_finalized", completed.Detail)
 	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
 	assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelClearedFilename(runCtx.RunID)))
 	assert.NoFileExists(t, intentionPath(t, runCtx))
@@ -1453,7 +1473,7 @@ func TestPromoteRuleSidecarAndCleanup_FsyncParentDirsAfterDeletion(t *testing.T)
 
 	stagedPath := mustStagedRulePath(t, runCtx, "rules/rule-a.md")
 	require.NoError(t, internalio.WriteAtomic(stagedPath, []byte("rule-a body\n")))
-	require.NoError(t, promoteRuleSidecar(stagedPath, filepath.Join(runCtx.RunsBase, "rules", "rule-a.md"), sha256String("rule-a body\n")))
+	require.NoError(t, promoteRuleSidecar(stagedPath, filepath.Join(runCtx.RunsBase, "rules", "rule-a.md"), sha256String("rule-a body\n"), ""))
 
 	require.NoError(t, internalio.WriteAtomic(mustStagedRulePath(t, runCtx, "rules/rule-b.md"), []byte("rule-b body\n")))
 	require.NoError(t, cleanupStagedRuleSidecars(runCtx))
@@ -1477,7 +1497,7 @@ func TestPromoteRuleSidecar_TreatsMissingStagedWithMatchingDestinationAsPublishe
 	// entry in the batch was published and its staged copy fsynced away.
 	assert.NoFileExists(t, stagedPath)
 
-	require.NoError(t, promoteRuleSidecar(stagedPath, dstPath, sha256String(body)))
+	require.NoError(t, promoteRuleSidecar(stagedPath, dstPath, sha256String(body), ""))
 	// Destination unchanged and still holds the planned bytes.
 	got, err := os.ReadFile(dstPath)
 	require.NoError(t, err)
@@ -1494,8 +1514,26 @@ func TestPromoteRuleSidecar_MissingStagedWithWrongDestinationStillFails(t *testi
 	dstPath := filepath.Join(runCtx.RunsBase, "rules", "rule-a.md")
 	require.NoError(t, internalio.WriteAtomic(dstPath, []byte("stale bytes\n")))
 
-	err := promoteRuleSidecar(stagedPath, dstPath, sha256String("rule-a body\n"))
+	err := promoteRuleSidecar(stagedPath, dstPath, sha256String("rule-a body\n"), "")
 	require.ErrorIs(t, err, errRulePublishStagedMissing)
+}
+
+func TestPromoteRuleSidecar_AllowsUpdateWhenDestinationMatchesPrevSha(t *testing.T) {
+	runCtx, _, _, _, _ := newFixtureWithResolver(t, "PR41025")
+	oldBody := "old body\n"
+	newBody := "new body\n"
+	stagedPath := mustStagedRulePath(t, runCtx, "rules/rule-a.md")
+	require.NoError(t, internalio.WriteAtomic(stagedPath, []byte(newBody)))
+
+	dstPath := filepath.Join(runCtx.RunsBase, "rules", "rule-a.md")
+	require.NoError(t, internalio.WriteAtomic(dstPath, []byte(oldBody)))
+
+	require.NoError(t, promoteRuleSidecar(stagedPath, dstPath, sha256String(newBody), sha256String(oldBody)))
+
+	got, err := os.ReadFile(dstPath)
+	require.NoError(t, err)
+	assert.Equal(t, newBody, string(got))
+	assert.NoFileExists(t, stagedPath)
 }
 
 // F10: multi-entry adoption resuming after a crash-between-publishes must
@@ -1574,7 +1612,7 @@ func TestPromoteRuleSidecar_RejectsSymlinkDestination(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(dstPath), 0o755))
 	require.NoError(t, os.Symlink(externalPath, dstPath))
 
-	err := promoteRuleSidecar(stagedPath, dstPath, sha256String(body))
+	err := promoteRuleSidecar(stagedPath, dstPath, sha256String(body), "")
 	require.ErrorIs(t, err, errRulePublishDestinationType)
 	assert.FileExists(t, stagedPath)
 	info, statErr := os.Lstat(dstPath)
@@ -1603,7 +1641,7 @@ func TestPromoteRuleSidecar_DetectsDestinationSwapToSymlinkBeforeRead(t *testing
 		promoteRuleSidecarBeforeDestinationRead = originalHook
 	})
 
-	err := promoteRuleSidecar(stagedPath, dstPath, sha256String(body))
+	err := promoteRuleSidecar(stagedPath, dstPath, sha256String(body), "")
 	require.ErrorIs(t, err, errRulePublishDestinationType)
 	assert.FileExists(t, stagedPath)
 }
@@ -1814,15 +1852,16 @@ func TestRun_RollsBackBeforeSecondRegistryAppendWhenSentinelAppearsMidLoop(t *te
 	assert.Equal(t, contracts.RegistryKindRolledBack, lines[1].Entry.Kind)
 }
 
-func TestRun_FillsBestShaBeforeFromRemoteHeadAfterLock(t *testing.T) {
+func TestRun_ReadsBestShaBeforeFromRemoteHeadAfterLockAndOverridesPrefilledValue(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR20")
-	resolver.target.BestShaBefore = ""
+	resolver.target.BestShaBefore = strings.Repeat("9", 40)
 	git := &fakeGit{head: strings.Repeat("4", 40)}
 
 	require.NoError(t, Run(context.Background(), 20, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()}))
 
 	adopt := mustDecisionAdopt(t, readDecision(t, runCtx))
 	assert.Equal(t, strings.Repeat("4", 40), adopt.BestShaBefore)
+	assert.Equal(t, 1, git.remoteHeadCalls)
 }
 
 func TestRun_CanceledPushReturnsContextWithoutRollback(t *testing.T) {
@@ -1944,10 +1983,11 @@ type fakePushCall struct {
 }
 
 type fakeGit struct {
-	head      string
-	pushErr   error
-	pushCalls []fakePushCall
-	onPush    func(fakePushCall)
+	head            string
+	pushErr         error
+	pushCalls       []fakePushCall
+	onPush          func(fakePushCall)
+	remoteHeadCalls int
 }
 
 type cancelOnPushGit struct {
@@ -1956,6 +1996,7 @@ type cancelOnPushGit struct {
 }
 
 func (g *fakeGit) RemoteHead(_ context.Context, _ string) (string, error) {
+	g.remoteHeadCalls++
 	return g.head, nil
 }
 

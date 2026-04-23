@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -13,12 +14,13 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
-	"github.com/nishimoto265/auto-improve/internal/validation"
 )
 
 var killProcess = syscall.Kill
 var getProcessGroupID = syscall.Getpgid
 var lookupLeaseStartTime = agentrunner.LookupProcessStartTime
+var errHeartbeatUpdateFailed = agentrunner.ErrHeartbeatUpdateFailed
+var errLegacyResumeStateMissingLeaderStartTime = agentrunner.ErrResumeStateMissingLeaderStartTime
 
 type resumeState struct {
 	ExpectedBaseSHA string    `json:"expected_base_sha" validate:"required,sha1_hex"`
@@ -35,12 +37,20 @@ func resumeStatePath(agentDir string) string {
 }
 
 func heartbeatPath(agentDir string) string {
-	return filepath.Join(agentDir, heartbeatFileName)
+	return agentrunner.HeartbeatPath(agentDir)
 }
 
 func saveResumeState(agentDir string, state resumeState) error {
 	return internalio.WriteJSONAtomic(resumeStatePath(agentDir), state)
 }
+
+// ErrLegacyResumeStateLiveLease is returned when a pre-leader_start_time
+// resume-state file is decoded and the recorded pid is still alive. Silently
+// clearing the lease in this case would downgrade a live writer to "inactive"
+// and let resumeIfNeeded fast-path past rescue, yielding a concurrent writer
+// on the same worktree. Callers MUST surface this as manual recovery so the
+// operator can stop the original agent before upgrade.
+var ErrLegacyResumeStateLiveLease = errors.New("step20: legacy resume state without leader_start_time but pid is still alive; refusing to silently downgrade")
 
 func loadResumeState(agentDir string) (resumeState, bool, error) {
 	path := resumeStatePath(agentDir)
@@ -50,25 +60,35 @@ func loadResumeState(agentDir string) (resumeState, bool, error) {
 		}
 		return resumeState{}, false, err
 	}
-	state, err := internalio.ReadJSON[resumeState](path)
-	if err == nil {
-		return state, true, nil
-	}
-	// Backward-compatible load: pre-leader_start_time resume-state files
-	// stored an active lease (pid != 0) without a leader_start_time field.
-	// Treat such legacy records as a migration case — decode structurally but
-	// clear the active-lease portion so resumeIfNeeded sees an inactive lease
-	// and proceeds via the normal rescue / retry path, rather than hard
-	// failing because Validate() rejects the missing field.
 	data, readErr := os.ReadFile(path)
 	if readErr != nil {
 		return resumeState{}, false, readErr
 	}
-	legacy, legacyErr := decodeLegacyResumeState(data)
-	if legacyErr != nil {
+	state, err := decodeCurrentResumeState(data)
+	if err == nil {
+		return state, true, nil
+	}
+	if !errors.Is(err, errLegacyResumeStateMissingLeaderStartTime) {
 		return resumeState{}, false, err
 	}
+	// Backward-compatible load: pre-leader_start_time resume-state files
+	// stored an active lease (pid != 0) without a leader_start_time field.
+	// We only migrate when the current document is otherwise structurally
+	// valid and fails solely because the legacy field is absent. Any other
+	// validation or decode error must fail closed so malformed current JSON
+	// cannot be mistaken for legacy state.
+	legacy, legacyErr := decodeLegacyResumeState(data)
+	if legacyErr != nil {
+		return resumeState{}, false, legacyErr
+	}
 	if legacy.Pid != 0 && legacy.LeaderStartTime == "" {
+		if legacyLeaseLikelyLive(agentDir, legacy) {
+			return resumeState{}, false, &agentrunner.ManualRecoveryRequiredError{
+				Reason: contracts.RollbackReasonWorktreeRescueLoop,
+				Detail: "legacy resume state still references a live lease; operator must stop the original agent before migration",
+				Err:    ErrLegacyResumeStateLiveLease,
+			}
+		}
 		legacy.StartedAt = time.Time{}
 		legacy.LastHeartbeat = time.Time{}
 		legacy.Pid = 0
@@ -77,11 +97,34 @@ func loadResumeState(agentDir string) (resumeState, bool, error) {
 	return legacy, true, nil
 }
 
+func legacyLeaseLikelyLive(agentDir string, legacy resumeState) bool {
+	if !pidAlive(legacy.Pid) {
+		return false
+	}
+	stale, modTime, err := heartbeatStale(agentDir, defaultStaleAfter, time.Now().UTC())
+	if err != nil {
+		return true
+	}
+	if modTime.IsZero() {
+		return true
+	}
+	_ = stale
+	return true
+}
+
+func decodeCurrentResumeState(data []byte) (resumeState, error) {
+	return decodeResumeState(data, true)
+}
+
 // decodeLegacyResumeState parses a resume-state JSON document without invoking
 // Validate() so older schemas (active lease without leader_start_time) can be
 // loaded and migrated. Duplicate keys / unknown fields / trailing tokens are
 // still rejected via the contracts strict helpers.
 func decodeLegacyResumeState(data []byte) (resumeState, error) {
+	return decodeResumeState(data, false)
+}
+
+func decodeResumeState(data []byte, validate bool) (resumeState, error) {
 	var out resumeState
 	if err := contracts.RejectDuplicateJSONKeys(data); err != nil {
 		return resumeState{}, err
@@ -91,6 +134,15 @@ func decodeLegacyResumeState(data []byte) (resumeState, error) {
 	if err := dec.Decode(&out); err != nil {
 		return resumeState{}, err
 	}
+	var rest any
+	if err := dec.Decode(&rest); err != io.EOF {
+		return resumeState{}, contracts.ErrTrailingJSON
+	}
+	if validate {
+		if err := out.Validate(); err != nil {
+			return resumeState{}, err
+		}
+	}
 	return out, nil
 }
 
@@ -99,69 +151,40 @@ type heartbeatConfig struct {
 	interval  time.Duration
 	now       func() time.Time
 	baseState resumeState
+	cancel    context.CancelCauseFunc
+	prefix    string
 }
 
-type heartbeatHandle struct {
-	stop chan struct{}
-	done chan struct{}
-}
+type heartbeatHandle = agentrunner.HeartbeatHandle
 
 func startHeartbeat(ctx context.Context, cfg heartbeatConfig) (*heartbeatHandle, error) {
-	if err := touchHeartbeat(cfg.agentDir, cfg.now()); err != nil {
-		return nil, err
-	}
-	handle := &heartbeatHandle{
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
-	}
-	go func() {
-		defer close(handle.done)
-		ticker := time.NewTicker(cfg.interval)
-		defer ticker.Stop()
-		state := cfg.baseState
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-handle.stop:
-				return
-			case <-ticker.C:
-				now := cfg.now().UTC()
-				state.LastHeartbeat = now
-				_ = touchHeartbeat(cfg.agentDir, now)
-				_ = saveResumeState(cfg.agentDir, state)
+	state := cfg.baseState
+	return agentrunner.StartHeartbeat(ctx, agentrunner.HeartbeatConfig{
+		AgentDir: cfg.agentDir,
+		Interval: cfg.interval,
+		Now:      cfg.now,
+		Cancel:   cfg.cancel,
+		Prefix:   cfg.prefix,
+		OnTick: func(now time.Time) error {
+			state.LastHeartbeat = now
+			var tickErr error
+			if err := touchHeartbeat(cfg.agentDir, now); err != nil {
+				tickErr = err
 			}
-		}
-	}()
-	return handle, nil
-}
-
-func (h *heartbeatHandle) Stop() {
-	if h == nil {
-		return
-	}
-	close(h.stop)
-	<-h.done
+			if err := saveResumeState(cfg.agentDir, state); err != nil {
+				tickErr = errors.Join(tickErr, err)
+			}
+			return tickErr
+		},
+	})
 }
 
 func touchHeartbeat(agentDir string, at time.Time) error {
-	path := heartbeatPath(agentDir)
-	if err := internalio.WriteAtomic(path, nil); err != nil {
-		return err
-	}
-	return os.Chtimes(path, at, at)
+	return agentrunner.TouchHeartbeat(agentDir, at)
 }
 
 func heartbeatStale(agentDir string, staleAfter time.Duration, now time.Time) (bool, time.Time, error) {
-	info, err := os.Stat(heartbeatPath(agentDir))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return true, time.Time{}, nil
-		}
-		return false, time.Time{}, err
-	}
-	modTime := info.ModTime()
-	return now.Sub(modTime) > staleAfter, modTime, nil
+	return agentrunner.HeartbeatStale(agentDir, staleAfter, now)
 }
 
 func pidAlive(pid int) bool {
@@ -214,31 +237,7 @@ func shouldAttemptRescue(stale bool, pid, pgid int, leaderStartTime string) bool
 }
 
 func (s resumeState) Validate() error {
-	if err := validation.Instance().Var(s.ExpectedBaseSHA, "required,sha1_hex"); err != nil {
-		return err
-	}
-	if s.Pid == 0 {
-		if s.Pgid != 0 {
-			return errors.New("step20: resume state: pgid requires pid")
-		}
-		if s.LeaderStartTime != "" {
-			return errors.New("step20: resume state: inactive lease must not persist leader_start_time")
-		}
-		if !s.StartedAt.IsZero() || !s.LastHeartbeat.IsZero() {
-			return errors.New("step20: resume state: inactive lease must not persist heartbeat timestamps")
-		}
-		return nil
-	}
-	if s.Pid < 0 {
-		return errors.New("step20: resume state: pid must be >= 0")
-	}
-	if s.LeaderStartTime == "" {
-		return errors.New("step20: resume state: active lease requires leader_start_time")
-	}
-	if s.StartedAt.IsZero() || s.LastHeartbeat.IsZero() {
-		return errors.New("step20: resume state: active lease requires started_at and last_heartbeat")
-	}
-	return nil
+	return agentrunner.ValidateLeaseState("step20", s.ExpectedBaseSHA, s.StartedAt, s.Pid, s.Pgid, s.RetryCount, s.LeaderStartTime, s.LastHeartbeat)
 }
 
 func clearActiveLease(agentDir string) error {

@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"sort"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/state"
 )
-
-const ghListLimit = 200
 
 type MergedPR struct {
 	Number      int       `json:"number"`
@@ -48,32 +47,40 @@ func NewWithRunner(processedPath string, runner commandRunner) Detector {
 	}
 }
 
-func (d Detector) DetectMergedPRs(ctx context.Context, lastProcessedPR int, repo string) ([]MergedPR, error) {
+func (d Detector) DetectMergedPRs(ctx context.Context, repo string, defaultBranch string) ([]MergedPR, error) {
 	if repo == "" {
 		return nil, errors.New("detect: repo is required")
 	}
+	if defaultBranch == "" {
+		return nil, errors.New("detect: default_branch is required")
+	}
 
+	endpoint := fmt.Sprintf(
+		"repos/%s/pulls?state=closed&base=%s&per_page=100&sort=updated&direction=desc",
+		repo,
+		url.QueryEscape(defaultBranch),
+	)
 	output, err := d.run(
 		ctx,
 		"gh",
-		"pr",
-		"list",
-		"--repo", repo,
-		"--state", "merged",
-		"--limit", fmt.Sprintf("%d", ghListLimit),
-		"--json", "number,title,baseRefName,mergedAt",
+		"api",
+		"--paginate",
+		"--slurp",
+		endpoint,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("detect: gh pr list failed: %w", err)
+		return nil, fmt.Errorf("detect: gh api pulls failed: %w", err)
 	}
 
-	var raw []struct {
-		Number      int       `json:"number"`
-		Title       string    `json:"title"`
-		BaseRefName string    `json:"baseRefName"`
-		MergedAt    time.Time `json:"mergedAt"`
+	var pages [][]struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+		MergedAt *time.Time `json:"merged_at"`
 	}
-	if err := json.Unmarshal(output, &raw); err != nil {
+	if err := json.Unmarshal(output, &pages); err != nil {
 		return nil, err
 	}
 
@@ -82,26 +89,36 @@ func (d Detector) DetectMergedPRs(ctx context.Context, lastProcessedPR int, repo
 		return nil, err
 	}
 
-	prs := make([]MergedPR, 0, len(raw))
-	for _, pr := range raw {
-		if pr.Number <= lastProcessedPR {
-			continue
+	prs := make([]MergedPR, 0, len(pages)*100)
+	seen := make(map[int]struct{})
+	for _, page := range pages {
+		for _, pr := range page {
+			if pr.MergedAt == nil {
+				continue
+			}
+			if pr.Base.Ref != defaultBranch {
+				continue
+			}
+			if _, ok := processed[pr.Number]; ok {
+				continue
+			}
+			if _, ok := seen[pr.Number]; ok {
+				continue
+			}
+			seen[pr.Number] = struct{}{}
+			prs = append(prs, MergedPR{
+				Number:      pr.Number,
+				Title:       pr.Title,
+				BaseRefName: pr.Base.Ref,
+				MergedAt:    *pr.MergedAt,
+			})
 		}
-		if pr.BaseRefName != "main" && pr.BaseRefName != "master" {
-			continue
-		}
-		if _, ok := processed[pr.Number]; ok {
-			continue
-		}
-		prs = append(prs, MergedPR{
-			Number:      pr.Number,
-			Title:       pr.Title,
-			BaseRefName: pr.BaseRefName,
-			MergedAt:    pr.MergedAt,
-		})
 	}
 
 	sort.Slice(prs, func(i, j int) bool {
+		if !prs[i].MergedAt.Equal(prs[j].MergedAt) {
+			return prs[i].MergedAt.Before(prs[j].MergedAt)
+		}
 		return prs[i].Number < prs[j].Number
 	})
 	return prs, nil

@@ -19,11 +19,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/state"
 )
 
@@ -76,6 +78,8 @@ type Deps struct {
 	Now            func() time.Time
 	RegistryHighAt int
 	RegistryCritAt int
+	RepoRoot       string
+	PolicyBranch   string
 }
 
 // IntentionWriter is the minimal subset of orchestrator.IntentionStore used by
@@ -289,6 +293,24 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 			return ctx.Err()
 		}
 		return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, classifyRulePublishFailureDetail(err))
+	}
+	if strings.TrimSpace(deps.PolicyBranch) != "" {
+		if strings.TrimSpace(deps.RepoRoot) == "" {
+			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_repo_root_missing")
+		}
+		policyHeadBefore, err := deps.Git.RemoteHead(ctx, deps.PolicyBranch)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_remote_head_failure")
+		}
+		if _, err := policyrepo.PublishSnapshot(ctx, deps.RepoRoot, deps.PolicyBranch, policyHeadBefore, runCtx.RunsBase, string(runCtx.RunID)); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_publish_failure")
+		}
 	}
 	now := deps.Now()
 	decision := contracts.Decision{
@@ -596,12 +618,13 @@ func markManualRecoveryWithDetail(pr int, runCtx internalio.RunContext, intentio
 	// writing the durable sentinel. If the sentinel write later fails, the
 	// intention is already parked at a stage that resume() treats as
 	// terminal-but-persisted (returns ErrNeedsManualRecovery and refuses to
-	// reopen transaction paths), so the operator-gate barrier holds even
-	// without the sentinel. The inverse ordering (sentinel-first) would leave
-	// a durable needs_manual_recovery file with an intention still at
-	// branch_pushed / registry_appended; once the operator cleared the
-	// sentinel, a subsequent tick would resume the old transaction path
-	// instead of re-blocking — a silent bypass of the manual-recovery barrier.
+	// reopen transaction paths), so the operator-gate barrier holds (for the
+	// same run) even without the sentinel. The inverse ordering
+	// (sentinel-first) would leave a durable needs_manual_recovery file with
+	// an intention still at branch_pushed / registry_appended; once the
+	// operator cleared the sentinel, a subsequent tick would resume the old
+	// transaction path instead of re-blocking — a silent bypass of the
+	// manual-recovery barrier.
 	if err := store.Save(intention); err != nil {
 		return err
 	}
@@ -1122,7 +1145,7 @@ func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contract
 			return err
 		}
 		dstPath := filepath.Join(runCtx.RunsBase, filepath.FromSlash(entry.RulePath))
-		if err := promoteRuleSidecarFn(stagedPath, dstPath, entry.Sha256); err != nil {
+		if err := promoteRuleSidecarFn(stagedPath, dstPath, entry.Sha256, entry.PrevSha256); err != nil {
 			return err
 		}
 		intention.PublishedRuleOpIDs = appendIfMissing(intention.PublishedRuleOpIDs, entry.OpID)
@@ -1136,7 +1159,7 @@ func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contract
 	return cleanupStagedRuleSidecars(runCtx)
 }
 
-func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
+func promoteRuleSidecar(stagedPath, dstPath, wantSHA, prevSHA string) error {
 	data, err := internalio.ReadValidatedRegularFile(stagedPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1176,11 +1199,15 @@ func promoteRuleSidecar(stagedPath, dstPath, wantSHA string) error {
 				return fmt.Errorf("%w: read destination=%s: %v", errRulePublishDestinationType, dstPath, err)
 			}
 			sum := sha256.Sum256(dstData)
-			if hex.EncodeToString(sum[:]) == wantSHA {
+			dstSHA := hex.EncodeToString(sum[:])
+			if dstSHA == wantSHA {
 				if err := removePathAndSyncParent(stagedPath); err != nil && !os.IsNotExist(err) {
 					return err
 				}
 				return nil
+			}
+			if prevSHA != "" && dstSHA == prevSHA {
+				break
 			}
 			return fmt.Errorf("%w: path=%s", errRulePublishConflict, dstPath)
 		default:
@@ -1800,7 +1827,7 @@ func resolveBestShaBefore(ctx context.Context, pkg *contracts.TaskPackage, targe
 	if target.BestBranch == "" && pkg != nil {
 		target.BestBranch = pkg.BestBranch
 	}
-	if target.BestBranch == "" || target.BestShaBefore != "" {
+	if target.BestBranch == "" {
 		return target, nil
 	}
 	bestShaBefore, err := deps.Git.RemoteHead(ctx, target.BestBranch)

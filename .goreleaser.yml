@@ -1,0 +1,33 @@
+version: 2
+
+project_name: auto-improve
+
+builds:
+  - id: auto-improve
+    main: ./cmd/auto-improve
+    binary: auto-improve
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: linux
+        goarch: arm64
+    env:
+      - CGO_ENABLED=0
+
+archives:
+  - id: binaries
+    ids:
+      - auto-improve
+    formats:
+      - binary
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  disable: true

@@ -1,0 +1,35 @@
+# Step 20 Implement
+
+Inputs
+- run_id: {{ .TaskPackage.RunID }}
+- pass: 1
+- agent: {{ .Agent }}
+- run_artifact_dir: 20-pass1/{{ .Agent }}
+- checklist_output_path: checklist-result.json (write this at the worktree root)
+
+Task
+- Apply the requested change in the checked-out worktree.
+- Modify repository files only.
+- Write `checklist-result.json` at the worktree root.
+
+Checklist artifact contract
+- `checklist-result.json` must be strict JSON with exactly these top-level keys:
+  - `schema_version`
+  - `run_id`
+  - `pass`
+  - `agent`
+  - `items`
+- Use this shape:
+```json
+{"schema_version":"1","run_id":"{{ .TaskPackage.RunID }}","pass":1,"agent":"{{ .Agent }}","items":[]}
+```
+- Do not add keys like `status`, `completed_checks`, or markdown wrappers.
+
+Harness-owned artifacts
+- The harness captures `session.jsonl`.
+- The harness computes `diff.patch`.
+- The harness writes `manifest.json`.
+- Do not create or overwrite `manifest.json`, `session.jsonl`, or `diff.patch` yourself.
+
+Reconstructed Task Prompt
+{{ .TaskPrompt }}

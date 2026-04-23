@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -124,6 +125,54 @@ func TestStepRunTerminalVariants(t *testing.T) {
 			assertArtifactPresence(t, env.run.IO.RunDir(), tt.wantArtifacts)
 		})
 	}
+}
+
+func TestStepRun_UsesConfiguredCodexImplementerProfile(t *testing.T) {
+	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
+	t.Setenv("FAKE_AGENT", "a1")
+
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "config.yaml")
+	agentsPath := filepath.Join(configDir, "agents.yaml")
+	scriptPath := testScriptPath(t, "fake-claude-success.sh")
+
+	require.NoError(t, os.WriteFile(configPath, []byte(fmt.Sprintf(`
+repo:
+  root: %q
+  github: "owner/repo"
+  default_branch: "main"
+  best_branch: "best/main"
+paths:
+  runs: %q
+worktree:
+  base: %q
+agent_config_path: "./agents.yaml"
+claude_cli_path: "/does/not/exist"
+`, env.repoDir, env.run.IO.RunsBase, env.run.IO.WorktreeBase)), 0o644))
+	require.NoError(t, os.WriteFile(agentsPath, []byte(fmt.Sprintf(`
+profiles:
+  codex_impl:
+    provider: codex
+    binary: %q
+  stub:
+    provider: stub
+roles:
+  implementer: codex_impl
+  judge_primary: stub
+  judge_secondary: stub
+  judge_arbiter: stub
+`, scriptPath)), 0o644))
+
+	cfg, err := config.LoadConfig(configPath)
+	require.NoError(t, err)
+	env.run.Config = cfg
+
+	err = (Step{}).Run(context.Background(), env.run)
+	require.NoError(t, err)
+
+	manifest := readManifest(t, env.manifestPath)
+	assert.Equal(t, contracts.ManifestKindSuccess, manifest.Kind)
 }
 
 func TestStepRun_PersistsChildPIDAndPGIDInResumeState(t *testing.T) {
@@ -829,7 +878,7 @@ func TestStepRun_GitCommandsIgnoreInheritedGitDir(t *testing.T) {
 
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
 	otherRepo := filepath.Join(t.TempDir(), "other-repo")
-	initGitRepoWithWorktree(t, otherRepo, filepath.Join(t.TempDir(), "other-pass2-a1"))
+	initGitRepoWithWorktree(t, otherRepo, filepath.Join(t.TempDir(), "2026-04-21-PR99-deadbee-pass2-a1"))
 	runCommand(t, otherRepo, "git", "commit", "--allow-empty", "-m", "other-head")
 	otherHead := strings.TrimSpace(runCommand(t, otherRepo, "git", "rev-parse", "HEAD"))
 
@@ -1070,9 +1119,9 @@ func newStepTestEnv(t *testing.T, script string, timeoutSeconds int) stepTestEnv
 	runsBase := t.TempDir()
 	worktreeBase := t.TempDir()
 	repoDir := t.TempDir()
-
-	baseSHA := initGitRepoWithWorktree(t, repoDir, filepath.Join(worktreeBase, "pass2-a1"))
 	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
+
+	baseSHA := initGitRepoWithWorktree(t, repoDir, filepath.Join(worktreeBase, fmt.Sprintf("%s-pass2-a1", runID)))
 
 	taskPackage := contracts.TaskPackage{
 		SchemaVersion:           "1",
@@ -1084,12 +1133,12 @@ func newStepTestEnv(t *testing.T, script string, timeoutSeconds int) stepTestEnv
 		ReconstructedTaskPrompt: "Implement the requested change safely.",
 		CreatedAt:               time.Now().UTC(),
 		Worktrees: []contracts.WorktreeAllocation{
-			{Agent: "a1", Pass: 1, Path: filepath.Join(worktreeBase, "pass1-a1"), Branch: "test/pass1/a1", BaseSHA: baseSHA, HeadSHA: baseSHA},
-			{Agent: "a2", Pass: 1, Path: filepath.Join(worktreeBase, "pass1-a2"), Branch: "test/pass1/a2", BaseSHA: baseSHA, HeadSHA: baseSHA},
-			{Agent: "a3", Pass: 1, Path: filepath.Join(worktreeBase, "pass1-a3"), Branch: "test/pass1/a3", BaseSHA: baseSHA, HeadSHA: baseSHA},
-			{Agent: "a1", Pass: 2, Path: filepath.Join(worktreeBase, "pass2-a1"), Branch: "test/pass2/a1", BaseSHA: baseSHA, HeadSHA: baseSHA},
-			{Agent: "a2", Pass: 2, Path: filepath.Join(worktreeBase, "pass2-a2"), Branch: "test/pass2/a2", BaseSHA: baseSHA, HeadSHA: baseSHA},
-			{Agent: "a3", Pass: 2, Path: filepath.Join(worktreeBase, "pass2-a3"), Branch: "test/pass2/a3", BaseSHA: baseSHA, HeadSHA: baseSHA},
+			{Agent: "a1", Pass: 1, Path: filepath.Join(worktreeBase, fmt.Sprintf("%s-pass1-a1", runID)), Branch: "test/pass1/a1", BaseSHA: baseSHA, HeadSHA: baseSHA},
+			{Agent: "a2", Pass: 1, Path: filepath.Join(worktreeBase, fmt.Sprintf("%s-pass1-a2", runID)), Branch: "test/pass1/a2", BaseSHA: baseSHA, HeadSHA: baseSHA},
+			{Agent: "a3", Pass: 1, Path: filepath.Join(worktreeBase, fmt.Sprintf("%s-pass1-a3", runID)), Branch: "test/pass1/a3", BaseSHA: baseSHA, HeadSHA: baseSHA},
+			{Agent: "a1", Pass: 2, Path: filepath.Join(worktreeBase, fmt.Sprintf("%s-pass2-a1", runID)), Branch: "test/pass2/a1", BaseSHA: baseSHA, HeadSHA: baseSHA},
+			{Agent: "a2", Pass: 2, Path: filepath.Join(worktreeBase, fmt.Sprintf("%s-pass2-a2", runID)), Branch: "test/pass2/a2", BaseSHA: baseSHA, HeadSHA: baseSHA},
+			{Agent: "a3", Pass: 2, Path: filepath.Join(worktreeBase, fmt.Sprintf("%s-pass2-a3", runID)), Branch: "test/pass2/a3", BaseSHA: baseSHA, HeadSHA: baseSHA},
 		},
 	}
 

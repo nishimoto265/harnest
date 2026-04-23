@@ -1,0 +1,156 @@
+name: Auto Improve
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Subcommand to run"
+        required: true
+        type: choice
+        default: preflight
+        options:
+          - preflight
+          - detect-merged
+          - run
+          - recover
+          - sunset
+      args:
+        description: "Space-delimited arguments for the selected subcommand"
+        required: false
+        type: string
+      repo_github:
+        description: "GitHub repo slug for config.yaml (defaults to the current repository)"
+        required: false
+        type: string
+      default_branch:
+        description: "Default branch for config.yaml (defaults to the repository default branch)"
+        required: false
+        type: string
+      best_branch:
+        description: "best_branch for config.yaml"
+        required: true
+        default: auto-improve/best
+        type: string
+      runs_base:
+        description: "Absolute runs_base override (defaults to $HOME/.auto-improve/runs)"
+        required: false
+        type: string
+      worktree_base:
+        description: "Absolute worktree_base override (defaults to $HOME/.auto-improve/worktrees)"
+        required: false
+        type: string
+      claude_cli_path:
+        description: "Claude CLI executable path or command name"
+        required: false
+        default: claude
+        type: string
+      codex_cli_path:
+        description: "Codex CLI executable path or command name"
+        required: false
+        default: codex
+        type: string
+
+concurrency:
+  group: auto-improve-prod
+  cancel-in-progress: false
+
+jobs:
+  auto-improve:
+    runs-on:
+      - self-hosted
+      - auto-improve
+    permissions:
+      contents: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare config.yaml
+        env:
+          INPUT_REPO_GITHUB: ${{ inputs.repo_github }}
+          INPUT_DEFAULT_BRANCH: ${{ inputs.default_branch }}
+          INPUT_BEST_BRANCH: ${{ inputs.best_branch }}
+          INPUT_RUNS_BASE: ${{ inputs.runs_base }}
+          INPUT_WORKTREE_BASE: ${{ inputs.worktree_base }}
+          INPUT_CLAUDE_CLI_PATH: ${{ inputs.claude_cli_path }}
+          INPUT_CODEX_CLI_PATH: ${{ inputs.codex_cli_path }}
+          REPOSITORY_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          base_dir="${HOME}/.auto-improve"
+          runs_base="${INPUT_RUNS_BASE:-${base_dir}/runs}"
+          worktree_base="${INPUT_WORKTREE_BASE:-${base_dir}/worktrees}"
+          repo_github="${INPUT_REPO_GITHUB:-${GITHUB_REPOSITORY}}"
+          default_branch="${INPUT_DEFAULT_BRANCH:-${REPOSITORY_DEFAULT_BRANCH}}"
+
+          case "${runs_base}" in
+            /*) ;;
+            *) echo "runs_base must be an absolute path: ${runs_base}" >&2; exit 1 ;;
+          esac
+          case "${worktree_base}" in
+            /*) ;;
+            *) echo "worktree_base must be an absolute path: ${worktree_base}" >&2; exit 1 ;;
+          esac
+
+          mkdir -p "${runs_base}" "${worktree_base}"
+
+          cat > config.yaml <<EOF
+          repo:
+            github: "${repo_github}"
+            root: "${GITHUB_WORKSPACE}"
+            default_branch: "${default_branch}"
+            best_branch: "${INPUT_BEST_BRANCH}"
+          paths:
+            runs: "${runs_base}"
+          worktree:
+            base: "${worktree_base}"
+          claude_cli_path: "${INPUT_CLAUDE_CLI_PATH}"
+          codex_cli_path: "${INPUT_CODEX_CLI_PATH}"
+          EOF
+
+      - name: Run auto-improve
+        env:
+          INPUT_COMMAND: ${{ inputs.command }}
+          INPUT_ARGS: ${{ inputs.args }}
+        run: |
+          set -euo pipefail
+
+          cmd=(go run ./cmd/auto-improve "${INPUT_COMMAND}")
+          if [[ -n "${INPUT_ARGS}" ]]; then
+            read -r -a extra_args <<< "${INPUT_ARGS}"
+            cmd+=("${extra_args[@]}")
+          fi
+          if [[ "${INPUT_COMMAND}" == "run" ]]; then
+            need_preflight=1
+            for arg in "${cmd[@]}"; do
+              if [[ "${arg}" == "--with-preflight" ]]; then
+                need_preflight=0
+                break
+              fi
+            done
+            if [[ "${need_preflight}" -eq 1 ]]; then
+              cmd+=("--with-preflight")
+            fi
+          fi
+
+          printf 'Executing:'
+          printf ' %q' "${cmd[@]}"
+          printf '\n'
+
+          "${cmd[@]}"

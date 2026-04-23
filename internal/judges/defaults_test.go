@@ -5,7 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/contracts"
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -90,4 +93,51 @@ func TestExpectedComplianceRuleIDs_MatchesDefault(t *testing.T) {
 	ruleIDs, err := ExpectedComplianceRuleIDs(path)
 	require.NoError(t, err)
 	assert.Equal(t, []string{stubRuleID}, ruleIDs)
+}
+
+func TestResolveRunRubricPath_EmbedsActiveRules(t *testing.T) {
+	dir := t.TempDir()
+	SetDefaultRubricDirForTest(dir)
+	t.Cleanup(func() { SetDefaultRubricDirForTest("") })
+
+	runCtx, err := internalio.NewRunContext("2026-04-23-PR1-deadbee", filepath.Join(dir, "runs"), filepath.Join(dir, "worktrees"))
+	require.NoError(t, err)
+
+	ruleBody := []byte("# Companion Rule\n\nWhen a diff changes `app/message.txt`, it must also change `app/details.txt`.\n")
+	rulePath := filepath.Join(runCtx.RunsBase, "rules", "r-sync-message-details.md")
+	require.NoError(t, internalio.WriteAtomic(rulePath, ruleBody))
+	registryEntry := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "r-sync-message-details",
+			RulePath:       "rules/r-sync-message-details.md",
+			Sha256:         runtimeRubricSHA256Hex(ruleBody),
+			IdempotencyKey: strings.Repeat("a", 64),
+			ByRunID:        "2026-04-23-PR1-feedbee",
+			At:             time.Date(2026, 4, 23, 7, 0, 0, 0, time.UTC),
+			VersionSeq:     1,
+		},
+	}
+	result, err := internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), registryEntry)
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Sha256)
+
+	path, err := ResolveRunRubricPath(runCtx)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(path, runCtx.RunDir()))
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	text := string(data)
+	assert.Contains(t, text, "## Active Rule IDs")
+	assert.Contains(t, text, "- r-sync-message-details")
+	assert.Contains(t, text, "## Active Rules")
+	assert.Contains(t, text, "### r-sync-message-details")
+	assert.Contains(t, text, "When a diff changes `app/message.txt`, it must also change `app/details.txt`.")
+
+	ruleIDs, err := ExpectedComplianceRuleIDs(path)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"r-sync-message-details"}, ruleIDs)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,11 @@ type GitClient interface {
 
 	// FetchCommit ensures the given object ID is available in the local clone.
 	FetchCommit(ctx context.Context, repoRoot, sha string) error
+
+	// RepoSlug resolves the authoritative owner/name slug from the local clone.
+	// step10 uses this for gh requests so it never inherits the caller cwd or a
+	// stale config-provided repo string.
+	RepoSlug(ctx context.Context, repoRoot string) (string, error)
 }
 
 type gitCLI struct {
@@ -44,7 +50,8 @@ func NewGitClient() GitClient {
 	return gitCLI{run: defaultCmdRunner, stat: os.Stat}
 }
 
-// NewGitClientWithRunner exposes the subprocess seam for tests.
+// NewGitClientWithRunner exposes the subprocess seam for tests. The same
+// runner is used for every git operation.
 func NewGitClientWithRunner(runner cmdRunner) GitClient {
 	if runner == nil {
 		runner = defaultCmdRunner
@@ -171,6 +178,18 @@ func (g gitCLI) FetchCommit(ctx context.Context, repoRoot, sha string) error {
 	return nil
 }
 
+func (g gitCLI) RepoSlug(ctx context.Context, repoRoot string) (string, error) {
+	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "remote", "get-url", "origin")
+	if err != nil {
+		return "", formatCommandFailure(fmt.Sprintf("step10: git remote get-url origin (in %s)", repoRoot), err, out, stderr)
+	}
+	slug, err := repoSlugFromRemoteURL(strings.TrimSpace(string(out)))
+	if err != nil {
+		return "", fmt.Errorf("step10: resolve repo slug from origin remote (in %s): %w", repoRoot, err)
+	}
+	return slug, nil
+}
+
 func (g gitCLI) worktreeBelongsToRepo(ctx context.Context, repoRoot, path string) (bool, error) {
 	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "worktree", "list", "--porcelain")
 	if err != nil {
@@ -194,4 +213,68 @@ func (g gitCLI) worktreeBelongsToRepo(ctx context.Context, repoRoot, path string
 		}
 	}
 	return false, nil
+}
+
+func repoSlugFromRemoteURL(remoteURL string) (string, error) {
+	if remoteURL == "" {
+		return "", errors.New("origin remote url is empty")
+	}
+	if strings.HasPrefix(remoteURL, "/") || strings.HasPrefix(remoteURL, "./") || strings.HasPrefix(remoteURL, "../") {
+		return "", fmt.Errorf("expected owner/name repo slug, got %q", remoteURL)
+	}
+	remoteURL = strings.TrimSuffix(remoteURL, ".git")
+
+	if strings.Contains(remoteURL, "://") {
+		parsed, err := url.Parse(remoteURL)
+		if err != nil {
+			return "", err
+		}
+		return repoSlugFromPath(parsed.Path)
+	}
+
+	if at := strings.LastIndex(remoteURL, "@"); at >= 0 {
+		if colon := strings.Index(remoteURL[at+1:], ":"); colon >= 0 {
+			return repoSlugFromPath(remoteURL[at+1+colon+1:])
+		}
+	}
+
+	return repoSlugFromPath(remoteURL)
+}
+
+func repoSlugFromPath(path string) (string, error) {
+	path = strings.Trim(path, "/")
+	parts := strings.Split(path, "/")
+	switch len(parts) {
+	case 2:
+		if parts[0] == "" || parts[1] == "" {
+			break
+		}
+		if !looksLikeOwner(parts[0]) || !looksLikeRepoName(parts[1]) {
+			break
+		}
+		return parts[0] + "/" + parts[1], nil
+	case 3:
+		if looksLikeHost(parts[0]) {
+			if parts[1] == "" || parts[2] == "" {
+				break
+			}
+			if !looksLikeOwner(parts[1]) || !looksLikeRepoName(parts[2]) {
+				break
+			}
+			return parts[1] + "/" + parts[2], nil
+		}
+	}
+	return "", fmt.Errorf("expected owner/name repo slug, got %q", path)
+}
+
+func looksLikeHost(segment string) bool {
+	return strings.Contains(segment, ".") || strings.Contains(segment, ":") || segment == "github.com"
+}
+
+func looksLikeOwner(segment string) bool {
+	return segment != "." && segment != ".." && !strings.Contains(segment, ".")
+}
+
+func looksLikeRepoName(segment string) bool {
+	return segment != "." && segment != ".."
 }

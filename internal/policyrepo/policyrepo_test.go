@@ -1,0 +1,133 @@
+package policyrepo
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestHydrateFromBranchCopiesPolicyFilesToRunsBase(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, registryLocalName), []byte("stale\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, rulesLocalDirName, "stale.md"), []byte("stale\n"), 0o644))
+
+	require.NoError(t, HydrateFromBranch(context.Background(), repoRoot, "policy", runsBase))
+
+	registryBytes, err := os.ReadFile(filepath.Join(runsBase, registryLocalName))
+	require.NoError(t, err)
+	assert.Contains(t, string(registryBytes), `"rule_id":"r-sync-message-details"`)
+
+	ruleBytes, err := os.ReadFile(filepath.Join(runsBase, rulesLocalDirName, "r-sync-message-details.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(ruleBytes), "Sync companion files")
+	assert.NoFileExists(t, filepath.Join(runsBase, rulesLocalDirName, "stale.md"))
+}
+
+func TestPublishSnapshotPushesRunsBasePolicyToBranch(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, rulesLocalDirName), 0o755))
+	const updatedRule = "# Updated rule\n\nnew body\n"
+	registry := "{\"kind\":\"added\",\"schema_version\":\"1\",\"rule_id\":\"r-sync-message-details\",\"rule_path\":\"rules/r-sync-message-details.md\",\"sha256\":\"" + sha256Hex([]byte(updatedRule)) + "\",\"idempotency_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_seq\":1,\"prev_hash\":\"\",\"by_run_id\":\"2026-04-23-PR1-feedbee\",\"at\":\"2026-04-23T08:00:00Z\"}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, registryLocalName), []byte(registry), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, rulesLocalDirName, "r-sync-message-details.md"), []byte(updatedRule), 0o644))
+
+	headBefore := strings.TrimSpace(string(mustGitOutput(t, repoRoot, "rev-parse", "origin/policy")))
+	newHead, err := PublishSnapshot(context.Background(), repoRoot, "policy", headBefore, runsBase, "2026-04-23-PR2-adopt")
+	require.NoError(t, err)
+	assert.NotEqual(t, headBefore, newHead)
+
+	mustGit(t, repoRoot, "fetch", "--no-tags", "origin", "policy")
+	body := string(mustGitOutput(t, repoRoot, "show", "origin/policy:"+RulesRepoDirRelPath+"/r-sync-message-details.md"))
+	assert.Contains(t, body, "# Updated rule")
+}
+
+func TestHydrateFromBranchKeepsPreviousLocalPolicyWhenRemoteSnapshotIsInvalid(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, rulesLocalDirName), 0o755))
+	const localRule = "# Local rule\n\nbody\n"
+	localRegistry := "{\"kind\":\"added\",\"schema_version\":\"1\",\"rule_id\":\"r-local\",\"rule_path\":\"rules/r-local.md\",\"sha256\":\"" + sha256Hex([]byte(localRule)) + "\",\"idempotency_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_seq\":1,\"prev_hash\":\"\",\"by_run_id\":\"2026-04-23-PR1-feedbee\",\"at\":\"2026-04-23T08:00:00Z\"}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, registryLocalName), []byte(localRegistry), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, rulesLocalDirName, "r-local.md"), []byte(localRule), 0o644))
+
+	mustGit(t, repoRoot, "checkout", "policy")
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, RepoDirName, "rules-registry.jsonl"), []byte("{\"kind\":\"added\",\"schema_version\":\"1\",\"rule_id\":\"r-bad\",\"rule_path\":\"rules/r-bad.md\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"idempotency_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_seq\":1,\"prev_hash\":\"\",\"by_run_id\":\"2026-04-23-PR1-feedbee\",\"at\":\"2026-04-23T08:00:00Z\"}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, RepoDirName, "rules", "r-bad.md"), []byte("# bad\n"), 0o644))
+	mustGit(t, repoRoot, "add", RepoDirName)
+	mustGit(t, repoRoot, "commit", "-m", "break policy snapshot")
+	mustGit(t, repoRoot, "push", "origin", "policy")
+
+	err := HydrateFromBranch(context.Background(), repoRoot, "policy", runsBase)
+	require.Error(t, err)
+
+	registryBytes, readErr := os.ReadFile(filepath.Join(runsBase, registryLocalName))
+	require.NoError(t, readErr)
+	assert.Equal(t, localRegistry, string(registryBytes))
+	ruleBytes, readErr := os.ReadFile(filepath.Join(runsBase, rulesLocalDirName, "r-local.md"))
+	require.NoError(t, readErr)
+	assert.Equal(t, localRule, string(ruleBytes))
+}
+
+func TestPublishSnapshotRejectsMissingLocalRegistry(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, rulesLocalDirName), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, rulesLocalDirName, "r-sync-message-details.md"), []byte("# orphan\n"), 0o644))
+	headBefore := strings.TrimSpace(string(mustGitOutput(t, repoRoot, "rev-parse", "origin/policy")))
+
+	_, err := PublishSnapshot(context.Background(), repoRoot, "policy", headBefore, runsBase, "2026-04-23-PR2-adopt")
+	require.Error(t, err)
+}
+
+func newClonedRepoWithPolicyBranch(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	work := filepath.Join(root, "work")
+	mustGit(t, root, "init", "--bare", origin)
+	mustGit(t, root, "clone", origin, work)
+	mustGit(t, work, "config", "user.name", "Test User")
+	mustGit(t, work, "config", "user.email", "test@example.com")
+	require.NoError(t, os.WriteFile(filepath.Join(work, "README.md"), []byte("# repo\n"), 0o644))
+	mustGit(t, work, "add", "README.md")
+	mustGit(t, work, "commit", "-m", "initial")
+	mustGit(t, work, "push", "origin", "HEAD:main")
+	mustGit(t, work, "checkout", "--orphan", "policy")
+	mustGit(t, work, "rm", "-rf", ".")
+	require.NoError(t, os.MkdirAll(filepath.Join(work, RepoDirName, "rules"), 0o755))
+	const seedRule = "# Sync companion files\n\nWhen a diff changes `app/message.txt`, it must also change `app/details.txt`.\n"
+	registry := "{\"kind\":\"added\",\"schema_version\":\"1\",\"rule_id\":\"r-sync-message-details\",\"rule_path\":\"rules/r-sync-message-details.md\",\"sha256\":\"" + sha256Hex([]byte(seedRule)) + "\",\"idempotency_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_seq\":1,\"prev_hash\":\"\",\"by_run_id\":\"2026-04-23-PR1-feedbee\",\"at\":\"2026-04-23T08:00:00Z\"}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(work, RepoDirName, "rules-registry.jsonl"), []byte(registry), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(work, RepoDirName, "rules", "r-sync-message-details.md"), []byte(seedRule), 0o644))
+	mustGit(t, work, "add", RepoDirName)
+	mustGit(t, work, "commit", "-m", "policy seed")
+	mustGit(t, work, "push", "-u", "origin", "policy")
+	mustGit(t, work, "fetch", "--no-tags", "origin", "policy")
+	return work
+}
+
+func mustGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+}
+
+func mustGitOutput(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return out
+}

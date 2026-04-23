@@ -39,6 +39,17 @@ case "$subcmd" in
   fetch)
     exit 0
     ;;
+  remote)
+    case "${1:-} ${2:-}" in
+      "get-url origin")
+        printf '%s\n' "git@github.com:owner/repo.git"
+        ;;
+      *)
+        echo "unsupported remote args: $*" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   merge-base)
     if [ "${1:-}" = "--is-ancestor" ]; then
       exit 0

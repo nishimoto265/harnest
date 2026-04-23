@@ -777,6 +777,10 @@ func stateEntryPR(entry contracts.StateEntry) (int, bool) {
 	}
 }
 
+func EntryPR(entry contracts.StateEntry) (int, bool) {
+	return stateEntryPR(entry)
+}
+
 func stateEntryRunID(entry contracts.StateEntry) (contracts.RunID, bool) {
 	switch value := entry.Value.(type) {
 	case contracts.StateEntryStarted:

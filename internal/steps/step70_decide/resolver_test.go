@@ -216,6 +216,14 @@ func TestMaterializeRuleSidecarRejectsExternalSymlink(t *testing.T) {
 	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, "rules/r-loot.md"))
 }
 
+func TestGeneratedRuleID_IsValidAndDeterministic(t *testing.T) {
+	id1 := generatedRuleID("cand-2026-04-23-PR1-a0f77d2-001")
+	id2 := generatedRuleID("cand-2026-04-23-PR1-a0f77d2-001")
+	require.Equal(t, id1, id2)
+	require.NoError(t, contracts.ValidateRuleID(id1))
+	assert.True(t, strings.HasPrefix(id1, "r-"))
+}
+
 func newResolverRunContext(t *testing.T) internalio.RunContext {
 	t.Helper()
 	runsBase := filepath.Join(realTempDir(t), "runs")

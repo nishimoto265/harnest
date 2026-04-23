@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -163,6 +165,11 @@ func ExpectedComplianceRuleIDs(rubricPath string) ([]string, error) {
 	if err := contracts.EnsureCleanAbsolutePath(rubricPath); err != nil {
 		return nil, err
 	}
+	if ruleIDs, err := parseActiveRuleIDs(rubricPath); err != nil {
+		return nil, err
+	} else if len(ruleIDs) > 0 {
+		return ruleIDs, nil
+	}
 	defaultPath, err := DefaultRubricPath()
 	if err != nil {
 		return nil, nil
@@ -171,4 +178,43 @@ func ExpectedComplianceRuleIDs(rubricPath string) ([]string, error) {
 		return nil, nil
 	}
 	return []string{stubRuleID}, nil
+}
+
+func parseActiveRuleIDs(rubricPath string) ([]string, error) {
+	data, err := os.ReadFile(rubricPath)
+	if err != nil {
+		return nil, fmt.Errorf("judges: read rubric for active rule ids: %w", err)
+	}
+	const heading = "## Active Rule IDs"
+	lines := strings.Split(string(data), "\n")
+	collecting := false
+	seen := make(map[string]struct{})
+	ruleIDs := make([]string, 0)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == heading:
+			collecting = true
+			continue
+		case collecting && strings.HasPrefix(trimmed, "## "):
+			collecting = false
+		}
+		if !collecting || !strings.HasPrefix(trimmed, "- ") {
+			continue
+		}
+		ruleID := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
+		if ruleID == "" {
+			continue
+		}
+		if err := contracts.ValidateRuleID(ruleID); err != nil {
+			return nil, fmt.Errorf("judges: parse active rule id %q: %w", ruleID, err)
+		}
+		if _, ok := seen[ruleID]; ok {
+			continue
+		}
+		seen[ruleID] = struct{}{}
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	sort.Strings(ruleIDs)
+	return ruleIDs, nil
 }

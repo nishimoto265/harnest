@@ -40,19 +40,23 @@ func (s stubGH) PRView(ctx context.Context, pr int, repo string) (PRInfo, error)
 }
 
 type stubGit struct {
-	mu         sync.Mutex
-	known      map[string]string // path → sha (marks "already exists")
-	createdBy  []string
-	resolvedBy map[string]string
-	mergeBase  map[string]string
-	fetched    []string
+	mu             sync.Mutex
+	known          map[string]string // path → sha (marks "already exists")
+	createdBy      []string
+	resolvedBy     map[string]string
+	mergeBase      map[string]string
+	fetched        []string
+	repoSlug       string
+	repoSlugByRoot map[string]string
 }
 
 func newStubGit() *stubGit {
 	return &stubGit{
-		known:      map[string]string{},
-		resolvedBy: map[string]string{},
-		mergeBase:  map[string]string{},
+		known:          map[string]string{},
+		resolvedBy:     map[string]string{},
+		mergeBase:      map[string]string{},
+		repoSlug:       "owner/repo",
+		repoSlugByRoot: map[string]string{},
 	}
 }
 
@@ -99,6 +103,33 @@ func (s *stubGit) FetchCommit(ctx context.Context, repoRoot, sha string) error {
 	defer s.mu.Unlock()
 	s.fetched = append(s.fetched, repoRoot+"::"+sha)
 	return nil
+}
+
+func (s *stubGit) RepoSlug(ctx context.Context, repoRoot string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if slug, ok := s.repoSlugByRoot[repoRoot]; ok {
+		return slug, nil
+	}
+	return s.repoSlug, nil
+}
+
+type recordingGH struct {
+	repo string
+	info PRInfo
+	err  error
+}
+
+func (g *recordingGH) PRView(ctx context.Context, pr int, repo string) (PRInfo, error) {
+	g.repo = repo
+	if g.err != nil {
+		return PRInfo{}, g.err
+	}
+	out := g.info
+	if out.Number == 0 {
+		out.Number = pr
+	}
+	return out, nil
 }
 
 func newRunCtx(t *testing.T) internalio.RunContext {
@@ -257,6 +288,74 @@ func TestRun_GHFailurePropagates(t *testing.T) {
 	_, err := runner.Run(context.Background(), in)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ghErr)
+}
+
+func TestRun_UsesRepoRootSlugWhenInputRepoEmpty(t *testing.T) {
+	rc := newRunCtx(t)
+	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
+	gh := &recordingGH{info: PRInfo{Number: 42, Title: "improve X", MergeCommitOID: testMergeCommitOID}}
+	runner := &Runner{GH: gh, Git: git}
+
+	in := Input{
+		PR:         42,
+		BestBranch: "auto-improve/best",
+		RepoRoot:   t.TempDir(),
+		RunCtx:     rc,
+	}
+	_, err := runner.Run(context.Background(), in)
+	require.NoError(t, err)
+	assert.Equal(t, "owner/repo", gh.repo)
+}
+
+func TestRun_UsesConfiguredRepoWhenProvided(t *testing.T) {
+	rc := newRunCtx(t)
+	repoRoot := t.TempDir()
+	git := newStubGit()
+	git.repoSlugByRoot[repoRoot] = "owner/repo"
+	gh := &recordingGH{info: PRInfo{Number: 42, Title: "improve X", MergeCommitOID: testMergeCommitOID}}
+	runner := &Runner{
+		GH:  gh,
+		Git: git,
+	}
+
+	in := Input{
+		PR:         42,
+		BestBranch: "auto-improve/best",
+		RepoRoot:   repoRoot,
+		Repo:       "owner/repo",
+		RunCtx:     rc,
+	}
+	_, err := runner.Run(context.Background(), in)
+	require.NoError(t, err)
+	assert.Equal(t, "owner/repo", gh.repo)
+}
+
+func TestRepoSlugFromRemoteURL_RejectsLocalPathRemote(t *testing.T) {
+	_, err := repoSlugFromRemoteURL("/tmp/repo")
+	require.Error(t, err)
+}
+
+func TestRun_RejectsConfiguredRepoMismatchWhenLocalSlugIsKnown(t *testing.T) {
+	rc := newRunCtx(t)
+	repoRoot := t.TempDir()
+	git := newStubGit()
+	git.repoSlugByRoot[repoRoot] = "owner/repo"
+	runner := &Runner{
+		GH:  &recordingGH{info: PRInfo{Number: 42, Title: "improve X", MergeCommitOID: testMergeCommitOID}},
+		Git: git,
+	}
+
+	in := Input{
+		PR:         42,
+		BestBranch: "auto-improve/best",
+		RepoRoot:   repoRoot,
+		Repo:       "stale/slug",
+		RunCtx:     rc,
+	}
+	_, err := runner.Run(context.Background(), in)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "repo mismatch")
 }
 
 func TestRun_InvalidBaseSHA(t *testing.T) {
@@ -421,6 +520,8 @@ func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 		stat: os.Stat,
 		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 			switch {
+			case slices.Equal(args, []string{"-C", repoRoot, "remote", "get-url", "origin"}):
+				return []byte("git@github.com:owner/repo.git\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", testMergeCommitOID}):
 				return nil, nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
@@ -465,6 +566,8 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 		stat: os.Stat,
 		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 			switch {
+			case slices.Equal(args, []string{"-C", repoRoot, "remote", "get-url", "origin"}):
+				return []byte("git@github.com:owner/repo.git\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", testMergeCommitOID}):
 				return nil, nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):

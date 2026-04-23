@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/validation"
 	"gopkg.in/yaml.v3"
@@ -30,6 +31,16 @@ var requiredStepTimeoutKeys = []string{
 	"step70",
 }
 
+var defaultStepTimeouts = map[string]int{
+	"step10": 300,
+	"step20": 1800,
+	"step30": 1800,
+	"step40": 900,
+	"step50": 1800,
+	"step60": 1800,
+	"step70": 300,
+}
+
 type Config struct {
 	Repo     RepoConfig     `yaml:"repo"`
 	Worktree WorktreeConfig `yaml:"worktree"`
@@ -38,6 +49,7 @@ type Config struct {
 
 	RunsBasePath              string         `yaml:"runs_base"`
 	WorktreeBasePath          string         `yaml:"worktree_base"`
+	AgentConfigPath           string         `yaml:"agent_config_path"`
 	ClaudeCLIPath             string         `yaml:"claude_cli_path"`
 	CodexCLIPath              string         `yaml:"codex_cli_path"`
 	PreflightTimeoutSec       int            `yaml:"preflight_timeout_sec"`
@@ -48,6 +60,7 @@ type Config struct {
 
 	configPath string
 	repoRoot   string
+	agentFile  agents.File
 }
 
 type RepoConfig struct {
@@ -55,6 +68,7 @@ type RepoConfig struct {
 	Root          string `yaml:"root"`
 	DefaultBranch string `yaml:"default_branch"`
 	BestBranch    string `yaml:"best_branch"`
+	PolicyBranch  string `yaml:"policy_branch"`
 }
 
 type WorktreeConfig struct {
@@ -116,6 +130,9 @@ func Load(path string) (Config, error) {
 
 	cfg.applyDefaults()
 	cfg.configPath = absPath
+	if err := cfg.loadAgentFile(); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -137,6 +154,14 @@ func (c *Config) applyDefaults() {
 	}
 	if c.RegistryCriticalThreshold == 0 {
 		c.RegistryCriticalThreshold = DefaultRegistryCriticalThreshold
+	}
+	if len(c.StepTimeouts) == 0 {
+		c.StepTimeouts = make(map[string]int, len(defaultStepTimeouts))
+	}
+	for key, value := range defaultStepTimeouts {
+		if c.StepTimeouts[key] == 0 {
+			c.StepTimeouts[key] = value
+		}
 	}
 }
 
@@ -167,6 +192,13 @@ func (c Config) WorktreeBase() (string, error) {
 		return "", errors.New("config: WorktreeBase is required")
 	}
 	return c.resolvePath(value)
+}
+
+func (c Config) PolicyBranch() (string, bool) {
+	if strings.TrimSpace(c.Repo.PolicyBranch) == "" {
+		return "", false
+	}
+	return c.Repo.PolicyBranch, true
 }
 
 func (c Config) ProcessedPath() (string, error) {
@@ -219,6 +251,21 @@ func (c Config) CodexBinary() string {
 	return "codex"
 }
 
+func (c Config) AgentFile() agents.File {
+	if len(c.agentFile.Profiles) == 0 || len(c.agentFile.Roles) == 0 {
+		return agents.Legacy(agents.LegacyDefaults{
+			ImplementerBinary:    c.legacyImplementerBinary(),
+			JudgePrimaryBinary:   c.legacyJudgePrimaryBinary(),
+			JudgeSecondaryBinary: c.legacyJudgeSecondaryBinary(),
+		})
+	}
+	return c.agentFile
+}
+
+func (c Config) AgentProfile(role agents.Role) (agents.Profile, error) {
+	return c.AgentFile().ProfileForRole(role)
+}
+
 func (c Config) Validate() error {
 	if c.Paths.Runs == "" && c.RunsBasePath == "" {
 		return errors.New("config: RunsBase is required")
@@ -251,6 +298,23 @@ func (c Config) Validate() error {
 			return err
 		}
 	}
+	if c.Repo.Root != "" {
+		if err := contracts.EnsureCleanAbsolutePath(filepath.Clean(c.Repo.Root)); err != nil {
+			return err
+		}
+	}
+	if c.Paths.StateFile != "" {
+		return errors.New("config: paths.state_file override is not supported")
+	}
+	if c.Paths.RulesRegistry != "" {
+		return errors.New("config: paths.rules_registry override is not supported")
+	}
+	if c.Repo.GitHub != "" && c.Repo.DefaultBranch == "" {
+		return errors.New("config: repo.default_branch is required when repo.github is set")
+	}
+	if err := c.AgentFile().Validate(); err != nil {
+		return err
+	}
 
 	type validationView struct {
 		RegistryHighThreshold     int `validate:"gt=0"`
@@ -264,6 +328,71 @@ func (c Config) Validate() error {
 		PreflightTimeoutSec:       c.PreflightTimeoutSec,
 		RescueMaxRetries:          c.RescueMaxRetries,
 	})
+}
+
+func (c *Config) loadAgentFile() error {
+	legacy := agents.Legacy(agents.LegacyDefaults{
+		ImplementerBinary:    c.legacyImplementerBinary(),
+		JudgePrimaryBinary:   c.legacyJudgePrimaryBinary(),
+		JudgeSecondaryBinary: c.legacyJudgeSecondaryBinary(),
+	})
+	path := c.AgentConfigPath
+	if path == "" {
+		if c.configPath == "" {
+			c.agentFile = legacy
+			return nil
+		}
+		path = filepath.Join(filepath.Dir(c.configPath), agents.DefaultFileName())
+	}
+	if !filepath.IsAbs(path) {
+		if c.configPath != "" {
+			path = filepath.Join(filepath.Dir(c.configPath), path)
+		}
+	}
+	path = filepath.Clean(path)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			c.agentFile = legacy
+			return nil
+		}
+		return err
+	}
+	file, err := agents.Load(path)
+	if err != nil {
+		return err
+	}
+	c.agentFile = file
+	return nil
+}
+
+func (c Config) legacyImplementerBinary() string {
+	if c.Agents.Implementer != "" {
+		return c.Agents.Implementer
+	}
+	if c.ClaudeCLIPath != "" {
+		return c.ClaudeCLIPath
+	}
+	return "claude"
+}
+
+func (c Config) legacyJudgePrimaryBinary() string {
+	if c.Agents.JudgePrimary != "" {
+		return c.Agents.JudgePrimary
+	}
+	if c.ClaudeCLIPath != "" {
+		return c.ClaudeCLIPath
+	}
+	return "claude"
+}
+
+func (c Config) legacyJudgeSecondaryBinary() string {
+	if c.Agents.JudgeSecondary != "" {
+		return c.Agents.JudgeSecondary
+	}
+	if c.CodexCLIPath != "" {
+		return c.CodexCLIPath
+	}
+	return "codex"
 }
 
 func (c Config) resolveRepoRoot() (string, error) {

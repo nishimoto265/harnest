@@ -388,7 +388,7 @@ func applyDefaults(in Input) (Input, error) {
 		in.PromptVersion = "phase0-stub"
 	}
 	if in.RubricPath == "" {
-		rubricPath, err := judges.DefaultRubricPath()
+		rubricPath, err := judges.ResolveRunRubricPath(in.IO)
 		if err != nil {
 			return Input{}, err
 		}
@@ -842,6 +842,9 @@ func doneMarkerMatchesCurrentState(runIO internalio.RunContext, paths step60Path
 	}
 	pairwiseCount, pairwiseHash, err := currentPairwiseState(paths.Pairwise)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
 		return false, fmt.Errorf("step60: inspect pairwise final: %w", err)
 	}
 	scoresRawHash, err := hashReducedRawScoresFile(runIO, paths.ScoresRaw)
@@ -1328,32 +1331,21 @@ func step60VersionsMatch(paths step60Paths, rubricVersion, promptVersion string)
 	if err != nil {
 		return false, err
 	}
-	for _, row := range reduceRawScores(scoreRaw) {
-		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
-			return false, nil
-		}
-	}
-	for _, row := range reduceRawCompliance(complianceRaw) {
-		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
-			return false, nil
-		}
-	}
-	for _, row := range scoreFinal {
-		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
-			return false, nil
-		}
-	}
-	for _, row := range complianceFinal {
-		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
-			return false, nil
-		}
-	}
-	for _, row := range pairwiseRows {
-		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
-			return false, nil
-		}
-	}
-	return true, nil
+	return scorecore.RowsMatchVersion(reduceRawScores(scoreRaw), func(row contracts.RawScoreEntry) (string, string) {
+		return row.RubricVersion, row.PromptVersion
+	}, rubricVersion, promptVersion) &&
+		scorecore.RowsMatchVersion(reduceRawCompliance(complianceRaw), func(row contracts.RawComplianceEntry) (string, string) {
+			return row.RubricVersion, row.PromptVersion
+		}, rubricVersion, promptVersion) &&
+		scorecore.RowsMatchVersion(scoreFinal, func(row contracts.ScoreEntry) (string, string) {
+			return row.RubricVersion, row.PromptVersion
+		}, rubricVersion, promptVersion) &&
+		scorecore.RowsMatchVersion(complianceFinal, func(row contracts.ComplianceEntry) (string, string) {
+			return row.RubricVersion, row.PromptVersion
+		}, rubricVersion, promptVersion) &&
+		scorecore.RowsMatchVersion(pairwiseRows, func(row contracts.PairwiseEntry) (string, string) {
+			return row.RubricVersion, row.PromptVersion
+		}, rubricVersion, promptVersion), nil
 }
 
 func minInt(left, right int) int {
@@ -1498,10 +1490,20 @@ func loadPass1Scores(runIO internalio.RunContext, rubricVersion, promptVersion s
 	if err != nil {
 		return nil, fmt.Errorf("step60: read pass1 scores: %w", err)
 	}
-	// F8: fail closed when step30 was run under a different scoring
-	// contract. Pairwise winner=A/B/tie otherwise reflects version drift,
-	// not actual pass2 regression/improvement.
-	for _, row := range rows {
+	// F8 + r17 F1: the pass1 final layer is append-only and CollapseByKey
+	// authoritatively selects the latest row per (agent, dimension). Version
+	// parity therefore has to be checked against the collapsed (effective)
+	// view, not every historical row — otherwise a rubric/prompt bump that
+	// triggers a step30 rerun would leave the now-superseded old-version
+	// rows behind forever, and step60 would perma-fail with
+	// ErrPass1VersionMismatch even though step30 produced fresh rows that
+	// match. This preserves the F8 guarantee (pass1 and pass2 share scoring
+	// assumptions) while honoring the append-only contract in
+	// io-contracts.md §3.
+	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ScoreEntry) scoreKey {
+		return scoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
+	})
+	for _, row := range collapsed {
 		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
 			return nil, fmt.Errorf(
 				"%w: path=%s agent=%s dimension=%s pass1_rubric=%s pass1_prompt=%s step60_rubric=%s step60_prompt=%s",
@@ -1510,9 +1512,6 @@ func loadPass1Scores(runIO internalio.RunContext, rubricVersion, promptVersion s
 			)
 		}
 	}
-	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ScoreEntry) scoreKey {
-		return scoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
-	})
 	byAgent := make(map[contracts.AgentID][]contracts.ScoreEntry, len(collapsed))
 	for _, entry := range collapsed {
 		byAgent[entry.Agent] = append(byAgent[entry.Agent], entry)
@@ -1532,10 +1531,12 @@ func loadPass1ComplianceRuleIDs(runIO internalio.RunContext, rubricVersion, prom
 		}
 		return nil, fmt.Errorf("step60: read pass1 compliance: %w", err)
 	}
-	// F8: compliance rule-id identity depends on the rubric that produced
-	// the row. Mismatched versions would silently accept stale rule IDs
-	// into expectedCompliance. Fail closed.
-	for _, row := range rows {
+	collapsed := scorecore.CollapseFinalCompliance(rows)
+	// F8 + r17 F1: verify parity on the collapsed (effective) rows only —
+	// see loadPass1Scores above for the full rationale. CollapseFinalCompliance
+	// keys by (agent, rule_id); old-version rows superseded by fresh step30
+	// output are authoritatively dropped.
+	for _, row := range collapsed {
 		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
 			return nil, fmt.Errorf(
 				"%w: path=%s agent=%s rule_id=%s pass1_rubric=%s pass1_prompt=%s step60_rubric=%s step60_prompt=%s",
@@ -1544,7 +1545,6 @@ func loadPass1ComplianceRuleIDs(runIO internalio.RunContext, rubricVersion, prom
 			)
 		}
 	}
-	collapsed := scorecore.CollapseFinalCompliance(rows)
 	byAgent := make(map[contracts.AgentID]map[string]struct{}, len(collapsed))
 	for _, entry := range collapsed {
 		if _, ok := byAgent[entry.Agent]; !ok {

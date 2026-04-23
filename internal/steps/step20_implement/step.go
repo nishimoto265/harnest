@@ -2,6 +2,7 @@ package step20_implement
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
@@ -38,6 +40,9 @@ var (
 	ErrAgentLeaseContended      = errors.New("step20: agent lease contended")
 	ErrRescueAbortedLeaseActive = errors.New("step20: rescue aborted because lease is active")
 )
+
+//go:embed prompts/step20-implement.tmpl
+var step20PromptFS embed.FS
 
 type RunContext struct {
 	Config      *config.Config
@@ -163,6 +168,8 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 			heartbeat.Stop()
 		}
 	}()
+	runCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 
 	sessionPath, err := artifactPath(run.IO, run.Pass, run.Agent, sessionFileName)
 	if err != nil {
@@ -173,9 +180,18 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 	if remaining <= 0 {
 		return s.writeTimeoutManifest(ctx, run, allocation, timeout, stepStartedAt, s.now().UTC())
 	}
+	implementer, err := run.Config.AgentProfile(agents.RoleImplementer)
+	if err != nil {
+		return err
+	}
+	binary, args, err := agentrunner.ImplementerCommand(implementer, allocation.Path)
+	if err != nil {
+		return err
+	}
 
-	runResult, err := s.runner.Run(ctx, runnerRequest{
-		Binary:      run.Config.ClaudeBinary(),
+	runResult, err := s.runner.Run(runCtx, runnerRequest{
+		Binary:      binary,
+		Args:        args,
 		Workdir:     allocation.Path,
 		Prompt:      promptText,
 		SessionPath: sessionPath,
@@ -203,11 +219,13 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 			if err := saveResumeState(agentDir, state); err != nil {
 				return err
 			}
-			handle, err := startHeartbeat(ctx, heartbeatConfig{
+			handle, err := startHeartbeat(runCtx, heartbeatConfig{
 				agentDir:  agentDir,
 				interval:  s.heartbeatInterval,
 				now:       s.now,
 				baseState: state,
+				cancel:    cancel,
+				prefix:    "step20",
 			})
 			if err != nil {
 				return err
@@ -217,13 +235,22 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 		},
 	})
 	if err != nil {
+		if cause := context.Cause(runCtx); cause != nil && errors.Is(err, runCtx.Err()) {
+			return cause
+		}
 		return err
+	}
+	if cause := context.Cause(runCtx); cause != nil && errors.Is(cause, errHeartbeatUpdateFailed) {
+		return cause
 	}
 
 	finalizeCtx := context.Background()
 	if heartbeat != nil {
 		heartbeat.Stop()
 		heartbeat = nil
+	}
+	if cause := context.Cause(runCtx); cause != nil && errors.Is(cause, errHeartbeatUpdateFailed) {
+		return cause
 	}
 	if err := prepareTerminalLeaseFinalize(agentDir); err != nil {
 		return err
@@ -236,7 +263,7 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 		finalizeErr = s.writeErrorManifest(finalizeCtx, run, runResult)
 	} else if runResult.CleanupErr != nil {
 		runResult.ExitCode = 1
-		runResult.StderrSnippet = appendCleanupDetail(runResult.StderrSnippet, runResult.CleanupErr)
+		runResult.StderrSnippet = agentrunner.AppendCleanupDetail(runResult.StderrSnippet, runResult.CleanupErr)
 		finalizeErr = s.writeErrorManifest(finalizeCtx, run, runResult)
 	} else {
 		finalizeErr = s.writeSuccessArtifacts(finalizeCtx, run, allocation, runResult)
@@ -283,21 +310,22 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	if len(diffBytes) == 0 {
 		return s.writeNoChangeManifest(ctx, run, runResult)
 	}
+	syntheticCommit := false
+	syntheticParent := ""
 	if headSHA == allocation.BaseSHA {
-		headSHA, err = synthesizeSuccessCommit(collectCtx, allocation, run)
+		headSHA, syntheticParent, err = synthesizeSuccessCommit(collectCtx, allocation, run)
 		if err != nil {
 			return err
 		}
-		if err := agentrunner.ValidateSuccessHead(collectCtx, allocation, headSHA, "step20"); err != nil {
-			return err
-		}
-		diffBytes, err = successDiffBytes(collectCtx, allocation.Path, allocation.BaseSHA)
-		if err != nil {
-			return err
-		}
+		syntheticCommit = true
 	}
 	if err := internalio.WriteAtomic(diffPath, diffBytes); err != nil {
 		return err
+	}
+	if syntheticCommit {
+		if err := finalizeSyntheticSuccessCommit(collectCtx, allocation, headSHA, syntheticParent, "step20"); err != nil {
+			return err
+		}
 	}
 
 	prefix := manifestPrefix(run.Pass, run.Agent)
@@ -349,7 +377,7 @@ func (s *Step) writeNoChangeManifest(ctx context.Context, run RunContext, runRes
 }
 
 func (s *Step) writeErrorManifest(ctx context.Context, run RunContext, runResult runnerResult) error {
-	reason := interruptionReason(runResult.ExitCode, runResult.StdoutSnippet, runResult.StderrSnippet)
+	reason := agentrunner.InterruptionReason(runResult.ExitCode, runResult.StdoutSnippet, runResult.StderrSnippet)
 	manifest := contracts.Manifest{
 		Kind: contracts.ManifestKindError,
 		Value: contracts.ManifestError{
@@ -360,7 +388,7 @@ func (s *Step) writeErrorManifest(ctx context.Context, run RunContext, runResult
 			Agent:         run.Agent,
 			ExitCode:      runResult.ExitCode,
 			Reason:        string(reason),
-			Detail:        truncateDetail(runResult.StderrSnippet, runResult.StdoutSnippet),
+			Detail:        agentrunner.TruncateDetail(runResult.StderrSnippet, runResult.StdoutSnippet),
 			StartedAt:     runResult.StartedAt.UTC(),
 			FinishedAt:    runResult.FinishedAt.UTC(),
 		},
@@ -413,24 +441,24 @@ func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte
 	return agentrunner.SuccessDiffBytes(ctx, worktreePath, baseSHA, "step20")
 }
 
-func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeAllocation, run RunContext) (string, error) {
+func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeAllocation, run RunContext) (string, string, error) {
 	if _, err := gitOutputContext(ctx, identity, allocation.Path, "add", "-A", "--", ".", ":(exclude)"+checklistFileName); err != nil {
-		return "", err
+		return "", "", err
 	}
 	staged, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "diff", "--cached", "--name-only", "--", ".", ":(exclude)"+checklistFileName)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if staged == "" {
-		return "", errors.New("step20: synthetic success commit found no staged changes")
+		return "", "", errors.New("step20: synthetic success commit found no staged changes")
 	}
 	parent, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	tree, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "write-tree")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	commitSHA, err := gitOutputContext(
 		ctx,
@@ -444,15 +472,19 @@ func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeA
 		fmt.Sprintf("auto-improve: synthesize step20 success for %s %s", run.IO.RunID, run.Agent),
 	)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
+	return commitSHA, parent, nil
+}
+
+func finalizeSyntheticSuccessCommit(ctx context.Context, allocation contracts.WorktreeAllocation, commitSHA, parent, errPrefix string) error {
 	if _, err := gitOutputContext(ctx, identity, allocation.Path, "update-ref", "refs/heads/"+allocation.Branch, commitSHA, parent); err != nil {
-		return "", err
+		return err
 	}
 	if _, err := gitOutputContext(ctx, identity, allocation.Path, "reset", "--mixed", "HEAD"); err != nil {
-		return "", err
+		return err
 	}
-	return commitSHA, nil
+	return agentrunner.ValidateSuccessHead(ctx, allocation, commitSHA, errPrefix)
 }
 
 func ensureAllocationWorktree(ctx context.Context, cfg *config.Config, allocation contracts.WorktreeAllocation) error {
@@ -532,17 +564,6 @@ func verifyAllocationHead(ctx context.Context, allocation contracts.WorktreeAllo
 	return nil
 }
 
-func appendCleanupDetail(stderrSnippet []byte, cleanupErr error) []byte {
-	detail := strings.TrimSpace(string(stderrSnippet))
-	if cleanupErr == nil {
-		return stderrSnippet
-	}
-	if detail == "" {
-		return []byte(cleanupErr.Error())
-	}
-	return []byte(detail + "\ncleanup: " + cleanupErr.Error())
-}
-
 func manifestPrefix(pass int, agent contracts.AgentID) string {
 	if pass == 2 {
 		return filepath.Join("50-pass2", string(agent))
@@ -585,12 +606,7 @@ type promptData struct {
 }
 
 func renderPrompt(cfg *config.Config, data promptData) (string, error) {
-	repoRoot, err := cfg.RepoRoot()
-	if err != nil {
-		return "", err
-	}
-	templatePath := filepath.Join(repoRoot, prompt.TemplateStep20Implement.RelativePath())
-	tmpl, err := template.ParseFiles(templatePath)
+	tmpl, err := template.New(string(prompt.TemplateStep20Implement)).Option("missingkey=error").ParseFS(step20PromptFS, "prompts/step20-implement.tmpl")
 	if err != nil {
 		return "", err
 	}

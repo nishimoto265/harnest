@@ -1,0 +1,44 @@
+package judges
+
+import (
+	"fmt"
+
+	"github.com/nishimoto265/auto-improve/internal/agents"
+	"github.com/nishimoto265/auto-improve/internal/config"
+	"github.com/nishimoto265/auto-improve/internal/contracts"
+)
+
+func NewJudgeFromConfig(cfg *config.Config, role contracts.JudgeRole) (Judge, error) {
+	if cfg == nil {
+		return NewStub(Role(role))
+	}
+	var agentRole agents.Role
+	switch role {
+	case contracts.JudgeRolePrimary:
+		agentRole = agents.RoleJudgePrimary
+	case contracts.JudgeRoleSecondary:
+		agentRole = agents.RoleJudgeSecondary
+	case contracts.JudgeRoleArbiter:
+		agentRole = agents.RoleJudgeArbiter
+	default:
+		return nil, fmt.Errorf("judges: unsupported judge role %q", role)
+	}
+	profile, err := cfg.AgentProfile(agentRole)
+	if err != nil {
+		return nil, err
+	}
+	switch profile.Provider {
+	case agents.ProviderStub:
+		return NewStub(Role(role))
+	case agents.ProviderClaude:
+		return NewCLIJudge(profile, Role(role)), nil
+	case agents.ProviderCodex:
+		return NewCLIJudge(profile, Role(role)), nil
+	case agents.ProviderStubViolation:
+		return NewViolationStub(Role(role))
+	case agents.ProviderStubAdopt:
+		return NewAdoptStub(Role(role))
+	default:
+		return nil, fmt.Errorf("judges: provider %q for role %q is not implemented yet", profile.Provider, role)
+	}
+}

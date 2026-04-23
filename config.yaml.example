@@ -1,7 +1,16 @@
 # Copy to config.yaml and edit for your environment.
 
-runs_base: "/tmp/auto-improve/runs" # Absolute directory for per-run artifacts.
-worktree_base: "/tmp/auto-improve/worktrees" # Absolute directory for git worktrees.
+repo:
+  github: "owner/repo" # Required for detect-merged and detect-loop.
+  root: "/abs/path/to/auto-improve" # Repository root for manual CLI use and launchd.
+  default_branch: "main" # Branch watched by detect-merged and detect-loop.
+  best_branch: "auto-improve/best" # Promotion target branch.
+  policy_branch: "auto-improve/policy" # Optional; repo-backed learned policy branch.
+paths:
+  runs: "/abs/path/to/auto-improve-state/runs" # Durable absolute directory for per-run artifacts.
+worktree:
+  base: "/abs/path/to/auto-improve-state/worktrees" # Durable absolute directory for git worktrees.
+agent_config_path: "./agents.yaml" # Optional; defaults to ./agents.yaml when present, otherwise legacy role defaults.
 claude_cli_path: "claude" # Claude CLI executable path or command name on PATH.
 codex_cli_path: "codex" # Codex CLI executable path or command name on PATH.
 preflight_timeout_sec: 30 # Timeout for preflight checks in seconds.

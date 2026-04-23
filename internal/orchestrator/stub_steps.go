@@ -37,10 +37,10 @@ func defaultSteps(cfg *config.Config, decoders ContractDecoders) Steps {
 	return Steps{
 		Step10:  step10Adapter{runner: step10restorebase.NewRunner(), decode: decoders.Step10},
 		Step20:  step20,
-		Step30:  newStep30ScoreAdapter(step30_score.New(), decoders.Step30),
+		Step30:  newStep30ScoreAdapter(step30_score.New(step30_score.WithPanelProvider(step30_score.ConfigPanelProvider(cfg))), decoders.Step30),
 		Step40:  stubStep40{decode: decoders.Step40},
 		Step50:  step50,
-		Step60:  step60Step{decode: decoders.Step60},
+		Step60:  step60Step{cfg: cfg, decode: decoders.Step60},
 		Step70:  realStep70{cfg: cfg, decode: decoders.Step70},
 		Archive: realArchiveStep{},
 	}
@@ -149,6 +149,7 @@ func (a step10Adapter) Run(ctx context.Context, run *StepRunContext) error {
 	result, err := a.runner.Run(ctx, step10restorebase.Input{
 		PR:            run.PR,
 		BestBranch:    run.Config.Repo.BestBranch,
+		PolicyBranch:  run.Config.Repo.PolicyBranch,
 		HarnessFiles:  true,
 		ExpectedRunID: run.IO.RunID,
 		RepoRoot:      repoRoot,
@@ -317,16 +318,29 @@ func (s stubMarkerStep) Run(ctx context.Context, run *StepRunContext) error {
 }
 
 type step60Step struct {
+	cfg    *config.Config
 	decode func([]byte, any) (any, error)
 }
 
 func (s step60Step) Run(ctx context.Context, run *StepRunContext) error {
+	primary, err := judges.NewJudgeFromConfig(s.cfg, contracts.JudgeRolePrimary)
+	if err != nil {
+		return err
+	}
+	secondary, err := judges.NewJudgeFromConfig(s.cfg, contracts.JudgeRoleSecondary)
+	if err != nil {
+		return err
+	}
+	arbiter, err := judges.NewJudgeFromConfig(s.cfg, contracts.JudgeRoleArbiter)
+	if err != nil {
+		return err
+	}
 	if err := step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
 		IO:          run.IO,
 		TaskPackage: run.TaskPackage,
-		Primary:     judges.NewPrimaryStub(),
-		Secondary:   judges.NewSecondaryStub(),
-		Arbiter:     judges.NewArbiterStub(),
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     arbiter,
 	}); err != nil {
 		return err
 	}
@@ -683,6 +697,8 @@ func (s realStep70) Run(ctx context.Context, run *StepRunContext) error {
 		},
 		RegistryHighAt: run.Config.RegistryHighThreshold,
 		RegistryCritAt: run.Config.RegistryCriticalThreshold,
+		RepoRoot:       repoRoot,
+		PolicyBranch:   run.Config.Repo.PolicyBranch,
 	}
 	runStep := step70_decide.Run
 	if s.runFn != nil {

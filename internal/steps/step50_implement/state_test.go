@@ -1,6 +1,8 @@
 package step50_implement
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,4 +43,40 @@ func TestLoadResumeState_MigratesLegacyActiveLeaseWithoutLeaderStartTime(t *test
 	assert.True(t, state.StartedAt.IsZero())
 	assert.True(t, state.LastHeartbeat.IsZero())
 	assert.Equal(t, 2, state.RetryCount, "retry_count must survive migration")
+}
+
+func TestLoadResumeState_RejectsMalformedCurrentResumeState(t *testing.T) {
+	agentDir := t.TempDir()
+	baseSHA := strings.Repeat("a", 40)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	current := `{"expected_base_sha":"` + baseSHA + `","started_at":"` + now + `","pid":-1,"pgid":1234,"leader_start_time":"saved-start","retry_count":2,"last_heartbeat":"` + now + `"}`
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, resumeStateFileName), []byte(current), 0o644))
+
+	_, _, err := loadResumeState(agentDir)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, ErrLegacyResumeStateLiveLease), "malformed current JSON must not fall back to legacy migration")
+}
+
+func TestStartHeartbeat_CancelsOnTickFailure(t *testing.T) {
+	agentDir := t.TempDir()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(nil) })
+
+	handle, err := startHeartbeat(ctx, heartbeatConfig{
+		agentDir:  agentDir,
+		interval:  10 * time.Millisecond,
+		now:       time.Now,
+		baseState: resumeState{ExpectedBaseSHA: strings.Repeat("a", 40), StartedAt: time.Now().UTC(), Pid: 1234, Pgid: 1234, LeaderStartTime: "saved-start", RetryCount: 1, LastHeartbeat: time.Now().UTC()},
+		cancel:    cancel,
+		prefix:    "step50",
+	})
+	require.NoError(t, err)
+	t.Cleanup(handle.Stop)
+	t.Cleanup(func() { _ = os.Chmod(agentDir, 0o700) })
+
+	require.NoError(t, os.Chmod(agentDir, 0o500))
+	require.Eventually(t, func() bool {
+		return context.Cause(ctx) != nil
+	}, time.Second, 10*time.Millisecond)
+	assert.ErrorContains(t, context.Cause(ctx), "step50: heartbeat update failed")
 }

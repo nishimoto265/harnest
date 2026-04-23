@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Ensure tag commit is on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if ! git branch -r --contains "$GITHUB_SHA" | sed 's/^[* ]*//' | grep -Fx "origin/${DEFAULT_BRANCH}" >/dev/null; then
+            echo "refusing to release tag from a commit outside origin/${DEFAULT_BRANCH}" >&2
+            exit 1
+          fi
+
+      - name: Test
+        run: go test ./...
+
+      - name: Smoke build
+        run: |
+          set -euo pipefail
+          go build -o ./auto-improve-smoke ./cmd/auto-improve
+          ./auto-improve-smoke help >/dev/null
+          rm -f ./auto-improve-smoke
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -917,9 +917,6 @@ func TestStepRunSerializesWorktreeRecreationUnderRescueLock(t *testing.T) {
 	worktreePath := filepath.Join(worktreeBase, string(runID)+"-pass1-a1")
 	branch := "auto-improve/" + string(runID) + "/pass1/a1"
 	runGit(t, repoDir, "worktree", "add", "-b", branch, worktreePath, baseSHA)
-	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "prompts"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "prompts", "step20-implement.tmpl"), []byte("step20 prompt\n"), 0o644))
-
 	runIO, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
 	require.NoError(t, err)
 	pkg := buildTaskPackage(t, runID, worktreeBase, worktreePath, baseSHA)
@@ -1421,9 +1418,6 @@ func TestStepRun_RecreatesMissingWorktreeBeforeLaunch(t *testing.T) {
 	worktreePath := filepath.Join(worktreeBase, string(runID)+"-pass1-a1")
 	branch := "auto-improve/" + string(runID) + "/pass1/a1"
 	runGit(t, repoDir, "worktree", "add", "-b", branch, worktreePath, baseSHA)
-	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "prompts"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "prompts", "step20-implement.tmpl"), []byte("step20 prompt\n"), 0o644))
-
 	runIO, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
 	require.NoError(t, err)
 	pkg := buildTaskPackage(t, runID, worktreeBase, worktreePath, baseSHA)
@@ -1478,7 +1472,8 @@ func TestRenderPrompt_UsesChecklistAtWorktreeRoot(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, promptText, "checklist_output_path: checklist-result.json")
-	assert.Contains(t, promptText, "checklist-result.json in the worktree root")
+	assert.Contains(t, promptText, "Write `checklist-result.json` at the worktree root.")
+	assert.Contains(t, promptText, "Do not create or overwrite `manifest.json`, `session.jsonl`, or `diff.patch` yourself.")
 }
 
 type failBeforeStartRunner struct{}

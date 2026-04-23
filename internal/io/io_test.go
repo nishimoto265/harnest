@@ -387,6 +387,17 @@ func TestRunContextFromTaskPackage_RejectsTamperedConfiguredWorktreeBase(t *test
 	assert.ErrorIs(t, err, ErrWorktreeBaseMismatch)
 }
 
+func TestRunContextFromTaskPackage_RejectsLegacyNestedWorktreePathShape(t *testing.T) {
+	runsBase := realTempDir(t)
+	worktreeBase := realTempDir(t)
+	pkg := testTaskPackage(t, runsBase, worktreeBase)
+	pkg.Worktrees[0].Path = filepath.Join(worktreeBase, "pass1", "a1")
+
+	_, err := RunContextFromTaskPackage(pkg, runsBase, worktreeBase)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWorktreeBaseMismatch)
+}
+
 func TestLoadFinalizedManifest_RejectsCrossRunManifestIdentity(t *testing.T) {
 	ctx := newTestRunContext(t)
 	otherRunID := contracts.RunID("2026-04-21-PR99-deadbee")

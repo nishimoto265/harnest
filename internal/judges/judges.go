@@ -153,6 +153,14 @@ type stubJudge struct {
 	role Role
 }
 
+type stubViolationJudge struct {
+	role Role
+}
+
+type stubAdoptJudge struct {
+	role Role
+}
+
 func NewStub(role Role) (Judge, error) {
 	switch role {
 	case RolePrimary, RoleSecondary, RoleArbiter:
@@ -175,6 +183,24 @@ func NewSecondaryStub() Judge {
 func NewArbiterStub() Judge {
 	judge, _ := NewStub(RoleArbiter)
 	return judge
+}
+
+func NewViolationStub(role Role) (Judge, error) {
+	switch role {
+	case RolePrimary, RoleSecondary, RoleArbiter:
+		return stubViolationJudge{role: role}, nil
+	default:
+		return nil, fmt.Errorf("%w: %s", ErrUnknownJudgeRole, role)
+	}
+}
+
+func NewAdoptStub(role Role) (Judge, error) {
+	switch role {
+	case RolePrimary, RoleSecondary, RoleArbiter:
+		return stubAdoptJudge{role: role}, nil
+	default:
+		return nil, fmt.Errorf("%w: %s", ErrUnknownJudgeRole, role)
+	}
 }
 
 func (j stubJudge) ScoreOutput(ctx context.Context, input JudgeInput) (JudgeOutput, error) {
@@ -220,6 +246,125 @@ func (j stubJudge) ScoreOutput(ctx context.Context, input JudgeInput) (JudgeOutp
 				RuleID:        stubRuleID,
 				Verdict:       contracts.ComplianceVerdictCompliant,
 				Rationale:     fmt.Sprintf("stub %s fixture marks the output compliant.", j.role),
+				VerdictPath:   verdictPath,
+				RubricVersion: stubRubricVersion,
+				PromptVersion: stubPromptVersion,
+				ResolvedAt:    stubResolvedAt,
+			},
+		},
+		Arbiter: j.role == RoleArbiter,
+	}
+	if err := output.ValidateFor(input); err != nil {
+		return JudgeOutput{}, err
+	}
+	return output, nil
+}
+
+func (j stubViolationJudge) ScoreOutput(ctx context.Context, input JudgeInput) (JudgeOutput, error) {
+	if err := input.Validate(); err != nil {
+		return JudgeOutput{}, err
+	}
+	select {
+	case <-ctx.Done():
+		return JudgeOutput{}, ctx.Err()
+	default:
+	}
+
+	verdictPath := contracts.VerdictPathSingle
+	if j.role == RoleArbiter {
+		verdictPath = contracts.VerdictPathArbitrated
+	}
+
+	scores := make([]contracts.ScoreEntry, 0, len(allDimensions))
+	for _, dimension := range allDimensions {
+		scores = append(scores, contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         input.RunID,
+			Pass:          input.Pass,
+			Agent:         input.Agent,
+			Dimension:     dimension,
+			Score:         60,
+			Reasons:       fmt.Sprintf("agent output still violates e2e stub rule on %s", dimension),
+			VerdictPath:   verdictPath,
+			RubricVersion: stubRubricVersion,
+			PromptVersion: stubPromptVersion,
+			ResolvedAt:    stubResolvedAt,
+		})
+	}
+
+	output := JudgeOutput{
+		Scores: scores,
+		Compliance: []contracts.ComplianceEntry{
+			{
+				SchemaVersion: "1",
+				RunID:         input.RunID,
+				Pass:          input.Pass,
+				Agent:         input.Agent,
+				RuleID:        "e2e-violation-rule",
+				Verdict:       contracts.ComplianceVerdictViolated,
+				Rationale:     fmt.Sprintf("stub violation fixture for %s requires explicit remediation", j.role),
+				VerdictPath:   verdictPath,
+				RubricVersion: stubRubricVersion,
+				PromptVersion: stubPromptVersion,
+				ResolvedAt:    stubResolvedAt,
+			},
+		},
+		Arbiter: j.role == RoleArbiter,
+	}
+	if err := output.ValidateFor(input); err != nil {
+		return JudgeOutput{}, err
+	}
+	return output, nil
+}
+
+func (j stubAdoptJudge) ScoreOutput(ctx context.Context, input JudgeInput) (JudgeOutput, error) {
+	if err := input.Validate(); err != nil {
+		return JudgeOutput{}, err
+	}
+	select {
+	case <-ctx.Done():
+		return JudgeOutput{}, ctx.Err()
+	default:
+	}
+	verdictPath := contracts.VerdictPathSingle
+	if j.role == RoleArbiter {
+		verdictPath = contracts.VerdictPathArbitrated
+	}
+	score := 55
+	verdict := contracts.ComplianceVerdictViolated
+	rationale := "pass1 intentionally fails the deterministic adopt stub rule"
+	if input.Pass == 2 {
+		score = 95
+		verdict = contracts.ComplianceVerdictCompliant
+		rationale = "pass2 satisfies the deterministic adopt stub rule"
+	}
+	scores := make([]contracts.ScoreEntry, 0, len(allDimensions))
+	for _, dimension := range allDimensions {
+		scores = append(scores, contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         input.RunID,
+			Pass:          input.Pass,
+			Agent:         input.Agent,
+			Dimension:     dimension,
+			Score:         score,
+			Reasons:       fmt.Sprintf("deterministic adopt stub %s score for %s", j.role, dimension),
+			VerdictPath:   verdictPath,
+			RubricVersion: stubRubricVersion,
+			PromptVersion: stubPromptVersion,
+			ResolvedAt:    stubResolvedAt,
+		})
+	}
+	output := JudgeOutput{
+		Scores: scores,
+		Compliance: []contracts.ComplianceEntry{
+			{
+				SchemaVersion: "1",
+				RunID:         input.RunID,
+				Pass:          input.Pass,
+				Agent:         input.Agent,
+				RuleID:        "adopt-stub-rule",
+				Verdict:       verdict,
+				Rationale:     rationale,
 				VerdictPath:   verdictPath,
 				RubricVersion: stubRubricVersion,
 				PromptVersion: stubPromptVersion,

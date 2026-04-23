@@ -26,6 +26,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/validation"
 )
 
@@ -37,10 +38,11 @@ var DefaultAgents = []contracts.AgentID{"a1", "a2", "a3"}
 type Input struct {
 	PR            int
 	BestBranch    string
+	PolicyBranch  string
 	HarnessFiles  bool
 	ExpectedRunID contracts.RunID // optional; empty disables the guard
 	RepoRoot      string          // clean absolute path to the managed repo
-	Repo          string          // "owner/name" form for `gh --repo` (optional)
+	Repo          string          // optional expected "owner/name"; validated against repoRoot remote
 	RunCtx        internalio.RunContext
 	Agents        []contracts.AgentID // defaults to DefaultAgents when empty
 	Now           func() time.Time    // test hook; defaults to time.Now().UTC()
@@ -88,7 +90,11 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	pr, err := r.GH.PRView(ctx, in.PR, in.Repo)
+	repoSlug, err := r.resolveRepoSlug(ctx, in.RepoRoot, in.Repo)
+	if err != nil {
+		return Result{}, err
+	}
+	pr, err := r.GH.PRView(ctx, in.PR, repoSlug)
 	if err != nil {
 		return Result{}, fmt.Errorf("step10: gh pr view: %w", err)
 	}
@@ -102,6 +108,11 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 			return Result{}, fmt.Errorf("step10: persisted base.sha=%s disagrees with merge-base=%s", persistedBaseSHA, derivedBaseSHA)
 		}
 		baseSHA = persistedBaseSHA
+	}
+	if in.HarnessFiles && strings.TrimSpace(in.PolicyBranch) != "" {
+		if err := policyrepo.HydrateFromBranch(ctx, in.RepoRoot, in.PolicyBranch, in.RunCtx.RunsBase); err != nil {
+			return Result{}, fmt.Errorf("step10: hydrate harness files from policy_branch=%s: %w", in.PolicyBranch, err)
+		}
 	}
 
 	worktrees, created, err := r.carveWorktrees(ctx, in, agents, baseSHA)
@@ -250,6 +261,32 @@ func (r *Runner) validateInput(in Input) ([]contracts.AgentID, error) {
 		seen[a] = struct{}{}
 	}
 	return agents, nil
+}
+
+func (r *Runner) resolveRepoSlug(ctx context.Context, repoRoot, configuredRepo string) (string, error) {
+	repoSlug, err := r.Git.RepoSlug(ctx, repoRoot)
+	if configuredRepo == "" {
+		if err != nil {
+			return "", err
+		}
+		if repoSlug == "" {
+			return "", fmt.Errorf("step10: resolved repo slug is empty for repo_root=%s", repoRoot)
+		}
+		return repoSlug, nil
+	}
+	if err == nil && repoSlug != "" && !strings.EqualFold(configuredRepo, repoSlug) {
+		return "", fmt.Errorf("step10: repo mismatch: configured=%s resolved=%s", configuredRepo, repoSlug)
+	}
+	if configuredRepo != "" {
+		return configuredRepo, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if repoSlug == "" {
+		return "", fmt.Errorf("step10: resolved repo slug is empty for repo_root=%s", repoRoot)
+	}
+	return repoSlug, nil
 }
 
 // carveWorktrees iterates (pass, agent) in deterministic order (pass 1 first,

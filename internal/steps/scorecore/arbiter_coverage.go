@@ -70,15 +70,7 @@ func ValidateArbiterComplianceRuleCoverage(primaryRuleIDs, secondaryRuleIDs, arb
 			secondaryRuleIDs,
 		)
 	}
-	if !equalRuleIDSets(primaryRuleIDs, arbiterRuleIDs) {
-		return fmt.Errorf(
-			"%w: expected=%v arbiter=%v",
-			ErrPanelArbiterRuleCoverage,
-			primaryRuleIDs,
-			arbiterRuleIDs,
-		)
-	}
-	return nil
+	return validateArbiterSupersetsDisputed(primaryRuleIDs, arbiterRuleIDs)
 }
 
 func uniqueSortedComplianceRuleIDs(rows []contracts.RawComplianceEntry) []string {

@@ -16,7 +16,6 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
-	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -910,6 +909,44 @@ func TestRun_IgnoresHistoricalRawVersionsAfterMigration(t *testing.T) {
 	assert.False(t, called)
 }
 
+// step30 appends a fresh versioned pass1 row set without truncating the
+// historical rows. step60 must check the collapsed effective pass1 rows so
+// a valid resume after that bump does not fail closed on the superseded
+// old-version entries that still remain on disk.
+func TestRun_AcceptsPass1AppendOnlyAfterVersionBump(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:    true,
+		pass1RubricVersion: "rubric-v1",
+		pass1PromptVersion: "prompt-v1",
+	})
+	agents := []contracts.AgentID{"a1", "a2", "a3"}
+
+	scoresPath := mustResolve(t, runIO, "30/scores-A.jsonl")
+	for _, agent := range agents {
+		for _, entry := range primaryStubScores(pkg.RunID, 1, agent) {
+			entry.RubricVersion = "rubric-v2"
+			entry.PromptVersion = "prompt-v2"
+			require.NoError(t, internalio.AppendJSONL(scoresPath, entry))
+		}
+	}
+
+	rows, err := internalio.ReadJSONL[contracts.ScoreEntry](scoresPath)
+	require.NoError(t, err)
+	assert.Equal(t, 2*len(agents)*len(canonicalDimensions), len(rows))
+
+	now := time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:            runIO,
+		TaskPackage:   &pkg,
+		RubricVersion: "rubric-v2",
+		PromptVersion: "prompt-v2",
+		Primary:       judges.NewPrimaryStub(),
+		Secondary:     judges.NewSecondaryStub(),
+		Arbiter:       judges.NewArbiterStub(),
+		Now:           func() time.Time { return now },
+	}))
+}
+
 func TestRun_RebuildsWhenRawComplianceCoverageIsMissing(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score:        true,
@@ -1383,7 +1420,7 @@ func TestNormalizeCompliance_RejectsDuplicateRuleIDs(t *testing.T) {
 	assert.ErrorIs(t, err, ErrDuplicateComplianceRuleID)
 }
 
-func TestRun_RejectsArbiterOnlyComplianceRulesOutsideDisputedSet(t *testing.T) {
+func TestRun_ToleratesArbiterOnlyComplianceRowsOutsideDisputedSet(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score:        true,
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
@@ -1410,8 +1447,7 @@ func TestRun_RejectsArbiterOnlyComplianceRulesOutsideDisputedSet(t *testing.T) {
 		},
 		Now: func() time.Time { return time.Date(2026, 4, 21, 17, 55, 0, 0, time.UTC) },
 	})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, scorecore.ErrPanelArbiterRuleCoverage)
+	require.NoError(t, err)
 }
 
 func TestRun_NormalizesRawResolvedAtToRunSnapshot(t *testing.T) {
