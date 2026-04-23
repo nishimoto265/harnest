@@ -506,6 +506,32 @@ func TestRun_TaskPromptSourceIssueSkipsDiffFetch(t *testing.T) {
 	assert.Zero(t, git.diffCalls)
 }
 
+func TestRun_TaskPromptSourceDiffSynthRequiresImmutableMergedDiff(t *testing.T) {
+	rc := newRunCtx(t)
+	git := newStubGit()
+	git.mergeBase[testBaseSHA+"::"+testBaseRefOID] = testBaseSHA
+	runner := &Runner{
+		GH: stubGH{info: PRInfo{
+			Number:     42,
+			Title:      "improve X",
+			Body:       "body text",
+			State:      "MERGED",
+			BaseRefOid: testBaseRefOID,
+			HeadRefOid: testBaseSHA,
+		}},
+		Git: git,
+	}
+
+	_, err := runner.Run(context.Background(), Input{
+		PR:               42,
+		BestBranch:       "auto-improve/best",
+		TaskPromptSource: "diff_synth",
+		RepoRoot:         t.TempDir(),
+		RunCtx:           rc,
+	})
+	require.ErrorContains(t, err, "diff_synth requires an immutable merged diff source")
+}
+
 func TestRun_RebaseMergedPR_WithoutImmutableBaseFailsClosed(t *testing.T) {
 	rc := newRunCtx(t)
 	runner := &Runner{
@@ -1165,6 +1191,7 @@ func TestSynthesizeTaskBrief_IssueSourceIncludesIssuesAndSkipsDiffContext(t *tes
 	assert.Contains(t, got, "### Linked Issues")
 	assert.Contains(t, got, "#7: issue title")
 	assert.NotContains(t, got, "### Diff Excerpt")
+	assert.Contains(t, got, "- issue body")
 }
 
 func TestSynthesizeTaskBrief_AutoWithUsableIssuesAlsoKeepsDiffContext(t *testing.T) {
