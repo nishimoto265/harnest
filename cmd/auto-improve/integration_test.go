@@ -1,0 +1,489 @@
+package main
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/nishimoto265/auto-improve/internal/contracts"
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+const integrationEnvVar = "AUTO_IMPROVE_INTEGRATION"
+
+func TestIntegrationConcurrentRunsDifferentPRsSucceed(t *testing.T) {
+	requireIntegrationEnv(t)
+
+	env := newCLIIntegrationEnv(t, 1*time.Second)
+	bin := buildIntegrationBinary(t)
+
+	cmd41, stdout41, stderr41 := env.newRunCommand(bin, 41)
+	cmd42, stdout42, stderr42 := env.newRunCommand(bin, 42)
+
+	require.NoError(t, cmd41.Start())
+	require.NoError(t, cmd42.Start())
+
+	require.NoError(t, cmd41.Wait(), "stdout=%s stderr=%s", stdout41.String(), stderr41.String())
+	require.NoError(t, cmd42.Wait(), "stdout=%s stderr=%s", stdout42.String(), stderr42.String())
+
+	runDirs := env.runDirs(t)
+	require.Len(t, runDirs, 2)
+	for _, runDir := range runDirs {
+		assert.FileExists(t, filepath.Join(runDir, "70", "decision.json"))
+	}
+	assert.NoDirExists(t, filepath.Join(env.runsBase, "needs-recovery"))
+}
+
+func TestIntegrationConcurrentSamePRSecondFailsWithPRLock(t *testing.T) {
+	requireIntegrationEnv(t)
+
+	env := newCLIIntegrationEnv(t, 2*time.Second)
+	bin := buildIntegrationBinary(t)
+
+	cmd1, stdout1, stderr1 := env.newRunCommand(bin, 42)
+	require.NoError(t, cmd1.Start())
+	t.Cleanup(func() {
+		if cmd1.ProcessState == nil && cmd1.Process != nil {
+			_ = cmd1.Process.Kill()
+		}
+	})
+
+	time.Sleep(250 * time.Millisecond)
+
+	cmd2, stdout2, stderr2 := env.newRunCommand(bin, 42)
+	err := cmd2.Run()
+	require.Error(t, err)
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Contains(t, stdout2.String()+stderr2.String(), "another process is already running this PR")
+
+	require.NoError(t, cmd1.Wait(), "stdout=%s stderr=%s", stdout1.String(), stderr1.String())
+	assert.NotEmpty(t, stdout2.String()+stderr2.String())
+}
+
+func TestIntegrationRecoverAdoptAnywaySubprocess(t *testing.T) {
+	requireIntegrationEnv(t)
+
+	root, runsBase, worktreeBase, runID := seedRecoverActionRun(t)
+	runDir := filepath.Join(runsBase, string(runID))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelFilename(runID)), []byte(`{"run_id":"2026-04-21-PR52-abcdef0","pr":52,"reason":"transactional_failure","failed_step":"70","created_at":"2026-04-21T12:00:00Z"}`), 0o644))
+	candidatesDoc, err := internalio.ReadJSON[contracts.Candidates](filepath.Join(runDir, "40", "candidates.json"))
+	require.NoError(t, err)
+	candidatesHash := candidatesDoc.CandidatesHash
+	intention := seedRecoverIntention(runID, contracts.IntentionStageNeedsManualRecovery, strings.Repeat("a", 40), strings.Repeat("b", 40), candidatesHash)
+	intention.RegistryAppendResult = nil
+	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
+	intention.FailedStep = contracts.FailedStep70
+	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "70", "intention.json"), intention))
+	entry := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "r-0001",
+			RulePath:       "rules/r-0001.md",
+			Sha256:         strings.Repeat("1", 64),
+			IdempotencyKey: intention.PlannedAdoption.Entries[0].OpID,
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        runID,
+			At:             time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}
+	_, err = internalio.AppendRegistryEntry(filepath.Join(runsBase, "rules-registry.jsonl"), entry)
+	require.NoError(t, err)
+	writeTestConfig(t, root, runsBase, worktreeBase)
+
+	bin := buildIntegrationBinary(t)
+	binDir := filepath.Join(root, "bin")
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+	writeExecutable(t, filepath.Join(binDir, "git"), recoverAdoptAnywayGitScript())
+
+	pkg, err := internalio.ReadJSON[contracts.TaskPackage](filepath.Join(runDir, "task-package.json"))
+	require.NoError(t, err)
+	var worktreesList strings.Builder
+	for _, wt := range pkg.Worktrees {
+		worktreesList.WriteString(wt.Path)
+		worktreesList.WriteByte('\n')
+	}
+	gitStateDir := filepath.Join(root, "git-state")
+	require.NoError(t, os.MkdirAll(gitStateDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(gitStateDir, "worktrees.list"), []byte(worktreesList.String()), 0o644))
+
+	cmd := exec.Command(bin, "recover", "--run", string(runID), "--adopt-anyway")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"AUTO_IMPROVE_GIT_STATE_DIR="+gitStateDir,
+		"AUTO_IMPROVE_TEST_REMOTE_SHA="+strings.Repeat("b", 40),
+	)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Run(), "stdout=%s stderr=%s", stdout.String(), stderr.String())
+
+	events, err := state.ScanEventsForRun(mustNewRunCtx(t, runID, runsBase, worktreeBase), runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindPromoted, events[len(events)-1].Kind)
+	assert.NoFileExists(t, filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelFilename(runID)))
+}
+
+func TestIntegrationRunFailsClosedOnBrokenPolicyBranch(t *testing.T) {
+	requireIntegrationEnv(t)
+
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, "rules"), 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+
+	writeTestConfig(t, root, runsBase, worktreeBase)
+	localRule := "# Local fallback rule\n\nbody\n"
+	localRegistry := "{\"kind\":\"added\",\"schema_version\":\"1\",\"rule_id\":\"r-local\",\"rule_path\":\"rules/r-local.md\",\"sha256\":\"" + sha256String(localRule) + "\",\"idempotency_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_seq\":1,\"prev_hash\":\"\",\"by_run_id\":\"2026-04-23-PR1-feedbee\",\"at\":\"2026-04-23T08:00:00Z\"}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "rules-registry.jsonl"), []byte(localRegistry), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "rules", "r-local.md"), []byte(localRule), 0o644))
+	appendPolicyBranchConfig(t, filepath.Join(root, "config.yaml"), "auto-improve/policy")
+
+	bin := buildIntegrationBinary(t)
+	binDir := filepath.Join(root, "bin")
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+	copyExecutable(t, filepath.Join(mustRepoRoot(t), "internal", "orchestrator", "testdata", "bin", "gh"), filepath.Join(binDir, "gh"))
+	writeExecutable(t, filepath.Join(binDir, "git"), brokenPolicyGitScript())
+	writeExecutable(t, filepath.Join(binDir, "claude"), fakeClaudeScript(0))
+
+	cmd := exec.Command(bin, "run", "--pr", "1")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"AUTO_IMPROVE_TEST_BASE_SHA="+strings.Repeat("a", 40),
+		"AUTO_IMPROVE_TEST_TARGET_SHA="+strings.Repeat("b", 40),
+		"AUTO_IMPROVE_TEST_MERGE_SHA="+strings.Repeat("c", 40),
+		"AUTO_IMPROVE_TEST_BEST_SHA="+strings.Repeat("d", 40),
+	)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	require.Error(t, err)
+	assert.Contains(t, stdout.String()+stderr.String(), "active rule body sha mismatch")
+
+	registryBytes, readErr := os.ReadFile(filepath.Join(runsBase, "rules-registry.jsonl"))
+	require.NoError(t, readErr)
+	assert.Equal(t, localRegistry, string(registryBytes))
+	ruleBytes, readErr := os.ReadFile(filepath.Join(runsBase, "rules", "r-local.md"))
+	require.NoError(t, readErr)
+	assert.Equal(t, localRule, string(ruleBytes))
+}
+
+type cliIntegrationEnv struct {
+	root      string
+	runsBase  string
+	worktrees string
+	binDir    string
+	env       []string
+}
+
+func newCLIIntegrationEnv(t *testing.T, agentSleep time.Duration) cliIntegrationEnv {
+	t.Helper()
+
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktrees := filepath.Join(root, "worktrees")
+	binDir := filepath.Join(root, "bin")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktrees, 0o755))
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+
+	writeTestConfig(t, root, runsBase, worktrees)
+
+	repoRoot := mustRepoRoot(t)
+	copyExecutable(t, filepath.Join(repoRoot, "internal", "orchestrator", "testdata", "bin", "git"), filepath.Join(binDir, "git"))
+	copyExecutable(t, filepath.Join(repoRoot, "internal", "orchestrator", "testdata", "bin", "gh"), filepath.Join(binDir, "gh"))
+	writeExecutable(t, filepath.Join(binDir, "claude"), fakeClaudeScript(agentSleep))
+
+	baseEnv := os.Environ()
+	baseEnv = append(baseEnv,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"AUTO_IMPROVE_GIT_STATE_DIR="+filepath.Join(root, "git-state"),
+		"AUTO_IMPROVE_TEST_BASE_SHA="+strings.Repeat("a", 40),
+		"AUTO_IMPROVE_TEST_TARGET_SHA="+strings.Repeat("b", 40),
+		"AUTO_IMPROVE_TEST_MERGE_SHA="+strings.Repeat("c", 40),
+		"AUTO_IMPROVE_TEST_BEST_SHA="+strings.Repeat("d", 40),
+	)
+
+	return cliIntegrationEnv{
+		root:      root,
+		runsBase:  runsBase,
+		worktrees: worktrees,
+		binDir:    binDir,
+		env:       baseEnv,
+	}
+}
+
+func (e cliIntegrationEnv) newRunCommand(bin string, pr int) (*exec.Cmd, *bytes.Buffer, *bytes.Buffer) {
+	cmd := exec.Command(bin, "run", "--pr", strconv.Itoa(pr))
+	cmd.Dir = e.root
+	cmd.Env = e.env
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	return cmd, &stdout, &stderr
+}
+
+func (e cliIntegrationEnv) runDirs(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(e.runsBase)
+	require.NoError(t, err)
+	dirs := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "pr-locks" || name == "rules" || name == "needs-recovery" {
+			continue
+		}
+		dirs = append(dirs, filepath.Join(e.runsBase, name))
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
+func buildIntegrationBinary(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "auto-improve")
+	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd.Dir = mustPackageDir(t)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return bin
+}
+
+func mustRepoRoot(t *testing.T) string {
+	t.Helper()
+	wd := mustPackageDir(t)
+	return filepath.Clean(filepath.Join(wd, "..", ".."))
+}
+
+func mustPackageDir(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	return wd
+}
+
+func requireIntegrationEnv(t *testing.T) {
+	t.Helper()
+	if os.Getenv(integrationEnvVar) != "1" {
+		t.Skip("set AUTO_IMPROVE_INTEGRATION=1 to run integration tests")
+	}
+}
+
+func copyExecutable(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(dst, data, 0o755))
+}
+
+func writeExecutable(t *testing.T, path, body string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o755))
+}
+
+func fakeClaudeScript(delay time.Duration) string {
+	return "#!/bin/sh\n" +
+		"set -eu\n" +
+		"sleep " + formatSleep(delay) + "\n" +
+		"cat > checklist-result.json <<EOF\n" +
+		"{\"schema_version\":\"1\",\"run_id\":\"${AUTO_IMPROVE_RUN_ID}\",\"pass\":${AUTO_IMPROVE_PASS},\"agent\":\"${AUTO_IMPROVE_AGENT}\",\"items\":[]}\n" +
+		"EOF\n" +
+		"printf 'generated change\\n' > \"generated-${AUTO_IMPROVE_PASS}-${AUTO_IMPROVE_AGENT}.txt\"\n" +
+		"printf '{\"event\":\"ok\"}\\n'\n"
+}
+
+func formatSleep(delay time.Duration) string {
+	if delay <= 0 {
+		return "0"
+	}
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.3f", delay.Seconds()), "0"), ".")
+}
+
+func sha256String(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func recoverAdoptAnywayGitScript() string {
+	return `#!/bin/sh
+set -eu
+
+state_dir="${AUTO_IMPROVE_GIT_STATE_DIR}"
+mkdir -p "$state_dir"
+
+if [ "${1:-}" = "-C" ]; then
+  repo_dir="$2"
+  shift 2
+else
+  repo_dir="$(pwd)"
+fi
+
+subcmd="$1"
+shift
+
+case "$subcmd" in
+  ls-remote)
+    branch="${4:-best}"
+    printf '%s\trefs/heads/%s\n' "${AUTO_IMPROVE_TEST_REMOTE_SHA}" "$branch"
+    ;;
+  worktree)
+    case "${1:-}" in
+      list)
+        if [ -f "$state_dir/worktrees.list" ]; then
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            printf 'worktree %s\n\n' "$path"
+          done < "$state_dir/worktrees.list"
+        fi
+        ;;
+      remove)
+        rm -rf "${3:-}"
+        ;;
+    esac
+    ;;
+  remote)
+    case "${1:-} ${2:-}" in
+      "get-url origin")
+        printf '%s\n' "git@github.com:owner/repo.git"
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+
+exit 0
+`
+}
+
+func appendPolicyBranchConfig(t *testing.T, path, policyBranch string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	content := string(data)
+	replacement := "  best_branch: auto-improve/best\n"
+	if policyBranch != "" {
+		replacement += "  policy_branch: " + policyBranch + "\n"
+	}
+	content = strings.Replace(content, "  best_branch: auto-improve/best\n", replacement, 1)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+}
+
+func brokenPolicyGitScript() string {
+	return `#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "-C" ]; then
+  repo_dir="$2"
+  shift 2
+else
+  repo_dir="$(pwd)"
+fi
+
+subcmd="$1"
+shift
+
+case "$subcmd" in
+  rev-parse)
+    if [ "${1:-}" = "--verify" ]; then
+      echo "${AUTO_IMPROVE_TEST_BEST_SHA}"
+      exit 0
+    fi
+    case "${1:-}" in
+      *^1) echo "${AUTO_IMPROVE_TEST_BASE_SHA}" ;;
+      HEAD) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
+      refs/heads/*) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
+      *) echo "${AUTO_IMPROVE_TEST_BEST_SHA}" ;;
+    esac
+    ;;
+  fetch)
+    exit 0
+    ;;
+  remote)
+    case "${1:-} ${2:-}" in
+      "get-url origin")
+        printf '%s\n' "git@github.com:owner/repo.git"
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+  ls-tree)
+    printf '%s\n' "auto-improve/rules-registry.jsonl"
+    printf '%s\n' "auto-improve/rules/r-bad.md"
+    ;;
+  show)
+    case "${1:-}" in
+      origin/auto-improve/policy:auto-improve/rules-registry.jsonl)
+        printf '%s\n' '{"kind":"added","schema_version":"1","rule_id":"r-bad","rule_path":"rules/r-bad.md","sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","idempotency_key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version_seq":1,"prev_hash":"","by_run_id":"2026-04-23-PR1-feedbee","at":"2026-04-23T08:00:00Z"}'
+        ;;
+      origin/auto-improve/policy:auto-improve/rules/r-bad.md)
+        printf '%s\n' '# broken policy'
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+  merge-base)
+    if [ "${1:-}" = "--is-ancestor" ]; then
+      exit 0
+    fi
+    ;;
+  worktree)
+    case "${1:-}" in
+      add)
+        if [ "${2:-}" = "-b" ]; then
+          mkdir -p "$4"
+        else
+          mkdir -p "$2"
+        fi
+        ;;
+      remove)
+        rm -rf "${3:-}"
+        ;;
+      list)
+        exit 0
+        ;;
+    esac
+    ;;
+  diff|ls-files|status|branch|ls-remote|push)
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+
+exit 0
+`
+}
