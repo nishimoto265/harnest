@@ -84,10 +84,9 @@ type AgentsConfig struct {
 }
 
 type PathsConfig struct {
-	Runs            string `yaml:"runs"`
-	NamespaceByRepo bool   `yaml:"namespace_by_repo"`
-	StateFile       string `yaml:"state_file"`
-	RulesRegistry   string `yaml:"rules_registry"`
+	Runs          string `yaml:"runs"`
+	StateFile     string `yaml:"state_file"`
+	RulesRegistry string `yaml:"rules_registry"`
 }
 
 func LoadDefault() (Config, error) {
@@ -213,17 +212,11 @@ func (c Config) PolicyBranch() (string, bool) {
 }
 
 func (c Config) namespaceStatePath(path, leaf string) string {
-	if !c.Paths.NamespaceByRepo {
-		return path
-	}
 	namespace, ok := c.repoStateNamespace()
 	if !ok {
 		return path
 	}
 	if filepath.Base(path) != leaf {
-		return path
-	}
-	if _, err := os.Stat(path); err == nil {
 		return path
 	}
 	parent := filepath.Dir(path)

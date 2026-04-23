@@ -895,7 +895,7 @@ func TestRunDetectLoopUsesConfiguredDefaultBranch(t *testing.T) {
 	}
 	detectMergedPRs = func(_ context.Context, cfg config.Config, processedPath string) ([]detect.MergedPR, error) {
 		assert.Equal(t, "develop", cfg.Repo.DefaultBranch)
-		assert.Equal(t, filepath.Join(runsBase, "processed.jsonl"), processedPath)
+		assert.Equal(t, filepath.Join(root, "owner__repo", "runs", "processed.jsonl"), processedPath)
 		return []detect.MergedPR{{Number: 101}, {Number: 102}}, nil
 	}
 	t.Cleanup(func() {
@@ -921,7 +921,6 @@ func TestRunDetectLoopUsesNamespacedProcessedPathWhenEnabled(t *testing.T) {
 			"  best_branch: auto-improve/best\n"+
 			"paths:\n"+
 			"  runs: "+runsBase+"\n"+
-			"  namespace_by_repo: true\n"+
 			"worktree:\n"+
 			"  base: "+worktreeBase+"\n",
 	), 0o644))

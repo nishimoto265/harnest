@@ -151,10 +151,9 @@ func TestRun_DefaultStub_EndToEnd(t *testing.T) {
 	assert.Equal(t, contracts.StateKindCompleted, events[len(events)-1].Kind)
 }
 
-func TestRun_DefaultStub_EndToEnd_UsesNamespacedStateWhenEnabled(t *testing.T) {
+func TestRun_DefaultStub_EndToEnd_UsesNamespacedStateWhenRepoGitHubIsSet(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Repo.GitHub = "owner/repo"
-	cfg.Paths.NamespaceByRepo = true
 	orch, err := NewOrchestrator(cfg)
 	require.NoError(t, err)
 	orch.steps.Step10 = stubStep10{}
