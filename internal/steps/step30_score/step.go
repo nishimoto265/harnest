@@ -94,8 +94,9 @@ func New(opts ...Option) *Step {
 // orchestrator.StepRunContext surface without importing orchestrator; the
 // adapter in internal/orchestrator wraps StepRunContext into Request.
 type Request struct {
-	RunContext  internalio.RunContext
-	TaskPackage *contracts.TaskPackage
+	RunContext    internalio.RunContext
+	TaskPackage   *contracts.TaskPackage
+	PanelProvider PanelProvider
 }
 
 // Errors surfaced by Run.
@@ -114,6 +115,10 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 	}
 	if req.TaskPackage.RunID != req.RunContext.RunID {
 		return fmt.Errorf("step30_score: task package run_id mismatch: task_package=%s io=%s", req.TaskPackage.RunID, req.RunContext.RunID)
+	}
+	panel := s.panel
+	if req.PanelProvider != nil {
+		panel = req.PanelProvider
 	}
 
 	paths, err := stepPaths(req.RunContext)
@@ -169,7 +174,7 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 	}
 	if valid {
 		promptVersion := s.promptVersion
-		if versioned, ok := s.panel.(PanelVersionProvider); ok {
+		if versioned, ok := panel.(PanelVersionProvider); ok {
 			promptVersion = versioned.PanelPromptVersion(s.promptVersion)
 		}
 		versionsMatch, err := step30VersionsMatch(paths, agentIDs, rubricVersion, promptVersion, expectedComplianceRules)
@@ -249,7 +254,7 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 			ExpectedComplianceRuleIDs: expectedComplianceRuleIDs,
 			EnforceExpectedCompliance: true,
 		}
-		primary, secondary, arbiter, err := s.panel.Judges(judgeInput)
+		primary, secondary, arbiter, err := panel.Judges(judgeInput)
 		if err != nil {
 			return fmt.Errorf("step30_score: panel agent=%s: %w", agent.agent, err)
 		}

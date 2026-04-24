@@ -846,6 +846,7 @@ func TestStubStep40_UsesRequestBoundDecoder(t *testing.T) {
 }
 
 func TestStep30AdapterDecoderRequestUsesArtifactPromptVersionFromConfigJudge(t *testing.T) {
+	constructionCfg := testConfig(t)
 	cfg := testConfigWithCLIJudge(t)
 	runID := contracts.RunID("2026-04-21-PR120-abcdef0")
 	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
@@ -862,7 +863,7 @@ func TestStep30AdapterDecoderRequestUsesArtifactPromptVersionFromConfigJudge(t *
 
 	var captured stepio.Step30Request
 	adapter := newStep30ScoreAdapter(
-		step30_score.New(step30_score.WithPanelProvider(step30_score.ConfigPanelProvider(cfg))),
+		step30_score.New(step30_score.WithPanelProvider(step30_score.ConfigPanelProvider(constructionCfg))),
 		func(data []byte, req any) (any, error) {
 			captured = req.(stepio.Step30Request)
 			return stepio.DecodeAndValidateStep30Response(data, captured)

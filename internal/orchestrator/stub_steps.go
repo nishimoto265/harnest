@@ -38,7 +38,7 @@ func defaultSteps(cfg *config.Config, decoders ContractDecoders) Steps {
 	return Steps{
 		Step10:  step10Adapter{runner: step10restorebase.NewRunner(), decode: decoders.Step10},
 		Step20:  step20,
-		Step30:  newStep30ScoreAdapter(step30_score.New(step30_score.WithPanelProvider(step30_score.ConfigPanelProvider(cfg))), decoders.Step30),
+		Step30:  newStep30ScoreAdapter(step30_score.New(), decoders.Step30),
 		Step40:  stubStep40{decode: decoders.Step40},
 		Step50:  step50,
 		Step60:  step60Step{cfg: cfg, decode: decoders.Step60},
@@ -60,8 +60,9 @@ func newStep30ScoreAdapter(step *step30_score.Step, decode func([]byte, any) (an
 
 func (a step30ScoreAdapter) Run(ctx context.Context, run *StepRunContext) error {
 	if err := a.step.Run(ctx, step30_score.Request{
-		RunContext:  run.IO,
-		TaskPackage: run.TaskPackage,
+		RunContext:    run.IO,
+		TaskPackage:   run.TaskPackage,
+		PanelProvider: step30_score.ConfigPanelProvider(run.Config),
 	}); err != nil {
 		return err
 	}
