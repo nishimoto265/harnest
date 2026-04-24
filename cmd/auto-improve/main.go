@@ -785,17 +785,6 @@ func requireAbortedSentinel(runCtx internalio.RunContext) error {
 	return nil
 }
 
-func requireAnySentinel(runCtx internalio.RunContext) error {
-	value, _, err := existingRecoverSentinel(runCtx)
-	if err != nil {
-		return err
-	}
-	if value == nil {
-		return commandExitError{code: 2, msg: fmt.Sprintf("recover: no sentinel found for run_id=%s", runCtx.RunID)}
-	}
-	return nil
-}
-
 func lastRunEventIsTerminal(events []contracts.StateEntry) bool {
 	if len(events) == 0 {
 		return false

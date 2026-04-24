@@ -324,6 +324,11 @@ func processIdentityMatches(pid int, expectedStartTime string) (bool, error) {
 		return false, nil
 	}
 	if isProcessInspectionUnavailableStartTime(expectedStartTime) {
+		if err := killPIDSignal(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return false, nil
+		} else if err != nil {
+			return false, err
+		}
 		return false, ErrCleanupInspectionUnavailable
 	}
 	currentStartTime, err := lookupProcessStartTime(pid)

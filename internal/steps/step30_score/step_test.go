@@ -344,7 +344,7 @@ func TestStep30Score_RejectsMissingExpectedActiveComplianceRule(t *testing.T) {
 
 	provider := &fakePanelProvider{
 		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
-			return makeJudgeOutput(input, role, 80, []ruleVerdict{{ruleID: "wrong-rule", verdict: contracts.ComplianceVerdictCompliant}})
+			return makeJudgeOutput(input, role, 80, nil)
 		},
 	}
 	step := New(WithPanelProvider(provider))

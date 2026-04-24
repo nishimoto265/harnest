@@ -2486,11 +2486,6 @@ func writeManifestError(t *testing.T, runIO internalio.RunContext, runID contrac
 	require.NoError(t, internalio.WriteJSONAtomic(manifestPath, manifest))
 }
 
-func writePass1Scores(t *testing.T, runIO internalio.RunContext, runID contracts.RunID, agents []contracts.AgentID) {
-	t.Helper()
-	writePass1ScoresAt(t, runIO, runID, agents, "default", "phase0-stub")
-}
-
 // writePass1ScoresAt lets tests seed step30 scores-A.jsonl with a specific
 // rubric/prompt version so F8's fail-closed version check exercises the
 // matching path.
