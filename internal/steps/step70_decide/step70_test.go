@@ -892,6 +892,43 @@ func TestRun_RulePublishConflictTransitionsToManualRecovery(t *testing.T) {
 	assert.Equal(t, "rule_publish_conflict", recovery.Detail)
 }
 
+func TestRun_RulePublishUpdateMissingDestinationTransitionsToManualRecovery(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR4121")
+	resolver.target.RulesToAppend = []contracts.RuleRegistryEntry{
+		adoptUpdatedEntryWithBody(runCtx.RunID, "rule-missing-update", "old body\n", "new body\n"),
+	}
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageRegistryAppended
+	entries, err := registryEntriesFromPlannedAdoption(intention, fixedNow()())
+	require.NoError(t, err)
+	entry, err := deriveRegistryChain(entries[0], runCtx.RulesRegistryPath())
+	require.NoError(t, err)
+	appendResult, err := internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), entry)
+	require.NoError(t, err)
+	intention.RegistryAppendResult = &appendResult
+	require.NoError(t, store.Save(intention))
+
+	stagedPath := mustStagedRulePath(t, runCtx, "rules/rule-missing-update.md")
+	require.NoError(t, internalio.WriteAtomic(stagedPath, []byte("new body\n")))
+	dstPath := filepath.Join(runCtx.RunsBase, "rules", "rule-missing-update.md")
+	assert.NoFileExists(t, dstPath)
+
+	err = Run(context.Background(), 4121, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.TargetSHA},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	})
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
+	assert.NoFileExists(t, dstPath)
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
+	assert.Equal(t, "rule_publish_conflict", recovery.Detail)
+}
+
 func TestRun_RejectsCandidatesHashMismatchAtEntry(t *testing.T) {
 	runCtx, pkg, candidates, store, _ := newFixture(t, "PR430")
 	candidates.CandidatesHash = strings.Repeat("f", 64)
@@ -1764,6 +1801,22 @@ func TestPromoteRuleSidecar_AllowsUpdateWhenDestinationMatchesPrevSha(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, newBody, string(got))
 	assert.NoFileExists(t, stagedPath)
+}
+
+func TestPromoteRuleSidecar_RejectsUpdateWhenDestinationMissing(t *testing.T) {
+	runCtx, _, _, _, _ := newFixtureWithResolver(t, "PR41026")
+	oldBody := "old body\n"
+	newBody := "new body\n"
+	stagedPath := mustStagedRulePath(t, runCtx, "rules/rule-a.md")
+	require.NoError(t, internalio.WriteAtomic(stagedPath, []byte(newBody)))
+
+	dstPath := filepath.Join(runCtx.RunsBase, "rules", "rule-a.md")
+	assert.NoFileExists(t, dstPath)
+
+	err := promoteRuleSidecar(stagedPath, dstPath, sha256String(newBody), sha256String(oldBody))
+	require.ErrorIs(t, err, errRulePublishConflict)
+	assert.NoFileExists(t, dstPath)
+	assert.FileExists(t, stagedPath)
 }
 
 // F10: multi-entry adoption resuming after a crash-between-publishes must
@@ -2736,6 +2789,25 @@ func adoptAddedEntryWithBody(runID contracts.RunID, ruleID, body string) contrac
 			RuleID:         ruleID,
 			RulePath:       "rules/" + ruleID + ".md",
 			Sha256:         sha256String(body),
+			IdempotencyKey: strings.Repeat("0", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        runID,
+			At:             time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+		},
+	}
+}
+
+func adoptUpdatedEntryWithBody(runID contracts.RunID, ruleID, prevBody, body string) contracts.RuleRegistryEntry {
+	return contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindUpdated,
+		Value: contracts.RuleRegistryUpdated{
+			Kind:           contracts.RegistryKindUpdated,
+			SchemaVersion:  "1",
+			RuleID:         ruleID,
+			RulePath:       "rules/" + ruleID + ".md",
+			Sha256:         sha256String(body),
+			PrevSha256:     sha256String(prevBody),
 			IdempotencyKey: strings.Repeat("0", 64),
 			VersionSeq:     1,
 			PrevHash:       "",
