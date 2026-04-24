@@ -30,6 +30,7 @@ const (
 )
 
 var errBlockedBySentinel = errors.New("archive: blocked by sentinel")
+var ErrSunsetActive = errors.New("archive: sunset is active")
 var ErrStaleMarkerDiverged = errors.New("archive: stale sunset marker diverged from current registry snapshot")
 
 var appendRegistryEntry = internalio.AppendRegistryEntry
@@ -229,6 +230,62 @@ func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 		return result, err
 	}
 	return result, nil
+}
+
+// ReconcileStaleSunsetMarkerWithLock completes or clears a stale
+// sunset-running.marker under the shared promotion lock. If the lock is held,
+// the marker may belong to a live sunset and must continue to block callers.
+func ReconcileStaleSunsetMarkerWithLock(ctx context.Context, runsBase string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if runsBase == "" {
+		return errors.New("archive: runs_base is required")
+	}
+	if diverged, err := divergedMarkerExists(runsBase); err != nil {
+		return err
+	} else if diverged {
+		return ErrStaleMarkerDiverged
+	}
+	if blocked, err := sentinelExists(runsBase); err != nil {
+		return err
+	} else if blocked {
+		return nil
+	}
+	markerPath := filepath.Join(runsBase, markerFilename)
+	if _, err := os.Stat(markerPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	lock, acquired, err := internalio.TryAcquireFileLock(filepath.Join(runsBase, "promotion.lock"))
+	if err != nil {
+		return fmt.Errorf("archive: acquire promotion.lock: %w", err)
+	}
+	if !acquired {
+		return ErrSunsetActive
+	}
+	defer func() {
+		_ = lock.Unlock()
+	}()
+	if diverged, err := divergedMarkerExists(runsBase); err != nil {
+		return err
+	} else if diverged {
+		return ErrStaleMarkerDiverged
+	}
+	if blocked, err := sentinelExists(runsBase); err != nil {
+		return err
+	} else if blocked {
+		return nil
+	}
+	if _, err := os.Stat(markerPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return reconcileStaleMarker(ctx, Opts{RunsBase: runsBase})
 }
 
 func ComputeOpID(sunsetRunID, ruleID, transition string) string {
