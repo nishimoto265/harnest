@@ -50,6 +50,27 @@ func TestPublishSnapshotPushesRunsBasePolicyToBranch(t *testing.T) {
 	assert.Contains(t, body, "# Updated rule")
 }
 
+func TestPublishSnapshotUsesConfiguredRemote(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	mustGit(t, repoRoot, "remote", "rename", "origin", "upstream")
+
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, rulesLocalDirName), 0o755))
+	const updatedRule = "# Remote-aware rule\n\nnew body\n"
+	registry := "{\"kind\":\"added\",\"schema_version\":\"1\",\"rule_id\":\"r-sync-message-details\",\"rule_path\":\"rules/r-sync-message-details.md\",\"sha256\":\"" + sha256Hex([]byte(updatedRule)) + "\",\"idempotency_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_seq\":1,\"prev_hash\":\"\",\"by_run_id\":\"2026-04-23-PR1-feedbee\",\"at\":\"2026-04-23T08:00:00Z\"}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, registryLocalName), []byte(registry), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, rulesLocalDirName, "r-sync-message-details.md"), []byte(updatedRule), 0o644))
+
+	headBefore := strings.TrimSpace(string(mustGitOutput(t, repoRoot, "rev-parse", "upstream/policy")))
+	newHead, err := PublishSnapshotWithOptions(context.Background(), repoRoot, "policy", headBefore, runsBase, "2026-04-23-PR2-adopt", Options{Remote: "upstream"})
+	require.NoError(t, err)
+	assert.NotEqual(t, headBefore, newHead)
+
+	mustGit(t, repoRoot, "fetch", "--no-tags", "upstream", "policy")
+	body := string(mustGitOutput(t, repoRoot, "show", "upstream/policy:"+RulesRepoDirRelPath+"/r-sync-message-details.md"))
+	assert.Contains(t, body, "# Remote-aware rule")
+}
+
 func TestHydrateFromBranchKeepsPreviousLocalPolicyWhenRemoteSnapshotIsInvalid(t *testing.T) {
 	repoRoot := newClonedRepoWithPolicyBranch(t)
 	runsBase := filepath.Join(t.TempDir(), "runs")

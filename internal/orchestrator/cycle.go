@@ -10,6 +10,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	ilog "github.com/nishimoto265/auto-improve/internal/logger"
 	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
 	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 )
 
@@ -165,6 +166,12 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 				continue
 			}
 			if err := o.runSingle(ctx, run, contracts.FailedStep60, o.steps.Step60); err != nil {
+				if errors.Is(err, step60_scorepairwise.ErrNoScorablePass2Agents) {
+					if appendErr := o.appendState(failedEntry(pr, run.IO.RunID, contracts.FailedStep60, "no_scorable_agents", "step60 completed without any scorable pass2 manifests", time.Now().UTC())); appendErr != nil {
+						return appendErr
+					}
+					return nil
+				}
 				return err
 			}
 			if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep60, time.Now().UTC())); err != nil {

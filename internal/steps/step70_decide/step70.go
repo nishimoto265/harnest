@@ -80,6 +80,7 @@ type Deps struct {
 	RegistryCritAt int
 	RepoRoot       string
 	PolicyBranch   string
+	PolicyRemote   string
 }
 
 // IntentionWriter is the minimal subset of orchestrator.IntentionStore used by
@@ -305,7 +306,7 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 			}
 			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_remote_head_failure")
 		}
-		if _, err := policyrepo.PublishSnapshot(ctx, deps.RepoRoot, deps.PolicyBranch, policyHeadBefore, runCtx.RunsBase, string(runCtx.RunID)); err != nil {
+		if _, err := policyrepo.PublishSnapshotWithOptions(ctx, deps.RepoRoot, deps.PolicyBranch, policyHeadBefore, runCtx.RunsBase, string(runCtx.RunID), policyrepo.Options{Remote: deps.PolicyRemote}); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}

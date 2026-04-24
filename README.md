@@ -21,7 +21,7 @@ Old migration-plan memos (`docs/memos/`) are history/参考 only.
 
 - Go 1.22 binary: `auto-improve {preflight, detect-merged, run, sunset, recover}`
 - macOS launchd (hourly tick) or `workflow_dispatch` on GitHub Actions
-- External CLI dependencies: `git >= 2.35`, `gh >= 2.40`, `jq >= 1.6`, `yq >= 4.0`, `claude`, `codex`
+- External CLI dependencies: `git >= 2.35`, `gh >= 2.40`, `jq >= 1.6`, `yq >= 4.0`, `lsof`, `claude`, `codex`
 - Platform: darwin/arm64, darwin/amd64, linux/amd64
 
 ## Runtime dependencies
@@ -34,6 +34,7 @@ or the installer arms launchd. Make sure these are installed and working first:
 - `curl`
 - `jq >= 1.6`
 - `yq >= 4.0`
+- `lsof`
 - `claude`
 - `codex`
 

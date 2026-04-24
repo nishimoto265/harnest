@@ -437,6 +437,39 @@ func TestRun_AllNonScorablePass1StopsBeforeStep30(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(cfg.Paths.Runs, string(runID), "30", "done.marker"))
 }
 
+func TestRun_AllNonScorablePass2StopsBeforeStep70(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	recorder := &callRecorder{}
+	orch.steps = Steps{
+		Step10:  stubStep10{},
+		Step20:  stubAgentSteps(),
+		Step30:  stubMarkerStep{path: "30/done.marker"},
+		Step40:  forcedCandidateStep{},
+		Step50:  nonScorableAgentSteps(contracts.ManifestKindError),
+		Step60:  step60Step{cfg: cfg},
+		Step70:  recordingStep{label: "70", recorder: recorder},
+		Archive: recordingStep{label: "archive", recorder: recorder},
+	}
+
+	runID := contracts.RunID("2026-04-21-PR451-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 451, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindFailed, last.Kind)
+	failed, ok := last.Value.(contracts.StateEntryFailed)
+	require.True(t, ok)
+	assert.Equal(t, "no_scorable_agents", failed.Reason)
+	assert.NotContains(t, recorder.snapshot(), "70")
+}
+
 func TestRun_Step70NeedsManualRecovery_EndToEnd(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)

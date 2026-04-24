@@ -13,7 +13,7 @@ import (
 )
 
 func TestCheckReportsMissingRequiredTools(t *testing.T) {
-	requiredTools := []string{"git", "gh", "curl", "jq", "yq", "claude"}
+	requiredTools := []string{"git", "gh", "curl", "jq", "yq", "lsof", "claude"}
 	for _, missing := range requiredTools {
 		t.Run(missing, func(t *testing.T) {
 			cfg := testConfig(t)
@@ -73,6 +73,7 @@ func fakeDependencies(t *testing.T, missing string) Dependencies {
 		"gh":     "/usr/local/bin/gh",
 		"jq":     "/usr/local/bin/jq",
 		"yq":     "/usr/local/bin/yq",
+		"lsof":   "/usr/local/bin/lsof",
 		"claude": "/usr/local/bin/claude",
 		"codex":  "/usr/local/bin/codex",
 	}

@@ -85,6 +85,7 @@ func (c Checker) Check(ctx context.Context, cfg config.Config) PreflightResult {
 	failures = appendFailure(failures, c.checkBinary("curl", "curl"))
 	failures = appendFailure(failures, c.checkVersion(ctx, "jq", "jq", version{major: 1, minor: 6}, "--version"))
 	failures = appendFailure(failures, c.checkVersion(ctx, "yq", "yq", version{major: 4, minor: 0}, "--version"))
+	failures = appendFailure(failures, c.checkBinary("lsof", "lsof"))
 	failures = append(failures, c.checkAgentBinaries(cfg)...)
 	failures = appendFailure(failures, c.checkGHAuth(ctx))
 
