@@ -40,8 +40,10 @@
 │   │           ├── staged.patch
 │   │           ├── untracked/           # cp -a で保存された untracked files
 │   │           ├── untracked-symlinks.txt  # symlink は record only
-│   │           ├── ignored.txt          # ignored ファイル list (記録のみ)
-│   │           └── state.json           # 各 artifact の sha256
+│   │           ├── ignored/             # git clean -fdx で消える ignored files
+│   │           ├── ignored-skipped.txt  # ignored の symlink / non-regular / too-large 記録
+│   │           ├── ignored.txt          # ignored ファイル list
+│   │           └── state.json           # 各 artifact の sha256 + dirty_fingerprint
 │   ├── a2/ ...
 │   └── a3/ ...
 ├── 30/

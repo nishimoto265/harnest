@@ -3,6 +3,7 @@ package rescuetest
 import (
 	"os"
 	"path/filepath"
+	"testing"
 
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
@@ -22,29 +23,61 @@ func WriteCompleteCaptureArtifacts(rescueDir string, fileDigest FileDigestFunc, 
 	return writeCoverageArtifacts(rescueDir, fileDigest, paths)
 }
 
-func WriteIgnoredCoverageArtifacts(rescueDir string, fileDigest FileDigestFunc) ([]agentrunner.RescueArtifactDigest, error) {
-	return writeCoverageArtifacts(rescueDir, fileDigest, []string{"ignored-skipped.txt", "ignored.txt"})
-}
-
 func WritePartialIgnoredCoverageArtifacts(rescueDir string, fileDigest FileDigestFunc) ([]agentrunner.RescueArtifactDigest, error) {
 	return writeCoverageArtifacts(rescueDir, fileDigest, []string{"ignored.txt"})
+}
+
+func WriteArtifact(rescueDir, rel string, body []byte, fileDigest FileDigestFunc) (agentrunner.RescueArtifactDigest, error) {
+	path := filepath.Join(rescueDir, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return agentrunner.RescueArtifactDigest{}, err
+	}
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		return agentrunner.RescueArtifactDigest{}, err
+	}
+	digest, err := fileDigest(path)
+	if err != nil {
+		return agentrunner.RescueArtifactDigest{}, err
+	}
+	return agentrunner.RescueArtifactDigest{Path: rel, SHA256: digest}, nil
+}
+
+func AssertRescueStateHasArtifacts(t testing.TB, agentDir, rescuedDirName, skipDir string, paths ...string) {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(agentDir, rescuedDirName))
+	if err != nil {
+		t.Fatalf("read rescue dir entries: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() == skipDir {
+			continue
+		}
+		state, err := agentrunner.ReadRescueState(filepath.Join(agentDir, rescuedDirName, entry.Name(), "state.json"))
+		if err != nil {
+			continue
+		}
+		artifacts := make(map[string]bool, len(state.Artifacts))
+		for _, artifact := range state.Artifacts {
+			artifacts[artifact.Path] = true
+		}
+		for _, path := range paths {
+			if !artifacts[path] {
+				t.Fatalf("fresh rescue artifact %s missing from %s", path, entry.Name())
+			}
+		}
+		return
+	}
+	t.Fatalf("fresh rescue state not found under %s", filepath.Join(agentDir, rescuedDirName))
 }
 
 func writeCoverageArtifacts(rescueDir string, fileDigest FileDigestFunc, paths []string) ([]agentrunner.RescueArtifactDigest, error) {
 	artifacts := make([]agentrunner.RescueArtifactDigest, 0, len(paths))
 	for _, rel := range paths {
-		path := filepath.Join(rescueDir, rel)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(path, nil, 0o644); err != nil {
-			return nil, err
-		}
-		digest, err := fileDigest(path)
+		artifact, err := WriteArtifact(rescueDir, rel, nil, fileDigest)
 		if err != nil {
 			return nil, err
 		}
-		artifacts = append(artifacts, agentrunner.RescueArtifactDigest{Path: rel, SHA256: digest})
+		artifacts = append(artifacts, artifact)
 	}
 	return artifacts, nil
 }

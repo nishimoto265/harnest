@@ -83,7 +83,7 @@ func TestResumeIfNeeded_AdoptsExistingRescueAfterCrashBeforeResumeStateSave(t *t
 	}))
 	require.NoError(t, touchHeartbeat(fx.agentDir, oldTime))
 	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, "dirty.txt"), []byte("dirty\n"), 0o644))
-	currentDirtyFingerprint, err := agentrunner.ComputeDirtyFingerprint(context.Background(), fx.worktree)
+	currentDirtyFingerprint, _, err := agentrunner.ComputeDirtyState(context.Background(), fx.worktree)
 	require.NoError(t, err)
 
 	rescueDir := filepath.Join(fx.agentDir, rescuedDirName, "existing-rescue")
@@ -153,6 +153,61 @@ func TestResumeIfNeeded_SkipsStaleRescueDirWhenDirtyFingerprintDrifts(t *testing
 	assert.GreaterOrEqual(t, len(rescueDirEntries(t, fx.agentDir)), 2, "new rescue dir must be captured when fingerprint drifts")
 }
 
+func TestResumeIfNeeded_SkipsStaleRescueDirWhenIgnoredContentDrifts(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	allocation, err := worktreeFor(fx.run.TaskPackage, fx.run.Pass, fx.run.Agent)
+	require.NoError(t, err)
+	stubQuiescentRescueWorktree(t)
+
+	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	require.NoError(t, saveResumeState(fx.agentDir, resumeState{
+		ExpectedBaseSHA: fx.baseSHA,
+		StartedAt:       oldTime,
+		Pid:             999999,
+		LeaderStartTime: "stale-start",
+		RetryCount:      0,
+		LastHeartbeat:   oldTime,
+	}))
+	require.NoError(t, touchHeartbeat(fx.agentDir, oldTime))
+	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, ".gitignore"), []byte(".env.local\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, ".env.local"), []byte("old\n"), 0o644))
+	oldDirtyFingerprint, _, err := agentrunner.ComputeDirtyState(context.Background(), fx.worktree)
+	require.NoError(t, err)
+
+	rescueDir := filepath.Join(fx.agentDir, rescuedDirName, "stale-ignored-rescue")
+	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
+	artifacts, err := rescuetest.WriteCompleteCaptureArtifacts(rescueDir, fileDigest)
+	require.NoError(t, err)
+	gitignoreArtifact, err := rescuetest.WriteArtifact(rescueDir, "untracked/.gitignore", []byte(".env.local\n"), fileDigest)
+	require.NoError(t, err)
+	ignoredListArtifact, err := rescuetest.WriteArtifact(rescueDir, "ignored.txt", []byte(strconv.Quote(".env.local")), fileDigest)
+	require.NoError(t, err)
+	ignoredArtifact, err := rescuetest.WriteArtifact(rescueDir, "ignored/.env.local", []byte("old\n"), fileDigest)
+	require.NoError(t, err)
+	artifacts = replaceRescueArtifact(artifacts, ignoredListArtifact)
+	artifacts = append(artifacts, gitignoreArtifact, ignoredArtifact)
+	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
+		ExpectedBaseSHA:  fx.baseSHA,
+		RescuedHeadSHA:   allocation.BaseSHA,
+		RetryCount:       1,
+		CommitCount:      0,
+		BundleMode:       agentrunner.RescueBundleModeNone,
+		CreatedAt:        time.Now().UTC(),
+		Artifacts:        artifacts,
+		DirtyFingerprint: oldDirtyFingerprint,
+	}))
+	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, ".env.local"), []byte("new\n"), 0o644))
+
+	retryCount, err := fx.step.resumeIfNeeded(context.Background(), fx.run, allocation, fx.agentDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, retryCount)
+	assert.NoFileExists(t, filepath.Join(fx.worktree, ".env.local"))
+	assert.GreaterOrEqual(t, len(rescueDirEntries(t, fx.agentDir)), 2, "ignored content drift must force a fresh rescue capture")
+
+	rescuedBytes := readFreshRescueFile(t, fx.agentDir, "stale-ignored-rescue", "ignored/.env.local")
+	assert.Equal(t, "new\n", string(rescuedBytes))
+}
+
 func TestResumeIfNeeded_SkipsRescueDirWithPartialIgnoredCoverage(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	allocation, err := worktreeFor(fx.run.TaskPackage, fx.run.Pass, fx.run.Agent)
@@ -170,7 +225,7 @@ func TestResumeIfNeeded_SkipsRescueDirWithPartialIgnoredCoverage(t *testing.T) {
 	}))
 	require.NoError(t, touchHeartbeat(fx.agentDir, oldTime))
 	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, "dirty.txt"), []byte("dirty\n"), 0o644))
-	currentDirtyFingerprint, err := agentrunner.ComputeDirtyFingerprint(context.Background(), fx.worktree)
+	currentDirtyFingerprint, _, err := agentrunner.ComputeDirtyState(context.Background(), fx.worktree)
 	require.NoError(t, err)
 
 	rescueDir := filepath.Join(fx.agentDir, rescuedDirName, "partial-rescue")
@@ -193,7 +248,7 @@ func TestResumeIfNeeded_SkipsRescueDirWithPartialIgnoredCoverage(t *testing.T) {
 	assert.Equal(t, 1, retryCount)
 	assert.NoFileExists(t, filepath.Join(fx.worktree, "dirty.txt"))
 	assert.GreaterOrEqual(t, len(rescueDirEntries(t, fx.agentDir)), 2, "partial ignored coverage must force a fresh rescue capture")
-	assertRescueStateHasArtifacts(t, fx.agentDir, "partial-rescue", "commits.bundle", "tracked.patch", "staged.patch", "untracked-symlinks.txt", "ignored-skipped.txt", "ignored.txt", "untracked/dirty.txt")
+	rescuetest.AssertRescueStateHasArtifacts(t, fx.agentDir, rescuedDirName, "partial-rescue", "commits.bundle", "tracked.patch", "staged.patch", "untracked-symlinks.txt", "ignored-skipped.txt", "ignored.txt", "untracked/dirty.txt")
 }
 
 func TestEnsureRescueLeaseQuiesced_PreservesTimeoutSentinel(t *testing.T) {
@@ -237,28 +292,29 @@ func staleResumeState(baseSHA string) resumeState {
 	}
 }
 
-func assertRescueStateHasArtifacts(t *testing.T, agentDir, skipDir string, paths ...string) {
+func replaceRescueArtifact(artifacts []agentrunner.RescueArtifactDigest, replacement agentrunner.RescueArtifactDigest) []agentrunner.RescueArtifactDigest {
+	for i, artifact := range artifacts {
+		if artifact.Path == replacement.Path {
+			artifacts[i] = replacement
+			return artifacts
+		}
+	}
+	return append(artifacts, replacement)
+}
+
+func readFreshRescueFile(t *testing.T, agentDir, skipDir, rel string) []byte {
 	t.Helper()
-	entries := rescueDirEntries(t, agentDir)
-	require.NotEmpty(t, entries)
-	for _, entry := range entries {
+	for _, entry := range rescueDirEntries(t, agentDir) {
 		if entry.Name() == skipDir {
 			continue
 		}
-		state, err := agentrunner.ReadRescueState(filepath.Join(agentDir, rescuedDirName, entry.Name(), "state.json"))
-		if err != nil {
-			continue
+		data, err := os.ReadFile(filepath.Join(agentDir, rescuedDirName, entry.Name(), filepath.FromSlash(rel)))
+		if err == nil {
+			return data
 		}
-		artifacts := make(map[string]bool, len(state.Artifacts))
-		for _, artifact := range state.Artifacts {
-			artifacts[artifact.Path] = true
-		}
-		for _, path := range paths {
-			assert.True(t, artifacts[path], "fresh rescue artifact %s missing from %s", path, entry.Name())
-		}
-		return
 	}
-	t.Fatalf("fresh rescue state not found under %s", filepath.Join(agentDir, rescuedDirName))
+	t.Fatalf("fresh rescue file %s not found under %s", rel, filepath.Join(agentDir, rescuedDirName))
+	return nil
 }
 
 func writeRescueGitWrapper(t *testing.T, dir, body string) {
