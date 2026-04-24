@@ -11,13 +11,13 @@ import (
 	"sort"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/candidaterules"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/registryview"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
-	step50 "github.com/nishimoto265/auto-improve/internal/steps/step50_implement"
 )
 
 const minimumPromotionDeltaTenths = 30
@@ -531,7 +531,7 @@ func step70LoadCandidateRules(runCtx internalio.RunContext) ([]judges.CandidateR
 		}
 		return nil, fmt.Errorf("step70: stat candidates: %w", err)
 	}
-	payloads, err := step50.LoadRulePayloads(candidatesPath)
+	payloads, err := candidaterules.LoadRulePayloads(candidatesPath)
 	if err != nil {
 		return nil, fmt.Errorf("step70: load candidate rules: %w", err)
 	}

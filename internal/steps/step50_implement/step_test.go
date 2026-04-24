@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/candidaterules"
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
@@ -606,7 +607,7 @@ func TestRenderPrompt_IncludesActiveRulesAndNoPass1FailureOracle(t *testing.T) {
 		},
 		Agent:            "a1",
 		CandidateRuleIDs: []string{"cand-1"},
-		RulePayloads: []RulePayload{{
+		RulePayloads: []candidaterules.RulePayload{{
 			ID:           "cand-1",
 			Kind:         string(contracts.CandidateKindNew),
 			Title:        "Candidate rule",
@@ -819,115 +820,6 @@ func TestStepRunRemovesStaleArtifactsOnNonSuccess(t *testing.T) {
 	checklistPath := filepath.Join(env.run.IO.RunDir(), "50-pass2", "a1", "checklist-result.json")
 	assert.FileExists(t, diffPath)
 	assert.FileExists(t, checklistPath)
-}
-
-func TestLoadRulePayloadsRejectsPathTraversal(t *testing.T) {
-	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
-	t.Setenv("FAKE_AGENT", "a1")
-
-	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
-	candidatesPath, err := env.run.IO.ResolveRunRelative(filepath.Join("40", "candidates.json"))
-	require.NoError(t, err)
-
-	bodyPath, err := env.run.IO.ResolveRunRelative(filepath.Join("40", "candidates", "good.md"))
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Dir(bodyPath), 0o755))
-	require.NoError(t, os.WriteFile(bodyPath, []byte("body\n"), 0o644))
-	bodySHA := sha256Hex([]byte("body\n"))
-
-	tests := []struct {
-		name      string
-		candidate contracts.Candidate
-		wantErr   string
-	}{
-		{
-			name: "candidate_id traversal",
-			candidate: contracts.Candidate{
-				CandidateID:        "../cand",
-				Kind:               contracts.CandidateKindNew,
-				Title:              "Bad candidate id",
-				ProposedBodyPath:   "40/candidates/good.md",
-				ProposedBodySha256: bodySHA,
-			},
-			wantErr: `invalid candidate_id "../cand"`,
-		},
-		{
-			name: "target_rule_id traversal",
-			candidate: contracts.Candidate{
-				CandidateID:        "cand-1",
-				Kind:               contracts.CandidateKindUpdate,
-				TargetRuleID:       "../rule",
-				Title:              "Bad target rule id",
-				ProposedBodyPath:   "40/candidates/good.md",
-				ProposedBodySha256: bodySHA,
-			},
-			wantErr: `invalid rule_id`,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.name == "target_rule_id traversal" {
-				require.NoError(t, os.MkdirAll(filepath.Dir(candidatesPath), 0o755))
-				require.NoError(t, os.WriteFile(candidatesPath, []byte(`{"schema_version":"1","run_id":"`+string(env.run.IO.RunID)+`","candidates":[{"candidate_id":"cand-1","kind":"update","target_rule_id":"../rule","title":"Bad target rule id","proposed_body_path":"40/candidates/good.md","proposed_body_sha256":"`+bodySHA+`"}],"candidates_hash":"`+contracts.CanonicalCandidatesHash([]contracts.Candidate{{
-					CandidateID:        "cand-1",
-					Kind:               contracts.CandidateKindUpdate,
-					TargetRuleID:       "../rule",
-					Title:              "Bad target rule id",
-					ProposedBodyPath:   "40/candidates/good.md",
-					ProposedBodySha256: bodySHA,
-				}})+`","created_at":"2026-04-21T00:00:00Z"}`), 0o644))
-			} else {
-				writeCandidatesFileAtPath(t, candidatesPath, env.run.IO.RunID, []contracts.Candidate{tt.candidate})
-			}
-			_, err := LoadRulePayloads(candidatesPath)
-			require.ErrorContains(t, err, tt.wantErr)
-		})
-	}
-}
-
-func TestLoadRulePayloads_SkipsDuplicateCandidates(t *testing.T) {
-	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
-	candidateNew := writeCandidateSidecar(t, env.run.IO, contracts.Candidate{
-		CandidateID:      "cand-new",
-		Kind:             contracts.CandidateKindNew,
-		Title:            "New rule",
-		ProposedBodyPath: "40/candidates/cand-new.md",
-	}, "# cand-new\nnew body\n")
-	candidateDuplicate := writeCandidateSidecar(t, env.run.IO, contracts.Candidate{
-		CandidateID:      "cand-dup",
-		Kind:             contracts.CandidateKindDuplicate,
-		TargetRuleID:     "rule-v1",
-		Title:            "Duplicate rule",
-		ProposedBodyPath: "40/candidates/cand-dup.md",
-	}, "# cand-dup\nduplicate body\n")
-	writeCandidatesFile(t, env.run.IO, []contracts.Candidate{candidateNew, candidateDuplicate})
-
-	candidatesPath, err := env.run.IO.ResolveRunRelative(filepath.Join("40", "candidates.json"))
-	require.NoError(t, err)
-	payloads, err := LoadRulePayloads(candidatesPath)
-	require.NoError(t, err)
-	require.Len(t, payloads, 1)
-	assert.Equal(t, "cand-new", payloads[0].ID)
-}
-
-func TestLoadRulePayloads_AllowsValidatedRuleID(t *testing.T) {
-	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
-	candidate := writeCandidateSidecar(t, env.run.IO, contracts.Candidate{
-		CandidateID:      "cand-1",
-		Kind:             contracts.CandidateKindUpdate,
-		TargetRuleID:     "rule-v1",
-		Title:            "Updated rule",
-		ProposedBodyPath: "40/candidates/cand-1.md",
-	}, "# cand-1\nupdated body\n")
-	writeCandidatesFile(t, env.run.IO, []contracts.Candidate{candidate})
-
-	candidatesPath, err := env.run.IO.ResolveRunRelative(filepath.Join("40", "candidates.json"))
-	require.NoError(t, err)
-	payloads, err := LoadRulePayloads(candidatesPath)
-	require.NoError(t, err)
-	require.Len(t, payloads, 1)
-	assert.Equal(t, "rule-v1", payloads[0].TargetRuleID)
 }
 
 func TestCopyUntrackedFiles_SkipsSymlinksAndKeepsWhitespaceNames(t *testing.T) {

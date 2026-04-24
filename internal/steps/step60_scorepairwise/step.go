@@ -13,12 +13,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/candidaterules"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
-	step50 "github.com/nishimoto265/auto-improve/internal/steps/step50_implement"
 )
 
 type Input struct {
@@ -633,7 +633,7 @@ func loadCandidateRules(runIO internalio.RunContext) ([]judges.CandidateRule, er
 		}
 		return nil, fmt.Errorf("step60: stat candidates: %w", err)
 	}
-	payloads, err := step50.LoadRulePayloads(candidatesPath)
+	payloads, err := candidaterules.LoadRulePayloads(candidatesPath)
 	if err != nil {
 		return nil, fmt.Errorf("step60: load candidate rules: %w", err)
 	}
