@@ -3368,6 +3368,7 @@ func testConfigWithCLIJudge(t *testing.T) *config.Config {
 	repoRoot := filepath.Join(dir, "repo")
 	require.NoError(t, os.MkdirAll(repoRoot, 0o755))
 	codexPath := writeFakeCodexJudge(t, dir)
+	implementerPath := writeFakeConfigImplementer(t, dir)
 	configPath := filepath.Join(dir, "config.yaml")
 	agentsPath := filepath.Join(dir, "agents.yaml")
 	require.NoError(t, os.WriteFile(configPath, []byte(fmt.Sprintf(`
@@ -3383,20 +3384,30 @@ agent_config_path: %q
 `, repoRoot, runsBase, worktreeBase, agentsPath)), 0o644))
 	require.NoError(t, os.WriteFile(agentsPath, []byte(fmt.Sprintf(`
 profiles:
+  fake-implementer:
+    provider: claude
+    binary: %q
   codex-judge:
     provider: codex
     binary: %q
   stub:
     provider: stub
 roles:
-  implementer: stub
+  implementer: fake-implementer
   judge_primary: codex-judge
   judge_secondary: codex-judge
   judge_arbiter: codex-judge
-`, codexPath)), 0o644))
+`, implementerPath, codexPath)), 0o644))
 	cfg, err := config.LoadConfig(configPath)
 	require.NoError(t, err)
 	return cfg
+}
+
+func writeFakeConfigImplementer(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake-implementer")
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	return path
 }
 
 func writeFakeCodexJudge(t *testing.T, dir string) string {
