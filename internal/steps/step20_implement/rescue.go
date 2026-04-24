@@ -293,7 +293,6 @@ type rescueStateFile = agentrunner.RescueStateFile
 
 type rescueArtifactDigest = agentrunner.RescueArtifactDigest
 
-var rescueKillProcessGroupUntilGone = agentrunner.KillProcessGroupUntilGone
 var rescueWorktreeProcessIDs = worktreeProcessIDs
 var rescueKillPID = syscall.Kill
 var rescueQuiesceMaxWait = 750 * time.Millisecond
@@ -655,15 +654,14 @@ func ensureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state r
 		PGID:            state.Pgid,
 		LeaderStartTime: state.LeaderStartTime,
 	}, agentrunner.RescueLeaseQuiesceOptions{
-		KillProcessGroupUntilGone: rescueKillProcessGroupUntilGone,
-		WorktreeProcessIDs:        rescueWorktreeProcessIDs,
-		KillPID:                   rescueKillPID,
-		Sleep:                     rescueSleep,
-		Now:                       time.Now,
-		PIDAlive:                  pidAlive,
-		LookupProcessStartTime:    lookupLeaseStartTime,
-		MaxWait:                   rescueQuiesceMaxWait,
-		Interval:                  rescueQuiesceInterval,
+		WorktreeProcessIDs:     rescueWorktreeProcessIDs,
+		KillPID:                rescueKillPID,
+		Sleep:                  rescueSleep,
+		Now:                    time.Now,
+		PIDAlive:               pidAlive,
+		LookupProcessStartTime: lookupLeaseStartTime,
+		MaxWait:                rescueQuiesceMaxWait,
+		Interval:               rescueQuiesceInterval,
 	})
 	switch {
 	case err == nil:

@@ -82,7 +82,7 @@ func loadResumeState(agentDir string) (resumeState, bool, error) {
 		return resumeState{}, false, legacyErr
 	}
 	if legacy.Pid != 0 && legacy.LeaderStartTime == "" {
-		if legacyLeaseLikelyLive(agentDir, legacy) {
+		if legacyLeaseLikelyLive(legacy) {
 			return resumeState{}, false, &agentrunner.ManualRecoveryRequiredError{
 				Reason: contracts.RollbackReasonWorktreeRescueLoop,
 				Detail: "legacy resume state still references a live lease; operator must stop the original agent before migration",
@@ -97,19 +97,8 @@ func loadResumeState(agentDir string) (resumeState, bool, error) {
 	return legacy, true, nil
 }
 
-func legacyLeaseLikelyLive(agentDir string, legacy resumeState) bool {
-	if !pidAlive(legacy.Pid) {
-		return false
-	}
-	stale, modTime, err := heartbeatStale(agentDir, defaultStaleAfter, time.Now().UTC())
-	if err != nil {
-		return true
-	}
-	if modTime.IsZero() {
-		return true
-	}
-	_ = stale
-	return true
+func legacyLeaseLikelyLive(legacy resumeState) bool {
+	return pidAlive(legacy.Pid)
 }
 
 func decodeCurrentResumeState(data []byte) (resumeState, error) {

@@ -34,11 +34,6 @@ func SentinelExistsExceptRun(runsBase string, runID contracts.RunID) (bool, erro
 	return blocked, err
 }
 
-func sentinelExistsExceptRun(runsBase string, ignoreRunID contracts.RunID) (bool, error) {
-	blocked, _, err := globalBlockReason(runsBase, ignoreRunID)
-	return blocked, err
-}
-
 func globalBlockReason(runsBase string, ignoreRunID contracts.RunID) (bool, string, error) {
 	dir := filepath.Join(runsBase, needsRecoveryDir)
 	entries, err := os.ReadDir(dir)

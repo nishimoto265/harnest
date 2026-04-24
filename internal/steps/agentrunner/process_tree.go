@@ -41,7 +41,10 @@ var processGroupMembersUntilGoneList = processGroupMembers
 var killProcessGroupUntilGoneSignal = KillProcessGroup
 var killSessionProcessesUntilGoneKill = killPIDs
 
-var ErrCleanupTimeout = errors.New("agentrunner: process cleanup timed out")
+var (
+	ErrCleanupTimeout               = errors.New("agentrunner: process cleanup timed out")
+	ErrCleanupInspectionUnavailable = errors.New("agentrunner: process inspection unavailable during active lease cleanup")
+)
 
 const processInspectionUnavailableStartTimePrefix = "process-inspection-unavailable:"
 
@@ -241,7 +244,7 @@ func killProcessGroupUntilGoneOwned(lease ProcessLease, maxWait, interval time.D
 		matches, err := processIdentityMatches(lease.PID, lease.StartTime)
 		if err != nil {
 			if isProcessInspectionUnavailable(err) {
-				return lastErr
+				return errors.Join(lastErr, fmt.Errorf("%w: pid=%d pgid=%d", ErrCleanupInspectionUnavailable, lease.PID, lease.PGID))
 			}
 			return errors.Join(lastErr, err)
 		}
@@ -254,7 +257,7 @@ func killProcessGroupUntilGoneOwned(lease ProcessLease, maxWait, interval time.D
 		members, err := processGroupMembersUntilGoneList(lease.PGID)
 		if err != nil {
 			if isProcessInspectionUnavailable(err) {
-				return lastErr
+				return errors.Join(lastErr, fmt.Errorf("%w: pgid=%d", ErrCleanupInspectionUnavailable, lease.PGID))
 			}
 			return errors.Join(lastErr, err)
 		}
@@ -288,7 +291,7 @@ func killSessionProcessesUntilGoneOwned(lease ProcessLease, sessionID int, maxWa
 		matches, err := processIdentityMatches(lease.PID, lease.StartTime)
 		if err != nil {
 			if isProcessInspectionUnavailable(err) {
-				return lastErr
+				return errors.Join(lastErr, fmt.Errorf("%w: pid=%d session_id=%d", ErrCleanupInspectionUnavailable, lease.PID, sessionID))
 			}
 			return errors.Join(lastErr, err)
 		}
@@ -298,7 +301,7 @@ func killSessionProcessesUntilGoneOwned(lease ProcessLease, sessionID int, maxWa
 		pids, err := sessionProcessesUntilGoneList(sessionID)
 		if err != nil {
 			if isProcessInspectionUnavailable(err) {
-				return lastErr
+				return errors.Join(lastErr, fmt.Errorf("%w: session_id=%d", ErrCleanupInspectionUnavailable, sessionID))
 			}
 			return errors.Join(lastErr, err)
 		}
@@ -321,7 +324,7 @@ func processIdentityMatches(pid int, expectedStartTime string) (bool, error) {
 		return false, nil
 	}
 	if isProcessInspectionUnavailableStartTime(expectedStartTime) {
-		return false, nil
+		return false, ErrCleanupInspectionUnavailable
 	}
 	currentStartTime, err := lookupProcessStartTime(pid)
 	switch {
@@ -331,51 +334,6 @@ func processIdentityMatches(pid int, expectedStartTime string) (bool, error) {
 		return false, err
 	default:
 		return currentStartTime == expectedStartTime, nil
-	}
-}
-
-func KillSessionProcesses(sessionID int) error {
-	pids, err := sessionProcesses(sessionID)
-	if err != nil {
-		if isProcessInspectionUnavailable(err) {
-			return nil
-		}
-		return err
-	}
-	return killPIDs(pids)
-}
-
-func KillSessionProcessesUntilGone(sessionID int, maxWait, interval time.Duration) error {
-	if sessionID <= 0 {
-		return nil
-	}
-	if interval <= 0 {
-		interval = 25 * time.Millisecond
-	}
-	if maxWait <= 0 {
-		maxWait = 500 * time.Millisecond
-	}
-	deadline := cleanupNow().Add(maxWait)
-	var lastErr error
-	for {
-		pids, err := sessionProcessesUntilGoneList(sessionID)
-		if err != nil {
-			if isProcessInspectionUnavailable(err) {
-				return lastErr
-			}
-			return errors.Join(lastErr, err)
-		}
-		if len(pids) == 0 {
-			return lastErr
-		}
-		if err := killSessionProcessesUntilGoneKill(pids); err != nil {
-			lastErr = err
-		}
-		if !cleanupNow().Before(deadline) {
-			timeoutErr := fmt.Errorf("%w: session_id=%d survivors=%v", ErrCleanupTimeout, sessionID, pids)
-			return errors.Join(timeoutErr, lastErr)
-		}
-		cleanupSleep(interval)
 	}
 }
 
@@ -465,40 +423,6 @@ func processDescendants(rootPID int, seeds []int) ([]int, error) {
 		}
 	}
 	return out, nil
-}
-
-func KillProcessGroupUntilGone(pgid int, maxWait, interval time.Duration) error {
-	if pgid <= 0 {
-		return nil
-	}
-	if interval <= 0 {
-		interval = 25 * time.Millisecond
-	}
-	if maxWait <= 0 {
-		maxWait = 500 * time.Millisecond
-	}
-	deadline := cleanupNow().Add(maxWait)
-	var lastErr error
-	for {
-		if err := killProcessGroupUntilGoneSignal(pgid); err != nil {
-			lastErr = err
-		}
-		members, err := processGroupMembersUntilGoneList(pgid)
-		if err != nil {
-			if isProcessInspectionUnavailable(err) {
-				return lastErr
-			}
-			return errors.Join(lastErr, err)
-		}
-		if len(members) == 0 {
-			return lastErr
-		}
-		if !cleanupNow().Before(deadline) {
-			timeoutErr := fmt.Errorf("%w: pgid=%d survivors=%v", ErrCleanupTimeout, pgid, members)
-			return errors.Join(timeoutErr, lastErr)
-		}
-		cleanupSleep(interval)
-	}
 }
 
 func processGroupMembers(pgid int) ([]int, error) {

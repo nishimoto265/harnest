@@ -12,6 +12,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
 func TestResumeStateValidate_RejectsActiveLeaseWithoutLeaderStartTime(t *testing.T) {
@@ -73,6 +76,9 @@ func TestLoadResumeState_RejectsLiveLegacyLeaseWithoutLeaderStartTime(t *testing
 
 	_, ok, err := loadResumeState(agentDir)
 	require.ErrorIs(t, err, ErrLegacyResumeStateLiveLease)
+	var manual *agentrunner.ManualRecoveryRequiredError
+	require.ErrorAs(t, err, &manual)
+	assert.Equal(t, contracts.RollbackReasonWorktreeRescueLoop, manual.Reason)
 	assert.False(t, ok)
 	assert.Equal(t, 1234, gotPID)
 	assert.Equal(t, syscall.Signal(0), gotSignal)
