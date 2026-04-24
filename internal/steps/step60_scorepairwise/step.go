@@ -96,6 +96,11 @@ type pass1ComplianceState struct {
 	Rows    []contracts.ComplianceEntry
 }
 
+type pass1ScoringVersions struct {
+	RubricVersion string
+	PromptVersion string
+}
+
 type expectedComplianceAgentState struct {
 	Agent   contracts.AgentID `json:"agent"`
 	RuleIDs []string          `json:"rule_ids"`
@@ -411,6 +416,32 @@ func applyDefaults(in Input) (Input, error) {
 	if in.Now == nil {
 		in.Now = time.Now
 	}
+	if in.Primary == nil {
+		in.Primary = judges.NewPrimaryStub()
+	}
+	if in.Secondary == nil {
+		in.Secondary = judges.NewSecondaryStub()
+	}
+	if in.Arbiter == nil {
+		in.Arbiter = judges.NewArbiterStub()
+	}
+	if in.RubricVersion == "" || in.PromptVersion == "" {
+		versions, ok, err := inferPass1ScoringVersions(in.IO)
+		if err != nil {
+			return Input{}, err
+		}
+		if ok && in.RubricVersion == "" {
+			in.RubricVersion = versions.RubricVersion
+		}
+		if ok && in.PromptVersion == "" {
+			switch {
+			case versions.PromptVersion == judges.PanelPromptVersion("phase0-stub", in.Primary, in.Secondary, in.Arbiter):
+				in.PromptVersion = "phase0-stub"
+			case versions.PromptVersion == judges.PanelPromptVersion(versions.PromptVersion, in.Primary, in.Secondary, in.Arbiter):
+				in.PromptVersion = versions.PromptVersion
+			}
+		}
+	}
 	if in.RubricVersion == "" {
 		in.RubricVersion = "default"
 	}
@@ -434,17 +465,65 @@ func applyDefaults(in Input) (Input, error) {
 		}
 		in.CandidateRules = candidateRules
 	}
-	if in.Primary == nil {
-		in.Primary = judges.NewPrimaryStub()
-	}
-	if in.Secondary == nil {
-		in.Secondary = judges.NewSecondaryStub()
-	}
-	if in.Arbiter == nil {
-		in.Arbiter = judges.NewArbiterStub()
-	}
 	in.PromptVersion = judges.PanelPromptVersion(in.PromptVersion, in.Primary, in.Secondary, in.Arbiter)
 	return in, nil
+}
+
+func inferPass1ScoringVersions(runIO internalio.RunContext) (pass1ScoringVersions, bool, error) {
+	scorePath, err := runIO.ResolveRunRelative("30/scores-A.jsonl")
+	if err != nil {
+		return pass1ScoringVersions{}, false, fmt.Errorf("step60: resolve pass1 scores path: %w", err)
+	}
+	scoreRows, err := internalio.ReadJSONL[contracts.ScoreEntry](scorePath)
+	if err != nil {
+		return pass1ScoringVersions{}, false, fmt.Errorf("step60: read pass1 scores for version inference: %w", err)
+	}
+
+	var versions pass1ScoringVersions
+	for _, row := range scorecore.CollapseFinalScores(scoreRows) {
+		next, err := collectPass1ScoringVersion(versions, row.RubricVersion, row.PromptVersion)
+		if err != nil {
+			return pass1ScoringVersions{}, false, fmt.Errorf("step60: infer pass1 score versions: %w", err)
+		}
+		versions = next
+	}
+
+	compliancePath, err := runIO.ResolveRunRelative("30/compliance-A.jsonl")
+	if err != nil {
+		return pass1ScoringVersions{}, false, fmt.Errorf("step60: resolve pass1 compliance path: %w", err)
+	}
+	complianceRows, err := internalio.ReadJSONL[contracts.ComplianceEntry](compliancePath)
+	if err != nil {
+		return pass1ScoringVersions{}, false, fmt.Errorf("step60: read pass1 compliance for version inference: %w", err)
+	}
+	for _, row := range scorecore.CollapseFinalCompliance(complianceRows) {
+		next, err := collectPass1ScoringVersion(versions, row.RubricVersion, row.PromptVersion)
+		if err != nil {
+			return pass1ScoringVersions{}, false, fmt.Errorf("step60: infer pass1 compliance versions: %w", err)
+		}
+		versions = next
+	}
+
+	if versions.RubricVersion == "" || versions.PromptVersion == "" {
+		return pass1ScoringVersions{}, false, nil
+	}
+	return versions, true, nil
+}
+
+func collectPass1ScoringVersion(current pass1ScoringVersions, rubricVersion, promptVersion string) (pass1ScoringVersions, error) {
+	if rubricVersion == "" || promptVersion == "" {
+		return pass1ScoringVersions{}, ErrPass1VersionMismatch
+	}
+	if current.RubricVersion == "" && current.PromptVersion == "" {
+		return pass1ScoringVersions{RubricVersion: rubricVersion, PromptVersion: promptVersion}, nil
+	}
+	if current.RubricVersion != rubricVersion || current.PromptVersion != promptVersion {
+		return pass1ScoringVersions{}, fmt.Errorf(
+			"%w: mixed pass1 scoring versions: got rubric=%s prompt=%s want rubric=%s prompt=%s",
+			ErrPass1VersionMismatch, rubricVersion, promptVersion, current.RubricVersion, current.PromptVersion,
+		)
+	}
+	return current, nil
 }
 
 func resolveStep60Paths(runIO internalio.RunContext) (step60Paths, error) {

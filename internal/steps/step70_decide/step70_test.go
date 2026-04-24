@@ -196,6 +196,50 @@ func TestFilesystemResolver_AdoptPromotesExactSidecarBytes(t *testing.T) {
 	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, filepath.Join("rules", ruleID+".md")))
 }
 
+func TestFilesystemResolver_RequiresStep60DoneMarker(t *testing.T) {
+	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
+	markerPath, err := runCtx.ResolveRunRelative("60/done.marker")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(markerPath))
+
+	resolver := FilesystemResolver{RepoDir: runCtx.RunsBase, Now: fixedNow()}
+	_, ok, err := resolver.Resolve(runCtx, pkg, candidates)
+	require.Error(t, err)
+	assert.False(t, ok)
+	assert.Contains(t, err.Error(), "step60 done marker")
+	stagingRulesPath, err := runCtx.ResolveRunRelative("staging/rules")
+	require.NoError(t, err)
+	assert.NoDirExists(t, stagingRulesPath)
+}
+
+func TestFilesystemResolver_RejectsStep60ArtifactsThatDoNotMatchDoneMarker(t *testing.T) {
+	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
+	scorePath, err := runCtx.ResolveRunRelative("60/scores-B.jsonl")
+	require.NoError(t, err)
+	require.NoError(t, internalio.AppendJSONL(scorePath, contracts.ScoreEntry{
+		SchemaVersion: "1",
+		RunID:         runCtx.RunID,
+		Pass:          2,
+		Agent:         "a1",
+		Dimension:     contracts.DimensionFidelity,
+		Score:         1,
+		Reasons:       "stale score after marker",
+		VerdictPath:   contracts.VerdictPathAgreement,
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    time.Date(2026, 4, 21, 10, 3, 0, 0, time.UTC),
+	}))
+
+	resolver := FilesystemResolver{RepoDir: runCtx.RunsBase, Now: fixedNow()}
+	_, ok, err := resolver.Resolve(runCtx, pkg, candidates)
+	require.Error(t, err)
+	assert.False(t, ok)
+	assert.Contains(t, err.Error(), "done marker does not match")
+	stagingRulesPath, err := runCtx.ResolveRunRelative("staging/rules")
+	require.NoError(t, err)
+	assert.NoDirExists(t, stagingRulesPath)
+}
+
 func TestRun_AdoptHappyPath(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR2")
 	git := &fakeGit{head: resolver.target.BestShaBefore}
@@ -2319,7 +2363,58 @@ func seedFilesystemResolverFixture(t *testing.T) (internalio.RunContext, *contra
 		PromptVersion: "phase0-stub",
 		ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
 	}))
+	writeStep60DoneMarkerForResolverFixture(t, runCtx)
 	return runCtx, pkg, candidates
+}
+
+func writeStep60DoneMarkerForResolverFixture(t *testing.T, runCtx internalio.RunContext) {
+	t.Helper()
+	artifacts, err := loadStep60Artifacts(runCtx)
+	require.NoError(t, err)
+	scoresCount, scoresHash, err := step70FinalScoresState(artifacts.Scores)
+	require.NoError(t, err)
+	complianceCount, complianceHash, err := step70FinalComplianceState(artifacts.Compliance)
+	require.NoError(t, err)
+	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(artifacts.Pairwise)
+	require.NoError(t, err)
+
+	placeholderHash := strings.Repeat("0", 64)
+	marker := contracts.Step60DoneMarker{
+		CompletedAgents: []contracts.AgentID{"a1"},
+		Dimensions: []contracts.Dimension{
+			contracts.DimensionFidelity,
+			contracts.DimensionCorrectness,
+			contracts.DimensionMaintainability,
+			contracts.DimensionDiscipline,
+			contracts.DimensionCommunication,
+		},
+		ExpectedCounts: contracts.Step60ExpectedCounts{
+			Scores:     int64(scoresCount),
+			Compliance: int64(complianceCount),
+			Pairwise:   int64(pairwiseCount),
+		},
+		InputHashes: contracts.Step60DoneInputHashes{
+			Pass1Scores:        placeholderHash,
+			Pass1Compliance:    placeholderHash,
+			Pass2Outputs:       placeholderHash,
+			CandidateRules:     placeholderHash,
+			ExpectedCompliance: placeholderHash,
+		},
+		ContentHashes: contracts.Step60DoneContentHashes{
+			ScoresFinal:     scoresHash,
+			ComplianceFinal: complianceHash,
+			PairwiseFinal:   pairwiseHash,
+		},
+		RawHashes: contracts.StepDoneRawHashes{
+			ScoresRaw:     placeholderHash,
+			ComplianceRaw: placeholderHash,
+		},
+		ResolvedAt: time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+	}
+	require.NoError(t, marker.Validate())
+	markerPath, err := runCtx.ResolveRunRelative("60/done.marker")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(markerPath, marker))
 }
 
 func resolverScoreDimensions() []contracts.Dimension {
