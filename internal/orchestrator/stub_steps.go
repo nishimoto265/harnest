@@ -17,6 +17,7 @@ import (
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/nishimoto265/auto-improve/internal/policyrepo"
+	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 	step10restorebase "github.com/nishimoto265/auto-improve/internal/steps/step10_restorebase"
 	"github.com/nishimoto265/auto-improve/internal/steps/step20_implement"
 	"github.com/nishimoto265/auto-improve/internal/steps/step30_score"
@@ -72,11 +73,15 @@ func (a step30ScoreAdapter) Run(ctx context.Context, run *StepRunContext) error 
 	if err != nil {
 		return err
 	}
+	versions, err := step30ScoringVersions(run.IO)
+	if err != nil {
+		return err
+	}
 	req := stepio.Step30Request{
 		TaskPackage:    *run.TaskPackage,
 		ScorableAgents: scorableAgents,
-		RubricVersion:  "default",
-		PromptVersion:  "phase0-stub",
+		RubricVersion:  versions.RubricVersion,
+		PromptVersion:  versions.PromptVersion,
 	}
 	markerPath, err := run.IO.ResolveRunRelative("30/done.marker")
 	if err != nil {
@@ -357,11 +362,15 @@ func (s step60Step) Run(ctx context.Context, run *StepRunContext) error {
 	if err != nil {
 		return err
 	}
+	versions, err := step60ScoringVersions(run.IO)
+	if err != nil {
+		return err
+	}
 	req := stepio.Step60Request{
 		TaskPackage:    *run.TaskPackage,
 		ScorableAgents: scorableAgents,
-		RubricVersion:  "default",
-		PromptVersion:  "phase0-stub",
+		RubricVersion:  versions.RubricVersion,
+		PromptVersion:  versions.PromptVersion,
 	}
 	markerPath, err := run.IO.ResolveRunRelative("60/done.marker")
 	if err != nil {
@@ -384,6 +393,125 @@ func (s step60Step) Run(ctx context.Context, run *StepRunContext) error {
 	}
 	_, err = s.decode(payload, req)
 	return err
+}
+
+type scoringVersions struct {
+	RubricVersion string
+	PromptVersion string
+}
+
+func step30ScoringVersions(runIO internalio.RunContext) (scoringVersions, error) {
+	scorePath, err := runIO.ResolveRunRelative("30/scores-A.jsonl")
+	if err != nil {
+		return scoringVersions{}, err
+	}
+	compliancePath, err := runIO.ResolveRunRelative("30/compliance-A.jsonl")
+	if err != nil {
+		return scoringVersions{}, err
+	}
+	scoreRows, err := internalio.ReadJSONL[contracts.ScoreEntry](scorePath)
+	if err != nil {
+		return scoringVersions{}, err
+	}
+	complianceRows, err := internalio.ReadJSONL[contracts.ComplianceEntry](compliancePath)
+	if err != nil {
+		return scoringVersions{}, err
+	}
+	versions, err := collectScoreEntryVersions(scorecore.CollapseFinalScores(scoreRows), scoringVersions{})
+	if err != nil {
+		return scoringVersions{}, fmt.Errorf("orchestrator: step30 score versions: %w", err)
+	}
+	versions, err = collectComplianceEntryVersions(scorecore.CollapseFinalCompliance(complianceRows), versions)
+	if err != nil {
+		return scoringVersions{}, fmt.Errorf("orchestrator: step30 compliance versions: %w", err)
+	}
+	if versions.RubricVersion == "" || versions.PromptVersion == "" {
+		return scoringVersions{}, errors.New("orchestrator: step30 artifacts do not contain scoring versions")
+	}
+	return versions, nil
+}
+
+func step60ScoringVersions(runIO internalio.RunContext) (scoringVersions, error) {
+	scorePath, err := runIO.ResolveRunRelative("60/scores-B.jsonl")
+	if err != nil {
+		return scoringVersions{}, err
+	}
+	compliancePath, err := runIO.ResolveRunRelative("60/compliance-B.jsonl")
+	if err != nil {
+		return scoringVersions{}, err
+	}
+	pairwisePath, err := runIO.ResolveRunRelative("60/pairwise.jsonl")
+	if err != nil {
+		return scoringVersions{}, err
+	}
+	scoreRows, err := internalio.ReadJSONL[contracts.ScoreEntry](scorePath)
+	if err != nil {
+		return scoringVersions{}, err
+	}
+	complianceRows, err := internalio.ReadJSONL[contracts.ComplianceEntry](compliancePath)
+	if err != nil {
+		return scoringVersions{}, err
+	}
+	pairwiseRows, err := internalio.ReadJSONL[contracts.PairwiseEntry](pairwisePath)
+	if err != nil {
+		return scoringVersions{}, err
+	}
+	versions, err := collectScoreEntryVersions(scorecore.CollapseFinalScores(scoreRows), scoringVersions{})
+	if err != nil {
+		return scoringVersions{}, fmt.Errorf("orchestrator: step60 score versions: %w", err)
+	}
+	versions, err = collectComplianceEntryVersions(scorecore.CollapseFinalCompliance(complianceRows), versions)
+	if err != nil {
+		return scoringVersions{}, fmt.Errorf("orchestrator: step60 compliance versions: %w", err)
+	}
+	for _, row := range pairwiseRows {
+		versions, err = collectScoringVersion(versions, row.RubricVersion, row.PromptVersion)
+		if err != nil {
+			return scoringVersions{}, fmt.Errorf("orchestrator: step60 pairwise versions: %w", err)
+		}
+	}
+	if versions.RubricVersion == "" || versions.PromptVersion == "" {
+		return scoringVersions{}, errors.New("orchestrator: step60 artifacts do not contain scoring versions")
+	}
+	return versions, nil
+}
+
+func collectScoreEntryVersions(rows []contracts.ScoreEntry, versions scoringVersions) (scoringVersions, error) {
+	var err error
+	for _, row := range rows {
+		versions, err = collectScoringVersion(versions, row.RubricVersion, row.PromptVersion)
+		if err != nil {
+			return scoringVersions{}, err
+		}
+	}
+	return versions, nil
+}
+
+func collectComplianceEntryVersions(rows []contracts.ComplianceEntry, versions scoringVersions) (scoringVersions, error) {
+	var err error
+	for _, row := range rows {
+		versions, err = collectScoringVersion(versions, row.RubricVersion, row.PromptVersion)
+		if err != nil {
+			return scoringVersions{}, err
+		}
+	}
+	return versions, nil
+}
+
+func collectScoringVersion(current scoringVersions, rubricVersion, promptVersion string) (scoringVersions, error) {
+	if rubricVersion == "" || promptVersion == "" {
+		return scoringVersions{}, errors.New("missing rubric_version or prompt_version")
+	}
+	if current.RubricVersion == "" && current.PromptVersion == "" {
+		return scoringVersions{RubricVersion: rubricVersion, PromptVersion: promptVersion}, nil
+	}
+	if current.RubricVersion != rubricVersion || current.PromptVersion != promptVersion {
+		return scoringVersions{}, fmt.Errorf(
+			"mixed scoring versions: got rubric=%s prompt=%s want rubric=%s prompt=%s",
+			rubricVersion, promptVersion, current.RubricVersion, current.PromptVersion,
+		)
+	}
+	return current, nil
 }
 
 func seedStubPass1Scores(ctx context.Context, run *StepRunContext) error {

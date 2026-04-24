@@ -25,6 +25,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 	"github.com/nishimoto265/auto-improve/internal/steps/step20_implement"
+	"github.com/nishimoto265/auto-improve/internal/steps/step30_score"
 	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
 	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 	"github.com/stretchr/testify/assert"
@@ -815,6 +816,90 @@ func TestStubStep40_UsesRequestBoundDecoder(t *testing.T) {
 	assert.True(t, called)
 	require.NotNil(t, run.Candidates)
 	assert.Len(t, run.Candidates.Candidates, 1)
+}
+
+func TestStep30AdapterDecoderRequestUsesArtifactPromptVersionFromConfigJudge(t *testing.T) {
+	cfg := testConfigWithCLIJudge(t)
+	runID := contracts.RunID("2026-04-21-PR120-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	pkg := stubTaskPackageForRun(runCtx, 120)
+	for _, agent := range defaultAgents {
+		require.NoError(t, stubImplementStep{}.Run(context.Background(), &StepRunContext{
+			IO:          runCtx,
+			TaskPackage: &pkg,
+			Pass:        1,
+			Agent:       agent,
+		}))
+	}
+
+	var captured stepio.Step30Request
+	adapter := newStep30ScoreAdapter(
+		step30_score.New(step30_score.WithPanelProvider(step30_score.ConfigPanelProvider(cfg))),
+		func(data []byte, req any) (any, error) {
+			captured = req.(stepio.Step30Request)
+			return stepio.DecodeAndValidateStep30Response(data, captured)
+		},
+	)
+	require.NoError(t, adapter.Run(context.Background(), &StepRunContext{
+		Config:      cfg,
+		IO:          runCtx,
+		TaskPackage: &pkg,
+	}))
+
+	rows := mustReadJSONL[contracts.ScoreEntry](t, runCtx, "30/scores-A.jsonl")
+	require.NotEmpty(t, rows)
+	assert.Equal(t, rows[0].RubricVersion, captured.RubricVersion)
+	assert.Equal(t, rows[0].PromptVersion, captured.PromptVersion)
+	assert.NotEqual(t, "phase0-stub", captured.PromptVersion)
+	assert.Contains(t, captured.PromptVersion, "cli-judge-v1-codex")
+}
+
+func TestStep60AdapterDecoderRequestUsesArtifactPromptVersionFromConfigJudge(t *testing.T) {
+	cfg := testConfigWithCLIJudge(t)
+	runID := contracts.RunID("2026-04-21-PR121-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	pkg := stubTaskPackageForRun(runCtx, 121)
+	for _, agent := range defaultAgents {
+		require.NoError(t, stubImplementStep{}.Run(context.Background(), &StepRunContext{
+			IO:          runCtx,
+			TaskPackage: &pkg,
+			Pass:        1,
+			Agent:       agent,
+		}))
+		require.NoError(t, stubImplementStep{}.Run(context.Background(), &StepRunContext{
+			IO:          runCtx,
+			TaskPackage: &pkg,
+			Pass:        2,
+			Agent:       agent,
+		}))
+	}
+	promptVersion := configJudgePanelPromptVersion(t, cfg)
+	for _, agent := range defaultAgents {
+		writePass1ScoringRowsForAdapterTest(t, runCtx, pkg.RunID, agent, "default", promptVersion)
+	}
+
+	var captured stepio.Step60Request
+	step := step60Step{
+		cfg: cfg,
+		decode: func(data []byte, req any) (any, error) {
+			captured = req.(stepio.Step60Request)
+			return stepio.DecodeAndValidateStep60Response(data, captured)
+		},
+	}
+	require.NoError(t, step.Run(context.Background(), &StepRunContext{
+		Config:      cfg,
+		IO:          runCtx,
+		TaskPackage: &pkg,
+	}))
+
+	rows := mustReadJSONL[contracts.ScoreEntry](t, runCtx, "60/scores-B.jsonl")
+	require.NotEmpty(t, rows)
+	assert.Equal(t, rows[0].RubricVersion, captured.RubricVersion)
+	assert.Equal(t, rows[0].PromptVersion, captured.PromptVersion)
+	assert.Equal(t, promptVersion, captured.PromptVersion)
+	assert.NotEqual(t, "phase0-stub", captured.PromptVersion)
 }
 
 func TestRun_Step70TerminalEventSkipsStepDoneAndNextTickDoesNotResume(t *testing.T) {
@@ -2517,6 +2602,86 @@ func testConfig(t *testing.T) *config.Config {
 	}
 }
 
+func testConfigWithCLIJudge(t *testing.T) *config.Config {
+	t.Helper()
+	dir := t.TempDir()
+	runsBase := filepath.Join(dir, "runs")
+	worktreeBase := filepath.Join(dir, "worktrees")
+	repoRoot := filepath.Join(dir, "repo")
+	require.NoError(t, os.MkdirAll(repoRoot, 0o755))
+	codexPath := writeFakeCodexJudge(t, dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	agentsPath := filepath.Join(dir, "agents.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(fmt.Sprintf(`
+repo:
+  root: %q
+  default_branch: "main"
+  best_branch: "best"
+paths:
+  runs: %q
+worktree:
+  base: %q
+agent_config_path: %q
+`, repoRoot, runsBase, worktreeBase, agentsPath)), 0o644))
+	require.NoError(t, os.WriteFile(agentsPath, []byte(fmt.Sprintf(`
+profiles:
+  codex-judge:
+    provider: codex
+    binary: %q
+  stub:
+    provider: stub
+roles:
+  implementer: stub
+  judge_primary: codex-judge
+  judge_secondary: codex-judge
+  judge_arbiter: codex-judge
+`, codexPath)), 0o644))
+	cfg, err := config.LoadConfig(configPath)
+	require.NoError(t, err)
+	return cfg
+}
+
+func writeFakeCodexJudge(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "codex-judge")
+	require.NoError(t, os.WriteFile(path, []byte(`#!/bin/sh
+set -eu
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    out="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+cat > /dev/null
+cat > "$out" <<'EOF'
+{"scores":[
+  {"dimension":"fidelity","score":80,"reason":"r1"},
+  {"dimension":"correctness","score":81,"reason":"r2"},
+  {"dimension":"maintainability","score":82,"reason":"r3"},
+  {"dimension":"discipline","score":83,"reason":"r4"},
+  {"dimension":"communication","score":84,"reason":"r5"}
+],"compliance":[
+  {"rule_id":"stub-rubric-rule","verdict":"compliant","rationale":"ok"}
+]}
+EOF
+`), 0o755))
+	return path
+}
+
+func configJudgePanelPromptVersion(t *testing.T, cfg *config.Config) string {
+	t.Helper()
+	primary, err := judges.NewJudgeFromConfig(cfg, contracts.JudgeRolePrimary)
+	require.NoError(t, err)
+	secondary, err := judges.NewJudgeFromConfig(cfg, contracts.JudgeRoleSecondary)
+	require.NoError(t, err)
+	arbiter, err := judges.NewJudgeFromConfig(cfg, contracts.JudgeRoleArbiter)
+	require.NoError(t, err)
+	return judges.PanelPromptVersion("phase0-stub", primary, secondary, arbiter)
+}
+
 func repoRootFromTestFile(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
@@ -2571,6 +2736,62 @@ func appendJSONLForTest(runCtx internalio.RunContext, rel string, record any) er
 		return err
 	}
 	return internalio.AppendJSONL(path, record)
+}
+
+func mustReadJSONL[T any](t *testing.T, runCtx internalio.RunContext, rel string) []T {
+	t.Helper()
+	path, err := runCtx.ResolveRunRelative(rel)
+	require.NoError(t, err)
+	rows, err := internalio.ReadJSONL[T](path)
+	require.NoError(t, err)
+	return rows
+}
+
+func writePass1ScoringRowsForAdapterTest(
+	t *testing.T,
+	runCtx internalio.RunContext,
+	runID contracts.RunID,
+	agent contracts.AgentID,
+	rubricVersion string,
+	promptVersion string,
+) {
+	t.Helper()
+	now := time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC)
+	dimensions := []contracts.Dimension{
+		contracts.DimensionFidelity,
+		contracts.DimensionCorrectness,
+		contracts.DimensionMaintainability,
+		contracts.DimensionDiscipline,
+		contracts.DimensionCommunication,
+	}
+	for i, dimension := range dimensions {
+		require.NoError(t, appendJSONLForTest(runCtx, "30/scores-A.jsonl", contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         runID,
+			Pass:          1,
+			Agent:         agent,
+			Dimension:     dimension,
+			Score:         80 + i,
+			Reasons:       "pass1 fixture score",
+			VerdictPath:   contracts.VerdictPathAgreement,
+			RubricVersion: rubricVersion,
+			PromptVersion: promptVersion,
+			ResolvedAt:    now,
+		}))
+	}
+	require.NoError(t, appendJSONLForTest(runCtx, "30/compliance-A.jsonl", contracts.ComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         runID,
+		Pass:          1,
+		Agent:         agent,
+		RuleID:        "stub-rubric-rule",
+		Verdict:       contracts.ComplianceVerdictCompliant,
+		Rationale:     "pass1 fixture compliance",
+		VerdictPath:   contracts.VerdictPathAgreement,
+		RubricVersion: rubricVersion,
+		PromptVersion: promptVersion,
+		ResolvedAt:    now,
+	}))
 }
 
 func writeValidStep30ArtifactsForTest(runCtx internalio.RunContext) error {
