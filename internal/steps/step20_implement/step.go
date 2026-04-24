@@ -471,10 +471,19 @@ func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeA
 	if err != nil {
 		return "", "", err
 	}
-	commitSHA, err := gitOutputContext(
+	commitSHA, err := synthesizeSuccessCommitWithIdentity(ctx, allocation, run, tree, parent)
+	if err != nil {
+		return "", "", err
+	}
+	return commitSHA, parent, nil
+}
+
+func synthesizeSuccessCommitWithIdentity(ctx context.Context, allocation contracts.WorktreeAllocation, run RunContext, tree, parent string) (string, error) {
+	return gitOutputContextWithEnv(
 		ctx,
 		strings.TrimSpace,
 		allocation.Path,
+		syntheticCommitEnv(),
 		"commit-tree",
 		tree,
 		"-p",
@@ -482,10 +491,6 @@ func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeA
 		"-m",
 		fmt.Sprintf("auto-improve: synthesize step20 success for %s %s", run.IO.RunID, run.Agent),
 	)
-	if err != nil {
-		return "", "", err
-	}
-	return commitSHA, parent, nil
 }
 
 func finalizeSyntheticSuccessCommit(ctx context.Context, allocation contracts.WorktreeAllocation, commitSHA, parent, errPrefix string) error {

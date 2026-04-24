@@ -656,10 +656,11 @@ func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeA
 	if err != nil {
 		return "", "", err
 	}
-	commitSHA, err := gitOutputContext(
+	commitSHA, err := gitOutputContextWithEnv(
 		ctx,
 		stringsTrimSpace,
 		allocation.Path,
+		syntheticCommitEnv(),
 		"commit-tree",
 		tree,
 		"-p",

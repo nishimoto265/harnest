@@ -125,6 +125,7 @@ func TestGitLocalEnv_AppendsSafeGitProfile(t *testing.T) {
 	setSanitizeTestEnv(t)
 
 	env := GitLocalEnv("AUTO_IMPROVE_STEP=20")
+	falsePath := trustedFalsePath()
 
 	assert.Contains(t, env, "AUTO_IMPROVE_STEP=20")
 	assert.Contains(t, env, "PATH="+defaultTrustedPATH)
@@ -142,8 +143,8 @@ func TestGitLocalEnv_AppendsSafeGitProfile(t *testing.T) {
 	assert.Contains(t, env, "GIT_CONFIG_KEY_4=diff.external")
 	assert.Contains(t, env, "GIT_CONFIG_VALUE_4=")
 	assert.Contains(t, env, "GIT_SSH_COMMAND=ssh -F "+os.DevNull)
-	assert.Contains(t, env, "GIT_ASKPASS=/bin/false")
-	assert.Contains(t, env, "SSH_ASKPASS=/bin/false")
+	assert.Contains(t, env, "GIT_ASKPASS="+falsePath)
+	assert.Contains(t, env, "SSH_ASKPASS="+falsePath)
 	assert.Contains(t, env, "GIT_TERMINAL_PROMPT=0")
 
 	assert.NotContains(t, env, "SSH_AUTH_SOCK=/tmp/ssh.sock")
@@ -160,6 +161,7 @@ func TestGitNetworkEnv_PreservesNetworkAuthAndAppendsSafeGitProfile(t *testing.T
 	setSanitizeTestEnv(t)
 
 	env := GitNetworkEnv("GH_TOKEN=override")
+	falsePath := trustedFalsePath()
 
 	assert.Contains(t, env, "SSH_AUTH_SOCK=/tmp/ssh.sock")
 	assert.Contains(t, env, "GH_TOKEN=override")
@@ -167,13 +169,41 @@ func TestGitNetworkEnv_PreservesNetworkAuthAndAppendsSafeGitProfile(t *testing.T
 	assert.Contains(t, env, "GH_HOST=github.example.com")
 	assert.Contains(t, env, "GIT_CONFIG_NOSYSTEM=1")
 	assert.Contains(t, env, "GIT_CONFIG_GLOBAL="+os.DevNull)
+	assert.Contains(t, env, "GIT_CONFIG_KEY_0=credential.helper")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_0=")
 	assert.Contains(t, env, "GIT_SSH_COMMAND=ssh -F "+os.DevNull)
-	assert.Contains(t, env, "GIT_ASKPASS=/bin/false")
+	assert.Contains(t, env, "GIT_ASKPASS="+falsePath)
 
 	assert.NotContains(t, env, "GH_TOKEN=token")
 	assert.NotContains(t, env, "GIT_CONFIG_GLOBAL=/tmp/gitconfig")
 	assert.NotContains(t, env, "GIT_SSH_COMMAND=ssh -F /tmp/config")
 	assert.NotContains(t, env, "GIT_ASKPASS=/usr/local/bin/gh-askpass")
+}
+
+func TestGitSafeProfile_UsesPortableFalseFromTrustedPath(t *testing.T) {
+	dir := t.TempDir()
+	falsePath := filepath.Join(dir, "false")
+	require.NoError(t, os.WriteFile(falsePath, []byte("#!/bin/sh\nexit 1\n"), 0o755))
+	restore := SetTrustedPathForTest(dir)
+	t.Cleanup(restore)
+
+	env := GitLocalEnv()
+
+	assert.Contains(t, env, "PATH="+dir)
+	assert.Contains(t, env, "GIT_ASKPASS="+falsePath)
+	assert.Contains(t, env, "SSH_ASKPASS="+falsePath)
+}
+
+func TestGitSafeProfile_FallsBackToSystemFalse(t *testing.T) {
+	restore := SetTrustedPathForTest(t.TempDir())
+	t.Cleanup(restore)
+
+	falsePath := trustedFalsePath()
+	env := GitLocalEnv()
+
+	assert.Contains(t, []string{"/usr/bin/false", "/bin/false"}, falsePath)
+	assert.Contains(t, env, "GIT_ASKPASS="+falsePath)
+	assert.Contains(t, env, "SSH_ASKPASS="+falsePath)
 }
 
 func TestTrustedLookPath_IgnoresParentPathShadow(t *testing.T) {

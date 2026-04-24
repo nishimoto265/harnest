@@ -150,7 +150,9 @@ func GitLocalEnv(extra ...string) []string {
 }
 
 // GitNetworkEnv returns the hardened env for network-crossing harness git.
-// Network auth env allowed by SanitizeForNetworkExec is preserved.
+// Network auth env allowed by SanitizeForNetworkExec is preserved, but ambient
+// credential helpers stay reset. If raw HTTPS git auth needs a token, add a
+// call-site-scoped askpass/header instead of re-enabling global helpers here.
 func GitNetworkEnv(extra ...string) []string {
 	return appendSafeGitProfile(SanitizeForNetworkExec(extra...))
 }
@@ -257,13 +259,26 @@ func appendSafeGitProfile(env []string) []string {
 			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, entry.value),
 		)
 	}
+	falsePath := trustedFalsePath()
 	filtered = append(filtered,
 		"GIT_SSH_COMMAND=ssh -F "+os.DevNull,
-		"GIT_ASKPASS=/bin/false",
-		"SSH_ASKPASS=/bin/false",
+		"GIT_ASKPASS="+falsePath,
+		"SSH_ASKPASS="+falsePath,
 		"GIT_TERMINAL_PROMPT=0",
 	)
 	return filtered
+}
+
+func trustedFalsePath() string {
+	if resolved, err := TrustedLookPath("false"); err == nil {
+		return resolved
+	}
+	for _, candidate := range []string{"/usr/bin/false", "/bin/false"} {
+		if err := executableFile(candidate); err == nil {
+			return candidate
+		}
+	}
+	return "/bin/false"
 }
 
 func safeGitProfileControlsKey(key string) bool {
