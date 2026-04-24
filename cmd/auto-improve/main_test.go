@@ -597,23 +597,8 @@ func TestRecoverAdoptAnywayPromotesAndClearsSentinel(t *testing.T) {
 		},
 	}
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "70", "decision.json"), decision))
-	entry := contracts.RuleRegistryEntry{
-		Kind: contracts.RegistryKindAdded,
-		Value: contracts.RuleRegistryAdded{
-			Kind:           contracts.RegistryKindAdded,
-			SchemaVersion:  "1",
-			RuleID:         "r-0001",
-			RulePath:       "rules/r-0001.md",
-			Sha256:         strings.Repeat("1", 64),
-			IdempotencyKey: intention.PlannedAdoption.Entries[0].OpID,
-			VersionSeq:     1,
-			PrevHash:       "",
-			ByRunID:        runID,
-			At:             time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
-		},
-	}
-	_, err = internalio.AppendRegistryEntry(filepath.Join(runsBase, "rules-registry.jsonl"), entry)
-	require.NoError(t, err)
+	appendRecoverRegistryEntry(t, runsBase, runID, intention)
+	seedRecoverPublishedRule(t, runsBase)
 
 	writeTestConfig(t, root, runsBase, worktreeBase)
 	originalGitFactory := recoverGitOpsForRepo
@@ -657,23 +642,8 @@ func TestRecoverAdoptAnywayAllowsNeedsManualRecoveryStage(t *testing.T) {
 	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
 	intention.FailedStep = contracts.FailedStep70
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "70", "intention.json"), intention))
-	entry := contracts.RuleRegistryEntry{
-		Kind: contracts.RegistryKindAdded,
-		Value: contracts.RuleRegistryAdded{
-			Kind:           contracts.RegistryKindAdded,
-			SchemaVersion:  "1",
-			RuleID:         "r-0001",
-			RulePath:       "rules/r-0001.md",
-			Sha256:         strings.Repeat("1", 64),
-			IdempotencyKey: intention.PlannedAdoption.Entries[0].OpID,
-			VersionSeq:     1,
-			PrevHash:       "",
-			ByRunID:        runID,
-			At:             time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
-		},
-	}
-	_, err = internalio.AppendRegistryEntry(filepath.Join(runsBase, "rules-registry.jsonl"), entry)
-	require.NoError(t, err)
+	appendRecoverRegistryEntry(t, runsBase, runID, intention)
+	seedRecoverPublishedRule(t, runsBase)
 
 	writeTestConfig(t, root, runsBase, worktreeBase)
 	originalGitFactory := recoverGitOpsForRepo
@@ -715,23 +685,8 @@ func TestRecoverAdoptAnywayReconstructsMissingRegistryAppendResult(t *testing.T)
 	intention.FailedStep = contracts.FailedStep70
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "70", "intention.json"), intention))
 
-	entry := contracts.RuleRegistryEntry{
-		Kind: contracts.RegistryKindAdded,
-		Value: contracts.RuleRegistryAdded{
-			Kind:           contracts.RegistryKindAdded,
-			SchemaVersion:  "1",
-			RuleID:         "r-0001",
-			RulePath:       "rules/r-0001.md",
-			Sha256:         strings.Repeat("1", 64),
-			IdempotencyKey: intention.PlannedAdoption.Entries[0].OpID,
-			VersionSeq:     1,
-			PrevHash:       "",
-			ByRunID:        runID,
-			At:             time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
-		},
-	}
-	_, err = internalio.AppendRegistryEntry(filepath.Join(runsBase, "rules-registry.jsonl"), entry)
-	require.NoError(t, err)
+	appendRecoverRegistryEntry(t, runsBase, runID, intention)
+	seedRecoverPublishedRule(t, runsBase)
 
 	writeTestConfig(t, root, runsBase, worktreeBase)
 	originalGitFactory := recoverGitOpsForRepo
@@ -1269,11 +1224,45 @@ func seedRecoverIntention(runID contracts.RunID, stage contracts.IntentionStage,
 					OpID:     contracts.ComputePlannedAdoptionEntryOpID(idempotencyKey, 0, "r-0001"),
 					RuleID:   "r-0001",
 					RulePath: "rules/r-0001.md",
-					Sha256:   strings.Repeat("1", 64),
+					Sha256:   recoverRuleSHA(),
 				},
 			},
 		},
 	}
+}
+
+func appendRecoverRegistryEntry(t *testing.T, runsBase string, runID contracts.RunID, intention contracts.IntentionRecord) {
+	t.Helper()
+	entry := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "r-0001",
+			RulePath:       "rules/r-0001.md",
+			Sha256:         recoverRuleSHA(),
+			IdempotencyKey: intention.PlannedAdoption.Entries[0].OpID,
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        runID,
+			At:             time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}
+	_, err := internalio.AppendRegistryEntry(filepath.Join(runsBase, "rules-registry.jsonl"), entry)
+	require.NoError(t, err)
+}
+
+func seedRecoverPublishedRule(t *testing.T, runsBase string) {
+	t.Helper()
+	require.NoError(t, internalio.WriteAtomic(filepath.Join(runsBase, "rules", "r-0001.md"), []byte(recoverRuleBody())))
+}
+
+func recoverRuleBody() string {
+	return "recover rule body\n"
+}
+
+func recoverRuleSHA() string {
+	return sha256String(recoverRuleBody())
 }
 
 func mustNewRunCtx(t *testing.T, runID contracts.RunID, runsBase, worktreeBase string) internalio.RunContext {
