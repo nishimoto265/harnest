@@ -43,8 +43,9 @@ var runGit = func(ctx context.Context, env []string, args ...string) ([]byte, er
 var removePreparedPublishWorktree = removeWorktree
 
 type snapshot struct {
-	registry []byte
-	rules    map[string][]byte
+	registry        []byte
+	registryPresent bool
+	rules           map[string][]byte
 }
 
 type SnapshotMetadata struct {
@@ -279,7 +280,7 @@ func BranchSnapshotMatchesLocal(ctx context.Context, repoRoot, branch, runsBase 
 }
 
 func snapshotsEqual(a, b snapshot) bool {
-	if !bytes.Equal(a.registry, b.registry) || len(a.rules) != len(b.rules) {
+	if a.registryPresent != b.registryPresent || !bytes.Equal(a.registry, b.registry) || len(a.rules) != len(b.rules) {
 		return false
 	}
 	for path, aBody := range a.rules {
@@ -402,7 +403,7 @@ func syncSnapshotToWorktree(worktreeDir string, snap snapshot) error {
 	if err := os.MkdirAll(repoRootDir, 0o755); err != nil {
 		return err
 	}
-	if len(snap.registry) > 0 {
+	if snap.registryPresent {
 		if err := internalio.WriteAtomic(registryDst, snap.registry); err != nil {
 			return err
 		}
@@ -442,6 +443,7 @@ func loadBranchSnapshot(ctx context.Context, repoRoot, branch string) (snapshot,
 		switch {
 		case rel == RegistryRepoRelPath:
 			snap.registry = data
+			snap.registryPresent = true
 		case strings.HasPrefix(rel, RulesRepoDirRelPath+"/"):
 			snap.rules[localRulePathForRepoRelative(rel)] = data
 		}
@@ -462,8 +464,9 @@ func loadLocalSnapshot(runsBase string) (snapshot, error) {
 		return snapshot{}, err
 	}
 	snap := snapshot{
-		registry: registryBytes,
-		rules:    make(map[string][]byte),
+		registry:        registryBytes,
+		registryPresent: true,
+		rules:           make(map[string][]byte),
 	}
 	rulesSrc := filepath.Join(runsBase, rulesLocalDirName)
 	if _, err := os.Stat(rulesSrc); err != nil {
@@ -567,7 +570,7 @@ func localRulePathForRepoRelative(rel string) string {
 }
 
 func validateSnapshot(snap snapshot) error {
-	if len(snap.registry) == 0 {
+	if !snap.registryPresent {
 		if len(snap.rules) == 0 {
 			return nil
 		}
@@ -637,7 +640,7 @@ func applySnapshot(runsBase string, snap snapshot) error {
 }
 
 func stageSnapshot(stageDir string, snap snapshot) error {
-	if len(snap.registry) > 0 {
+	if snap.registryPresent {
 		if err := internalio.WriteAtomic(filepath.Join(stageDir, registryLocalName), snap.registry); err != nil {
 			return err
 		}
@@ -690,7 +693,7 @@ func moveCurrentPolicyToBackup(runsBase, backupDir string) (func() error, error)
 }
 
 func moveSnapshotIntoPlace(runsBase, stageDir string, snap snapshot) error {
-	if len(snap.registry) > 0 {
+	if snap.registryPresent {
 		if err := os.Rename(filepath.Join(stageDir, registryLocalName), filepath.Join(runsBase, registryLocalName)); err != nil {
 			return err
 		}
