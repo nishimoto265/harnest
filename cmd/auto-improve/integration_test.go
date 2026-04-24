@@ -298,6 +298,82 @@ func TestIntegrationRunUsesRealGitWorktreesWhenFakeGitIsAbsent(t *testing.T) {
 	assert.FileExists(t, filepath.Join(runDirs[0], "70", "decision.json"))
 }
 
+func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
+	requireIntegrationEnv(t)
+
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	repoRoot := filepath.Join(root, "repo")
+	binDir := filepath.Join(root, "bin")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	require.NoError(t, os.MkdirAll(repoRoot, 0o755))
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+
+	shas := seedRealGitIntegrationRepo(t, repoRoot)
+	writeIntegrationConfigForRepo(t, root, repoRoot, runsBase, worktreeBase)
+	copyExecutable(t, filepath.Join(mustRepoRoot(t), "internal", "orchestrator", "testdata", "bin", "gh"), filepath.Join(binDir, "gh"))
+	implementerPath := filepath.Join(binDir, "fake-implementer")
+	judgePath := filepath.Join(binDir, "fake-judge")
+	writeExecutable(t, implementerPath, fakeAdoptImplementerScript())
+	writeExecutable(t, judgePath, fakeAdoptJudgeScript())
+	writeIntegrationAdoptAgentsConfig(t, root, implementerPath, judgePath)
+
+	bin := buildIntegrationBinary(t)
+	cmd := exec.Command(bin, "run", "--pr", "77")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		integrationTrustedPathEnvVar+"="+trustedPathWithFakeBin(binDir),
+		"AUTO_IMPROVE_TEST_BASE_SHA="+shas.base,
+		"AUTO_IMPROVE_TEST_TARGET_SHA="+shas.head,
+		"AUTO_IMPROVE_TEST_MERGE_SHA="+shas.merge,
+		"AUTO_IMPROVE_TEST_BEST_SHA="+shas.base,
+	)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Run(), "stdout=%s stderr=%s", stdout.String(), stderr.String())
+
+	runDirs := cliIntegrationEnv{runsBase: runsBase}.runDirs(t)
+	require.Len(t, runDirs, 1)
+	runDir := runDirs[0]
+	pkg, err := internalio.ReadJSON[contracts.TaskPackage](filepath.Join(runDir, "task-package.json"))
+	require.NoError(t, err)
+	candidates, err := internalio.ReadJSON[contracts.Candidates](filepath.Join(runDir, "40", "candidates.json"))
+	require.NoError(t, err)
+	require.NotEmpty(t, candidates.Candidates)
+	decision, err := internalio.ReadJSON[contracts.Decision](filepath.Join(runDir, "70", "decision.json"))
+	require.NoError(t, err)
+	require.Equal(t, contracts.DecisionActionAdopt, decision.Action)
+	adopt, ok := decision.Value.(contracts.DecisionAdopt)
+	require.True(t, ok)
+
+	winnerManifest := readIntegrationManifest(t, runDir, 2, "a1")
+	assert.Equal(t, winnerManifest.HeadSHA, adopt.TargetSha)
+	remoteHead := strings.Fields(runIntegrationGit(t, repoRoot, "ls-remote", "origin", "auto-improve/best"))[0]
+	assert.Equal(t, adopt.TargetSha, remoteHead)
+
+	lines, err := internalio.RegistryLines(filepath.Join(runsBase, "rules-registry.jsonl"))
+	require.NoError(t, err)
+	require.Len(t, lines, 1)
+	added, ok := lines[0].Entry.Value.(contracts.RuleRegistryAdded)
+	require.True(t, ok)
+	assert.Equal(t, pkg.RunID, added.ByRunID)
+	assert.NotEmpty(t, added.IdempotencyKey)
+	assert.Equal(t, adopt.RegistryAppendResult.Sha256, lines[0].Sha256)
+	assert.FileExists(t, filepath.Join(runsBase, added.RulePath))
+
+	events, err := state.ScanEventsForRun(mustNewRunCtx(t, pkg.RunID, runsBase, worktreeBase), pkg.RunID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindPromoted, events[len(events)-1].Kind)
+	for _, worktree := range pkg.Worktrees {
+		assert.NoDirExists(t, worktree.Path, "step70 cleanup should remove adopted real git worktrees")
+	}
+}
+
 func TestIntegrationSunsetSubprocessArchivesDeprecatedRule(t *testing.T) {
 	requireIntegrationEnv(t)
 
@@ -514,6 +590,38 @@ func writeIntegrationAgentsConfig(t *testing.T, root, claudePath string) {
 	require.NoError(t, os.WriteFile(configPath, append(data, []byte("agent_config_path: \"./agents.yaml\"\n")...), 0o644))
 }
 
+func writeIntegrationAdoptAgentsConfig(t *testing.T, root, implementerPath, judgePath string) {
+	t.Helper()
+	content := "profiles:\n" +
+		"  fake-implementer:\n" +
+		"    provider: claude\n" +
+		"    binary: " + yamlDoubleQuote(implementerPath) + "\n" +
+		"    args: [\"-p\"]\n" +
+		"  fake-judge-primary:\n" +
+		"    provider: claude\n" +
+		"    binary: " + yamlDoubleQuote(judgePath) + "\n" +
+		"  fake-judge-secondary:\n" +
+		"    provider: claude\n" +
+		"    binary: " + yamlDoubleQuote(judgePath) + "\n" +
+		"  fake-judge-arbiter:\n" +
+		"    provider: claude\n" +
+		"    binary: " + yamlDoubleQuote(judgePath) + "\n" +
+		"roles:\n" +
+		"  implementer: fake-implementer\n" +
+		"  judge_primary: fake-judge-primary\n" +
+		"  judge_secondary: fake-judge-secondary\n" +
+		"  judge_arbiter: fake-judge-arbiter\n"
+	require.NoError(t, os.WriteFile(filepath.Join(root, "agents.yaml"), []byte(content), 0o644))
+
+	configPath := filepath.Join(root, "config.yaml")
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	if strings.Contains(string(data), "agent_config_path:") {
+		return
+	}
+	require.NoError(t, os.WriteFile(configPath, append(data, []byte("agent_config_path: \"./agents.yaml\"\n")...), 0o644))
+}
+
 type realGitIntegrationSHAs struct {
 	base  string
 	head  string
@@ -700,6 +808,60 @@ func fakeClaudeScript(delay time.Duration) string {
 		"EOF\n" +
 		"printf 'generated change\\n' > \"generated-${AUTO_IMPROVE_PASS}-${AUTO_IMPROVE_AGENT}.txt\"\n" +
 		"printf '{\"event\":\"ok\"}\\n'\n"
+}
+
+func fakeAdoptImplementerScript() string {
+	return `#!/bin/sh
+set -eu
+
+cat > checklist-result.json <<EOF
+{"schema_version":"1","run_id":"${AUTO_IMPROVE_RUN_ID}","pass":${AUTO_IMPROVE_PASS},"agent":"${AUTO_IMPROVE_AGENT}","items":[]}
+EOF
+mkdir -p app
+printf 'pass=%s agent=%s\n' "${AUTO_IMPROVE_PASS}" "${AUTO_IMPROVE_AGENT}" > "app/generated-${AUTO_IMPROVE_PASS}-${AUTO_IMPROVE_AGENT}.txt"
+printf '{"event":"ok"}\n'
+`
+}
+
+func fakeAdoptJudgeScript() string {
+	return `#!/bin/sh
+set -eu
+
+prompt="$(cat)"
+if printf '%s' "$prompt" | grep -q 'step30 pass1'; then
+  score=55
+  verdict=violated
+  rationale='pass1 intentionally violates fake adoption rule'
+else
+  score=95
+  verdict=compliant
+  rationale='pass2 satisfies fake adoption rule'
+fi
+
+rules="$(printf '%s\n' "$prompt" | awk '
+  /^Required compliance rule_ids:/ { collecting=1; next }
+  collecting && /^- / { sub(/^- /, ""); print; next }
+  collecting && NF == 0 { exit }
+  collecting && !/^- / { exit }
+')"
+
+printf '{"scores":['
+printf '{"dimension":"fidelity","score":%s,"reason":"fake judge score"},' "$score"
+printf '{"dimension":"correctness","score":%s,"reason":"fake judge score"},' "$score"
+printf '{"dimension":"maintainability","score":%s,"reason":"fake judge score"},' "$score"
+printf '{"dimension":"discipline","score":%s,"reason":"fake judge score"},' "$score"
+printf '{"dimension":"communication","score":%s,"reason":"fake judge score"}' "$score"
+printf '],"compliance":['
+first=1
+for rule in $rules; do
+  if [ "$first" -eq 0 ]; then
+    printf ','
+  fi
+  first=0
+  printf '{"rule_id":"%s","verdict":"%s","rationale":"%s"}' "$rule" "$verdict" "$rationale"
+done
+printf ']}\n'
+`
 }
 
 func formatSleep(delay time.Duration) string {
