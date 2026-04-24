@@ -96,6 +96,9 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 			}
 			return err
 		}
+		if err := checkDetectLoopRecoveryGate(runsBase); err != nil {
+			return err
+		}
 	}
 	prs, err := detectMergedPRs(ctx, cfg, processedPath)
 	if err != nil {

@@ -171,9 +171,10 @@ func readRegistryLinesHandle(f *os.File) ([]RegistryLine, error) {
 	}
 	reader := bufio.NewReader(f)
 	var (
-		lines  []RegistryLine
-		offset int64
-		lineNo int
+		lines    []RegistryLine
+		offset   int64
+		lineNo   int
+		prevHash string
 	)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -199,11 +200,20 @@ func readRegistryLinesHandle(f *os.File) ([]RegistryLine, error) {
 			return nil, fmt.Errorf("registry line %d at offset %d: %w", lineNo, offset, decodeErr)
 		}
 		sum := sha256.Sum256(line)
+		rowHash := hex.EncodeToString(sum[:])
+		rowPrevHash, prevErr := registryPrevHash(entry)
+		if prevErr != nil {
+			return nil, fmt.Errorf("registry line %d at offset %d: %w", lineNo, offset, prevErr)
+		}
+		if rowPrevHash != prevHash {
+			return nil, fmt.Errorf("registry line %d at offset %d: %w: expected_prev_hash=%q actual_prev_hash=%q", lineNo, offset, ErrRegistryCASMismatch, rowPrevHash, prevHash)
+		}
 		lines = append(lines, RegistryLine{
 			Offset: offset,
-			Sha256: hex.EncodeToString(sum[:]),
+			Sha256: rowHash,
 			Entry:  entry,
 		})
+		prevHash = rowHash
 		offset += int64(len(line) + 1)
 		if err != nil {
 			if isEOF(err) {

@@ -951,14 +951,54 @@ func TestRecoverClearSentinelAllowsMissingTaskPackageAndCandidates(t *testing.T)
 	assert.FileExists(t, filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelClearedFilename(runID)))
 }
 
+func TestRecoverClearSentinelAllowsAbortedSentinel(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	runID := contracts.RunID("2026-04-21-PR52-abcdef0")
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, "needs-recovery"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, string(runID), "70"), 0o755))
+	abortedName := contracts.NeedsRecoverySentinelAbortedFilename(runID)
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "needs-recovery", abortedName), []byte(`{"run_id":"2026-04-21-PR52-abcdef0","pr":52,"reason":"manual_abort_pending_cleanup","failed_step":"70","created_at":"2026-04-21T12:00:00Z"}`), 0o644))
+
+	ctx := mustNewRunCtx(t, runID, runsBase, worktreeBase)
+	require.NoError(t, state.NewWriter(ctx).Append(contracts.StateEntry{
+		Kind: contracts.StateKindStarted,
+		Value: contracts.StateEntryStarted{
+			Kind:  contracts.StateKindStarted,
+			PR:    52,
+			RunID: runID,
+			Step:  contracts.FailedStep10,
+			At:    time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}))
+
+	writeTestConfig(t, root, runsBase, worktreeBase)
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"recover", "--run", string(runID), "--clear-sentinel"})
+	require.NoError(t, cmd.Execute())
+
+	assert.NoFileExists(t, filepath.Join(runsBase, "needs-recovery", abortedName))
+	assert.FileExists(t, filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelClearedFilename(runID)))
+}
+
 type stubPipelineRunner struct {
-	prs  []int
-	opts []orchestrator.RunOptions
+	prs   []int
+	opts  []orchestrator.RunOptions
+	onRun func(pr int, opts orchestrator.RunOptions) error
 }
 
 func (r *stubPipelineRunner) Run(_ context.Context, pr int, opts orchestrator.RunOptions) error {
 	r.prs = append(r.prs, pr)
 	r.opts = append(r.opts, opts)
+	if r.onRun != nil {
+		return r.onRun(pr, opts)
+	}
 	return nil
 }
 
@@ -1135,6 +1175,76 @@ func TestRunDetectLoopDrainsResumeQueueBeforeFreshDetection(t *testing.T) {
 	require.Len(t, stub.opts, 2)
 	assert.Equal(t, runID, stub.opts[0].RunID)
 	assert.Empty(t, stub.opts[1].RunID)
+}
+
+func TestRunDetectLoopStopsWhenResumeCreatesNeedsRecoverySentinel(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "owner__repo", "runs"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "owner__repo", "runs", "needs-recovery"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "config.yaml"), []byte(
+		"repo:\n"+
+			"  github: owner/repo\n"+
+			"  root: "+root+"\n"+
+			"  default_branch: develop\n"+
+			"  best_branch: auto-improve/best\n"+
+			"paths:\n"+
+			"  runs: "+runsBase+"\n"+
+			"worktree:\n"+
+			"  base: "+worktreeBase+"\n",
+	), 0o644))
+	runID := contracts.RunID("2026-04-21-PR303-abcdef0")
+	namespacedRunsBase := filepath.Join(root, "owner__repo", "runs")
+	ctx := mustNewRunCtx(t, runID, namespacedRunsBase, filepath.Join(root, "owner__repo", "worktrees"))
+	require.NoError(t, state.NewWriter(ctx).Append(contracts.StateEntry{
+		Kind: contracts.StateKindInterrupted,
+		Value: contracts.StateEntryInterrupted{
+			Kind:   contracts.StateKindInterrupted,
+			PR:     303,
+			RunID:  runID,
+			Step:   contracts.FailedStep20,
+			Reason: contracts.InterruptedReasonUnknown,
+			At:     time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}))
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	stub := &stubPipelineRunner{
+		onRun: func(pr int, opts orchestrator.RunOptions) error {
+			require.Equal(t, 303, pr)
+			require.Equal(t, runID, opts.RunID)
+			return os.WriteFile(
+				filepath.Join(namespacedRunsBase, "needs-recovery", contracts.NeedsRecoverySentinelFilename(runID)),
+				[]byte(`{"run_id":"2026-04-21-PR303-abcdef0","pr":303,"reason":"transactional_failure","failed_step":"70","created_at":"2026-04-21T12:00:00Z"}`),
+				0o644,
+			)
+		},
+	}
+	originalNewPipelineRunner := newPipelineRunner
+	originalDetectMergedPRs := detectMergedPRs
+	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
+		return stub, nil
+	}
+	detectMergedPRs = func(context.Context, config.Config, string) ([]detect.MergedPR, error) {
+		require.Fail(t, "detect should not run after a resumed run creates a recovery sentinel")
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		newPipelineRunner = originalNewPipelineRunner
+		detectMergedPRs = originalDetectMergedPRs
+	})
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--detect-loop"})
+	err = cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "global needs_manual_recovery block")
+	assert.Equal(t, []int{303}, stub.prs)
 }
 
 func TestRunDetectLoopBlocksOnNeedsRecoveryWhenNoWork(t *testing.T) {

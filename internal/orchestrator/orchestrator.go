@@ -269,7 +269,9 @@ func (o *Orchestrator) selectRun(pr int, opts RunOptions) (runSelection, error) 
 	switch action {
 	case state.NextActionResume:
 		if latest.LastEvent != nil && isPolicySnapshotStaleInterrupted(*latest.LastEvent) {
-			return newFreshSelection(pr, opts, runsBase, worktreeBase)
+			freshOpts := opts
+			freshOpts.RunID = ""
+			return newFreshSelection(pr, freshOpts, runsBase, worktreeBase)
 		}
 		runID, ok := stateRunID(*latest.LastEvent)
 		if !ok {

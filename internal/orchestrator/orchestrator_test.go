@@ -641,7 +641,7 @@ func TestRun_Step70PolicySnapshotStaleStartsFreshNextRun(t *testing.T) {
 	require.NoError(t, err)
 	recorder := &callRecorder{}
 	second.steps = stubPipelineSteps(recordingStep{label: "10", recorder: recorder}, stubStep70{})
-	require.NoError(t, second.Run(context.Background(), 410, RunOptions{}))
+	require.NoError(t, second.Run(context.Background(), 410, RunOptions{RunID: runID}))
 
 	assert.Contains(t, recorder.snapshot(), "10")
 }

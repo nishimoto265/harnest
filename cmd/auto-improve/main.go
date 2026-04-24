@@ -443,7 +443,7 @@ func runRecoverMarkManualAbort(cmd *cobra.Command, runID string) error {
 }
 
 func runRecoverClearSentinel(cmd *cobra.Command, runID string) error {
-	runsBase, runCtx, lock, err := recoverRunSentinelPrereqs(runID)
+	runsBase, runCtx, lock, err := recoverClearSentinelPrereqs(runID)
 	if err != nil {
 		return err
 	}
@@ -610,6 +610,14 @@ func recoverRunPrereqs(runID string, requireSentinel bool) (context.Context, str
 }
 
 func recoverRunSentinelPrereqs(runID string) (string, internalio.RunContext, *internalio.FileLock, error) {
+	return recoverRunSentinelPrereqsWithOptions(runID, false)
+}
+
+func recoverClearSentinelPrereqs(runID string) (string, internalio.RunContext, *internalio.FileLock, error) {
+	return recoverRunSentinelPrereqsWithOptions(runID, true)
+}
+
+func recoverRunSentinelPrereqsWithOptions(runID string, allowAborted bool) (string, internalio.RunContext, *internalio.FileLock, error) {
 	if runID == "" {
 		return "", internalio.RunContext{}, nil, commandExitError{code: 2, msg: "recover: --run <id> is required"}
 	}
@@ -627,7 +635,7 @@ func recoverRunSentinelPrereqs(runID string) (string, internalio.RunContext, *in
 		_ = lock.Unlock()
 		return "", internalio.RunContext{}, nil, err
 	}
-	if sentinelName == contracts.NeedsRecoverySentinelAbortedFilename(runCtx.RunID) {
+	if sentinelName == contracts.NeedsRecoverySentinelAbortedFilename(runCtx.RunID) && !allowAborted {
 		_ = lock.Unlock()
 		return "", internalio.RunContext{}, nil, commandExitError{code: 2, msg: fmt.Sprintf("recover: %s is an aborted sentinel; use --finalize-cleanup", sentinelName)}
 	}

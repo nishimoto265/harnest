@@ -757,6 +757,53 @@ func TestReadRegistryLinesRejectsUnterminatedFinalLine(t *testing.T) {
 	assert.Contains(t, err.Error(), "unterminated final line")
 }
 
+func TestReadRegistryLinesRejectsBrokenPrevHashChain(t *testing.T) {
+	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
+	first := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("2", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        "2026-04-21-PR1-abcdef0",
+			At:             time.Unix(100, 0).UTC(),
+		},
+	}
+	firstPayload, err := marshalJSONLRecord(first)
+	require.NoError(t, err)
+	firstSum := sha256.Sum256(firstPayload)
+	require.NotEqual(t, hex.EncodeToString(firstSum[:]), strings.Repeat("f", 64))
+
+	second := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindUpdated,
+		Value: contracts.RuleRegistryUpdated{
+			Kind:           contracts.RegistryKindUpdated,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("3", 64),
+			PrevSha256:     strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("4", 64),
+			VersionSeq:     2,
+			PrevHash:       strings.Repeat("f", 64),
+			ByRunID:        "2026-04-21-PR2-bcdef01",
+			At:             time.Unix(200, 0).UTC(),
+		},
+	}
+	secondPayload, err := marshalJSONLRecord(second)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(registryPath, append(append(firstPayload, '\n'), append(secondPayload, '\n')...), 0o644))
+
+	_, err = readRegistryLines(registryPath)
+	require.ErrorIs(t, err, ErrRegistryCASMismatch)
+	assert.Contains(t, err.Error(), "expected_prev_hash")
+}
+
 func TestAppendRegistryPayloadRollsBackPartialRecordWrite(t *testing.T) {
 	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
 	original := []byte("{\"existing\":true}\n")
