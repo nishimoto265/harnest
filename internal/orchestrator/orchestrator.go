@@ -268,6 +268,9 @@ func (o *Orchestrator) selectRun(pr int, opts RunOptions) (runSelection, error) 
 	action := latest.Action
 	switch action {
 	case state.NextActionResume:
+		if latest.LastEvent != nil && isPolicySnapshotStaleInterrupted(*latest.LastEvent) {
+			return newFreshSelection(pr, opts, runsBase, worktreeBase)
+		}
 		runID, ok := stateRunID(*latest.LastEvent)
 		if !ok {
 			return runSelection{}, errors.New("orchestrator: latest resume event is missing run_id")
@@ -292,6 +295,20 @@ func (o *Orchestrator) selectRun(pr int, opts RunOptions) (runSelection, error) 
 		return runSelection{}, fmt.Errorf("orchestrator: PR %d is blocked by needs_manual_recovery: run_id=%s", pr, runID)
 	default:
 		return newFreshSelection(pr, opts, runsBase, worktreeBase)
+	}
+}
+
+func isPolicySnapshotStaleInterrupted(entry contracts.StateEntry) bool {
+	if entry.Kind != contracts.StateKindInterrupted {
+		return false
+	}
+	switch v := entry.Value.(type) {
+	case contracts.StateEntryInterrupted:
+		return strings.HasPrefix(v.Detail, "policy_snapshot_stale")
+	case *contracts.StateEntryInterrupted:
+		return v != nil && strings.HasPrefix(v.Detail, "policy_snapshot_stale")
+	default:
+		return false
 	}
 }
 

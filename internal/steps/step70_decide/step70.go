@@ -203,7 +203,7 @@ func startFresh(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 	if reason, err := policySnapshotPreAdoptBlockReason(ctx, runCtx, deps); err != nil {
 		return err
 	} else if reason != "" {
-		return writeReject(runCtx, pkg, reason, deps)
+		return newPolicySnapshotStaleError(reason)
 	}
 	target, err = resolveBestShaBefore(ctx, pkg, target, deps)
 	if err != nil {
@@ -338,6 +338,9 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 	} else if handled {
 		return nil
 	}
+	if err := verifyCurrentRegistryAppendProof(runCtx, intention); err != nil {
+		return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRegistryDivergence, "decision_registry_mismatch")
+	}
 	if err := promoteStagedRuleSidecars(runCtx, &intention, store); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -372,6 +375,28 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 		return err
 	}
 	return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps, nil)
+}
+
+type PolicySnapshotStaleError struct {
+	Reason string
+}
+
+func newPolicySnapshotStaleError(reason string) *PolicySnapshotStaleError {
+	return &PolicySnapshotStaleError{Reason: reason}
+}
+
+func (e *PolicySnapshotStaleError) Error() string {
+	if e == nil || e.Reason == "" {
+		return "step70: policy snapshot stale"
+	}
+	return "step70: policy snapshot stale: " + e.Reason
+}
+
+func (e *PolicySnapshotStaleError) InterruptedDetail() string {
+	if e == nil || e.Reason == "" {
+		return "policy_snapshot_stale"
+	}
+	return "policy_snapshot_stale: " + e.Reason
 }
 
 func drivePolicyPublish(ctx context.Context, pr int, runCtx internalio.RunContext, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) (contracts.IntentionRecord, error) {
@@ -1018,6 +1043,39 @@ func completePlannedRegistryMatches(matches []*plannedRegistryMatch) (contracts.
 		last = match.Result
 	}
 	return last, true
+}
+
+func verifyCurrentRegistryAppendProof(runCtx internalio.RunContext, intention contracts.IntentionRecord) error {
+	if intention.RegistryAppendResult == nil {
+		return ErrRegistryDivergence
+	}
+	result, err := currentPlannedRegistryAppendResult(runCtx, intention)
+	if err != nil {
+		return err
+	}
+	if result.Offset != intention.RegistryAppendResult.Offset || result.Sha256 != intention.RegistryAppendResult.Sha256 {
+		return ErrRegistryDivergence
+	}
+	return nil
+}
+
+func currentPlannedRegistryAppendResult(runCtx internalio.RunContext, intention contracts.IntentionRecord) (contracts.RegistryAppendResult, error) {
+	matches, err := findPlannedRegistryMatches(runCtx, intention)
+	if err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	result, ok := completePlannedRegistryMatches(matches)
+	if !ok {
+		return contracts.RegistryAppendResult{}, ErrRegistryDivergence
+	}
+	currentHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
+	if err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	if currentHead != result.Sha256 {
+		return contracts.RegistryAppendResult{}, ErrRegistryDivergence
+	}
+	return result, nil
 }
 
 func resumeIndexForPlannedRegistryEntries(intention contracts.IntentionRecord, matches []*plannedRegistryMatch, currentHead string) (int, error) {

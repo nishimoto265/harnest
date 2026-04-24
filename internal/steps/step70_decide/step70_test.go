@@ -78,19 +78,19 @@ func TestRun_RejectsWhenPolicyBranchAdvancedSinceRunSnapshot(t *testing.T) {
 	}))
 	git := &fakeGit{head: strings.Repeat("9", 40)}
 
-	require.NoError(t, Run(context.Background(), 102, runCtx, pkg, candidates, store, Deps{
+	err := Run(context.Background(), 102, runCtx, pkg, candidates, store, Deps{
 		Git:          git,
 		Resolver:     resolver,
 		Now:          fixedNow(),
 		PolicyBranch: "auto-improve/policy",
 		RepoRoot:     runCtx.RunsBase,
-	}))
+	})
 
-	decision := readDecision(t, runCtx)
-	require.Equal(t, contracts.DecisionActionReject, decision.Action)
-	reject := decision.Value.(contracts.DecisionReject)
-	assert.Equal(t, "policy_branch_stale", reject.Reason)
+	var stale *PolicySnapshotStaleError
+	require.ErrorAs(t, err, &stale)
+	assert.Equal(t, "policy_branch_stale", stale.Reason)
 	assert.Empty(t, git.pushCalls)
+	assert.NoFileExists(t, mustRunPath(t, runCtx, "70/decision.json"))
 }
 
 func TestDrivePolicyPublish_PolicyPublishingEmptyAfterAdoptsMatchingRemoteSnapshot(t *testing.T) {
@@ -1382,6 +1382,55 @@ func TestRun_ResumeFromDecisionWritten_RemoteMismatchNeedsManualRecovery(t *test
 	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
 	assert.Equal(t, contracts.RollbackReasonRemoteDivergence, recovery.Reason)
 	assert.Equal(t, "decision_written_remote_mismatch", recovery.Detail)
+}
+
+func TestRun_ResumeFromRegistryAppendedRequiresCurrentRegistryProof(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR504")
+	registryPath := runCtx.RulesRegistryPath()
+	appendResult, _ := seedRegistryAdd(t, registryPath, resolver, runCtx.RunID, candidates.CandidatesHash)
+	_, _ = seedRegistryUniqueAdd(t, registryPath, "other-rule", fmt.Sprintf("%064x", 7504), "2026-04-21-PR75-abcdef0")
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageRegistryAppended
+	intention.RegistryAppendResult = &appendResult
+	require.NoError(t, store.Save(intention))
+
+	err := Run(context.Background(), 504, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.TargetSHA},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	})
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
+
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
+	assert.Equal(t, contracts.RollbackReasonRegistryDivergence, recovery.Reason)
+	assert.Equal(t, "decision_registry_mismatch", recovery.Detail)
+	assert.NotContains(t, readStateKinds(t, runCtx), contracts.StateKindPromoted)
+}
+
+func TestRecoverAdoptAnywayRefusesStaleRegistryProof(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR505")
+	registryPath := runCtx.RulesRegistryPath()
+	appendResult, _ := seedRegistryAdd(t, registryPath, resolver, runCtx.RunID, candidates.CandidatesHash)
+	_, _ = seedRegistryUniqueAdd(t, registryPath, "other-rule", fmt.Sprintf("%064x", 7505), "2026-04-21-PR75-abcdef0")
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageNeedsManualRecovery
+	intention.RegistryAppendResult = &appendResult
+	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
+	intention.FailedStep = contracts.FailedStep70
+	require.NoError(t, store.Save(intention))
+
+	err := RecoverAdoptAnyway(context.Background(), 505, runCtx, pkg, candidates, store, Deps{
+		Git: &fakeGit{head: resolver.target.TargetSHA},
+		Now: fixedNow(),
+	})
+	var refused *RecoverRefusalError
+	require.ErrorAs(t, err, &refused)
+	assert.Contains(t, refused.Message, "registry proof mismatch")
+	assert.NoFileExists(t, mustRunPath(t, runCtx, "70/decision.json"))
 }
 
 func TestRun_OrphanPersistedAdoptDecisionRemoteMismatchNeedsManualRecovery(t *testing.T) {

@@ -194,9 +194,15 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 			}
 		case contracts.FailedStep70:
 			if err := o.runSingle(ctx, run, contracts.FailedStep70, o.steps.Step70); err != nil {
+				var policyStale *step70_decide.PolicySnapshotStaleError
 				switch {
 				case errors.Is(err, step70_decide.ErrBlockedBySentinel):
 					if appendErr := o.appendInterrupted(run.PR, run.IO.RunID, contracts.FailedStep70, contracts.InterruptedReasonUnknown, "step70 blocked by needs-recovery sentinel"); appendErr != nil {
+						return appendErr
+					}
+					return nil
+				case errors.As(err, &policyStale):
+					if appendErr := o.appendInterrupted(run.PR, run.IO.RunID, contracts.FailedStep70, contracts.InterruptedReasonUnknown, policyStale.InterruptedDetail()); appendErr != nil {
 						return appendErr
 					}
 					return nil

@@ -617,6 +617,35 @@ func TestRun_Step70NeedsManualRecovery_EndToEnd(t *testing.T) {
 	assert.Contains(t, eventKinds(events), contracts.StateKindNeedsManualRecovery)
 }
 
+func TestRun_Step70PolicySnapshotStaleStartsFreshNextRun(t *testing.T) {
+	cfg := testConfig(t)
+	first, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	first.steps = stubPipelineSteps(nil, policySnapshotStaleStep{})
+
+	runID := contracts.RunID("2026-04-21-PR410-abcdef0")
+	require.NoError(t, first.Run(context.Background(), 410, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindInterrupted, last.Kind)
+	interrupted, ok := last.Value.(contracts.StateEntryInterrupted)
+	require.True(t, ok)
+	assert.Contains(t, interrupted.Detail, "policy_snapshot_stale")
+
+	second, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	recorder := &callRecorder{}
+	second.steps = stubPipelineSteps(recordingStep{label: "10", recorder: recorder}, stubStep70{})
+	require.NoError(t, second.Run(context.Background(), 410, RunOptions{}))
+
+	assert.Contains(t, recorder.snapshot(), "10")
+}
+
 func TestRun_DuplicateOnlyCandidatesSkipPass2AndStep60(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
@@ -1638,6 +1667,12 @@ func (s *cancelAfterNoopStep) Run(ctx context.Context, run *StepRunContext) erro
 		s.cancel()
 	}
 	return nil
+}
+
+type policySnapshotStaleStep struct{}
+
+func (policySnapshotStaleStep) Run(context.Context, *StepRunContext) error {
+	return &step70_decide.PolicySnapshotStaleError{Reason: "policy_branch_stale"}
 }
 
 type blockingStartStep struct {
