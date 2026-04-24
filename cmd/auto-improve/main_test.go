@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1003,6 +1004,12 @@ func (r *stubPipelineRunner) Run(_ context.Context, pr int, opts orchestrator.Ru
 	return nil
 }
 
+type pipelineRunnerFunc func(context.Context, int, orchestrator.RunOptions) error
+
+func (f pipelineRunnerFunc) Run(ctx context.Context, pr int, opts orchestrator.RunOptions) error {
+	return f(ctx, pr, opts)
+}
+
 func assertCommandExitCode(t *testing.T, err error, code int) {
 	t.Helper()
 	var exitErr interface{ ExitCode() int }
@@ -1034,6 +1041,73 @@ func TestRunExecutesSinglePR(t *testing.T) {
 	cmd.SetArgs([]string{"run", "--pr", "42"})
 	require.NoError(t, cmd.Execute())
 	assert.Equal(t, []int{42}, stub.prs)
+}
+
+func TestRunFromScratchPassesRunOption(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	writeTestConfig(t, root, runsBase, worktreeBase)
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	stub := &stubPipelineRunner{}
+	originalNewPipelineRunner := newPipelineRunner
+	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
+		return stub, nil
+	}
+	t.Cleanup(func() { newPipelineRunner = originalNewPipelineRunner })
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--pr", "42", "--from-scratch"})
+	require.NoError(t, cmd.Execute())
+	assert.Equal(t, []int{42}, stub.prs)
+	require.Len(t, stub.opts, 1)
+	assert.True(t, stub.opts[0].FromScratch)
+}
+
+func TestRunFromScratchRejectsDetectLoop(t *testing.T) {
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--detect-loop", "--from-scratch"})
+	err := cmd.Execute()
+	require.Error(t, err)
+	assertCommandExitCode(t, err, 2)
+	assert.Contains(t, err.Error(), "--from-scratch and --detect-loop are mutually exclusive")
+}
+
+func TestRunSignalCancelsPipelineContext(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	writeTestConfig(t, root, runsBase, worktreeBase)
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	originalNewPipelineRunner := newPipelineRunner
+	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
+		return pipelineRunnerFunc(func(ctx context.Context, pr int, opts orchestrator.RunOptions) error {
+			require.Equal(t, 42, pr)
+			require.False(t, opts.FromScratch)
+			require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+			<-ctx.Done()
+			return nil
+		}), nil
+	}
+	t.Cleanup(func() { newPipelineRunner = originalNewPipelineRunner })
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--pr", "42"})
+	require.NoError(t, cmd.Execute())
 }
 
 func TestRunWithPreflightBlocksBeforePreflightOnNeedsRecovery(t *testing.T) {
@@ -1292,6 +1366,56 @@ func TestRunDetectLoopDrainsResumeQueueBeforeFreshDetection(t *testing.T) {
 	cmd.SetArgs([]string{"run", "--detect-loop"})
 	require.NoError(t, cmd.Execute())
 	assert.Equal(t, []int{301, 302}, stub.prs)
+	require.Len(t, stub.opts, 2)
+	assert.Equal(t, runID, stub.opts[0].RunID)
+	assert.Empty(t, stub.opts[1].RunID)
+}
+
+func TestRunDetectLoopDoesNotFreshReenqueueResumedPRInSameTick(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	writeTestConfig(t, root, runsBase, worktreeBase)
+
+	runID := contracts.RunID("2026-04-21-PR307-abcdef0")
+	ctx := mustNewRunCtx(t, runID, runsBase, worktreeBase)
+	require.NoError(t, state.NewWriter(ctx).Append(contracts.StateEntry{
+		Kind: contracts.StateKindInterrupted,
+		Value: contracts.StateEntryInterrupted{
+			Kind:   contracts.StateKindInterrupted,
+			PR:     307,
+			RunID:  runID,
+			Step:   contracts.FailedStep20,
+			Reason: contracts.InterruptedReasonUnknown,
+			At:     time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}))
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	stub := &stubPipelineRunner{}
+	originalNewPipelineRunner := newPipelineRunner
+	originalDetectMergedPRs := detectMergedPRs
+	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
+		return stub, nil
+	}
+	detectMergedPRs = func(_ context.Context, _ config.Config, _ string) ([]detect.MergedPR, error) {
+		return []detect.MergedPR{{Number: 307}, {Number: 308}}, nil
+	}
+	t.Cleanup(func() {
+		newPipelineRunner = originalNewPipelineRunner
+		detectMergedPRs = originalDetectMergedPRs
+	})
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--detect-loop"})
+	require.NoError(t, cmd.Execute())
+	assert.Equal(t, []int{307, 308}, stub.prs)
 	require.Len(t, stub.opts, 2)
 	assert.Equal(t, runID, stub.opts[0].RunID)
 	assert.Empty(t, stub.opts[1].RunID)
