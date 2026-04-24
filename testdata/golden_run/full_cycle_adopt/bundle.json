@@ -311,7 +311,7 @@
       "version_seq": 1
     }
   ],
-  "rules/r-bf1d22bf4a85.md": null,
+  "rules/r-bf1d22bf4a85.md": "# Forced rule\n\nUse explicit resource cleanup.",
   "task-package.json": {
     "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "best_branch": "best",

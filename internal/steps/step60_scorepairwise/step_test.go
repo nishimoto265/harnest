@@ -352,21 +352,22 @@ func TestRun_RebuildsWhenPass1ScoresChangeWithDoneMarker(t *testing.T) {
 	appendPass1ScoresWithScore(t, runIO, pkg.RunID, []contracts.AgentID{"a1"}, 10)
 
 	later := firstNow.Add(2 * time.Hour)
-	var called bool
-	noJudge := unexpectedCallJudge{called: &called}
+	primary := &countingJudge{delegate: judges.NewPrimaryStub()}
+	secondary := &countingJudge{delegate: judges.NewSecondaryStub()}
 	require.NoError(t, Run(context.Background(), Input{
 		IO:          runIO,
 		TaskPackage: &pkg,
-		Primary:     noJudge,
-		Secondary:   noJudge,
-		Arbiter:     noJudge,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     judges.NewArbiterStub(),
 		Now:         func() time.Time { return later },
 	}))
 
 	afterMarker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
 	pairwise := mustReadJSONL[contracts.PairwiseEntry](t, runIO, "60/pairwise.jsonl")
 	require.Len(t, pairwise, 1)
-	assert.False(t, called)
+	assert.Greater(t, primary.callCount(), int32(0))
+	assert.Greater(t, secondary.callCount(), int32(0))
 	assert.NotEqual(t, beforeMarker.InputHashes.Pass1Scores, afterMarker.InputHashes.Pass1Scores)
 	assert.Equal(t, later, afterMarker.ResolvedAt)
 	assert.Equal(t, "pass1_avg_tenths=100 pass2_avg_tenths=820", pairwise[0].Justification)
@@ -619,6 +620,55 @@ func TestRun_RerunsJudgesWhenLegacyDoneMarkerMissingInputHashesAndCandidateChang
 	}
 }
 
+func TestRun_RerunsJudgesWhenDoneMarkerMissingAndCandidateRulesChange(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	candidateV1 := []judges.CandidateRule{{
+		ID:    "cand-1",
+		Kind:  "new",
+		Title: "Candidate rule",
+		Body:  "first body",
+	}}
+	firstNow := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:             runIO,
+		TaskPackage:    &pkg,
+		Primary:        scriptedJudge{score: 60, reasonPrefix: "primary-v1", compliance: map[string]contracts.ComplianceVerdict{"cand-1": contracts.ComplianceVerdictCompliant}},
+		Secondary:      scriptedJudge{score: 60, reasonPrefix: "secondary-v1", compliance: map[string]contracts.ComplianceVerdict{"cand-1": contracts.ComplianceVerdictCompliant}},
+		Arbiter:        judges.NewArbiterStub(),
+		CandidateRules: candidateV1,
+		Now:            func() time.Time { return firstNow },
+	}))
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
+
+	candidateV2 := []judges.CandidateRule{{
+		ID:    "cand-1",
+		Kind:  "new",
+		Title: "Candidate rule",
+		Body:  "second body",
+	}}
+	primary := &countingJudge{delegate: scriptedJudge{score: 90, reasonPrefix: "primary-v2", compliance: map[string]contracts.ComplianceVerdict{"cand-1": contracts.ComplianceVerdictCompliant}}}
+	secondary := &countingJudge{delegate: scriptedJudge{score: 90, reasonPrefix: "secondary-v2", compliance: map[string]contracts.ComplianceVerdict{"cand-1": contracts.ComplianceVerdictCompliant}}}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:             runIO,
+		TaskPackage:    &pkg,
+		Primary:        primary,
+		Secondary:      secondary,
+		Arbiter:        judges.NewArbiterStub(),
+		CandidateRules: candidateV2,
+		Now:            func() time.Time { return firstNow.Add(time.Hour) },
+	}))
+
+	assert.Greater(t, primary.callCount(), int32(0))
+	assert.Greater(t, secondary.callCount(), int32(0))
+	afterMarker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
+	candidateV1Hash, err := hashCandidateRules(candidateV1)
+	require.NoError(t, err)
+	assert.NotEqual(t, candidateV1Hash, afterMarker.InputHashes.CandidateRules)
+}
+
 func TestRun_RebuildDropsStaleRowsForAgentsNoLongerScorable(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		agents:          []contracts.AgentID{"a1", "a2", "a3"},
@@ -743,17 +793,18 @@ func TestRun_RebuildsWhenCompletedAgentsNoLongerMatchCurrentScorableSet(t *testi
 	}))
 	writeManifestError(t, runIO, pkg.RunID, 2, "a3")
 
-	var called bool
-	noJudge := unexpectedCallJudge{called: &called}
+	primary := &countingJudge{delegate: judges.NewPrimaryStub()}
+	secondary := &countingJudge{delegate: judges.NewSecondaryStub()}
 	require.NoError(t, Run(context.Background(), Input{
 		IO:          runIO,
 		TaskPackage: &pkg,
-		Primary:     noJudge,
-		Secondary:   noJudge,
-		Arbiter:     noJudge,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     judges.NewArbiterStub(),
 		Now:         func() time.Time { return now },
 	}))
-	assert.False(t, called)
+	assert.Greater(t, primary.callCount(), int32(0))
+	assert.Greater(t, secondary.callCount(), int32(0))
 
 	marker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
 	assert.Equal(t, []contracts.AgentID{"a1", "a2"}, marker.CompletedAgents)

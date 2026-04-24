@@ -240,6 +240,102 @@ func TestFilesystemResolver_RejectsStep60ArtifactsThatDoNotMatchDoneMarker(t *te
 	assert.NoDirExists(t, stagingRulesPath)
 }
 
+func TestVerifyStep60ArtifactSnapshot_AllowsNoComplianceRules(t *testing.T) {
+	artifacts := step60ArtifactSnapshot{
+		Scores: []contracts.ScoreEntry{
+			{
+				SchemaVersion: "1",
+				RunID:         "2026-04-21-PR430-abcdef0",
+				Pass:          2,
+				Agent:         "a1",
+				Dimension:     contracts.DimensionFidelity,
+				Score:         90,
+				Reasons:       "resolver fixture pass2",
+				VerdictPath:   contracts.VerdictPathAgreement,
+				RubricVersion: "default",
+				PromptVersion: "phase0-stub",
+				ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+			},
+		},
+		Pairwise: []contracts.PairwiseEntry{
+			{
+				SchemaVersion: "1",
+				RunID:         "2026-04-21-PR430-abcdef0",
+				AgentA:        "a1",
+				AgentB:        "a1",
+				Winner:        contracts.PairwiseWinnerB,
+				Margin:        contracts.PairwiseMarginClear,
+				Justification: "resolver fixture",
+				VerdictPath:   contracts.VerdictPathAgreement,
+				RubricVersion: "default",
+				PromptVersion: "phase0-stub",
+				ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+			},
+		},
+	}
+	scoresCount, scoresHash, err := step70FinalScoresState(artifacts.Scores)
+	require.NoError(t, err)
+	complianceCount, complianceHash, err := step70FinalComplianceState(artifacts.Compliance)
+	require.NoError(t, err)
+	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(artifacts.Pairwise)
+	require.NoError(t, err)
+
+	err = verifyStep60ArtifactSnapshot(contracts.Step60DoneMarker{
+		CompletedAgents: []contracts.AgentID{"a1"},
+		Dimensions:      append([]contracts.Dimension(nil), step70CanonicalDimensions...),
+		ExpectedCounts: contracts.Step60ExpectedCounts{
+			Scores:     int64(scoresCount),
+			Compliance: int64(complianceCount),
+			Pairwise:   int64(pairwiseCount),
+		},
+		ContentHashes: contracts.Step60DoneContentHashes{
+			ScoresFinal:     scoresHash,
+			ComplianceFinal: complianceHash,
+			PairwiseFinal:   pairwiseHash,
+		},
+	}, artifacts)
+	require.NoError(t, err)
+}
+
+func TestFilesystemResolver_RejectsStep60RawArtifactsThatDoNotMatchDoneMarker(t *testing.T) {
+	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
+	rawPath, err := runCtx.ResolveRunRelative("60/scores-B-raw.jsonl")
+	require.NoError(t, err)
+	require.NoError(t, internalio.AppendJSONL(rawPath, contracts.RawScoreEntry{
+		SchemaVersion: "1",
+		RunID:         runCtx.RunID,
+		Pass:          2,
+		Agent:         "a1",
+		JudgeRole:     contracts.JudgeRolePrimary,
+		Dimension:     contracts.DimensionFidelity,
+		Score:         1,
+		Reasons:       "stale raw after marker",
+		OutputSha256:  strings.Repeat("1", 64),
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    time.Date(2026, 4, 21, 10, 3, 0, 0, time.UTC),
+	}))
+
+	resolver := FilesystemResolver{RepoDir: runCtx.RunsBase, Now: fixedNow()}
+	_, ok, err := resolver.Resolve(runCtx, pkg, candidates)
+	require.Error(t, err)
+	assert.False(t, ok)
+	assert.Contains(t, err.Error(), "raw hashes do not match")
+}
+
+func TestFilesystemResolver_RejectsStep60InputsThatDoNotMatchDoneMarker(t *testing.T) {
+	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
+	diffPath, err := runCtx.ResolveRunRelative("50-pass2/a1/diff.patch")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteAtomic(diffPath, []byte("mutated pass2 diff\n")))
+
+	resolver := FilesystemResolver{RepoDir: runCtx.RunsBase, Now: fixedNow()}
+	_, ok, err := resolver.Resolve(runCtx, pkg, candidates)
+	require.Error(t, err)
+	assert.False(t, ok)
+	assert.Contains(t, err.Error(), "input hashes do not match")
+}
+
 func TestRun_AdoptHappyPath(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR2")
 	git := &fakeGit{head: resolver.target.BestShaBefore}
@@ -384,10 +480,11 @@ func TestRun_ResumeFromBranchPushed_IdempotencyHit(t *testing.T) {
 	adopt, ok := decision.Value.(contracts.DecisionAdopt)
 	require.True(t, ok)
 	assert.Equal(t, appendResult, adopt.RegistryAppendResult)
-	require.Len(t, store.saved, 3)
+	require.Len(t, store.saved, 4)
 	assert.Equal(t, contracts.IntentionStageRegistryAppended, store.saved[1].Stage)
 	require.NotNil(t, store.saved[1].RegistryAppendResult)
 	assert.Equal(t, appendResult, *store.saved[1].RegistryAppendResult)
+	assert.NotEmpty(t, store.saved[2].PublishedRuleOpIDs)
 	// No additional push from the resume path (branch already pushed).
 	assert.Empty(t, git.pushCalls)
 }
@@ -395,6 +492,7 @@ func TestRun_ResumeFromBranchPushed_IdempotencyHit(t *testing.T) {
 func TestRun_ResumeFromBranchPushed_MultiEntryIdempotencyHit(t *testing.T) {
 	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR401")
 	resolver.target.RulesToAppend = adoptAddedEntriesWithTarget(runCtx.RunID, candidates.CandidatesHash, resolver.target.TargetSHA, "rule-a", "rule-b")
+	stageFixtureRuleSidecars(t, runCtx, resolver.target)
 	store := newTrackingStore(intentionPath(t, runCtx))
 	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
 	intention.Stage = contracts.IntentionStageBranchPushed
@@ -433,7 +531,7 @@ func TestRun_ResumeFromBranchPushed_CASAppendSucceeds(t *testing.T) {
 	decision := readDecision(t, runCtx)
 	adopt, ok := decision.Value.(contracts.DecisionAdopt)
 	require.True(t, ok)
-	require.Len(t, store.saved, 4)
+	require.Len(t, store.saved, 5)
 	assert.Equal(t, contracts.IntentionStageBranchPushed, store.saved[1].Stage)
 	assert.NotEmpty(t, store.saved[1].AppendedEntryOpIDs)
 	assert.Equal(t, contracts.IntentionStageRegistryAppended, store.saved[2].Stage)
@@ -490,6 +588,7 @@ func TestRun_ResumeFromBranchPushed_CASMismatchRetrySucceeds(t *testing.T) {
 func TestRun_ResumeFromBranchPushed_MultiEntryResumePartialFromRegistry(t *testing.T) {
 	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR430")
 	resolver.target.RulesToAppend = adoptAddedEntriesWithTarget(runCtx.RunID, candidates.CandidatesHash, resolver.target.TargetSHA, "rule-a", "rule-b")
+	stageFixtureRuleSidecars(t, runCtx, resolver.target)
 	store := newTrackingStore(intentionPath(t, runCtx))
 	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
 	intention.Stage = contracts.IntentionStageBranchPushed
@@ -514,6 +613,7 @@ func TestRun_ResumeFromBranchPushed_MultiEntryResumePartialFromRegistry(t *testi
 func TestRun_ResumeFromBranchPushed_MultiEntryCrashRecoveryFromPersistedProgress(t *testing.T) {
 	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR431")
 	resolver.target.RulesToAppend = adoptAddedEntriesWithTarget(runCtx.RunID, candidates.CandidatesHash, resolver.target.TargetSHA, "rule-a", "rule-b")
+	stageFixtureRuleSidecars(t, runCtx, resolver.target)
 	store := newTrackingStore(intentionPath(t, runCtx))
 	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
 	intention.Stage = contracts.IntentionStageBranchPushed
@@ -558,6 +658,7 @@ func TestRun_ResumeFromBranchPushed_CASMismatchTwiceRollsBack(t *testing.T) {
 func TestRun_MultiEntryAppendFailure_RollbackAppendsMarkersForCommittedRows(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR440")
 	resolver.target.RulesToAppend = adoptAddedEntriesWithTarget(runCtx.RunID, candidates.CandidatesHash, resolver.target.TargetSHA, "rule-a", "rule-b", "rule-c")
+	stageFixtureRuleSidecars(t, runCtx, resolver.target)
 	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
 	plannedOpIDs := []string{
 		intention.PlannedAdoption.Entries[0].OpID,
@@ -1706,8 +1807,8 @@ func TestPromoteStagedRuleSidecars_MultiEntryResumeAfterFirstPublish(t *testing.
 }
 
 // F10: intention.PublishedRuleOpIDs persisted by a previous tick means the
-// resume path skips the already-published entry without inspecting staged /
-// destination files, even if neither currently exists on disk.
+// resume path skips the already-published entry's staged file, but success
+// still requires the canonical destination to hold the planned bytes.
 func TestPromoteStagedRuleSidecars_SkipsPublishedOpIDsOnResume(t *testing.T) {
 	runCtx, _, candidates, _, resolver := newFixtureWithResolver(t, "PR4104")
 	resolver.target.RulesToAppend = []contracts.RuleRegistryEntry{
@@ -1719,13 +1820,28 @@ func TestPromoteStagedRuleSidecars_SkipsPublishedOpIDsOnResume(t *testing.T) {
 
 	// Only entry-b's staged file exists; entry-a is already marked published.
 	require.NoError(t, internalio.WriteAtomic(mustStagedRulePath(t, runCtx, "rules/rule-b.md"), []byte("rule-b body\n")))
+	require.NoError(t, internalio.WriteAtomic(filepath.Join(runCtx.RunsBase, "rules", "rule-a.md"), []byte("rule-a body\n")))
 
 	require.NoError(t, promoteStagedRuleSidecars(runCtx, &intention, nil))
 
-	// rule-a destination never existed (it was marked published) — we must not
-	// have attempted to read staged nor failed with errRulePublishStagedMissing.
-	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-a.md"))
+	// rule-a had no staged file, but its destination was verified.
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-a.md"))
 	assert.FileExists(t, filepath.Join(runCtx.RunsBase, "rules", "rule-b.md"))
+}
+
+func TestPromoteStagedRuleSidecars_MissingStagingDirRequiresPublishedDestinations(t *testing.T) {
+	runCtx, _, candidates, _, resolver := newFixtureWithResolver(t, "PR4105")
+	resolver.target.RulesToAppend = []contracts.RuleRegistryEntry{
+		adoptAddedEntryWithBody(runCtx.RunID, "rule-a", "rule-a body\n"),
+	}
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+
+	err := promoteStagedRuleSidecars(runCtx, &intention, nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errRulePublishStagedMissing)
+
+	require.NoError(t, internalio.WriteAtomic(filepath.Join(runCtx.RunsBase, "rules", "rule-a.md"), []byte("rule-a body\n")))
+	require.NoError(t, promoteStagedRuleSidecars(runCtx, &intention, nil))
 }
 
 func TestPromoteRuleSidecar_RejectsSymlinkDestination(t *testing.T) {
@@ -1855,7 +1971,7 @@ func TestRun_ResumePlanningRestartsWhenResolverTargetChanges(t *testing.T) {
 		BestShaBefore: originalTarget.BestShaBefore,
 		TargetSHA:     strings.Repeat("3", 40),
 		RulesToAppend: []contracts.RuleRegistryEntry{
-			adoptAddedEntryWithBody(runCtx.RunID, "rule-replanned", "body: replanned\n"),
+			adoptAddedEntryWithTarget(runCtx.RunID, candidates.CandidatesHash, strings.Repeat("3", 40), "rule-replanned"),
 		},
 	}
 	intention := planningIntention(runCtx.RunID, originalTarget, candidates.CandidatesHash)
@@ -1954,6 +2070,7 @@ func TestRun_RollsBackWhenOtherRunSentinelAppearsAfterRegistryAppend(t *testing.
 func TestRun_RollsBackBeforeSecondRegistryAppendWhenSentinelAppearsMidLoop(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR191")
 	resolver.target.RulesToAppend = adoptAddedEntriesWithTarget(runCtx.RunID, candidates.CandidatesHash, resolver.target.TargetSHA, "rule-a", "rule-b")
+	stageFixtureRuleSidecars(t, runCtx, resolver.target)
 
 	original := appendRegistryEntry
 	appendCount := 0
@@ -2130,8 +2247,47 @@ type seedRegistrySpec struct {
 	ByRunID        contracts.RunID
 }
 
-func (r *fixtureResolver) Resolve(internalio.RunContext, *contracts.TaskPackage, *contracts.Candidates) (Target, bool, error) {
+func (r *fixtureResolver) Resolve(runCtx internalio.RunContext, _ *contracts.TaskPackage, _ *contracts.Candidates) (Target, bool, error) {
+	if err := stageFixtureRuleSidecarsForResolver(runCtx, r.target); err != nil {
+		return Target{}, false, err
+	}
 	return r.target, true, nil
+}
+
+func stageFixtureRuleSidecarsForResolver(runCtx internalio.RunContext, target Target) error {
+	for _, entry := range target.RulesToAppend {
+		ruleID, rulePath, sha, err := registryEntryRuleSidecar(entry)
+		if err != nil {
+			return err
+		}
+		body := fixtureRuleBody(ruleID)
+		if sha256String(body) != sha {
+			continue
+		}
+		if err := internalio.WriteAtomic(mustStagedRulePathForResolver(runCtx, rulePath), []byte(body)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func registryEntryRuleSidecar(entry contracts.RuleRegistryEntry) (string, string, string, error) {
+	switch v := entry.Value.(type) {
+	case contracts.RuleRegistryAdded:
+		return v.RuleID, v.RulePath, v.Sha256, nil
+	case contracts.RuleRegistryUpdated:
+		return v.RuleID, v.RulePath, v.Sha256, nil
+	default:
+		return "", "", "", fmt.Errorf("unsupported fixture registry entry %T", entry.Value)
+	}
+}
+
+func mustStagedRulePathForResolver(runCtx internalio.RunContext, rulePath string) string {
+	path, err := stagedRuleSidecarPath(runCtx, rulePath)
+	if err != nil {
+		panic(err)
+	}
+	return path
 }
 
 type unexpectedResolver struct {
@@ -2149,15 +2305,18 @@ type sequenceResolver struct {
 	index   int
 }
 
-func (r *sequenceResolver) Resolve(internalio.RunContext, *contracts.TaskPackage, *contracts.Candidates) (Target, bool, error) {
+func (r *sequenceResolver) Resolve(runCtx internalio.RunContext, _ *contracts.TaskPackage, _ *contracts.Candidates) (Target, bool, error) {
 	if len(r.targets) == 0 {
 		return Target{}, false, nil
 	}
 	if r.index >= len(r.targets) {
-		return r.targets[len(r.targets)-1], true, nil
+		target := r.targets[len(r.targets)-1]
+		stageFixtureRuleSidecarsForResolver(runCtx, target)
+		return target, true, nil
 	}
 	target := r.targets[r.index]
 	r.index++
+	stageFixtureRuleSidecarsForResolver(runCtx, target)
 	return target, true, nil
 }
 
@@ -2257,6 +2416,31 @@ func seedFilesystemResolverFixture(t *testing.T) (internalio.RunContext, *contra
 	t.Helper()
 	runCtx, pkg, _, _, _ := newFixture(t, "PR420")
 	runID := runCtx.RunID
+	pass1ManifestPath, err := runCtx.ManifestPath(1, "a1")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(pass1ManifestPath, contracts.Manifest{
+		Kind: contracts.ManifestKindSuccess,
+		Value: contracts.ManifestSuccess{
+			Kind:          contracts.ManifestKindSuccess,
+			SchemaVersion: "1",
+			RunID:         runID,
+			Pass:          1,
+			Agent:         "a1",
+			BranchName:    pkg.Worktrees[0].Branch,
+			HeadSHA:       strings.Repeat("1", 40),
+			BaseSHA:       strings.Repeat("a", 40),
+			DiffPath:      "20-pass1/a1/diff.patch",
+			SessionPath:   "20-pass1/a1/session.jsonl",
+			ChecklistPath: "20-pass1/a1/checklist-result.json",
+			PromptVersion: "stub",
+			StartedAt:     time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+			FinishedAt:    time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC),
+		},
+	}))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, "20-pass1/a1/diff.patch"), []byte("pass1 diff\n")))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, "20-pass1/a1/session.jsonl"), []byte("{}\n")))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, "20-pass1/a1/checklist-result.json"), []byte("{}\n")))
+
 	manifestPath, err := runCtx.ManifestPath(2, "a1")
 	require.NoError(t, err)
 	require.NoError(t, internalio.WriteJSONAtomic(manifestPath, contracts.Manifest{
@@ -2278,6 +2462,11 @@ func seedFilesystemResolverFixture(t *testing.T) (internalio.RunContext, *contra
 			FinishedAt:    time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC),
 		},
 	}))
+	pass2Diff := []byte("pass2 diff\n")
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, "50-pass2/a1/diff.patch"), pass2Diff))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, "50-pass2/a1/session.jsonl"), []byte("{}\n")))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, "50-pass2/a1/checklist-result.json"), []byte("{}\n")))
+	pass2OutputHash := sha256String(string(pass2Diff))
 
 	pairwisePath, err := runCtx.ResolveRunRelative("60/pairwise.jsonl")
 	require.NoError(t, err)
@@ -2348,6 +2537,7 @@ func seedFilesystemResolverFixture(t *testing.T) (internalio.RunContext, *contra
 		CandidatesHash: contracts.CanonicalCandidatesHash([]contracts.Candidate{candidate}),
 		CreatedAt:      time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
 	}
+	require.NoError(t, internalio.WriteJSONAtomic(mustRunPath(t, runCtx, "40/candidates.json"), candidates))
 	compliancePath, err := runCtx.ResolveRunRelative("60/compliance-B.jsonl")
 	require.NoError(t, err)
 	require.NoError(t, internalio.AppendJSONL(compliancePath, contracts.ComplianceEntry{
@@ -2359,6 +2549,40 @@ func seedFilesystemResolverFixture(t *testing.T) (internalio.RunContext, *contra
 		Verdict:       contracts.ComplianceVerdictCompliant,
 		Rationale:     "candidate judged compliant",
 		VerdictPath:   contracts.VerdictPathAgreement,
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+	}))
+	scoreRawPath, err := runCtx.ResolveRunRelative("60/scores-B-raw.jsonl")
+	require.NoError(t, err)
+	complianceRawPath, err := runCtx.ResolveRunRelative("60/compliance-B-raw.jsonl")
+	require.NoError(t, err)
+	for _, dimension := range resolverScoreDimensions() {
+		require.NoError(t, internalio.AppendJSONL(scoreRawPath, contracts.RawScoreEntry{
+			SchemaVersion: "1",
+			RunID:         runID,
+			Pass:          2,
+			Agent:         "a1",
+			JudgeRole:     contracts.JudgeRolePrimary,
+			Dimension:     dimension,
+			Score:         90,
+			Reasons:       "resolver fixture pass2",
+			OutputSha256:  pass2OutputHash,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+		}))
+	}
+	require.NoError(t, internalio.AppendJSONL(complianceRawPath, contracts.RawComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         runID,
+		Pass:          2,
+		Agent:         "a1",
+		JudgeRole:     contracts.JudgeRolePrimary,
+		RuleID:        candidate.CandidateID,
+		Verdict:       contracts.ComplianceVerdictCompliant,
+		Rationale:     "candidate judged compliant",
+		OutputSha256:  pass2OutputHash,
 		RubricVersion: "default",
 		PromptVersion: "phase0-stub",
 		ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
@@ -2378,9 +2602,16 @@ func writeStep60DoneMarkerForResolverFixture(t *testing.T, runCtx internalio.Run
 	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(artifacts.Pairwise)
 	require.NoError(t, err)
 
-	placeholderHash := strings.Repeat("0", 64)
+	pkg, err := internalio.ReadJSON[contracts.TaskPackage](runCtx.TaskPackagePath())
+	require.NoError(t, err)
+	inputHashes, completedAgents, err := currentStep60InputHashes(runCtx, &pkg)
+	require.NoError(t, err)
+	scoresRawHash, err := step70ReducedRawScoresHash(runCtx)
+	require.NoError(t, err)
+	complianceRawHash, err := step70ReducedRawComplianceHash(runCtx)
+	require.NoError(t, err)
 	marker := contracts.Step60DoneMarker{
-		CompletedAgents: []contracts.AgentID{"a1"},
+		CompletedAgents: completedAgents,
 		Dimensions: []contracts.Dimension{
 			contracts.DimensionFidelity,
 			contracts.DimensionCorrectness,
@@ -2393,21 +2624,15 @@ func writeStep60DoneMarkerForResolverFixture(t *testing.T, runCtx internalio.Run
 			Compliance: int64(complianceCount),
 			Pairwise:   int64(pairwiseCount),
 		},
-		InputHashes: contracts.Step60DoneInputHashes{
-			Pass1Scores:        placeholderHash,
-			Pass1Compliance:    placeholderHash,
-			Pass2Outputs:       placeholderHash,
-			CandidateRules:     placeholderHash,
-			ExpectedCompliance: placeholderHash,
-		},
+		InputHashes: inputHashes,
 		ContentHashes: contracts.Step60DoneContentHashes{
 			ScoresFinal:     scoresHash,
 			ComplianceFinal: complianceHash,
 			PairwiseFinal:   pairwiseHash,
 		},
 		RawHashes: contracts.StepDoneRawHashes{
-			ScoresRaw:     placeholderHash,
-			ComplianceRaw: placeholderHash,
+			ScoresRaw:     scoresRawHash,
+			ComplianceRaw: complianceRawHash,
 		},
 		ResolvedAt: time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
 	}
@@ -2434,6 +2659,13 @@ func mustStagedRulePath(t *testing.T, runCtx internalio.RunContext, rulePath str
 	return path
 }
 
+func mustRunPath(t *testing.T, runCtx internalio.RunContext, rel string) string {
+	t.Helper()
+	path, err := runCtx.ResolveRunRelative(rel)
+	require.NoError(t, err)
+	return path
+}
+
 func newFixtureWithResolver(t *testing.T, prLabel string) (internalio.RunContext, *contracts.TaskPackage, *contracts.Candidates, IntentionWriter, *fixtureResolver) {
 	runCtx, pkg, candidates, store, resolver := newFixture(t, prLabel)
 	resolver.target = Target{
@@ -2442,9 +2674,23 @@ func newFixtureWithResolver(t *testing.T, prLabel string) (internalio.RunContext
 		TargetSHA:     strings.Repeat("2", 40),
 		RulesToAppend: []contracts.RuleRegistryEntry{adoptAddedEntry(runCtx.RunID, candidates.CandidatesHash)},
 	}
+	stageFixtureRuleSidecars(t, runCtx, resolver.target)
 	// Idempotency key requires the target.TargetSHA to be known; re-derive
 	// against the empty candidates hash used by newFixture.
 	return runCtx, pkg, candidates, store, resolver
+}
+
+func stageFixtureRuleSidecars(t *testing.T, runCtx internalio.RunContext, target Target) {
+	t.Helper()
+	for _, entry := range target.RulesToAppend {
+		ruleID, rulePath, sha, err := registryEntryRuleSidecar(entry)
+		require.NoError(t, err)
+		body := fixtureRuleBody(ruleID)
+		if sha256String(body) != sha {
+			continue
+		}
+		require.NoError(t, internalio.WriteAtomic(mustStagedRulePath(t, runCtx, rulePath), []byte(body)))
+	}
 }
 
 func adoptAddedEntry(runID contracts.RunID, candidatesHash string) contracts.RuleRegistryEntry {
@@ -2466,7 +2712,7 @@ func adoptAddedEntryWithTarget(runID contracts.RunID, candidatesHash, targetSHA,
 		SchemaVersion:  "1",
 		RuleID:         ruleID,
 		RulePath:       "rules/" + ruleID + ".md",
-		Sha256:         strings.Repeat("a", 64),
+		Sha256:         sha256String(fixtureRuleBody(ruleID)),
 		IdempotencyKey: key,
 		VersionSeq:     1,
 		PrevHash:       "",
@@ -2475,6 +2721,10 @@ func adoptAddedEntryWithTarget(runID contracts.RunID, candidatesHash, targetSHA,
 	}
 	v.IdempotencyKey = contracts.ComputeAdoptIdempotencyKey(string(runID), targetSHA, strings.Repeat("1", 40), candidatesHash)
 	return contracts.RuleRegistryEntry{Kind: v.Kind, Value: v}
+}
+
+func fixtureRuleBody(ruleID string) string {
+	return ruleID + " body\n"
 }
 
 func adoptAddedEntryWithBody(runID contracts.RunID, ruleID, body string) contracts.RuleRegistryEntry {
@@ -2532,6 +2782,12 @@ func seedRegistryAdd(t *testing.T, path string, resolver *fixtureResolver, runID
 	entry := entries[0]
 	result, err := internalio.AppendRegistryEntry(path, entry)
 	require.NoError(t, err)
+	ruleID, rulePath, sha, err := registryEntryRuleSidecar(entry)
+	require.NoError(t, err)
+	body := fixtureRuleBody(ruleID)
+	if sha256String(body) == sha {
+		require.NoError(t, internalio.WriteAtomic(filepath.Join(filepath.Dir(path), filepath.FromSlash(rulePath)), []byte(body)))
+	}
 	return result, entry
 }
 

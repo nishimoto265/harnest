@@ -70,11 +70,20 @@ type complianceKey struct {
 type step60Paths struct {
 	Lock            string
 	Done            string
+	RawReuse        string
 	ScoresRaw       string
 	ScoresFinal     string
 	ComplianceRaw   string
 	ComplianceFinal string
 	Pairwise        string
+}
+
+type step60RawReuseMarker struct {
+	CompletedAgents []contracts.AgentID             `json:"completed_agents"`
+	Dimensions      []contracts.Dimension           `json:"dimensions"`
+	InputHashes     contracts.Step60DoneInputHashes `json:"input_hashes"`
+	RawHashes       contracts.StepDoneRawHashes     `json:"raw_hashes"`
+	ResolvedAt      time.Time                       `json:"resolved_at"`
 }
 
 type scorableAgentRun struct {
@@ -189,6 +198,11 @@ func Run(ctx context.Context, in Input) error {
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("step60: stat done marker: %w", err)
 	} else {
+		rawReuseSafe, err := rawReuseMarkerMatchesCurrentState(in.IO, paths, expectedAgents, inputHashes)
+		if err != nil {
+			return err
+		}
+		allowRawReuse = rawReuseSafe
 		resetOutputs = true
 	}
 	if resetOutputs {
@@ -374,6 +388,21 @@ func Run(ctx context.Context, in Input) error {
 		return fmt.Errorf("step60: hash compliance raw: %w", err)
 	}
 
+	rawHashes := contracts.StepDoneRawHashes{
+		ScoresRaw:     scoresRawHash,
+		ComplianceRaw: complianceRawHash,
+	}
+	rawReuseMarker := step60RawReuseMarker{
+		CompletedAgents: completedAgents,
+		Dimensions:      append([]contracts.Dimension(nil), canonicalDimensions...),
+		InputHashes:     inputHashes,
+		RawHashes:       rawHashes,
+		ResolvedAt:      resolvedAt,
+	}
+	if err := internalio.WriteJSONAtomic(paths.RawReuse, rawReuseMarker); err != nil {
+		return fmt.Errorf("step60: write raw reuse marker: %w", err)
+	}
+
 	marker := contracts.Step60DoneMarker{
 		CompletedAgents: completedAgents,
 		Dimensions:      append([]contracts.Dimension(nil), canonicalDimensions...),
@@ -387,10 +416,7 @@ func Run(ctx context.Context, in Input) error {
 			ComplianceFinal: complianceFinalHash,
 			PairwiseFinal:   pairwiseFinalHash,
 		},
-		RawHashes: contracts.StepDoneRawHashes{
-			ScoresRaw:     scoresRawHash,
-			ComplianceRaw: complianceRawHash,
-		},
+		RawHashes:   rawHashes,
 		InputHashes: inputHashes,
 		ResolvedAt:  resolvedAt,
 	}
@@ -535,6 +561,10 @@ func resolveStep60Paths(runIO internalio.RunContext) (step60Paths, error) {
 	if err != nil {
 		return step60Paths{}, fmt.Errorf("step60: resolve done marker path: %w", err)
 	}
+	rawReusePath, err := runIO.ResolveRunRelative("60/raw-reuse.marker")
+	if err != nil {
+		return step60Paths{}, fmt.Errorf("step60: resolve raw reuse marker path: %w", err)
+	}
 	scoresRawPath, err := runIO.ResolveRunRelative("60/scores-B-raw.jsonl")
 	if err != nil {
 		return step60Paths{}, fmt.Errorf("step60: resolve scores raw path: %w", err)
@@ -558,6 +588,7 @@ func resolveStep60Paths(runIO internalio.RunContext) (step60Paths, error) {
 	return step60Paths{
 		Lock:            lockPath,
 		Done:            donePath,
+		RawReuse:        rawReusePath,
 		ScoresRaw:       scoresRawPath,
 		ScoresFinal:     scoresFinalPath,
 		ComplianceRaw:   complianceRawPath,
@@ -1012,9 +1043,41 @@ func doneMarkerMatchesCurrentState(runIO internalio.RunContext, paths step60Path
 		marker.RawHashes.ComplianceRaw == complianceRawHash, judgeInputHashesMatch(marker.InputHashes, inputHashes), nil
 }
 
+func rawReuseMarkerMatchesCurrentState(runIO internalio.RunContext, paths step60Paths, expectedAgents []contracts.AgentID, inputHashes contracts.Step60DoneInputHashes) (bool, error) {
+	marker, err := internalio.ReadJSON[step60RawReuseMarker](paths.RawReuse)
+	if err != nil {
+		return false, nil
+	}
+	if !slices.Equal(marker.Dimensions, canonicalDimensions) {
+		return false, nil
+	}
+	normalizedExpectedAgents := append([]contracts.AgentID(nil), expectedAgents...)
+	sort.Slice(normalizedExpectedAgents, func(i, j int) bool { return normalizedExpectedAgents[i] < normalizedExpectedAgents[j] })
+	if !slices.Equal(marker.CompletedAgents, normalizedExpectedAgents) {
+		return false, nil
+	}
+	if !judgeInputHashesMatch(marker.InputHashes, inputHashes) {
+		return false, nil
+	}
+	scoresRawHash, err := hashReducedRawScoresFile(runIO, paths.ScoresRaw)
+	if err != nil {
+		if overflowValidationFailure(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("step60: hash scores raw for raw reuse marker: %w", err)
+	}
+	complianceRawHash, err := hashReducedRawComplianceFile(runIO, paths.ComplianceRaw)
+	if err != nil {
+		if overflowValidationFailure(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("step60: hash compliance raw for raw reuse marker: %w", err)
+	}
+	return marker.RawHashes.ScoresRaw == scoresRawHash && marker.RawHashes.ComplianceRaw == complianceRawHash, nil
+}
+
 func judgeInputHashesMatch(left, right contracts.Step60DoneInputHashes) bool {
-	return left.Pass1Compliance == right.Pass1Compliance &&
-		left.CandidateRules == right.CandidateRules
+	return left == right
 }
 
 func overflowValidationFailure(err error) bool {
