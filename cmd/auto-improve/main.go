@@ -838,19 +838,6 @@ func (s recoverIntentionStore) Delete() error {
 	return nil
 }
 
-func notImplementedCommand(use, short string) *cobra.Command {
-	return &cobra.Command{
-		Use:   use,
-		Short: short,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return commandExitError{
-				code: 2,
-				msg:  fmt.Sprintf("%s: not implemented", cmd.Name()),
-			}
-		},
-	}
-}
-
 type commandExitError struct {
 	code int
 	msg  string

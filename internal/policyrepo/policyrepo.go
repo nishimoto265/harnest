@@ -513,18 +513,6 @@ func readBranchFile(ctx context.Context, repoRoot, branch, rel string) ([]byte, 
 	return out, nil
 }
 
-func localPathForRepoRelative(runsBase, rel string) (string, error) {
-	switch {
-	case rel == RegistryRepoRelPath:
-		return filepath.Join(runsBase, registryLocalName), nil
-	case strings.HasPrefix(rel, RulesRepoDirRelPath+"/"):
-		suffix := strings.TrimPrefix(rel, RulesRepoDirRelPath+"/")
-		return filepath.Join(runsBase, rulesLocalDirName, filepath.FromSlash(suffix)), nil
-	default:
-		return "", fmt.Errorf("policyrepo: unsupported repo policy path %q", rel)
-	}
-}
-
 func localRulePathForRepoRelative(rel string) string {
 	return filepath.ToSlash(strings.TrimPrefix(rel, RepoDirName+"/"))
 }

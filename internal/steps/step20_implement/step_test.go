@@ -303,12 +303,12 @@ func TestStepRun_QuiesceTimeoutRequiresManualRecoveryWithoutReset(t *testing.T) 
 func TestEnsureRescueLeaseQuiesced_SkipsRecycledProcessGroup(t *testing.T) {
 	originalKillProcess := killProcess
 	originalLookupStartTime := lookupLeaseStartTime
-	originalGroupKill := rescueKillProcessGroupUntilGone
 	originalWorktreePIDs := rescueWorktreeProcessIDs
 	killProcess = func(int, syscall.Signal) error { return nil }
 	lookupLeaseStartTime = func(int) (string, error) { return "recycled-start", nil }
 	groupKillCalls := 0
-	rescueKillProcessGroupUntilGone = func(int, time.Duration, time.Duration) error {
+	originalKillPID := rescueKillPID
+	rescueKillPID = func(int, syscall.Signal) error {
 		groupKillCalls++
 		return nil
 	}
@@ -316,7 +316,7 @@ func TestEnsureRescueLeaseQuiesced_SkipsRecycledProcessGroup(t *testing.T) {
 	t.Cleanup(func() {
 		killProcess = originalKillProcess
 		lookupLeaseStartTime = originalLookupStartTime
-		rescueKillProcessGroupUntilGone = originalGroupKill
+		rescueKillPID = originalKillPID
 		rescueWorktreeProcessIDs = originalWorktreePIDs
 	})
 

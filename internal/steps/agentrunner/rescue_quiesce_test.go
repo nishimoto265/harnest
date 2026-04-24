@@ -57,13 +57,13 @@ func TestEnsureRescueLeaseQuiesced_PropagatesSavedProcessGroupKillError(t *testi
 		PGID:            4242,
 		LeaderStartTime: "Tue Apr 22 10:00:00 2026",
 	}, RescueLeaseQuiesceOptions{
-		KillProcessGroupUntilGone: func(int, time.Duration, time.Duration) error { return want },
-		WorktreeProcessIDs:        func(context.Context, string) ([]int, error) { return nil, nil },
-		KillPID:                   func(int, syscall.Signal) error { return nil },
-		Sleep:                     func(time.Duration) {},
-		Now:                       func() time.Time { return time.Unix(0, 0) },
-		PIDAlive:                  func(int) bool { return true },
-		LookupProcessStartTime:    func(int) (string, error) { return "Tue Apr 22 10:00:00 2026", nil },
+		KillLeasedProcessGroup: func(context.Context, RescueLeaseState, RescueLeaseQuiesceOptions) error { return want },
+		WorktreeProcessIDs:     func(context.Context, string) ([]int, error) { return nil, nil },
+		KillPID:                func(int, syscall.Signal) error { return nil },
+		Sleep:                  func(time.Duration) {},
+		Now:                    func() time.Time { return time.Unix(0, 0) },
+		PIDAlive:               func(int) bool { return true },
+		LookupProcessStartTime: func(int) (string, error) { return "Tue Apr 22 10:00:00 2026", nil },
 	})
 	require.ErrorIs(t, err, want)
 }

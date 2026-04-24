@@ -154,7 +154,7 @@ func TestCleanupProcessTree_SkipsRecycledGroupAndSessionButKillsTrackedDescendan
 	require.Equal(t, []int{777}, killed)
 }
 
-func TestCleanupProcessTree_DegradesWhenProcessInspectionUnavailable(t *testing.T) {
+func TestCleanupProcessTree_FailsClosedWhenProcessInspectionUnavailableForActiveLease(t *testing.T) {
 	originalLookup := lookupProcessStartTime
 	originalGroupKill := killProcessGroupUntilGoneSignal
 	originalGroupMembers := processGroupMembersUntilGoneList
@@ -196,78 +196,23 @@ func TestCleanupProcessTree_DegradesWhenProcessInspectionUnavailable(t *testing.
 		PGID:      4242,
 		StartTime: "Tue Apr 22 10:00:00 2026",
 	}, 4242, tracker)
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCleanupInspectionUnavailable)
 	require.True(t, killed)
 }
 
-func TestKillSessionProcessesUntilGone_ReturnsTimeoutWhenSurvivorsRemain(t *testing.T) {
-	originalNow := cleanupNow
-	originalSleep := cleanupSleep
-	originalList := sessionProcessesUntilGoneList
-	originalKill := killSessionProcessesUntilGoneKill
-	t.Cleanup(func() {
-		cleanupNow = originalNow
-		cleanupSleep = originalSleep
-		sessionProcessesUntilGoneList = originalList
-		killSessionProcessesUntilGoneKill = originalKill
-	})
-
-	now := time.Unix(0, 0)
-	cleanupNow = func() time.Time {
-		current := now
-		now = now.Add(time.Millisecond)
-		return current
-	}
-	cleanupSleep = func(time.Duration) {}
-	sessionProcessesUntilGoneList = func(int) ([]int, error) {
-		return []int{111, 222}, nil
-	}
-	killSessionProcessesUntilGoneKill = func([]int) error { return nil }
-
-	err := KillSessionProcessesUntilGone(42, time.Microsecond, 0)
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrCleanupTimeout)
-}
-
-func TestKillProcessGroupUntilGone_ReturnsTimeoutWhenMembersRemain(t *testing.T) {
+func TestCleanupProcessTree_JoinsGroupKillErrorWithTimeout(t *testing.T) {
 	originalNow := cleanupNow
 	originalSleep := cleanupSleep
 	originalMembers := processGroupMembersUntilGoneList
 	originalKill := killProcessGroupUntilGoneSignal
+	originalLookup := lookupProcessStartTime
 	t.Cleanup(func() {
 		cleanupNow = originalNow
 		cleanupSleep = originalSleep
 		processGroupMembersUntilGoneList = originalMembers
 		killProcessGroupUntilGoneSignal = originalKill
-	})
-
-	now := time.Unix(0, 0)
-	cleanupNow = func() time.Time {
-		current := now
-		now = now.Add(time.Millisecond)
-		return current
-	}
-	cleanupSleep = func(time.Duration) {}
-	processGroupMembersUntilGoneList = func(int) ([]int, error) {
-		return []int{333}, nil
-	}
-	killProcessGroupUntilGoneSignal = func(int) error { return nil }
-
-	err := KillProcessGroupUntilGone(99, time.Microsecond, 0)
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrCleanupTimeout)
-}
-
-func TestKillProcessGroupUntilGone_JoinsKillErrorWithTimeout(t *testing.T) {
-	originalNow := cleanupNow
-	originalSleep := cleanupSleep
-	originalMembers := processGroupMembersUntilGoneList
-	originalKill := killProcessGroupUntilGoneSignal
-	t.Cleanup(func() {
-		cleanupNow = originalNow
-		cleanupSleep = originalSleep
-		processGroupMembersUntilGoneList = originalMembers
-		killProcessGroupUntilGoneSignal = originalKill
+		lookupProcessStartTime = originalLookup
 	})
 
 	want := errors.New("kill failed")
@@ -282,8 +227,13 @@ func TestKillProcessGroupUntilGone_JoinsKillErrorWithTimeout(t *testing.T) {
 		return []int{333}, nil
 	}
 	killProcessGroupUntilGoneSignal = func(int) error { return want }
+	lookupProcessStartTime = func(int) (string, error) { return "saved-start", nil }
 
-	err := KillProcessGroupUntilGone(99, time.Microsecond, 0)
+	err := CleanupProcessTree(ProcessLease{
+		PID:       99,
+		PGID:      99,
+		StartTime: "saved-start",
+	}, 0, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrCleanupTimeout)
 	require.ErrorIs(t, err, want)

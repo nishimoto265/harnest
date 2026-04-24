@@ -36,20 +36,15 @@ type RescueLeaseQuiesceOptions struct {
 	// default implementation is supplied that validates identity via
 	// PIDAlive + LookupProcessStartTime before each SIGKILL.
 	KillLeasedProcessGroup func(context.Context, RescueLeaseState, RescueLeaseQuiesceOptions) error
-	// KillProcessGroupUntilGone is retained for backward compatibility and is
-	// only consulted when KillLeasedProcessGroup is nil. Call sites that only
-	// have a PGID can continue to inject the legacy helper; tests may still
-	// use it to stub saved-group kill errors.
-	KillProcessGroupUntilGone func(int, time.Duration, time.Duration) error
-	WorktreeProcessIDs        func(context.Context, string) ([]int, error)
-	KillPID                   func(int, syscall.Signal) error
-	Sleep                     func(time.Duration)
-	Now                       func() time.Time
-	PIDAlive                  func(int) bool
-	LookupProcessStartTime    func(int) (string, error)
-	MaxWait                   time.Duration
-	Interval                  time.Duration
-	SelfPID                   int
+	WorktreeProcessIDs     func(context.Context, string) ([]int, error)
+	KillPID                func(int, syscall.Signal) error
+	Sleep                  func(time.Duration)
+	Now                    func() time.Time
+	PIDAlive               func(int) bool
+	LookupProcessStartTime func(int) (string, error)
+	MaxWait                time.Duration
+	Interval               time.Duration
+	SelfPID                int
 }
 
 type RescueLeaseQuiesceEnumerateError struct {
@@ -71,25 +66,8 @@ func EnsureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state R
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	legacyKillGroup := opts.KillProcessGroupUntilGone
-	if opts.KillProcessGroupUntilGone == nil {
-		opts.KillProcessGroupUntilGone = KillProcessGroupUntilGone
-	}
 	if opts.KillLeasedProcessGroup == nil {
-		// Preserve legacy test injection path: when callers only provided a
-		// PGID-based killer stub we forward to it so error propagation tests
-		// continue to work. Production callers should set KillLeasedProcessGroup
-		// (or leave it nil to use the identity-validated default).
-		if legacyKillGroup != nil {
-			opts.KillLeasedProcessGroup = func(ctx context.Context, state RescueLeaseState, opts RescueLeaseQuiesceOptions) error {
-				if state.PGID <= 0 {
-					return nil
-				}
-				return legacyKillGroup(state.PGID, 500*time.Millisecond, 25*time.Millisecond)
-			}
-		} else {
-			opts.KillLeasedProcessGroup = defaultKillLeasedProcessGroup
-		}
+		opts.KillLeasedProcessGroup = defaultKillLeasedProcessGroup
 	}
 	if opts.WorktreeProcessIDs == nil {
 		opts.WorktreeProcessIDs = func(ctx context.Context, worktreePath string) ([]int, error) {
