@@ -186,7 +186,7 @@ func trustedGitOutput(ctx context.Context, repoRoot string, args ...string) ([]b
 	if err != nil {
 		return nil, err
 	}
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

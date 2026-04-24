@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nishimoto265/auto-improve/internal/agents"
@@ -65,6 +66,70 @@ EOF
 	}))
 	assert.Len(t, output.Scores, 5)
 	assert.Len(t, output.Compliance, 1)
+}
+
+func TestCLIJudgeCodexScoreOutputRecordsArgvAndUsesManagedOutputPath(t *testing.T) {
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "output.patch")
+	rubricPath := filepath.Join(dir, "rubric.md")
+	argvPath := filepath.Join(dir, "argv.txt")
+	require.NoError(t, os.WriteFile(outputPath, []byte("diff --git a/app/message.txt b/app/message.txt\n"), 0o644))
+	require.NoError(t, os.WriteFile(rubricPath, []byte("# rubric\n"), 0o644))
+
+	codexPath := filepath.Join(dir, "codex")
+	require.NoError(t, os.WriteFile(codexPath, []byte(`#!/bin/sh
+set -eu
+argv_out="${FAKE_CODEX_ARGV_OUT}"
+: > "$argv_out"
+out=""
+while [ "$#" -gt 0 ]; do
+  printf '%s\n' "$1" >> "$argv_out"
+  case "$1" in
+    -o)
+      out="$2"
+      shift
+      printf '%s\n' "$1" >> "$argv_out"
+      ;;
+  esac
+  shift
+done
+cat > /dev/null
+cat > "$out" <<'EOF'
+{"scores":[
+  {"dimension":"fidelity","score":80,"reason":"r1"},
+  {"dimension":"correctness","score":81,"reason":"r2"},
+  {"dimension":"maintainability","score":82,"reason":"r3"},
+  {"dimension":"discipline","score":83,"reason":"r4"},
+  {"dimension":"communication","score":84,"reason":"r5"}
+],"compliance":[
+  {"rule_id":"stub-rubric-rule","verdict":"compliant","rationale":"ok"}
+]}
+EOF
+`), 0o755))
+
+	t.Setenv("FAKE_CODEX_ARGV_OUT", argvPath)
+	judge := NewCLIJudge(agents.Profile{
+		Provider: agents.ProviderCodex,
+		Binary:   codexPath,
+		Args:     []string{"--model", "gpt-5"},
+	}, RolePrimary)
+	output, err := judge.ScoreOutput(context.Background(), JudgeInput{
+		RunID:      "2026-04-23-PR1-abcdef0",
+		Pass:       1,
+		Agent:      "a1",
+		OutputPath: outputPath,
+		RubricPath: rubricPath,
+	})
+	require.NoError(t, err)
+	assert.Len(t, output.Scores, 5)
+
+	argvBytes, err := os.ReadFile(argvPath)
+	require.NoError(t, err)
+	argv := strings.Split(strings.TrimSpace(string(argvBytes)), "\n")
+	assert.Equal(t, "exec", argv[0])
+	assertArgValue(t, argv, "-C", dir)
+	assertArgLastValueHasPrefix(t, argv, "-o", filepath.Join(os.TempDir(), "auto-improve-output-"))
+	assert.Equal(t, "-", argv[len(argv)-1])
 }
 
 func TestCodexJudgeExecArgsAreReadOnlyAndKeepSafeProfileArgs(t *testing.T) {
@@ -200,6 +265,29 @@ func TestClaudeJudgeExecArgsRejectSafeArgMissingValue(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Nil(t, args)
+}
+
+func assertArgValue(t *testing.T, argv []string, flag, want string) {
+	t.Helper()
+	for i := 0; i < len(argv)-1; i++ {
+		if argv[i] == flag {
+			assert.Equal(t, want, argv[i+1])
+			return
+		}
+	}
+	t.Fatalf("missing %s in argv: %v", flag, argv)
+}
+
+func assertArgLastValueHasPrefix(t *testing.T, argv []string, flag, prefix string) {
+	t.Helper()
+	got := ""
+	for i := 0; i < len(argv)-1; i++ {
+		if argv[i] == flag {
+			got = argv[i+1]
+		}
+	}
+	require.NotEmpty(t, got, "missing %s in argv: %v", flag, argv)
+	assert.True(t, strings.HasPrefix(got, prefix), "last %s value %q does not have prefix %q", flag, got, prefix)
 }
 
 func TestRenderCLIJudgePromptPass2IncludesCandidateRuleBodies(t *testing.T) {
