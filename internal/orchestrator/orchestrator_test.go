@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
@@ -146,6 +147,57 @@ func TestRun_ResumeUsesConfigSnapshotPolicyBranch(t *testing.T) {
 	orch.steps = stubPipelineSteps(nil, assertPolicyBranchStep{t: t, want: "snapshot-policy"})
 
 	require.NoError(t, orch.Run(context.Background(), 56, RunOptions{}))
+}
+
+func TestRun_ResumeKeepsRelativeAgentConfigProviderFromSnapshot(t *testing.T) {
+	root := t.TempDir()
+	repoRoot := filepath.Join(root, "repo")
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(repoRoot, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "config.yaml"), []byte(fmt.Sprintf(`
+repo:
+  root: %q
+  default_branch: "main"
+  best_branch: "best"
+paths:
+  runs: %q
+worktree:
+  base: %q
+agent_config_path: "./agents.yaml"
+`, repoRoot, runsBase, worktreeBase)), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "agents.yaml"), []byte(`
+profiles:
+  codex_impl:
+    provider: codex
+    binary: codex
+  stub:
+    provider: stub
+roles:
+  implementer: codex_impl
+  judge_primary: stub
+  judge_secondary: stub
+  judge_arbiter: stub
+`), 0o644))
+	cfg, err := config.LoadConfig(filepath.Join(repoRoot, "config.yaml"))
+	require.NoError(t, err)
+
+	runID := contracts.RunID("2026-04-21-PR57-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
+	require.NoError(t, err)
+	require.NoError(t, seedResumeRun(t, runCtx, 57))
+	snapshotPath := filepath.Join(runCtx.RunDir(), "config.snapshot.yaml")
+	require.NoError(t, os.Remove(snapshotPath))
+	require.NoError(t, writeConfigSnapshot(snapshotPath, cfg))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps = stubPipelineSteps(nil, assertImplementerProviderStep{
+		t:    t,
+		want: agents.ProviderCodex,
+	})
+
+	require.NoError(t, orch.Run(context.Background(), 57, RunOptions{}))
 }
 
 func TestRun_DefaultStub_EndToEnd(t *testing.T) {
@@ -1505,6 +1557,20 @@ func (s assertPolicyBranchStep) Run(_ context.Context, run *StepRunContext) erro
 	s.t.Helper()
 	require.NotNil(s.t, run.Config)
 	assert.Equal(s.t, s.want, run.Config.Repo.PolicyBranch)
+	return stubStep70{}.Run(context.Background(), run)
+}
+
+type assertImplementerProviderStep struct {
+	t    *testing.T
+	want agents.Provider
+}
+
+func (s assertImplementerProviderStep) Run(_ context.Context, run *StepRunContext) error {
+	s.t.Helper()
+	require.NotNil(s.t, run.Config)
+	profile, err := run.Config.AgentProfile(agents.RoleImplementer)
+	require.NoError(s.t, err)
+	assert.Equal(s.t, s.want, profile.Provider)
 	return stubStep70{}.Run(context.Background(), run)
 }
 
