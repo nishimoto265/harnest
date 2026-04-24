@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -140,6 +141,46 @@ func RunSunset(ctx context.Context, opts Opts) (Result, error) {
 	return result, nil
 }
 
+func BuildTransitionPlan(runsBase string) ([]Transition, error) {
+	if runsBase == "" {
+		return nil, errors.New("archive: runs_base is required")
+	}
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	lines, err := readRegistryLines(registryPath)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]contracts.RuleRegistryEntry, 0, len(lines))
+	for _, line := range lines {
+		entries = append(entries, line.Entry)
+	}
+	states, err := registryview.Build(entries)
+	if err != nil {
+		return nil, err
+	}
+	ruleIDs := make([]string, 0, len(states))
+	for ruleID, state := range states {
+		if !state.Exists || state.Status != contracts.RuleStatusDeprecated {
+			continue
+		}
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	sort.Strings(ruleIDs)
+
+	transitions := make([]Transition, 0, len(ruleIDs))
+	for _, ruleID := range ruleIDs {
+		state := states[ruleID]
+		transitions = append(transitions, Transition{
+			RuleID:     ruleID,
+			PrevStatus: state.Status,
+			NewStatus:  contracts.RuleStatusArchived,
+			Kind:       contracts.RegistryKindArchived,
+			Transition: contracts.SunsetTransitionArchive,
+		})
+	}
+	return transitions, nil
+}
+
 func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 	opts = applyDefaults(opts)
 	if opts.RunsBase == "" {
@@ -211,6 +252,9 @@ func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 		if !ok {
 			return Result{}, nil
 		}
+	}
+	if len(opts.Transitions) == 0 {
+		return Result{}, nil
 	}
 
 	if err := writeMarker(opts); err != nil {

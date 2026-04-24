@@ -137,9 +137,13 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 			}
 		}
 	}
-	if in.HarnessFiles && strings.TrimSpace(in.PolicyBranch) != "" {
-		if err := policyrepo.HydrateAndSnapshotFromBranch(ctx, in.RepoRoot, in.PolicyBranch, in.RunCtx.RunsBase, in.RunCtx.RunDir()); err != nil {
-			return Result{}, fmt.Errorf("step10: hydrate harness files from policy_branch=%s: %w", in.PolicyBranch, err)
+	if in.HarnessFiles {
+		if strings.TrimSpace(in.PolicyBranch) != "" {
+			if err := policyrepo.HydrateAndSnapshotFromBranch(ctx, in.RepoRoot, in.PolicyBranch, in.RunCtx.RunsBase, in.RunCtx.RunDir()); err != nil {
+				return Result{}, fmt.Errorf("step10: hydrate harness files from policy_branch=%s: %w", in.PolicyBranch, err)
+			}
+		} else if err := policyrepo.SnapshotLocalForRun(ctx, in.RunCtx.RunsBase, in.RunCtx.RunDir()); err != nil {
+			return Result{}, fmt.Errorf("step10: snapshot local harness policy: %w", err)
 		}
 	}
 

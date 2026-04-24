@@ -49,8 +49,8 @@ type snapshot struct {
 
 type SnapshotMetadata struct {
 	SchemaVersion string `json:"schema_version" validate:"required,oneof=1"`
-	PolicyBranch  string `json:"policy_branch" validate:"required"`
-	PolicyHead    string `json:"policy_head" validate:"required,sha1_hex"`
+	PolicyBranch  string `json:"policy_branch,omitempty"`
+	PolicyHead    string `json:"policy_head,omitempty" validate:"omitempty,sha1_hex"`
 	RegistryHead  string `json:"registry_head" validate:"omitempty,sha256_hex"`
 }
 
@@ -78,6 +78,36 @@ func HydrateFromBranch(ctx context.Context, repoRoot, branch, runsBase string) e
 func HydrateAndSnapshotFromBranch(ctx context.Context, repoRoot, branch, runsBase, runDir string) error {
 	_, err := hydrateSnapshotFromBranch(ctx, repoRoot, branch, runsBase, runDir)
 	return err
+}
+
+func SnapshotLocalForRun(ctx context.Context, runsBase, runDir string) error {
+	lock, err := internalio.AcquireFileLockContext(ctx, filepath.Join(runsBase, "promotion.lock"))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Unlock() }()
+
+	snap, err := loadOptionalLocalSnapshot(runsBase)
+	if err != nil {
+		return err
+	}
+	if err := applySnapshotToRunDir(runDir, snap); err != nil {
+		return err
+	}
+	registryPath := filepath.Join(runDir, "policy", registryLocalName)
+	if len(snap.registry) == 0 {
+		if err := internalio.WriteAtomic(registryPath, nil); err != nil {
+			return err
+		}
+	}
+	registryHead, err := registryHead(registryPath)
+	if err != nil {
+		return err
+	}
+	return writeSnapshotMetadata(runDir, SnapshotMetadata{
+		SchemaVersion: "1",
+		RegistryHead:  registryHead,
+	})
 }
 
 func hydrateSnapshotFromBranch(ctx context.Context, repoRoot, branch, runsBase, runDir string) (snapshot, error) {
@@ -470,6 +500,22 @@ func loadLocalSnapshot(runsBase string) (snapshot, error) {
 		return snapshot{}, err
 	}
 	return snap, nil
+}
+
+func loadOptionalLocalSnapshot(runsBase string) (snapshot, error) {
+	registryPath := filepath.Join(runsBase, registryLocalName)
+	if _, err := os.Stat(registryPath); err == nil {
+		return loadLocalSnapshot(runsBase)
+	} else if err != nil && !os.IsNotExist(err) {
+		return snapshot{}, err
+	}
+	rulesSrc := filepath.Join(runsBase, rulesLocalDirName)
+	if _, statErr := os.Stat(rulesSrc); statErr == nil {
+		return loadLocalSnapshot(runsBase)
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		return snapshot{}, statErr
+	}
+	return snapshot{rules: map[string][]byte{}}, nil
 }
 
 func writeSnapshotMetadata(runDir string, meta SnapshotMetadata) error {
