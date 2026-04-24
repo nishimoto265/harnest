@@ -531,6 +531,23 @@ func TestRecoverFinalizeCleanupVerifiesHeadsAndClearsAbortedSentinel(t *testing.
 	assert.NoFileExists(t, filepath.Join(runDir, "70", "intention.json"))
 }
 
+func TestRecoverPolicyBranchFallsBackToConfigWhenSnapshotBranchEmpty(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
+	ctx := mustNewRunCtx(t, runID, runsBase, worktreeBase)
+	require.NoError(t, os.MkdirAll(filepath.Join(ctx.RunDir(), "policy"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ctx.RunDir(), "policy", "snapshot.json"), []byte(`{"schema_version":"1","policy_branch":"","registry_head":""}`), 0o644))
+
+	branch, meta, err := recoverPolicyBranch(ctx, config.Config{
+		Repo: config.RepoConfig{PolicyBranch: "auto-improve/policy"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+	assert.Equal(t, "auto-improve/policy", branch)
+}
+
 func TestRecoverRollbackWritesRollbackDecisionAndClearsSentinel(t *testing.T) {
 	root, runsBase, worktreeBase, runID := seedRecoverActionRun(t)
 	runDir := filepath.Join(runsBase, string(runID))
@@ -953,7 +970,7 @@ func TestRecoverClearSentinelAllowsMissingTaskPackageAndCandidates(t *testing.T)
 	assert.FileExists(t, filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelClearedFilename(runID)))
 }
 
-func TestRecoverClearSentinelAllowsAbortedSentinel(t *testing.T) {
+func TestRecoverClearSentinelRejectsAbortedSentinel(t *testing.T) {
 	root := realTempDir(t)
 	runsBase := filepath.Join(root, "runs")
 	worktreeBase := filepath.Join(root, "worktrees")
@@ -983,10 +1000,12 @@ func TestRecoverClearSentinelAllowsAbortedSentinel(t *testing.T) {
 
 	cmd := newRootCmd()
 	cmd.SetArgs([]string{"recover", "--run", string(runID), "--clear-sentinel"})
-	require.NoError(t, cmd.Execute())
+	err = cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--finalize-cleanup")
 
-	assert.NoFileExists(t, filepath.Join(runsBase, "needs-recovery", abortedName))
-	assert.FileExists(t, filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelClearedFilename(runID)))
+	assert.FileExists(t, filepath.Join(runsBase, "needs-recovery", abortedName))
+	assert.NoFileExists(t, filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelClearedFilename(runID)))
 }
 
 type stubPipelineRunner struct {

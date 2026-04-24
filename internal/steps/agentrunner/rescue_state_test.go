@@ -52,6 +52,27 @@ func TestComputeDirtyStateDetectsIgnoredContentDrift(t *testing.T) {
 	assert.NotEqual(t, first, second)
 }
 
+func TestComputeDirtyStateHandlesOversizedUntrackedWithoutHashingContent(t *testing.T) {
+	repoDir := initDirtyStateTestRepo(t)
+	hugePath := filepath.Join(repoDir, "huge.bin")
+	file, err := os.Create(hugePath)
+	require.NoError(t, err)
+	require.NoError(t, file.Truncate(RescueDiffLimitBytes+1))
+	require.NoError(t, file.Close())
+
+	first, _, err := ComputeDirtyState(context.Background(), repoDir)
+	require.NoError(t, err)
+
+	file, err = os.OpenFile(hugePath, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	require.NoError(t, file.Truncate(RescueDiffLimitBytes+2))
+	require.NoError(t, file.Close())
+	second, _, err := ComputeDirtyState(context.Background(), repoDir)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, first, second)
+}
+
 func initDirtyStateTestRepo(t *testing.T) string {
 	t.Helper()
 	repoDir := t.TempDir()

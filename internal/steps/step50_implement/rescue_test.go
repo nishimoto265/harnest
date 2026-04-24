@@ -229,7 +229,7 @@ func TestResumeIfNeeded_SkipsRescueDirWithPartialIgnoredCoverage(t *testing.T) {
 	assert.Equal(t, 1, retryCount)
 	assert.NoFileExists(t, filepath.Join(allocation.Path, "dirty.txt"))
 	assert.GreaterOrEqual(t, len(rescueDirEntries(t, agentDir)), 2, "partial ignored coverage must force a fresh rescue capture")
-	rescuetest.AssertRescueStateHasArtifacts(t, agentDir, rescuedDirName, "partial-rescue", "commits.bundle", "tracked.patch", "staged.patch", "untracked-symlinks.txt", "ignored-skipped.txt", "ignored.txt", "untracked/dirty.txt")
+	assertFreshRescueStateHasArtifacts(t, agentDir, "partial-rescue", "commits.bundle", "tracked.patch", "staged.patch", "untracked-symlinks.txt", "ignored-skipped.txt", "ignored.txt", "untracked/dirty.txt")
 }
 
 func TestEnsureRescueLeaseQuiesced_PreservesTimeoutSentinel(t *testing.T) {
@@ -291,6 +291,15 @@ func staleResumeState(baseSHA string) resumeState {
 		LeaderStartTime: "stale-start",
 		RetryCount:      0,
 		LastHeartbeat:   oldTime,
+	}
+}
+
+func assertFreshRescueStateHasArtifacts(t *testing.T, agentDir, skipDir string, paths ...string) {
+	t.Helper()
+	artifacts, rescueName, err := rescuetest.FreshRescueArtifactSet(agentDir, rescuedDirName, skipDir)
+	require.NoError(t, err)
+	for _, path := range paths {
+		assert.True(t, artifacts[path], "fresh rescue artifact %s missing from %s", path, rescueName)
 	}
 }
 

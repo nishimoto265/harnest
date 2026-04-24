@@ -95,6 +95,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		CopyIgnored:    copyIgnoredFilesWithBudget,
 		WriteIgnored:   writeIgnoredList,
 		FileDigest:     fileDigest,
+		ComputeDirty:   agentrunner.ComputeDirtyState,
 		VerifyState:    verifyRescueState,
 		FinishState: func(agentDir string, state implementrescue.State, nextRetry int) (int, error) {
 			return implementrescue.FinishState(agentDir, state, nextRetry, heartbeatPath, func(agentDir string, state implementrescue.State) error {

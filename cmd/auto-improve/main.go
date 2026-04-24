@@ -595,7 +595,7 @@ func recoverRunPrereqs(runID string, requireSentinel bool) (context.Context, str
 }
 
 func recoverClearSentinelPrereqs(runID string) (string, internalio.RunContext, *internalio.FileLock, error) {
-	return recoverRunSentinelPrereqsWithOptions(runID, true)
+	return recoverRunSentinelPrereqsWithOptions(runID, false)
 }
 
 func recoverRunSentinelPrereqsWithOptions(runID string, allowAborted bool) (string, internalio.RunContext, *internalio.FileLock, error) {
@@ -674,8 +674,11 @@ func recoverPolicyBranch(runCtx internalio.RunContext, cfg config.Config) (strin
 	if err != nil {
 		return "", nil, err
 	}
-	if ok {
+	if ok && strings.TrimSpace(meta.PolicyBranch) != "" {
 		return meta.PolicyBranch, &meta, nil
+	}
+	if ok {
+		return cfg.Repo.PolicyBranch, &meta, nil
 	}
 	return cfg.Repo.PolicyBranch, nil, nil
 }

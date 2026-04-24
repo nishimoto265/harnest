@@ -198,6 +198,7 @@ type PerformOptions struct {
 	CopyIgnored    func(context.Context, string, string, *agentrunner.RescueArtifactBudget) ([]agentrunner.RescueArtifactDigest, error)
 	WriteIgnored   func(context.Context, string, string) error
 	FileDigest     func(string) (string, error)
+	ComputeDirty   func(context.Context, string) (string, []string, error)
 	VerifyState    func(string) error
 	FinishState    func(string, State, int) (int, error)
 }
@@ -230,7 +231,7 @@ func Perform(ctx context.Context, opts PerformOptions) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	currentDirtyFingerprint, currentDirtyEntries, err := agentrunner.ComputeDirtyState(ctx, opts.Allocation.Path)
+	currentDirtyFingerprint, currentDirtyEntries, err := opts.ComputeDirty(ctx, opts.Allocation.Path)
 	if err != nil {
 		return 0, err
 	}
@@ -315,6 +316,9 @@ func validatePerformOptions(opts PerformOptions) error {
 	}
 	if opts.FileDigest == nil {
 		return errors.New("implementrescue: perform missing FileDigest")
+	}
+	if opts.ComputeDirty == nil {
+		return errors.New("implementrescue: perform missing ComputeDirty")
 	}
 	if opts.VerifyState == nil {
 		return errors.New("implementrescue: perform missing VerifyState")

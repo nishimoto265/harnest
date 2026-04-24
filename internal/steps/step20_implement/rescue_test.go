@@ -184,7 +184,7 @@ func TestResumeIfNeeded_SkipsStaleRescueDirWhenIgnoredContentDrifts(t *testing.T
 	require.NoError(t, err)
 	ignoredArtifact, err := rescuetest.WriteArtifact(rescueDir, "ignored/.env.local", []byte("old\n"), fileDigest)
 	require.NoError(t, err)
-	artifacts = replaceRescueArtifact(artifacts, ignoredListArtifact)
+	artifacts = replaceRescueArtifact(t, artifacts, ignoredListArtifact)
 	artifacts = append(artifacts, gitignoreArtifact, ignoredArtifact)
 	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
 		ExpectedBaseSHA:  fx.baseSHA,
@@ -248,7 +248,7 @@ func TestResumeIfNeeded_SkipsRescueDirWithPartialIgnoredCoverage(t *testing.T) {
 	assert.Equal(t, 1, retryCount)
 	assert.NoFileExists(t, filepath.Join(fx.worktree, "dirty.txt"))
 	assert.GreaterOrEqual(t, len(rescueDirEntries(t, fx.agentDir)), 2, "partial ignored coverage must force a fresh rescue capture")
-	rescuetest.AssertRescueStateHasArtifacts(t, fx.agentDir, rescuedDirName, "partial-rescue", "commits.bundle", "tracked.patch", "staged.patch", "untracked-symlinks.txt", "ignored-skipped.txt", "ignored.txt", "untracked/dirty.txt")
+	assertFreshRescueStateHasArtifacts(t, fx.agentDir, "partial-rescue", "commits.bundle", "tracked.patch", "staged.patch", "untracked-symlinks.txt", "ignored-skipped.txt", "ignored.txt", "untracked/dirty.txt")
 }
 
 func TestEnsureRescueLeaseQuiesced_PreservesTimeoutSentinel(t *testing.T) {
@@ -292,14 +292,25 @@ func staleResumeState(baseSHA string) resumeState {
 	}
 }
 
-func replaceRescueArtifact(artifacts []agentrunner.RescueArtifactDigest, replacement agentrunner.RescueArtifactDigest) []agentrunner.RescueArtifactDigest {
+func replaceRescueArtifact(t *testing.T, artifacts []agentrunner.RescueArtifactDigest, replacement agentrunner.RescueArtifactDigest) []agentrunner.RescueArtifactDigest {
+	t.Helper()
 	for i, artifact := range artifacts {
 		if artifact.Path == replacement.Path {
 			artifacts[i] = replacement
 			return artifacts
 		}
 	}
-	return append(artifacts, replacement)
+	t.Fatalf("rescue artifact %s not found", replacement.Path)
+	return nil
+}
+
+func assertFreshRescueStateHasArtifacts(t *testing.T, agentDir, skipDir string, paths ...string) {
+	t.Helper()
+	artifacts, rescueName, err := rescuetest.FreshRescueArtifactSet(agentDir, rescuedDirName, skipDir)
+	require.NoError(t, err)
+	for _, path := range paths {
+		assert.True(t, artifacts[path], "fresh rescue artifact %s missing from %s", path, rescueName)
+	}
 }
 
 func readFreshRescueFile(t *testing.T, agentDir, skipDir, rel string) []byte {

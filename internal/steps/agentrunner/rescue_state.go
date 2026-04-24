@@ -191,6 +191,9 @@ func dirtyFileComponent(ctx context.Context, worktreePath, label, rel string) (s
 	if !info.Mode().IsRegular() {
 		return fmt.Sprintf("%s:%s:non_regular:%s:%d:%d", label, cleaned, info.Mode().String(), info.Size(), info.ModTime().UnixNano()), nil
 	}
+	if info.Size() > RescueDiffLimitBytes {
+		return fmt.Sprintf("%s:%s:too_large:%d:%d", label, cleaned, info.Size(), info.ModTime().UnixNano()), nil
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err

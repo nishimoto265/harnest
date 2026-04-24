@@ -1,9 +1,9 @@
 package rescuetest
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
-	"testing"
 
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
@@ -42,11 +42,10 @@ func WriteArtifact(rescueDir, rel string, body []byte, fileDigest FileDigestFunc
 	return agentrunner.RescueArtifactDigest{Path: rel, SHA256: digest}, nil
 }
 
-func AssertRescueStateHasArtifacts(t testing.TB, agentDir, rescuedDirName, skipDir string, paths ...string) {
-	t.Helper()
+func FreshRescueArtifactSet(agentDir, rescuedDirName, skipDir string) (map[string]bool, string, error) {
 	entries, err := os.ReadDir(filepath.Join(agentDir, rescuedDirName))
 	if err != nil {
-		t.Fatalf("read rescue dir entries: %v", err)
+		return nil, "", err
 	}
 	for _, entry := range entries {
 		if entry.Name() == skipDir {
@@ -60,14 +59,9 @@ func AssertRescueStateHasArtifacts(t testing.TB, agentDir, rescuedDirName, skipD
 		for _, artifact := range state.Artifacts {
 			artifacts[artifact.Path] = true
 		}
-		for _, path := range paths {
-			if !artifacts[path] {
-				t.Fatalf("fresh rescue artifact %s missing from %s", path, entry.Name())
-			}
-		}
-		return
+		return artifacts, entry.Name(), nil
 	}
-	t.Fatalf("fresh rescue state not found under %s", filepath.Join(agentDir, rescuedDirName))
+	return nil, "", fmt.Errorf("fresh rescue state not found under %s", filepath.Join(agentDir, rescuedDirName))
 }
 
 func writeCoverageArtifacts(rescueDir string, fileDigest FileDigestFunc, paths []string) ([]agentrunner.RescueArtifactDigest, error) {

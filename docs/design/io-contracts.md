@@ -90,6 +90,12 @@
 - `<runs_base>/needs-recovery/<run_id>.json` or `.aborted.json` — rev11: durable sentinel
 - `<runs_base>/sunset-running.marker` / `last-sunset-at` — rev11: sunset tick state(rev18: lock は `promotion.lock` を共有、`.sunset-lock` 廃止)
 
+`rescued/<rescue_id>/state.json` の `dirty_fingerprint` は、rescue capture 時点の
+tracked diff、staged diff、untracked files、ignored files の内容を sha256 で要約した
+採用ガードである。`git reset --hard` と `git clean -fdx` が破棄しうる file class
+すべてを対象にし、既存 rescue dir を再利用する場合は現在 worktree の fingerprint
+と一致しなければならない。空文字は旧形式/unknown と扱い、採用してはならない。
+
 **worktree は runs/ の外**:
 `<worktree_base>/<runId>-pass{1,2}-a{1..N}/` に置く。コード上は `pass1WorktreePath(ctx, agent)` / `pass2WorktreePath(ctx, agent)` で取得。実際のメタデータ (`{agent, pass, path, branch, base_sha, head_sha}`) は **`task-package.json.worktrees[]` が正本**。step 70 の cleanup はそれを読む。
 
