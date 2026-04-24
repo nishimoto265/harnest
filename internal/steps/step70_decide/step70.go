@@ -27,6 +27,7 @@ import (
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/auto-improve/internal/worktreecleanup"
 )
 
 const registryMandatoryIndexAt = 1800
@@ -196,9 +197,9 @@ func startFresh(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 	}
 	if !hasTarget {
 		if len(candidates.Candidates) == 0 || allCandidatesDuplicate(candidates) {
-			return writeNoop(runCtx, pkg, deps)
+			return writeNoop(ctx, runCtx, pkg, deps)
 		}
-		return writeReject(runCtx, pkg, "below_threshold", deps)
+		return writeReject(ctx, runCtx, pkg, "below_threshold", deps)
 	}
 	if reason, err := policySnapshotPreAdoptBlockReason(ctx, runCtx, deps); err != nil {
 		return err
@@ -581,10 +582,10 @@ func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunCon
 	if err := cleanupWorktrees(ctx, runCtx, pkg, deps.Git); err != nil {
 		return err
 	}
-	if err := appendStateOnce(runCtx, writer, contracts.StateKindPromoted, promotedEvent(pr, runCtx.RunID, deps.Now())); err != nil {
+	if err := store.Delete(); err != nil {
 		return err
 	}
-	return store.Delete()
+	return appendStateOnce(runCtx, writer, contracts.StateKindPromoted, promotedEvent(pr, runCtx.RunID, deps.Now()))
 }
 
 func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, decision contracts.Decision, store IntentionWriter, writer state.Writer, deps Deps) error {
@@ -813,16 +814,16 @@ func resumeRollback(ctx context.Context, pr int, runCtx internalio.RunContext, p
 }
 
 func finalizeRollbackTerminal(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, reason contracts.RollbackReason, failed contracts.FailedStep, store IntentionWriter, writer state.Writer, deps Deps) error {
-	if err := appendStateOnce(runCtx, writer, contracts.StateKindRollback, rollbackEvent(pr, runCtx.RunID, reason, failed, deps.Now())); err != nil {
-		return err
-	}
 	if err := cleanupStagedRuleSidecars(runCtx); err != nil {
 		return err
 	}
 	if err := cleanupWorktrees(ctx, runCtx, pkg, deps.Git); err != nil {
 		return err
 	}
-	return store.Delete()
+	if err := store.Delete(); err != nil {
+		return err
+	}
+	return appendStateOnce(runCtx, writer, contracts.StateKindRollback, rollbackEvent(pr, runCtx.RunID, reason, failed, deps.Now()))
 }
 
 func ensureRollbackBranchState(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
@@ -899,7 +900,7 @@ func markManualRecoveryWithDetail(pr int, runCtx internalio.RunContext, intentio
 
 // ---- Noop / reject / decision helpers ----
 
-func writeNoop(runCtx internalio.RunContext, pkg *contracts.TaskPackage, deps Deps) error {
+func writeNoop(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.TaskPackage, deps Deps) error {
 	decision := contracts.Decision{
 		Action: contracts.DecisionActionNoop,
 		Value: contracts.DecisionNoop{
@@ -913,10 +914,10 @@ func writeNoop(runCtx internalio.RunContext, pkg *contracts.TaskPackage, deps De
 	if err := writeDecision(runCtx, decision); err != nil {
 		return err
 	}
-	return cleanupWorktrees(context.Background(), runCtx, pkg, deps.Git)
+	return cleanupWorktrees(ctx, runCtx, pkg, deps.Git)
 }
 
-func writeReject(runCtx internalio.RunContext, pkg *contracts.TaskPackage, reason string, deps Deps) error {
+func writeReject(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.TaskPackage, reason string, deps Deps) error {
 	decision := contracts.Decision{
 		Action: contracts.DecisionActionReject,
 		Value: contracts.DecisionReject{
@@ -930,7 +931,7 @@ func writeReject(runCtx internalio.RunContext, pkg *contracts.TaskPackage, reaso
 	if err := writeDecision(runCtx, decision); err != nil {
 		return err
 	}
-	return cleanupWorktrees(context.Background(), runCtx, pkg, deps.Git)
+	return cleanupWorktrees(ctx, runCtx, pkg, deps.Git)
 }
 
 func writeDecision(runCtx internalio.RunContext, decision contracts.Decision) error {
@@ -2027,27 +2028,7 @@ func intentionOwnsRemotePush(runCtx internalio.RunContext, intention contracts.I
 // ---- Cleanup ----
 
 func cleanupWorktrees(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.TaskPackage, git GitOps) error {
-	if pkg == nil {
-		return nil
-	}
-	for _, wt := range pkg.Worktrees {
-		if err := runCtx.ValidateWorktreeAllocation(wt); err != nil {
-			return err
-		}
-		if git != nil {
-			if err := git.RemoveWorktree(ctx, wt.Path); err != nil && !os.IsNotExist(err) && !errors.Is(err, ErrWorktreeUnregistered) {
-				return err
-			}
-		}
-		if _, err := os.Lstat(wt.Path); err == nil {
-			if err := os.RemoveAll(filepath.Clean(wt.Path)); err != nil {
-				return err
-			}
-		} else if !os.IsNotExist(err) {
-			return err
-		}
-	}
-	return nil
+	return worktreecleanup.Cleanup(ctx, runCtx, pkg, git)
 }
 
 func allCandidatesDuplicate(candidates *contracts.Candidates) bool {
