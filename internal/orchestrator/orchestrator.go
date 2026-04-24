@@ -344,7 +344,11 @@ func (o *Orchestrator) supersedeNonTerminalRun(pr int, latest state.LatestRun, r
 	if err := state.NewWriter(runCtx).Append(contracts.StateEntry{Kind: value.Kind, Value: value}); err != nil {
 		return err
 	}
-	return cleanupWorktrees(runCtx, pkg)
+	repoRoot, err := o.cfg.RepoRoot()
+	if err != nil {
+		return err
+	}
+	return cleanupWorktreesWithGit(runCtx, pkg, repoRoot)
 }
 
 func isPolicySnapshotStaleInterrupted(entry contracts.StateEntry) bool {
