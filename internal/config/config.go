@@ -330,6 +330,9 @@ func (c Config) Validate() error {
 	if err := c.rejectConflictingPathAliases(); err != nil {
 		return err
 	}
+	if strings.TrimSpace(c.CodexCLIPath) != "" {
+		return errors.New("config: codex_cli_path is deprecated; configure Codex profiles in agents.yaml and set agent_config_path")
+	}
 	if c.RegistryCriticalThreshold <= c.RegistryHighThreshold {
 		return fmt.Errorf(
 			"config: registry_critical_threshold must be greater than registry_high_threshold: critical=%d high=%d",
