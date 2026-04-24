@@ -347,7 +347,7 @@ func (o *Orchestrator) prepareFromScratchReplacement(pr int, latest state.Latest
 	} else if has {
 		return nil, fmt.Errorf("orchestrator: --from-scratch refused for run_id=%s with persisted step70 intention; resume or recover first", runID)
 	}
-	repoRoot, err := o.cfg.RepoRoot()
+	repoRoot, err := fromScratchCleanupRepoRoot(runCtx, o.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -523,6 +523,15 @@ func loadRunContext(runID contracts.RunID, runsBase, worktreeBase string) (inter
 
 func loadRunConfigSnapshot(runCtx internalio.RunContext) (config.Config, error) {
 	return config.Load(filepath.Join(runCtx.RunDir(), "config.snapshot.yaml"))
+}
+
+func fromScratchCleanupRepoRoot(runCtx internalio.RunContext, liveCfg *config.Config) (string, error) {
+	if snapshot, err := loadRunConfigSnapshot(runCtx); err == nil {
+		return snapshot.RepoRoot()
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	return liveCfg.RepoRoot()
 }
 
 func (o *Orchestrator) ensureRunScaffold(run *StepRunContext) error {
@@ -1258,35 +1267,16 @@ func providerInterruptionFromNonScorableManifests(run *StepRunContext, pass int)
 		if err != nil {
 			return "", "", false, err
 		}
-		switch value := manifest.Value.(type) {
-		case contracts.ManifestError:
-			agentReason, ok := providerManifestReason(value.Reason)
-			if !ok {
-				return "", "", false, nil
-			}
-			if reason == "" {
-				reason = agentReason
-			} else if reason != agentReason {
-				reason = contracts.InterruptedReasonUnknown
-			}
-			details = append(details, fmt.Sprintf("agent=%s reason=%s", agent, value.Reason))
-		case *contracts.ManifestError:
-			if value == nil {
-				return "", "", false, nil
-			}
-			agentReason, ok := providerManifestReason(value.Reason)
-			if !ok {
-				return "", "", false, nil
-			}
-			if reason == "" {
-				reason = agentReason
-			} else if reason != agentReason {
-				reason = contracts.InterruptedReasonUnknown
-			}
-			details = append(details, fmt.Sprintf("agent=%s reason=%s", agent, value.Reason))
-		default:
+		agentReason, ok := providerInterruptionManifestReason(*manifest)
+		if !ok {
 			return "", "", false, nil
 		}
+		if reason == "" {
+			reason = agentReason
+		} else if reason != agentReason {
+			reason = contracts.InterruptedReasonUnknown
+		}
+		details = append(details, fmt.Sprintf("agent=%s reason=%s", agent, manifestErrorReason(*manifest)))
 	}
 	if reason == "" {
 		return "", "", false, nil
@@ -1300,23 +1290,37 @@ func isProviderInterruptedManifest(manifest contracts.Manifest) bool {
 }
 
 func providerInterruptionManifestReason(manifest contracts.Manifest) (contracts.InterruptedReason, bool) {
-	reason := manifestErrorReason(manifest)
-	if reason == "" {
+	value, ok := manifestError(manifest)
+	if !ok {
 		return "", false
 	}
-	return providerManifestReason(reason)
+	if reason, ok := providerManifestReason(value.Reason); ok {
+		return reason, true
+	}
+	if value.Reason == string(contracts.InterruptedReasonUnknown) && value.ExitCode != 0 {
+		return contracts.InterruptedReasonUnknown, true
+	}
+	return "", false
 }
 
 func manifestErrorReason(manifest contracts.Manifest) string {
+	value, ok := manifestError(manifest)
+	if !ok {
+		return ""
+	}
+	return value.Reason
+}
+
+func manifestError(manifest contracts.Manifest) (contracts.ManifestError, bool) {
 	switch value := manifest.Value.(type) {
 	case contracts.ManifestError:
-		return value.Reason
+		return value, true
 	case *contracts.ManifestError:
 		if value != nil {
-			return value.Reason
+			return *value, true
 		}
 	}
-	return ""
+	return contracts.ManifestError{}, false
 }
 
 func providerManifestReason(reason string) (contracts.InterruptedReason, bool) {

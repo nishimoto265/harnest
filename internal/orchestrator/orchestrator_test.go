@@ -520,7 +520,7 @@ func TestRun_AllNonScorablePass1StopsBeforeStep30(t *testing.T) {
 	recorder := &callRecorder{}
 	orch.steps = Steps{
 		Step10:  stubStep10{},
-		Step20:  nonScorableAgentSteps(contracts.ManifestKindError),
+		Step20:  noChangeAgentSteps(),
 		Step30:  recordingStep{label: "30", recorder: recorder},
 		Step40:  recordingStep{label: "40", recorder: recorder},
 		Step50:  stubAgentSteps(),
@@ -553,7 +553,7 @@ func TestRun_AllNonScorablePass2StopsBeforeStep70(t *testing.T) {
 		Step20:  stubAgentSteps(),
 		Step30:  stubMarkerStep{path: "30/done.marker"},
 		Step40:  forcedCandidateStep{},
-		Step50:  nonScorableAgentSteps(contracts.ManifestKindError),
+		Step50:  noChangeAgentSteps(),
 		Step60:  step60Step{cfg: cfg},
 		Step70:  recordingStep{label: "70", recorder: recorder},
 		Archive: recordingStep{label: "archive", recorder: recorder},
@@ -583,7 +583,7 @@ func TestRun_ProviderInterruptedPass1IsNonTerminalInterrupted(t *testing.T) {
 	recorder := &callRecorder{}
 	orch.steps = Steps{
 		Step10:  stubStep10{},
-		Step20:  providerInterruptedAgentSteps("rate_limit"),
+		Step20:  providerInterruptedAgentSteps("unknown"),
 		Step30:  recordingStep{label: "30", recorder: recorder},
 		Step40:  recordingStep{label: "40", recorder: recorder},
 		Step50:  stubAgentSteps(),
@@ -605,7 +605,7 @@ func TestRun_ProviderInterruptedPass1IsNonTerminalInterrupted(t *testing.T) {
 	interrupted, ok := last.Value.(contracts.StateEntryInterrupted)
 	require.True(t, ok)
 	assert.Equal(t, contracts.FailedStep20, interrupted.Step)
-	assert.Equal(t, contracts.InterruptedReasonRateLimit, interrupted.Reason)
+	assert.Equal(t, contracts.InterruptedReasonUnknown, interrupted.Reason)
 	assert.Empty(t, recorder.snapshot())
 	for _, event := range events {
 		if event.Kind != contracts.StateKindStepDone {
@@ -622,6 +622,7 @@ func TestRun_ProviderInterruptedPass1RerunsInterruptedAgentsOnResume(t *testing.
 		string(contracts.InterruptedReasonBudget),
 		string(contracts.InterruptedReasonContext),
 		string(contracts.InterruptedReasonSignal),
+		string(contracts.InterruptedReasonUnknown),
 	} {
 		t.Run(reason, func(t *testing.T) {
 			cfg := testConfig(t)
@@ -643,6 +644,7 @@ func TestRun_ProviderInterruptedPass1RerunsInterruptedAgentsOnResume(t *testing.
 				string(contracts.InterruptedReasonBudget):    "bbbbbbb",
 				string(contracts.InterruptedReasonContext):   "ccccccc",
 				string(contracts.InterruptedReasonSignal):    "ddddddd",
+				string(contracts.InterruptedReasonUnknown):   "eeeeeee",
 			}[reason])
 			require.NoError(t, first.Run(context.Background(), 462, RunOptions{RunID: runID}))
 
@@ -1053,6 +1055,78 @@ func TestRun_FromScratchPrunesRegisteredGitWorktrees(t *testing.T) {
 	}
 }
 
+func TestRun_FromScratchCleanupUsesOldRunConfigSnapshotRepoRoot(t *testing.T) {
+	if _, err := processenv.TrustedLookPath("git"); err != nil {
+		t.Skipf("git not available in trusted PATH: %v", err)
+	}
+	root := t.TempDir()
+	oldRepoRoot := filepath.Join(root, "old-repo")
+	liveRepoRoot := filepath.Join(root, "live-repo-without-git")
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	require.NoError(t, os.MkdirAll(liveRepoRoot, 0o755))
+	runGit(t, "", "init", "-b", "main", oldRepoRoot)
+	runGit(t, oldRepoRoot, "config", "user.email", "auto-improve@example.test")
+	runGit(t, oldRepoRoot, "config", "user.name", "auto-improve test")
+	require.NoError(t, os.WriteFile(filepath.Join(oldRepoRoot, "README.md"), []byte("fixture\n"), 0o644))
+	runGit(t, oldRepoRoot, "add", "README.md")
+	runGit(t, oldRepoRoot, "commit", "-m", "initial")
+
+	cfg := testConfig(t)
+	cfg.Repo.Root = liveRepoRoot
+	cfg.Paths.Runs = runsBase
+	cfg.Worktree.Base = worktreeBase
+
+	oldRunID := contracts.RunID("2026-04-21-PR460-abcdef0")
+	oldRunCtx, err := internalio.NewRunContext(oldRunID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(oldRunCtx.RunDir(), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(oldRunCtx.RunDir(), "config.snapshot.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+oldRepoRoot+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: best\n"+
+			"paths:\n"+
+			"  runs: "+cfg.Paths.Runs+"\n"+
+			"worktree:\n"+
+			"  base: "+cfg.Worktree.Base+"\n",
+	), 0o644))
+	pkg := stubTaskPackageForRun(oldRunCtx, 460)
+	require.NoError(t, internalio.WriteJSONAtomic(oldRunCtx.TaskPackagePath(), pkg))
+	for _, wt := range pkg.Worktrees {
+		runGit(t, oldRepoRoot, "worktree", "add", "-b", wt.Branch, wt.Path, "HEAD")
+	}
+	require.NoError(t, state.NewWriter(oldRunCtx).Append(startedEntry(460, oldRunID, time.Now().UTC())))
+	require.NoError(t, state.NewWriter(oldRunCtx).Append(contracts.StateEntry{
+		Kind: contracts.StateKindInterrupted,
+		Value: contracts.StateEntryInterrupted{
+			Kind:   contracts.StateKindInterrupted,
+			PR:     460,
+			RunID:  oldRunID,
+			Step:   contracts.FailedStep20,
+			Reason: contracts.InterruptedReasonUnknown,
+			At:     time.Now().UTC(),
+		},
+	}))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps = stubPipelineSteps(nil, stubStep70{})
+
+	require.NoError(t, orch.Run(context.Background(), 460, RunOptions{FromScratch: true}))
+
+	list := runGit(t, oldRepoRoot, "worktree", "list", "--porcelain")
+	for _, wt := range pkg.Worktrees {
+		assert.NoDirExists(t, wt.Path)
+		assert.NotContains(t, list, wt.Path)
+	}
+	oldEvents, err := state.ScanEventsForRun(oldRunCtx, oldRunID)
+	require.NoError(t, err)
+	require.NotEmpty(t, oldEvents)
+	assert.Equal(t, contracts.StateKindSkipped, oldEvents[len(oldEvents)-1].Kind)
+}
+
 func TestRun_Step70NeedsManualRecovery_EndToEnd(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
@@ -1207,7 +1281,7 @@ func TestRun_RescueExhaustedBlocksOtherPRs(t *testing.T) {
 	assert.Equal(t, contracts.RunID("2026-04-21-PR77-abcdef0"), blocked.Sentinel.RunID)
 }
 
-func TestRun_ResumeStep30WithNoScorableAgentsFailsImmediately(t *testing.T) {
+func TestRun_ResumeStep30WithNoChangeManifestsFailsImmediately(t *testing.T) {
 	cfg := testConfig(t)
 	runID := contracts.RunID("2026-04-21-PR78-abcdef0")
 	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
@@ -1237,9 +1311,9 @@ func TestRun_ResumeStep30WithNoScorableAgentsFailsImmediately(t *testing.T) {
 				RunID:         runID,
 				Pass:          1,
 				Agent:         agent,
-				ExitCode:      1,
+				ExitCode:      0,
 				Reason:        "unknown",
-				Detail:        "fixture non-scorable manifest",
+				Detail:        "agent produced no diff",
 				StartedAt:     time.Now().UTC(),
 				FinishedAt:    time.Now().UTC(),
 			},
@@ -1265,6 +1339,67 @@ func TestRun_ResumeStep30WithNoScorableAgentsFailsImmediately(t *testing.T) {
 	failed, ok := last.Value.(contracts.StateEntryFailed)
 	require.True(t, ok)
 	assert.Equal(t, "no_scorable_agents", failed.Reason)
+}
+
+func TestRun_ResumeStep30WithUnknownNonzeroManifestsRecordsInterrupted(t *testing.T) {
+	cfg := testConfig(t)
+	runID := contracts.RunID("2026-04-21-PR79-bbcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runCtx.RunDir(), "config.snapshot.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+cfg.Repo.Root+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: best\n"+
+			"paths:\n"+
+			"  runs: "+cfg.Paths.Runs+"\n"+
+			"worktree:\n"+
+			"  base: "+cfg.Worktree.Base+"\n",
+	), 0o644))
+
+	pkg := stubTaskPackageForRun(runCtx, 79)
+	require.NoError(t, internalio.WriteJSONAtomic(runCtx.TaskPackagePath(), pkg))
+	for _, agent := range defaultAgents {
+		manifestPath, err := runCtx.ManifestPath(1, agent)
+		require.NoError(t, err)
+		require.NoError(t, internalio.WriteJSONAtomic(manifestPath, contracts.Manifest{
+			Kind: contracts.ManifestKindError,
+			Value: contracts.ManifestError{
+				Kind:          contracts.ManifestKindError,
+				SchemaVersion: "1",
+				RunID:         runID,
+				Pass:          1,
+				Agent:         agent,
+				ExitCode:      1,
+				Reason:        "unknown",
+				Detail:        "fixture provider error manifest",
+				StartedAt:     time.Now().UTC(),
+				FinishedAt:    time.Now().UTC(),
+			},
+		}))
+	}
+	require.NoError(t, writeRunText(runCtx, "30/done.marker", "stub\n"))
+	require.NoError(t, state.NewWriter(runCtx).Append(startedEntry(79, runID, time.Now().UTC())))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	recorder := &callRecorder{}
+	orch.steps.Step30 = recordingStep{label: "30", recorder: recorder}
+
+	require.NoError(t, orch.Run(context.Background(), 79, RunOptions{RunID: runID}))
+	assert.NotContains(t, recorder.snapshot(), "30")
+
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindInterrupted, last.Kind)
+	interrupted, ok := last.Value.(contracts.StateEntryInterrupted)
+	require.True(t, ok)
+	assert.Equal(t, contracts.FailedStep20, interrupted.Step)
+	assert.Equal(t, contracts.InterruptedReasonUnknown, interrupted.Reason)
 }
 
 func TestStubStep40_UsesRequestBoundDecoder(t *testing.T) {
@@ -2979,8 +3114,10 @@ func stubAgentSteps() map[contracts.AgentID]Step {
 }
 
 type nonScorableImplementStep struct {
-	kind   contracts.ManifestKind
-	reason string
+	kind     contracts.ManifestKind
+	exitCode int
+	reason   string
+	detail   string
 }
 
 type cancelingStep struct {
@@ -3021,6 +3158,10 @@ func (s nonScorableImplementStep) Run(ctx context.Context, run *StepRunContext) 
 		if reason == "" {
 			reason = "unknown"
 		}
+		detail := s.detail
+		if detail == "" {
+			detail = "fixture non-scorable manifest"
+		}
 		return internalio.WriteJSONAtomic(manifestPath, contracts.Manifest{
 			Kind: contracts.ManifestKindError,
 			Value: contracts.ManifestError{
@@ -3029,9 +3170,9 @@ func (s nonScorableImplementStep) Run(ctx context.Context, run *StepRunContext) 
 				RunID:         run.IO.RunID,
 				Pass:          run.Pass,
 				Agent:         run.Agent,
-				ExitCode:      1,
+				ExitCode:      s.exitCode,
 				Reason:        reason,
-				Detail:        "fixture non-scorable manifest",
+				Detail:        detail,
 				StartedAt:     startedAt,
 				FinishedAt:    startedAt,
 			},
@@ -3042,7 +3183,7 @@ func (s nonScorableImplementStep) Run(ctx context.Context, run *StepRunContext) 
 func nonScorableAgentSteps(kind contracts.ManifestKind) map[contracts.AgentID]Step {
 	steps := make(map[contracts.AgentID]Step, len(defaultAgents))
 	for _, agent := range defaultAgents {
-		steps[agent] = nonScorableImplementStep{kind: kind}
+		steps[agent] = nonScorableImplementStep{kind: kind, exitCode: 1}
 	}
 	return steps
 }
@@ -3050,7 +3191,20 @@ func nonScorableAgentSteps(kind contracts.ManifestKind) map[contracts.AgentID]St
 func providerInterruptedAgentSteps(reason string) map[contracts.AgentID]Step {
 	steps := make(map[contracts.AgentID]Step, len(defaultAgents))
 	for _, agent := range defaultAgents {
-		steps[agent] = nonScorableImplementStep{kind: contracts.ManifestKindError, reason: reason}
+		steps[agent] = nonScorableImplementStep{kind: contracts.ManifestKindError, exitCode: 1, reason: reason}
+	}
+	return steps
+}
+
+func noChangeAgentSteps() map[contracts.AgentID]Step {
+	steps := make(map[contracts.AgentID]Step, len(defaultAgents))
+	for _, agent := range defaultAgents {
+		steps[agent] = nonScorableImplementStep{
+			kind:     contracts.ManifestKindError,
+			exitCode: 0,
+			reason:   "unknown",
+			detail:   "agent produced no diff",
+		}
 	}
 	return steps
 }
