@@ -1523,6 +1523,85 @@ func TestRunDetectLoopSkipsFreshDetectionWhenResumeRemainsNonTerminal(t *testing
 	assert.Equal(t, runID, stub.opts[0].RunID)
 }
 
+func TestRunDetectLoopStopsBeforeLaterResumeTargetWhenCurrentRemainsNonTerminal(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	writeTestConfig(t, root, runsBase, worktreeBase)
+
+	firstRunID := contracts.RunID("2026-04-21-PR310-abcdef0")
+	firstCtx := mustNewRunCtx(t, firstRunID, runsBase, worktreeBase)
+	require.NoError(t, state.NewWriter(firstCtx).Append(contracts.StateEntry{
+		Kind: contracts.StateKindInterrupted,
+		Value: contracts.StateEntryInterrupted{
+			Kind:   contracts.StateKindInterrupted,
+			PR:     310,
+			RunID:  firstRunID,
+			Step:   contracts.FailedStep20,
+			Reason: contracts.InterruptedReasonUnknown,
+			At:     time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}))
+	secondRunID := contracts.RunID("2026-04-21-PR311-abcdef0")
+	secondCtx := mustNewRunCtx(t, secondRunID, runsBase, worktreeBase)
+	require.NoError(t, state.NewWriter(secondCtx).Append(contracts.StateEntry{
+		Kind: contracts.StateKindInterrupted,
+		Value: contracts.StateEntryInterrupted{
+			Kind:   contracts.StateKindInterrupted,
+			PR:     311,
+			RunID:  secondRunID,
+			Step:   contracts.FailedStep20,
+			Reason: contracts.InterruptedReasonUnknown,
+			At:     time.Date(2026, 4, 21, 12, 1, 0, 0, time.UTC),
+		},
+	}))
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	stub := &stubPipelineRunner{
+		onRun: func(pr int, opts orchestrator.RunOptions) error {
+			require.Equal(t, 310, pr)
+			require.Equal(t, firstRunID, opts.RunID)
+			return state.NewWriter(firstCtx).Append(contracts.StateEntry{
+				Kind: contracts.StateKindInterrupted,
+				Value: contracts.StateEntryInterrupted{
+					Kind:   contracts.StateKindInterrupted,
+					PR:     310,
+					RunID:  firstRunID,
+					Step:   contracts.FailedStep30,
+					Reason: contracts.InterruptedReasonUnknown,
+					At:     time.Date(2026, 4, 21, 12, 5, 0, 0, time.UTC),
+				},
+			})
+		},
+	}
+	originalNewPipelineRunner := newPipelineRunner
+	originalDetectMergedPRs := detectMergedPRs
+	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
+		return stub, nil
+	}
+	detectMergedPRs = func(context.Context, config.Config, string) ([]detect.MergedPR, error) {
+		require.Fail(t, "detect should not run while the first resumed target remains non-terminal")
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		newPipelineRunner = originalNewPipelineRunner
+		detectMergedPRs = originalDetectMergedPRs
+	})
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--detect-loop"})
+	require.NoError(t, cmd.Execute())
+	assert.Equal(t, []int{310}, stub.prs)
+	require.Len(t, stub.opts, 1)
+	assert.Equal(t, firstRunID, stub.opts[0].RunID)
+}
+
 func TestRunDetectLoopStopsWhenResumeCreatesNeedsRecoverySentinel(t *testing.T) {
 	root := realTempDir(t)
 	runsBase := filepath.Join(root, "runs")
