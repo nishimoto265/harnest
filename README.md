@@ -56,15 +56,16 @@ they are installed elsewhere.
 pass1/pass2. The default `auto` mode prefers linked issues when present but
 still keeps changed tests/files and a diff excerpt as supporting context.
 
-`agents.yaml` controls which runtime provider each role uses. Today the
-implementer role is provider-aware (`claude` or `codex`), while judge roles are
-reserved for future non-stub judge wiring and can safely stay `stub`.
-Provider-specific `args` are appended to the built-in invocation. The example
-Claude profile includes `-p` so runs are non-interactive. Codex defaults to
-`codex exec --full-auto --skip-git-repo-check -C <worktree>`; the dangerous
-`--dangerously-bypass-approvals-and-sandbox` mode is never injected by default
-and must be an explicit profile `args` opt-in if an externally sandboxed
-environment requires it.
+`agents.yaml` controls which runtime provider each role uses. Implementer roles
+can use `claude` or `codex`; judge roles can stay `stub` or use CLI-backed
+`claude` / `codex` profiles. Provider-specific `args` are appended to the
+built-in invocation. The example Claude profile includes `-p` so runs are
+non-interactive. Codex implementers default to
+`codex exec --full-auto --skip-git-repo-check -C <worktree>`, while Codex judges
+run with `codex exec --sandbox read-only --skip-git-repo-check --ephemeral`.
+The dangerous `--dangerously-bypass-approvals-and-sandbox` mode is never
+injected by default and must be an explicit implementer profile `args` opt-in if
+an externally sandboxed environment requires it.
 
 ## Commands
 
@@ -74,6 +75,8 @@ environment requires it.
   `repo.default_branch` 向けの merged PR を列挙する。
 - `auto-improve run --pr <n> --with-preflight`
   1 PR 分の pipeline を実行する。
+- `auto-improve run --pr <n> --from-scratch`
+  既存の non-terminal run を `superseded_by_from_scratch` として閉じ、worktree を prune して新規 run で再実行する。
 - `auto-improve run --detect-loop --with-preflight`
   未処理 merged PR を順に実行する。
 - `auto-improve sunset`
