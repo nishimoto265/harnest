@@ -186,7 +186,7 @@ func (*blockingRecoverGit) RemoveWorktree(context.Context, string) error {
 	return nil
 }
 
-func TestRecoverInspectDoesNotCreatePromotionLockWhenAbsent(t *testing.T) {
+func TestRecoverInspectCreatesPromotionLockWhenAbsent(t *testing.T) {
 	root := realTempDir(t)
 	runsBase := filepath.Join(root, "runs")
 	worktreeBase := filepath.Join(root, "worktrees")
@@ -208,7 +208,7 @@ func TestRecoverInspectDoesNotCreatePromotionLockWhenAbsent(t *testing.T) {
 	cmd.SetArgs([]string{"recover", "--inspect"})
 	require.NoError(t, cmd.Execute())
 
-	assert.NoFileExists(t, filepath.Join(runsBase, "promotion.lock"))
+	assert.FileExists(t, filepath.Join(runsBase, "promotion.lock"))
 
 	var payload recoverInspectOutput
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &payload))

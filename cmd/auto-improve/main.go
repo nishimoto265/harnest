@@ -223,11 +223,11 @@ func recoverRunsBaseAndInspectLock() (string, *internalio.FileLock, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	lock, exists, err := internalio.InspectFileLock(lockPath)
+	lock, acquired, err := internalio.TryAcquireFileLock(lockPath)
 	if err != nil {
 		return "", nil, err
 	}
-	if exists && lock == nil {
+	if !acquired {
 		return "", nil, commandExitError{code: 2, msg: "recover: promotion.lock is held by another process"}
 	}
 	return runsBase, lock, nil
@@ -343,7 +343,7 @@ func runRecoverFinalizeCleanup(cmd *cobra.Command, runID, expectedRemoteHead, ex
 			return commandExitError{code: 2, msg: fmt.Sprintf("recover: policy_branch HEAD mismatch: have=%s want=%s", actualPolicyHead, expectedPolicyHead)}
 		}
 	}
-	if err := step70_decide.FinalizeCleanup(runCtx, recoverIntentionStore{runCtx: runCtx}); err != nil {
+	if err := step70_decide.FinalizeCleanupLocked(runCtx, lock, recoverIntentionStore{runCtx: runCtx}); err != nil {
 		return err
 	}
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(recoverFinalizeCleanupOutput{
@@ -372,7 +372,7 @@ func runRecoverRollback(cmd *cobra.Command, runID string) error {
 	if err != nil {
 		return commandExitError{code: 2, msg: err.Error()}
 	}
-	if err := step70_decide.RecoverRollback(ctx, pkg.PR, runCtx, &pkg, store, step70_decide.Deps{
+	if err := step70_decide.RecoverRollbackLocked(ctx, lock, pkg.PR, runCtx, &pkg, store, step70_decide.Deps{
 		Git:          recoverGitOpsForRepo(repoRoot),
 		Now:          func() time.Time { return time.Now().UTC() },
 		RepoRoot:     repoRoot,
@@ -407,7 +407,7 @@ func runRecoverAdoptAnyway(cmd *cobra.Command, runID string) error {
 	if err != nil {
 		return commandExitError{code: 2, msg: err.Error()}
 	}
-	if err := step70_decide.RecoverAdoptAnyway(ctx, pkg.PR, runCtx, &pkg, &candidates, store, step70_decide.Deps{
+	if err := step70_decide.RecoverAdoptAnywayLocked(ctx, lock, pkg.PR, runCtx, &pkg, &candidates, store, step70_decide.Deps{
 		Git:          recoverGitOpsForRepo(repoRoot),
 		Now:          func() time.Time { return time.Now().UTC() },
 		RepoRoot:     repoRoot,
@@ -432,7 +432,7 @@ func runRecoverMarkManualAbort(cmd *cobra.Command, runID string) error {
 		return err
 	}
 	defer func() { _ = lock.Unlock() }()
-	if err := step70_decide.RecoverMarkManualAbort(runCtx, pkg.PR, store, time.Now().UTC()); err != nil {
+	if err := step70_decide.RecoverMarkManualAbortLocked(runCtx, lock, pkg.PR, store, time.Now().UTC()); err != nil {
 		return err
 	}
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(recoverActionOutput{
@@ -469,7 +469,7 @@ func runRecoverClearSentinel(cmd *cobra.Command, runID string) error {
 			}
 		}
 	}
-	if err := step70_decide.RecoverClearSentinel(runCtx); err != nil {
+	if err := step70_decide.RecoverClearSentinelLocked(runCtx, lock); err != nil {
 		return err
 	}
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(recoverActionOutput{

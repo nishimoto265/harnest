@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -151,6 +152,17 @@ func (l *FileLock) Path() string {
 		return ""
 	}
 	return l.path
+}
+
+func (l *FileLock) HoldsPath(path string) bool {
+	if l == nil || !l.held || l.file == nil || filepath.Clean(l.path) != filepath.Clean(path) {
+		return false
+	}
+	identity, err := fileIdentityFromFile(l.file)
+	if err != nil {
+		return false
+	}
+	return ensurePathMatchesIdentity(path, identity) == nil
 }
 
 func IsFileLockHeld(path string) bool {

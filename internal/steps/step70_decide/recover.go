@@ -26,9 +26,16 @@ func (e *RecoverRefusalError) Error() string {
 }
 
 func RecoverRollback(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, store IntentionWriter, deps Deps) error {
-	return withRecoverPromotionLock(ctx, runCtx, func() error {
-		return recoverRollbackUnlocked(ctx, pr, runCtx, pkg, store, deps)
+	return withRecoverPromotionLock(ctx, runCtx, func(lock *internalio.FileLock) error {
+		return RecoverRollbackLocked(ctx, lock, pr, runCtx, pkg, store, deps)
 	})
+}
+
+func RecoverRollbackLocked(ctx context.Context, lock *internalio.FileLock, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, store IntentionWriter, deps Deps) error {
+	if err := requireRecoverPromotionLock(runCtx, lock); err != nil {
+		return err
+	}
+	return recoverRollbackUnlocked(ctx, pr, runCtx, pkg, store, deps)
 }
 
 func recoverRollbackUnlocked(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, store IntentionWriter, deps Deps) error {
@@ -82,9 +89,16 @@ func recoverRollbackUnlocked(ctx context.Context, pr int, runCtx internalio.RunC
 }
 
 func RecoverAdoptAnyway(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, store IntentionWriter, deps Deps) error {
-	return withRecoverPromotionLock(ctx, runCtx, func() error {
-		return recoverAdoptAnywayUnlocked(ctx, pr, runCtx, pkg, candidates, store, deps)
+	return withRecoverPromotionLock(ctx, runCtx, func(lock *internalio.FileLock) error {
+		return RecoverAdoptAnywayLocked(ctx, lock, pr, runCtx, pkg, candidates, store, deps)
 	})
+}
+
+func RecoverAdoptAnywayLocked(ctx context.Context, lock *internalio.FileLock, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, store IntentionWriter, deps Deps) error {
+	if err := requireRecoverPromotionLock(runCtx, lock); err != nil {
+		return err
+	}
+	return recoverAdoptAnywayUnlocked(ctx, pr, runCtx, pkg, candidates, store, deps)
 }
 
 func recoverAdoptAnywayUnlocked(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, store IntentionWriter, deps Deps) error {
@@ -183,9 +197,16 @@ func recoverPolicyRollbackSafe(ctx context.Context, intention contracts.Intentio
 }
 
 func RecoverMarkManualAbort(runCtx internalio.RunContext, pr int, store IntentionWriter, at time.Time) error {
-	return withRecoverPromotionLock(context.Background(), runCtx, func() error {
-		return recoverMarkManualAbortUnlocked(runCtx, pr, store, at)
+	return withRecoverPromotionLock(context.Background(), runCtx, func(lock *internalio.FileLock) error {
+		return RecoverMarkManualAbortLocked(runCtx, lock, pr, store, at)
 	})
+}
+
+func RecoverMarkManualAbortLocked(runCtx internalio.RunContext, lock *internalio.FileLock, pr int, store IntentionWriter, at time.Time) error {
+	if err := requireRecoverPromotionLock(runCtx, lock); err != nil {
+		return err
+	}
+	return recoverMarkManualAbortUnlocked(runCtx, pr, store, at)
 }
 
 func recoverMarkManualAbortUnlocked(runCtx internalio.RunContext, pr int, store IntentionWriter, at time.Time) error {
@@ -231,9 +252,16 @@ func recoverMarkManualAbortUnlocked(runCtx internalio.RunContext, pr int, store 
 }
 
 func RecoverClearSentinel(runCtx internalio.RunContext) error {
-	return withRecoverPromotionLock(context.Background(), runCtx, func() error {
-		return recoverClearSentinelUnlocked(runCtx)
+	return withRecoverPromotionLock(context.Background(), runCtx, func(lock *internalio.FileLock) error {
+		return RecoverClearSentinelLocked(runCtx, lock)
 	})
+}
+
+func RecoverClearSentinelLocked(runCtx internalio.RunContext, lock *internalio.FileLock) error {
+	if err := requireRecoverPromotionLock(runCtx, lock); err != nil {
+		return err
+	}
+	return recoverClearSentinelUnlocked(runCtx)
 }
 
 func recoverClearSentinelUnlocked(runCtx internalio.RunContext) error {
@@ -243,14 +271,11 @@ func recoverClearSentinelUnlocked(runCtx internalio.RunContext) error {
 	return writeClearedSentinelMarker(runCtx)
 }
 
-func withRecoverPromotionLock(ctx context.Context, runCtx internalio.RunContext, fn func() error) error {
+func withRecoverPromotionLock(ctx context.Context, runCtx internalio.RunContext, fn func(*internalio.FileLock) error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	lockPath := runCtx.PromotionLockPath()
-	if internalio.IsFileLockHeld(lockPath) {
-		return fn()
-	}
 	lock, err := internalio.AcquireFileLockContext(ctx, lockPath)
 	if err != nil {
 		return fmt.Errorf("step70: acquire promotion.lock for recover: %w", err)
@@ -258,7 +283,14 @@ func withRecoverPromotionLock(ctx context.Context, runCtx internalio.RunContext,
 	defer func() {
 		_ = lock.Unlock()
 	}()
-	return fn()
+	return fn(lock)
+}
+
+func requireRecoverPromotionLock(runCtx internalio.RunContext, lock *internalio.FileLock) error {
+	if !lock.HoldsPath(runCtx.PromotionLockPath()) {
+		return errors.New("step70: recover requires held promotion.lock")
+	}
+	return nil
 }
 
 func loadRecoverIntention(store IntentionWriter) (*contracts.IntentionRecord, error) {

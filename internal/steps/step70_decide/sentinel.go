@@ -116,9 +116,16 @@ func writeClearedMarker(runsBase string, runID contracts.RunID) error {
 // FinalizeCleanup clears the durable manual-recovery block for a run after an
 // operator has explicitly reconciled branch/registry state out of band.
 func FinalizeCleanup(runCtx internalio.RunContext, store IntentionWriter) error {
-	return withRecoverPromotionLock(context.Background(), runCtx, func() error {
-		return finalizeCleanupUnlocked(runCtx, store)
+	return withRecoverPromotionLock(context.Background(), runCtx, func(lock *internalio.FileLock) error {
+		return FinalizeCleanupLocked(runCtx, lock, store)
 	})
+}
+
+func FinalizeCleanupLocked(runCtx internalio.RunContext, lock *internalio.FileLock, store IntentionWriter) error {
+	if err := requireRecoverPromotionLock(runCtx, lock); err != nil {
+		return err
+	}
+	return finalizeCleanupUnlocked(runCtx, store)
 }
 
 func finalizeCleanupUnlocked(runCtx internalio.RunContext, store IntentionWriter) error {
