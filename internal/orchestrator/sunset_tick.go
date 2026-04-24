@@ -9,7 +9,15 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 )
 
+type SunsetTickOptions struct {
+	Force bool
+}
+
 func RunSunsetTick(ctx context.Context) error {
+	return RunSunsetTickWithOptions(ctx, SunsetTickOptions{})
+}
+
+func RunSunsetTickWithOptions(ctx context.Context, tickOpts SunsetTickOptions) error {
 	cfg, err := config.LoadDefault()
 	if err != nil {
 		return err
@@ -18,18 +26,12 @@ func RunSunsetTick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	transitions, err := archive.BuildTransitionPlan(runsBase)
-	if err != nil {
-		return err
-	}
-	if len(transitions) == 0 {
-		return nil
-	}
 	now := time.Now().UTC()
 	_, err = archive.RunSunsetWithLock(ctx, archive.Opts{
 		RunsBase:       runsBase,
 		SunsetRunID:    fmt.Sprintf("sunset-%d", now.Unix()),
-		Transitions:    transitions,
+		AutoPlan:       true,
+		Force:          tickOpts.Force,
 		Now:            func() time.Time { return now },
 		RegistryHighAt: cfg.RegistryHighThreshold,
 		RegistryCritAt: cfg.RegistryCriticalThreshold,

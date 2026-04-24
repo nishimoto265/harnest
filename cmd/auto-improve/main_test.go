@@ -1711,7 +1711,7 @@ func TestRunDetectLoopBlocksOnSunsetSentinelWhenNoWork(t *testing.T) {
 func TestSunsetCommandInvokesRunner(t *testing.T) {
 	originalRunSunsetTick := runSunsetTick
 	called := false
-	runSunsetTick = func(context.Context) error {
+	runSunsetTick = func(context.Context, bool) error {
 		called = true
 		return nil
 	}
@@ -1721,6 +1721,21 @@ func TestSunsetCommandInvokesRunner(t *testing.T) {
 	cmd.SetArgs([]string{"sunset"})
 	require.NoError(t, cmd.Execute())
 	assert.True(t, called)
+}
+
+func TestSunsetCommandPassesForce(t *testing.T) {
+	originalRunSunsetTick := runSunsetTick
+	var gotForce bool
+	runSunsetTick = func(_ context.Context, force bool) error {
+		gotForce = force
+		return nil
+	}
+	t.Cleanup(func() { runSunsetTick = originalRunSunsetTick })
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"sunset", "--force"})
+	require.NoError(t, cmd.Execute())
+	assert.True(t, gotForce)
 }
 
 func TestRecoverRollbackRejectsCrossRunTaskPackage(t *testing.T) {
