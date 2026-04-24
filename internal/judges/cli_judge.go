@@ -205,9 +205,11 @@ func runCLIJudge(ctx context.Context, binary string, prefixArgs []string, profil
 	args := append([]string{}, prefixArgs...)
 	switch profile.Provider {
 	case agents.ProviderCodex:
-		args = append(args, agentrunner.CodexExecArgs(workdir)...)
-		args = append(args, profile.Args...)
-		args = append(args, "-o", outputPath, "-")
+		codexArgs, err := codexJudgeExecArgs(profile.Args, workdir, outputPath)
+		if err != nil {
+			return "", err
+		}
+		args = append(args, codexArgs...)
 	case agents.ProviderClaude:
 		args = append(args, "-p", "--output-format", "json", "--allowedTools", "Read", "--cwd", workdir)
 		args = append(args, profile.Args...)
@@ -234,6 +236,76 @@ func runCLIJudge(ctx context.Context, binary string, prefixArgs []string, profil
 	default:
 		return "", fmt.Errorf("judges: CLI provider %q is not implemented yet", profile.Provider)
 	}
+}
+
+func codexJudgeExecArgs(profileArgs []string, workdir, outputPath string) ([]string, error) {
+	if err := validateCodexJudgeProfileArgs(profileArgs); err != nil {
+		return nil, err
+	}
+	args := []string{
+		"exec",
+		"--sandbox", "read-only",
+		"--skip-git-repo-check",
+		"--ephemeral",
+		"-C", workdir,
+	}
+	args = append(args, profileArgs...)
+	args = append(args, "-o", outputPath, "-")
+	return args, nil
+}
+
+func validateCodexJudgeProfileArgs(args []string) error {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--full-auto", "--dangerously-bypass-approvals-and-sandbox":
+			return fmt.Errorf("judges: codex judge profile arg %q is not allowed", arg)
+		case "--sandbox", "-s":
+			if i+1 >= len(args) {
+				return fmt.Errorf("judges: codex judge profile arg %q requires a value", arg)
+			}
+			if args[i+1] != "read-only" {
+				return fmt.Errorf("judges: codex judge profile sandbox must remain read-only")
+			}
+			i++
+		case "-c", "--config":
+			if i+1 >= len(args) {
+				return fmt.Errorf("judges: codex judge profile arg %q requires a value", arg)
+			}
+			if codexJudgeConfigOverrideTouchesSafety(args[i+1]) {
+				return fmt.Errorf("judges: codex judge profile config override %q is not allowed", args[i+1])
+			}
+			i++
+		default:
+			if strings.HasPrefix(arg, "--sandbox=") {
+				if strings.TrimPrefix(arg, "--sandbox=") != "read-only" {
+					return fmt.Errorf("judges: codex judge profile sandbox must remain read-only")
+				}
+				continue
+			}
+			if strings.HasPrefix(arg, "-s=") {
+				if strings.TrimPrefix(arg, "-s=") != "read-only" {
+					return fmt.Errorf("judges: codex judge profile sandbox must remain read-only")
+				}
+				continue
+			}
+			if strings.HasPrefix(arg, "--config=") {
+				value := strings.TrimPrefix(arg, "--config=")
+				if codexJudgeConfigOverrideTouchesSafety(value) {
+					return fmt.Errorf("judges: codex judge profile config override %q is not allowed", value)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func codexJudgeConfigOverrideTouchesSafety(value string) bool {
+	key, _, _ := strings.Cut(value, "=")
+	key = strings.TrimSpace(key)
+	return strings.Contains(key, "sandbox") ||
+		strings.Contains(key, "approval") ||
+		strings.Contains(key, "shell_environment_policy")
 }
 
 func readModelJudgeResponse(path string) (modelJudgeResponse, error) {

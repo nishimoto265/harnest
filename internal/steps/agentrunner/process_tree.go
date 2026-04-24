@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 )
 
 type DescendantTracker struct {
@@ -409,7 +411,7 @@ func sessionProcesses(sessionID int) ([]int, error) {
 	if sessionID <= 0 {
 		return nil, nil
 	}
-	psOutput, err := exec.Command("ps", "-axo", "pid=,sess=").Output()
+	psOutput, err := psOutput("-axo", "pid=,sess=")
 	if err != nil {
 		return nil, err
 	}
@@ -489,7 +491,7 @@ type processParent struct {
 }
 
 func processParents() ([]processParent, error) {
-	psOutput, err := exec.Command("ps", "-axo", "pid=,ppid=").Output()
+	psOutput, err := psOutput("-axo", "pid=,ppid=")
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +519,7 @@ func processGroupMembers(pgid int) ([]int, error) {
 	if pgid <= 0 {
 		return nil, nil
 	}
-	psOutput, err := exec.Command("ps", "-axo", "pid=,pgid=").Output()
+	psOutput, err := psOutput("-axo", "pid=,pgid=")
 	if err != nil {
 		return nil, err
 	}
@@ -541,6 +543,15 @@ func processGroupMembers(pgid int) ([]int, error) {
 		return nil, err
 	}
 	return pids, nil
+}
+
+func psOutput(args ...string) ([]byte, error) {
+	cmd, err := processenv.TrustedCommand("ps", args...)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = processenv.SanitizeForLocalExec()
+	return cmd.Output()
 }
 
 func samePIDSet(a, b []int) bool {
