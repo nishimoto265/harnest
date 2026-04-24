@@ -1345,7 +1345,25 @@ func TestRunDetectLoopDrainsResumeQueueBeforeFreshDetection(t *testing.T) {
 	require.NoError(t, os.Chdir(root))
 	t.Cleanup(func() { _ = os.Chdir(originalWD) })
 
-	stub := &stubPipelineRunner{}
+	stub := &stubPipelineRunner{
+		onRun: func(pr int, opts orchestrator.RunOptions) error {
+			if opts.RunID == "" {
+				return nil
+			}
+			require.Equal(t, 301, pr)
+			require.Equal(t, runID, opts.RunID)
+			return state.NewWriter(ctx).Append(contracts.StateEntry{
+				Kind: contracts.StateKindPromoted,
+				Value: contracts.StateEntryPromoted{
+					Kind:  contracts.StateKindPromoted,
+					PR:    301,
+					RunID: runID,
+					Step:  contracts.FailedStep70,
+					At:    time.Date(2026, 4, 21, 12, 5, 0, 0, time.UTC),
+				},
+			})
+		},
+	}
 	originalNewPipelineRunner := newPipelineRunner
 	originalDetectMergedPRs := detectMergedPRs
 	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
@@ -1398,7 +1416,25 @@ func TestRunDetectLoopDoesNotFreshReenqueueResumedPRInSameTick(t *testing.T) {
 	require.NoError(t, os.Chdir(root))
 	t.Cleanup(func() { _ = os.Chdir(originalWD) })
 
-	stub := &stubPipelineRunner{}
+	stub := &stubPipelineRunner{
+		onRun: func(pr int, opts orchestrator.RunOptions) error {
+			if opts.RunID == "" {
+				return nil
+			}
+			require.Equal(t, 307, pr)
+			require.Equal(t, runID, opts.RunID)
+			return state.NewWriter(ctx).Append(contracts.StateEntry{
+				Kind: contracts.StateKindPromoted,
+				Value: contracts.StateEntryPromoted{
+					Kind:  contracts.StateKindPromoted,
+					PR:    307,
+					RunID: runID,
+					Step:  contracts.FailedStep70,
+					At:    time.Date(2026, 4, 21, 12, 5, 0, 0, time.UTC),
+				},
+			})
+		},
+	}
 	originalNewPipelineRunner := newPipelineRunner
 	originalDetectMergedPRs := detectMergedPRs
 	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
@@ -1419,6 +1455,72 @@ func TestRunDetectLoopDoesNotFreshReenqueueResumedPRInSameTick(t *testing.T) {
 	require.Len(t, stub.opts, 2)
 	assert.Equal(t, runID, stub.opts[0].RunID)
 	assert.Empty(t, stub.opts[1].RunID)
+}
+
+func TestRunDetectLoopSkipsFreshDetectionWhenResumeRemainsNonTerminal(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	writeTestConfig(t, root, runsBase, worktreeBase)
+
+	runID := contracts.RunID("2026-04-21-PR309-abcdef0")
+	ctx := mustNewRunCtx(t, runID, runsBase, worktreeBase)
+	require.NoError(t, state.NewWriter(ctx).Append(contracts.StateEntry{
+		Kind: contracts.StateKindInterrupted,
+		Value: contracts.StateEntryInterrupted{
+			Kind:   contracts.StateKindInterrupted,
+			PR:     309,
+			RunID:  runID,
+			Step:   contracts.FailedStep20,
+			Reason: contracts.InterruptedReasonUnknown,
+			At:     time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}))
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	stub := &stubPipelineRunner{
+		onRun: func(pr int, opts orchestrator.RunOptions) error {
+			require.Equal(t, 309, pr)
+			require.Equal(t, runID, opts.RunID)
+			return state.NewWriter(ctx).Append(contracts.StateEntry{
+				Kind: contracts.StateKindInterrupted,
+				Value: contracts.StateEntryInterrupted{
+					Kind:   contracts.StateKindInterrupted,
+					PR:     309,
+					RunID:  runID,
+					Step:   contracts.FailedStep30,
+					Reason: contracts.InterruptedReasonUnknown,
+					At:     time.Date(2026, 4, 21, 12, 5, 0, 0, time.UTC),
+				},
+			})
+		},
+	}
+	originalNewPipelineRunner := newPipelineRunner
+	originalDetectMergedPRs := detectMergedPRs
+	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
+		return stub, nil
+	}
+	detectMergedPRs = func(context.Context, config.Config, string) ([]detect.MergedPR, error) {
+		require.Fail(t, "detect should not run while a resumed run remains non-terminal")
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		newPipelineRunner = originalNewPipelineRunner
+		detectMergedPRs = originalDetectMergedPRs
+	})
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--detect-loop"})
+	require.NoError(t, cmd.Execute())
+	assert.Equal(t, []int{309}, stub.prs)
+	require.Len(t, stub.opts, 1)
+	assert.Equal(t, runID, stub.opts[0].RunID)
 }
 
 func TestRunDetectLoopStopsWhenResumeCreatesNeedsRecoverySentinel(t *testing.T) {
