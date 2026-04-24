@@ -244,6 +244,48 @@ func TestCleanupProcessTree_CleansKnownGroupAndSessionAfterLeaderExit(t *testing
 	require.Equal(t, 1, sessionKills)
 }
 
+func TestCleanupProcessTree_AllowsUnavailableMemberInspectionAfterLeaderExit(t *testing.T) {
+	originalLookup := lookupProcessStartTime
+	originalGroupKill := killProcessGroupUntilGoneSignal
+	originalGroupMembers := processGroupMembersUntilGoneList
+	originalSessionList := sessionProcessesUntilGoneList
+	originalSessionKill := killSessionProcessesUntilGoneKill
+	t.Cleanup(func() {
+		lookupProcessStartTime = originalLookup
+		killProcessGroupUntilGoneSignal = originalGroupKill
+		processGroupMembersUntilGoneList = originalGroupMembers
+		sessionProcessesUntilGoneList = originalSessionList
+		killSessionProcessesUntilGoneKill = originalSessionKill
+	})
+
+	lookupProcessStartTime = func(int) (string, error) {
+		return "", syscall.ESRCH
+	}
+	groupKills := 0
+	killProcessGroupUntilGoneSignal = func(int) error {
+		groupKills++
+		return nil
+	}
+	processGroupMembersUntilGoneList = func(int) ([]int, error) {
+		return nil, exec.ErrNotFound
+	}
+	sessionProcessesUntilGoneList = func(int) ([]int, error) {
+		return nil, exec.ErrNotFound
+	}
+	killSessionProcessesUntilGoneKill = func([]int) error {
+		t.Fatal("must not kill session without a member list")
+		return nil
+	}
+
+	err := CleanupProcessTree(ProcessLease{
+		PID:       4242,
+		PGID:      4242,
+		StartTime: "Tue Apr 22 10:00:00 2026",
+	}, 4242, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, groupKills)
+}
+
 func TestCleanupProcessTree_KillsBackgroundDescendantAfterRootExit(t *testing.T) {
 	requireProcessInspection(t)
 

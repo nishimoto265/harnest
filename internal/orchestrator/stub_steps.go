@@ -225,6 +225,7 @@ func (s step60Step) Run(ctx context.Context, run *StepRunContext) error {
 	if run != nil && run.Config != nil {
 		cfg = run.Config
 	}
+	pass1RubricVersion := step30RubricVersionForStep60(run.IO)
 	primary, err := judges.NewJudgeFromConfig(cfg, contracts.JudgeRolePrimary)
 	if err != nil {
 		return err
@@ -238,11 +239,12 @@ func (s step60Step) Run(ctx context.Context, run *StepRunContext) error {
 		return err
 	}
 	if err := step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
-		IO:          run.IO,
-		TaskPackage: run.TaskPackage,
-		Primary:     primary,
-		Secondary:   secondary,
-		Arbiter:     arbiter,
+		IO:            run.IO,
+		TaskPackage:   run.TaskPackage,
+		RubricVersion: pass1RubricVersion,
+		Primary:       primary,
+		Secondary:     secondary,
+		Arbiter:       arbiter,
 	}); err != nil {
 		return err
 	}
@@ -253,15 +255,15 @@ func (s step60Step) Run(ctx context.Context, run *StepRunContext) error {
 	if err != nil {
 		return err
 	}
-	versions, err := step60ScoringVersions(run.IO)
+	step60Versions, err := step60ScoringVersions(run.IO)
 	if err != nil {
 		return err
 	}
 	req := stepio.Step60Request{
 		TaskPackage:    *run.TaskPackage,
 		ScorableAgents: scorableAgents,
-		RubricVersion:  versions.RubricVersion,
-		PromptVersion:  versions.PromptVersion,
+		RubricVersion:  step60Versions.RubricVersion,
+		PromptVersion:  step60Versions.PromptVersion,
 	}
 	markerPath, err := run.IO.ResolveRunRelative("60/done.marker")
 	if err != nil {
@@ -284,6 +286,14 @@ func (s step60Step) Run(ctx context.Context, run *StepRunContext) error {
 	}
 	_, err = s.decode(payload, req)
 	return err
+}
+
+func step30RubricVersionForStep60(runIO internalio.RunContext) string {
+	versions, err := step30ScoringVersions(runIO)
+	if err != nil {
+		return ""
+	}
+	return versions.RubricVersion
 }
 
 type scoringVersions struct {

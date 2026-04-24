@@ -1896,12 +1896,14 @@ type scriptedStep60Step struct {
 }
 
 func (s scriptedStep60Step) Run(ctx context.Context, run *StepRunContext) error {
+	pass1RubricVersion := step30RubricVersionForStep60(run.IO)
 	if err := step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
-		IO:          run.IO,
-		TaskPackage: run.TaskPackage,
-		Primary:     orchestratorJudge{score: 95},
-		Secondary:   orchestratorJudge{score: 94},
-		Arbiter:     orchestratorJudge{score: 95},
+		IO:            run.IO,
+		TaskPackage:   run.TaskPackage,
+		RubricVersion: pass1RubricVersion,
+		Primary:       orchestratorJudge{score: 95},
+		Secondary:     orchestratorJudge{score: 94},
+		Arbiter:       orchestratorJudge{score: 95},
 	}); err != nil {
 		return err
 	}
@@ -1912,11 +1914,15 @@ func (s scriptedStep60Step) Run(ctx context.Context, run *StepRunContext) error 
 	if err != nil {
 		return err
 	}
+	versions, err := step60ScoringVersions(run.IO)
+	if err != nil {
+		return err
+	}
 	req := stepio.Step60Request{
 		TaskPackage:    *run.TaskPackage,
 		ScorableAgents: scorableAgents,
-		RubricVersion:  "default",
-		PromptVersion:  "phase0-stub",
+		RubricVersion:  versions.RubricVersion,
+		PromptVersion:  versions.PromptVersion,
 	}
 	markerPath, err := run.IO.ResolveRunRelative("60/done.marker")
 	if err != nil {

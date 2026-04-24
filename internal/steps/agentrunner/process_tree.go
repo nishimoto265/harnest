@@ -281,6 +281,9 @@ func killProcessGroupUntilGoneOwned(lease ProcessLease, maxWait, interval time.D
 		members, err := processGroupMembersUntilGoneList(lease.PGID)
 		if err != nil {
 			if isProcessInspectionUnavailable(err) {
+				if status == processIdentityGone {
+					return lastErr
+				}
 				return errors.Join(lastErr, fmt.Errorf("%w: pgid=%d", ErrCleanupInspectionUnavailable, lease.PGID))
 			}
 			return errors.Join(lastErr, err)
@@ -328,6 +331,9 @@ func killSessionProcessesUntilGoneOwned(lease ProcessLease, sessionID int, maxWa
 		pids, err := sessionProcessesUntilGoneList(sessionID)
 		if err != nil {
 			if isProcessInspectionUnavailable(err) {
+				if status == processIdentityGone {
+					return lastErr
+				}
 				return errors.Join(lastErr, fmt.Errorf("%w: session_id=%d", ErrCleanupInspectionUnavailable, sessionID))
 			}
 			return errors.Join(lastErr, err)
