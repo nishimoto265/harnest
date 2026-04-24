@@ -41,7 +41,7 @@ func (g RealGitOps) RemoteHead(ctx context.Context, branch string) (string, erro
 
 func (g RealGitOps) PushForceWithLease(ctx context.Context, branch, targetSHA, expected string) error {
 	remote := g.remoteName()
-	remoteURL := g.remoteURL(ctx, remote)
+	remoteURL := g.remotePushURL(ctx, remote)
 	refspec := fmt.Sprintf("%s:%s", targetSHA, branch)
 	lease := fmt.Sprintf("--force-with-lease=%s:%s", branch, expected)
 	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "push", remote, refspec, lease)
@@ -90,4 +90,20 @@ func (g RealGitOps) remoteURL(ctx context.Context, remote string) string {
 		return remoteURL
 	}
 	return remote
+}
+
+func (g RealGitOps) remotePushURL(ctx context.Context, remote string) string {
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "remote", "get-url", "--push", remote)
+	if err != nil {
+		return g.remoteURL(ctx, remote)
+	}
+	cmd.Env = processenv.GitLocalEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return g.remoteURL(ctx, remote)
+	}
+	if remoteURL := strings.TrimSpace(string(out)); remoteURL != "" {
+		return remoteURL
+	}
+	return g.remoteURL(ctx, remote)
 }

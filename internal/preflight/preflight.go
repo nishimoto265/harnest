@@ -154,8 +154,13 @@ func (c Checker) Check(ctx context.Context, cfg config.Config) PreflightResult {
 	if cfg.Repo.BestBranch == "" {
 		failures = append(failures, Failure{Name: "repo.best_branch", Detail: "config: repo.best_branch is required"})
 	}
-	if policyBranch, ok := cfg.PolicyBranch(); ok && policyBranch == cfg.Repo.BestBranch {
-		failures = append(failures, Failure{Name: "repo.policy_branch", Detail: "config: repo.policy_branch must be distinct from repo.best_branch"})
+	if policyBranch, ok := cfg.PolicyBranch(); ok {
+		if policyBranch == cfg.Repo.BestBranch {
+			failures = append(failures, Failure{Name: "repo.policy_branch", Detail: "config: repo.policy_branch must be distinct from repo.best_branch"})
+		}
+		if policyBranch == cfg.Repo.DefaultBranch {
+			failures = append(failures, Failure{Name: "repo.policy_branch", Detail: "config: repo.policy_branch must be distinct from repo.default_branch"})
+		}
 	}
 	repoRoot, err := cfg.RepoRoot()
 	if err != nil {
@@ -165,6 +170,11 @@ func (c Checker) Check(ctx context.Context, cfg config.Config) PreflightResult {
 		failures = appendFailure(failures, failure)
 		if failure == nil {
 			failures = appendFailure(failures, c.checkRepoSlugMatches(remoteURL, cfg.Repo.GitHub))
+			pushURLs, pushFailure := c.originPushURLs(ctx, repoRoot)
+			failures = appendFailure(failures, pushFailure)
+			if pushFailure == nil {
+				failures = append(failures, c.checkOriginPushURLs(remoteURL, pushURLs, cfg.Repo.GitHub)...)
+			}
 			failures = appendFailure(failures, c.checkRemoteBranch(ctx, repoRoot, remoteURL, cfg.Repo.BestBranch))
 			if policyBranch, ok := cfg.PolicyBranch(); ok {
 				failures = appendFailure(failures, c.checkRemoteBranchNamed(ctx, repoRoot, remoteURL, policyBranch, "repo.policy_branch"))
@@ -281,6 +291,34 @@ func (c Checker) originRemoteURL(ctx context.Context, repoRoot string) (string, 
 	return strings.TrimSpace(string(output)), nil
 }
 
+func (c Checker) originPushURLs(ctx context.Context, repoRoot string) ([]string, *Failure) {
+	resolved, err := c.deps.LookPath("git")
+	if err != nil {
+		return nil, &Failure{Name: "repo.github", Detail: err.Error()}
+	}
+	output, err := c.deps.RunGitLocal(ctx, resolved, "-C", repoRoot, "remote", "get-url", "--push", "--all", "origin")
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return nil, &Failure{Name: "repo.github", Detail: detail}
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	pushURLs := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pushURLs = append(pushURLs, line)
+	}
+	if len(pushURLs) == 0 {
+		return nil, &Failure{Name: "repo.github", Detail: "origin push url is empty"}
+	}
+	return pushURLs, nil
+}
+
 func (c Checker) checkRemoteBranch(ctx context.Context, repoRoot, remoteURL, branch string) *Failure {
 	return c.checkRemoteBranchNamed(ctx, repoRoot, remoteURL, branch, "repo.best_branch")
 }
@@ -316,6 +354,35 @@ func (c Checker) checkRepoSlugMatches(remoteURL, configured string) *Failure {
 		return &Failure{Name: "repo.github", Detail: fmt.Sprintf("config: repo.github=%q does not match origin=%q", configured, info.Slug)}
 	}
 	return nil
+}
+
+func (c Checker) checkOriginPushURLs(fetchURL string, pushURLs []string, configured string) []Failure {
+	allowedHosts := gitremote.AllowedGitHubHostsFromEnv(processenv.SanitizeForNetworkExec())
+	fetchInfo, err := gitremote.ParseGitHubRemote(fetchURL, allowedHosts)
+	if err != nil {
+		return []Failure{{Name: "repo.github", Detail: err.Error()}}
+	}
+
+	failures := make([]Failure, 0)
+	for _, pushURL := range pushURLs {
+		pushInfo, err := gitremote.ParseGitHubRemote(pushURL, allowedHosts)
+		if err != nil {
+			failures = append(failures, Failure{Name: "repo.github", Detail: fmt.Sprintf("origin push url %q: %s", pushURL, err.Error())})
+			continue
+		}
+		if !strings.EqualFold(pushInfo.Host, fetchInfo.Host) {
+			failures = append(failures, Failure{Name: "repo.github", Detail: fmt.Sprintf("origin push url %q host=%q does not match origin fetch host=%q", pushURL, pushInfo.Host, fetchInfo.Host)})
+			continue
+		}
+		if !strings.EqualFold(pushInfo.Slug, fetchInfo.Slug) {
+			failures = append(failures, Failure{Name: "repo.github", Detail: fmt.Sprintf("origin push url %q repo=%q does not match origin fetch repo=%q", pushURL, pushInfo.Slug, fetchInfo.Slug)})
+			continue
+		}
+		if strings.TrimSpace(configured) != "" && !strings.EqualFold(pushInfo.Slug, configured) {
+			failures = append(failures, Failure{Name: "repo.github", Detail: fmt.Sprintf("origin push url %q repo=%q does not match config repo.github=%q", pushURL, pushInfo.Slug, configured)})
+		}
+	}
+	return failures
 }
 
 func checkWritableDirectory(name string, path string) *Failure {

@@ -37,3 +37,17 @@ func TestParseGitHubRemoteAllowsConfiguredGHHost(t *testing.T) {
 	assert.Equal(t, "github.example.com", info.Host)
 	assert.Equal(t, "owner/repo", info.Slug)
 }
+
+func TestParseGitHubRemoteRejectsSchemeLessLocalPathStyleRemote(t *testing.T) {
+	for _, remoteURL := range []string{
+		"github.com/owner/repo",
+		"github.example.com/owner/repo",
+	} {
+		t.Run(remoteURL, func(t *testing.T) {
+			_, err := ParseGitHubRemote(remoteURL, []string{"github.example.com"})
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "could not parse GitHub remote url")
+		})
+	}
+}
