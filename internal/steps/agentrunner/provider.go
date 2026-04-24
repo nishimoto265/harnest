@@ -5,17 +5,21 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/nishimoto265/auto-improve/internal/agents"
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 )
 
 func ImplementerCommand(profile agents.Profile, workdir string) (string, []string, error) {
 	switch profile.Provider {
 	case agents.ProviderClaude:
-		return profile.Binary, append([]string(nil), profile.Args...), nil
+		binary, prefixArgs, err := PrepareProviderBinary(profile.Provider, profile.Binary)
+		if err != nil {
+			return "", nil, err
+		}
+		return binary, append(prefixArgs, profile.Args...), nil
 	case agents.ProviderCodex:
 		binary, prefixArgs, err := PrepareProviderBinary(profile.Provider, profile.Binary)
 		if err != nil {
@@ -61,7 +65,7 @@ func prepareNodeShebangBinary(binary string) (string, []string, error) {
 	}
 	needsNode, err := scriptNeedsNode(resolved)
 	if err != nil || !needsNode {
-		return binary, nil, err
+		return resolved, nil, err
 	}
 	nodeBinary, err := resolveNodeBinary(filepath.Dir(resolved))
 	if err != nil {
@@ -75,9 +79,9 @@ func resolveBinary(binary string) (string, error) {
 		return "", fmt.Errorf("agentrunner: binary is required")
 	}
 	if filepath.IsAbs(binary) {
-		return binary, nil
+		return processenv.TrustedLookPath(binary)
 	}
-	return exec.LookPath(binary)
+	return processenv.TrustedLookPath(binary)
 }
 
 func scriptNeedsNode(path string) (bool, error) {
@@ -98,5 +102,5 @@ func resolveNodeBinary(binaryDir string) (string, error) {
 	if info, err := os.Stat(sibling); err == nil && !info.IsDir() {
 		return sibling, nil
 	}
-	return exec.LookPath("node")
+	return processenv.TrustedLookPath("node")
 }

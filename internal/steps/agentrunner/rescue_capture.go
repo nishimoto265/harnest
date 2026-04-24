@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -92,7 +91,10 @@ func StreamGitOutputWithLimit(ctx context.Context, worktreePath, errPrefix, dest
 	cmdCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "git", append([]string{"-C", worktreePath}, args...)...)
+	cmd, err := processenv.TrustedCommandContext(cmdCtx, "git", append([]string{"-C", worktreePath}, args...)...)
+	if err != nil {
+		return closeWithErr(fmt.Errorf("%s: resolve git: %w", errPrefix, err))
+	}
 	cmd.Env = processenv.Sanitize()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

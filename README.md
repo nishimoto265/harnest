@@ -48,6 +48,10 @@ fill in the `repo.github`, `repo.root`, `repo.default_branch`, and
 `repo.best_branch` fields too. If you want adopted rules to persist in the
 target repository instead of only under the local `runs` cache, also configure
 `repo.policy_branch` and create that remote branch ahead of time.
+Subprocess command names are resolved against the fixed trusted runtime PATH
+(`/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin`), not the
+caller shell's ambient `PATH`; use absolute paths for `claude` / `codex` if
+they are installed elsewhere.
 `task_prompt.source` controls how step10 synthesizes the shared task brief for
 pass1/pass2. The default `auto` mode prefers linked issues when present but
 still keeps changed tests/files and a diff excerpt as supporting context.

@@ -73,14 +73,14 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 	timeoutCtx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(timeoutCtx, req.Binary, req.Args...)
-	if resolved, err := exec.LookPath(req.Binary); err == nil {
-		cmd.Path = resolved
+	cmd, err := processenv.TrustedCommandContext(timeoutCtx, req.Binary, req.Args...)
+	if err != nil {
+		return CommandResult{}, fmt.Errorf("%s: resolve command binary: %w", req.ErrPrefix, err)
 	}
 	cmd.Dir = req.Workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin = strings.NewReader(req.Prompt)
-	cmd.Env = withBinaryDirOnPATH(processenv.Sanitize(req.Env...), cmd.Path)
+	cmd.Env = processenv.Sanitize(req.Env...)
 
 	stdoutTail := newTailBuffer(8 << 10)
 	stderrTail := newTailBuffer(8 << 10)
@@ -159,30 +159,6 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 		return result, nil
 	}
 	return CommandResult{}, waitErr
-}
-
-func withBinaryDirOnPATH(env []string, binaryPath string) []string {
-	if binaryPath == "" {
-		return env
-	}
-	dir := filepath.Dir(binaryPath)
-	if dir == "." || dir == "" {
-		return env
-	}
-	out := append([]string(nil), env...)
-	for i, item := range out {
-		if !strings.HasPrefix(item, "PATH=") {
-			continue
-		}
-		current := strings.TrimPrefix(item, "PATH=")
-		if current == "" {
-			out[i] = "PATH=" + dir
-			return out
-		}
-		out[i] = "PATH=" + dir + string(os.PathListSeparator) + current
-		return out
-	}
-	return append(out, "PATH="+dir)
 }
 
 func InterruptionReason(exitCode int, stdout, stderr []byte) contracts.InterruptedReason {

@@ -45,7 +45,11 @@ func NewWithRunner(processedPath string, runner commandRunner) Detector {
 }
 
 func defaultCommandRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := detectCommandContext(ctx, name, args...)
+	resolved, err := processenv.TrustedLookPath(name)
+	if err != nil {
+		return nil, err
+	}
+	cmd := detectCommandContext(ctx, resolved, args...)
 	cmd.Env = processenv.SanitizeForNetworkExec()
 	return cmd.CombinedOutput()
 }

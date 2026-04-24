@@ -41,6 +41,8 @@ var (
 	ErrRescueAbortedLeaseActive = errors.New("step50: rescue aborted because lease is active")
 )
 
+var collectSuccessDiffBytes = agentrunner.SuccessDiffBytes
+
 type RunContext struct {
 	Config      *config.Config
 	Logger      *slog.Logger
@@ -606,7 +608,7 @@ func loadChecklistArtifact(ctx context.Context, worktreePath string, runID contr
 }
 
 func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte, error) {
-	return agentrunner.SuccessDiffBytes(ctx, worktreePath, baseSHA, "step50")
+	return collectSuccessDiffBytes(ctx, worktreePath, baseSHA, "step50")
 }
 
 func shouldWriteTimeoutManifest(err error, execCtx context.Context) bool {

@@ -29,8 +29,9 @@ func TestPerformRescue_DiffOverLimitRequiresManualRecovery(t *testing.T) {
   head -c $(((32 << 20) + 1)) /dev/zero | tr '\0' 'x'
   exit 0
 fi`)
+	useFakeGitWrapper(t, filepath.Join(wrapperDir, "git"))
+	useFakeStreamGitOutputWithLimit(t, filepath.Join(wrapperDir, "git"))
 	t.Setenv("REAL_GIT", realGit)
-	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	stubQuiescentRescueWorktree(t)
 
 	_, err = fx.step.performRescue(context.Background(), fx.run, allocation, fx.agentDir, staleResumeState(fx.baseSHA))

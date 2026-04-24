@@ -1,7 +1,11 @@
 package processenv
 
 import (
+	"context"
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -9,6 +13,68 @@ import (
 // Callers MUST NOT inherit the caller's $PATH since shell-init payloads can
 // inject attacker-controlled binaries earlier on the path.
 const trustedPATH = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
+
+// TrustedLookPath resolves bare command names against trustedPATH instead of
+// the parent process PATH. Absolute paths are allowed for explicit operator
+// configuration; relative paths with separators are rejected so they cannot
+// depend on the caller's current working directory.
+func TrustedLookPath(file string) (string, error) {
+	if file == "" {
+		return "", fmt.Errorf("processenv: executable name is required")
+	}
+	if filepath.IsAbs(file) {
+		if err := executableFile(file); err != nil {
+			return "", fmt.Errorf("processenv: executable %q is not usable: %w", file, err)
+		}
+		return file, nil
+	}
+	if strings.ContainsRune(file, os.PathSeparator) {
+		return "", fmt.Errorf("processenv: relative executable path %q is not allowed; use an absolute path or a bare name in trusted PATH", file)
+	}
+	for _, dir := range filepath.SplitList(trustedPATH) {
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, file)
+		if err := executableFile(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("processenv: executable %q not found in trusted PATH %q: %w", file, trustedPATH, exec.ErrNotFound)
+}
+
+// TrustedCommand returns an exec.Cmd whose path has already been resolved by
+// TrustedLookPath, avoiding exec.Command's implicit parent-PATH lookup.
+func TrustedCommand(name string, args ...string) (*exec.Cmd, error) {
+	resolved, err := TrustedLookPath(name)
+	if err != nil {
+		return nil, err
+	}
+	return exec.Command(resolved, args...), nil
+}
+
+// TrustedCommandContext is the context-aware variant of TrustedCommand.
+func TrustedCommandContext(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
+	resolved, err := TrustedLookPath(name)
+	if err != nil {
+		return nil, err
+	}
+	return exec.CommandContext(ctx, resolved, args...), nil
+}
+
+func executableFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("is a directory")
+	}
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("permission denied")
+	}
+	return nil
+}
 
 // Sanitize returns a strict allowlist env for purely local subprocess (e.g. the
 // `claude` agent binary and git operations scoped to a carved worktree).

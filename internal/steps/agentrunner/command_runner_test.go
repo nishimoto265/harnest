@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -109,4 +110,35 @@ func TestRunCommand_OnStartFailureStillRunsCleanup(t *testing.T) {
 	default:
 		t.Fatal("cleanup was not called after OnStart failure")
 	}
+}
+
+func TestRunCommand_IgnoresParentPathShadow(t *testing.T) {
+	shadowDir := t.TempDir()
+	markerPath := filepath.Join(shadowDir, "shadow-ran")
+	shadowPath := filepath.Join(shadowDir, "sh")
+	require.NoError(t, os.WriteFile(shadowPath, []byte(fmt.Sprintf("#!/bin/sh\ntouch %q\nexit 97\n", markerPath)), 0o755))
+	t.Setenv("PATH", shadowDir)
+
+	sessionPath := filepath.Join(t.TempDir(), "session.log")
+	result, err := RunCommand(context.Background(), CommandRequest{
+		Binary:      "sh",
+		Args:        []string{"-c", "printf trusted"},
+		Workdir:     t.TempDir(),
+		SessionPath: sessionPath,
+		Timeout:     time.Second,
+		ErrPrefix:   "test",
+	})
+
+	require.NoError(t, err)
+	require.False(t, result.TimedOut)
+	assertFileContains(t, sessionPath, "trusted")
+	_, statErr := os.Stat(markerPath)
+	require.True(t, os.IsNotExist(statErr), "parent PATH shadow binary was executed")
+}
+
+func assertFileContains(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(data), want)
 }

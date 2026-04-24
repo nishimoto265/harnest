@@ -13,8 +13,8 @@ worktree:
 task_prompt:
   source: "auto" # auto | issue | pr | diff_synth
 agent_config_path: "./agents.yaml" # Optional; defaults to ./agents.yaml when present, otherwise legacy role defaults.
-claude_cli_path: "claude" # Claude CLI executable path or command name on PATH.
-codex_cli_path: "codex" # Codex CLI executable path or command name on PATH.
+claude_cli_path: "claude" # Absolute path, or bare command name found in the trusted runtime PATH.
+codex_cli_path: "codex" # Absolute path, or bare command name found in the trusted runtime PATH.
 preflight_timeout_sec: 30 # Timeout for preflight checks in seconds.
 rescue_max_retries: 3 # Max worktree rescue attempts before manual recovery.
 registry_high_threshold: 1501 # Warn when the registry line count exceeds this value.

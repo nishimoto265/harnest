@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -21,7 +20,10 @@ type RealGitOps struct {
 
 func (g RealGitOps) RemoteHead(ctx context.Context, branch string) (string, error) {
 	remote := g.remoteName()
-	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "ls-remote", "--heads", remote, branch)
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "ls-remote", "--heads", remote, branch)
+	if err != nil {
+		return "", err
+	}
 	// ls-remote hits the network; preserve SSH_AUTH_SOCK / GIT_ASKPASS / GH_TOKEN.
 	cmd.Env = processenv.SanitizeForNetworkExec()
 	out, err := cmd.Output()
@@ -42,7 +44,10 @@ func (g RealGitOps) PushForceWithLease(ctx context.Context, branch, targetSHA, e
 	remote := g.remoteName()
 	refspec := fmt.Sprintf("%s:%s", targetSHA, branch)
 	lease := fmt.Sprintf("--force-with-lease=%s:%s", branch, expected)
-	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "push", remote, refspec, lease)
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "push", remote, refspec, lease)
+	if err != nil {
+		return err
+	}
 	// push hits the network; preserve SSH_AUTH_SOCK / GIT_ASKPASS / GH_TOKEN.
 	cmd.Env = processenv.SanitizeForNetworkExec()
 	var stderr bytes.Buffer
@@ -74,7 +79,10 @@ func (g RealGitOps) RemoveWorktree(ctx context.Context, path string) error {
 		}
 		return fmt.Errorf("%w: %s", ErrWorktreeUnregistered, path)
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "worktree", "remove", "--force", path)
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "worktree", "remove", "--force", path)
+	if err != nil {
+		return err
+	}
 	cmd.Env = processenv.Sanitize()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -107,7 +115,10 @@ func (g RealGitOps) remoteName() string {
 }
 
 func (g RealGitOps) worktreeBelongsToRepo(ctx context.Context, path string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "worktree", "list", "--porcelain")
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, err
+	}
 	cmd.Env = processenv.Sanitize()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
