@@ -566,6 +566,75 @@ func TestRecoverRollbackWritesRollbackDecisionAndClearsSentinel(t *testing.T) {
 	assert.Equal(t, contracts.StateKindRollback, events[len(events)-1].Kind)
 }
 
+func TestRecoverRollbackAllowsParkedNeedsManualRecoveryWhenBranchAlreadyAtBase(t *testing.T) {
+	root, runsBase, worktreeBase, runID := seedRecoverActionRun(t)
+	runDir := filepath.Join(runsBase, string(runID))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelFilename(runID)), []byte(`{"run_id":"2026-04-21-PR52-abcdef0","pr":52,"reason":"transactional_failure","failed_step":"70","created_at":"2026-04-21T12:00:00Z"}`), 0o644))
+	intention := seedRecoverIntention(runID, contracts.IntentionStageNeedsManualRecovery, strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 64))
+	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
+	intention.FailedStep = contracts.FailedStep70
+	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "70", "intention.json"), intention))
+
+	writeTestConfig(t, root, runsBase, worktreeBase)
+	originalGitFactory := recoverGitOpsForRepo
+	recoverGitOpsForRepo = func(string) step70_decide.GitOps {
+		return &recoverTestGit{head: strings.Repeat("a", 40)}
+	}
+	t.Cleanup(func() { recoverGitOpsForRepo = originalGitFactory })
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"recover", "--run", string(runID), "--rollback"})
+	require.NoError(t, cmd.Execute())
+
+	assert.NoFileExists(t, filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelFilename(runID)))
+	assert.NoFileExists(t, filepath.Join(runDir, "70", "intention.json"))
+	events, err := state.ScanEventsForRun(mustNewRunCtx(t, runID, runsBase, worktreeBase), runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindRollback, events[len(events)-1].Kind)
+}
+
+func TestRecoverRollbackAndAdoptAnywayRefuseAbortedSentinel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "rollback", args: []string{"--rollback"}},
+		{name: "adopt anyway", args: []string{"--adopt-anyway"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, runsBase, worktreeBase, runID := seedRecoverActionRun(t)
+			runDir := filepath.Join(runsBase, string(runID))
+			abortedName := contracts.NeedsRecoverySentinelAbortedFilename(runID)
+			require.NoError(t, os.WriteFile(filepath.Join(runsBase, "needs-recovery", abortedName), []byte(`{"run_id":"2026-04-21-PR52-abcdef0","pr":52,"reason":"manual_abort_pending_cleanup","failed_step":"70","created_at":"2026-04-21T12:00:00Z"}`), 0o644))
+			intention := seedRecoverIntention(runID, contracts.IntentionStageNeedsManualRecovery, strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 64))
+			intention.RecoveryReason = contracts.RollbackReasonManualAbortPendingCleanup
+			intention.FailedStep = contracts.FailedStep70
+			require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "70", "intention.json"), intention))
+
+			writeTestConfig(t, root, runsBase, worktreeBase)
+			originalWD, err := os.Getwd()
+			require.NoError(t, err)
+			require.NoError(t, os.Chdir(root))
+			t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+			cmd := newRootCmd()
+			cmd.SetArgs(append([]string{"recover", "--run", string(runID)}, tc.args...))
+			err = cmd.Execute()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "aborted sentinel")
+			assert.Contains(t, err.Error(), "--finalize-cleanup")
+			assert.FileExists(t, filepath.Join(runsBase, "needs-recovery", abortedName))
+			assert.FileExists(t, filepath.Join(runDir, "70", "intention.json"))
+		})
+	}
+}
+
 func TestRecoverAdoptAnywayPromotesAndClearsSentinel(t *testing.T) {
 	root, runsBase, worktreeBase, runID := seedRecoverActionRun(t)
 	runDir := filepath.Join(runsBase, string(runID))
@@ -793,6 +862,65 @@ func TestRecoverClearSentinelAppendsCompletedForNonTerminalRun(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, events)
 	assert.Equal(t, contracts.StateKindCompleted, events[len(events)-1].Kind)
+}
+
+func TestRecoverClearSentinelDoesNotAppendCompletedAfterTerminalActionWithTrailingWarning(t *testing.T) {
+	root, runsBase, worktreeBase, runID := seedRecoverActionRun(t)
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelFilename(runID)), []byte(`{"run_id":"2026-04-21-PR52-abcdef0","pr":52,"reason":"transactional_failure","failed_step":"70","created_at":"2026-04-21T12:00:00Z"}`), 0o644))
+	ctx := mustNewRunCtx(t, runID, runsBase, worktreeBase)
+	writer := state.NewWriter(ctx)
+	require.NoError(t, writer.Append(contracts.StateEntry{
+		Kind: contracts.StateKindCompleted,
+		Value: contracts.StateEntryCompleted{
+			Kind:   contracts.StateKindCompleted,
+			PR:     52,
+			RunID:  runID,
+			Step:   contracts.FailedStep70,
+			Detail: "already_terminal",
+			At:     time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}))
+	pr := 52
+	source := contracts.WarningSourceStep70
+	step := contracts.FailedStep70
+	count := int64(1501)
+	require.NoError(t, writer.Append(contracts.StateEntry{
+		Kind: contracts.StateKindWarningRegistrySizeHigh,
+		Value: contracts.StateEntryWarning{
+			Kind:   contracts.StateKindWarningRegistrySizeHigh,
+			PR:     &pr,
+			RunID:  &runID,
+			Source: &source,
+			Step:   &step,
+			Count:  &count,
+			At:     time.Date(2026, 4, 21, 12, 1, 0, 0, time.UTC),
+		},
+	}))
+
+	writeTestConfig(t, root, runsBase, worktreeBase)
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"recover", "--run", string(runID), "--clear-sentinel"})
+	require.NoError(t, cmd.Execute())
+
+	events, err := state.ScanEventsForRun(ctx, runID)
+	require.NoError(t, err)
+	completedCount := 0
+	for _, event := range events {
+		if event.Kind == contracts.StateKindCompleted {
+			completedCount++
+			completed, ok := event.Value.(contracts.StateEntryCompleted)
+			require.True(t, ok)
+			assert.NotEqual(t, "sentinel_manually_cleared", completed.Detail)
+		}
+	}
+	assert.Equal(t, 1, completedCount)
+	assert.Equal(t, contracts.StateKindWarningRegistrySizeHigh, events[len(events)-1].Kind)
+	assert.NoFileExists(t, filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelFilename(runID)))
 }
 
 func TestRecoverClearSentinelAllowsMissingTaskPackageAndCandidates(t *testing.T) {

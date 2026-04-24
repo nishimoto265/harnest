@@ -66,7 +66,7 @@ func recoverRollbackUnlocked(ctx context.Context, pr int, runCtx internalio.RunC
 	case !idempotencyHit &&
 		registryHead == intention.RegistryHeadBefore &&
 		(remoteHeadMatchesRollbackBase(remoteHead, target.BestShaBefore)) &&
-		(intention.Stage == contracts.IntentionStagePlanning || intention.Stage == contracts.IntentionStageBranchPushed):
+		recoverRollbackNoopStageAllowed(intention.Stage):
 		if err := handleRollback(ctx, pr, runCtx, pkg, target, *intention, store, writer, deps, reason, pushUnknown); err != nil {
 			return err
 		}
@@ -86,6 +86,17 @@ func recoverRollbackUnlocked(ctx context.Context, pr int, runCtx internalio.RunC
 		}
 	}
 	return removeNeedsRecoverySentinels(runCtx)
+}
+
+func recoverRollbackNoopStageAllowed(stage contracts.IntentionStage) bool {
+	switch stage {
+	case contracts.IntentionStagePlanning,
+		contracts.IntentionStageBranchPushed,
+		contracts.IntentionStageNeedsManualRecovery:
+		return true
+	default:
+		return false
+	}
 }
 
 func RecoverAdoptAnyway(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, store IntentionWriter, deps Deps) error {
