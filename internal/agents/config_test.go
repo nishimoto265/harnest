@@ -68,6 +68,20 @@ func TestLegacyInfersCodexImplementerProviderFromBinary(t *testing.T) {
 	assert.Equal(t, "/opt/bin/codex", impl.Binary)
 }
 
+func TestAllowTestStubProvidersRequiresExplicitEnvGate(t *testing.T) {
+	t.Setenv(AllowTestStubProvidersEnv, "")
+	assert.False(t, AllowTestStubProviders())
+
+	t.Setenv(AllowTestStubProvidersEnv, "1")
+	assert.True(t, AllowTestStubProviders())
+}
+
+func TestIsGatedTestStubProviderPreservesPlainStub(t *testing.T) {
+	assert.False(t, IsGatedTestStubProvider(ProviderStub))
+	assert.True(t, IsGatedTestStubProvider(ProviderStubViolation))
+	assert.True(t, IsGatedTestStubProvider(ProviderStubAdopt))
+}
+
 func TestValidateRejectsUnknownProfileReference(t *testing.T) {
 	cfg := File{
 		Profiles: map[string]Profile{

@@ -3,10 +3,12 @@ package preflight
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,6 +25,38 @@ func TestCheckReportsMissingRequiredTools(t *testing.T) {
 
 			require.False(t, result.OK)
 			assert.Contains(t, failureNames(result.Failures), missing)
+		})
+	}
+}
+
+func TestCheckRejectsGatedTestStubProvidersByDefault(t *testing.T) {
+	t.Setenv(agents.AllowTestStubProvidersEnv, "")
+
+	for _, provider := range []agents.Provider{agents.ProviderStubViolation, agents.ProviderStubAdopt} {
+		t.Run(string(provider), func(t *testing.T) {
+			cfg := loadPreflightConfigWithJudgeProvider(t, provider)
+
+			result := NewWithDependencies(fakeDependencies(t, "")).Check(context.Background(), cfg)
+
+			require.False(t, result.OK)
+			failure, ok := failureByName(result.Failures, string(agents.RoleJudgePrimary))
+			require.True(t, ok)
+			assert.Contains(t, failure.Detail, agents.AllowTestStubProvidersEnv)
+		})
+	}
+}
+
+func TestCheckAcceptsGatedTestStubProvidersWithEnvGate(t *testing.T) {
+	t.Setenv(agents.AllowTestStubProvidersEnv, "1")
+
+	for _, provider := range []agents.Provider{agents.ProviderStubViolation, agents.ProviderStubAdopt} {
+		t.Run(string(provider), func(t *testing.T) {
+			cfg := loadPreflightConfigWithJudgeProvider(t, provider)
+
+			result := NewWithDependencies(fakeDependencies(t, "")).Check(context.Background(), cfg)
+
+			assert.True(t, result.OK, "failures: %+v", result.Failures)
+			assert.NotContains(t, failureNames(result.Failures), string(agents.RoleJudgePrimary))
 		})
 	}
 }
@@ -51,6 +85,44 @@ func testConfig(t *testing.T) config.Config {
 	}
 }
 
+func loadPreflightConfigWithJudgeProvider(t *testing.T, provider agents.Provider) config.Config {
+	t.Helper()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(fmt.Sprintf(`
+repo:
+  github: owner/repo
+  root: %q
+  default_branch: main
+  best_branch: auto-improve/best
+paths:
+  runs: %q
+worktree:
+  base: %q
+`, filepath.Join(dir, "repo"), filepath.Join(dir, "runs"), filepath.Join(dir, "worktrees"))), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "agents.yaml"), []byte(fmt.Sprintf(`
+profiles:
+  claude:
+    provider: claude
+    binary: claude
+  judge-primary:
+    provider: %s
+  judge-secondary:
+    provider: stub
+  judge-arbiter:
+    provider: stub
+roles:
+  implementer: claude
+  judge_primary: judge-primary
+  judge_secondary: judge-secondary
+  judge_arbiter: judge-arbiter
+`, provider)), 0o644))
+
+	cfg, err := config.Load(filepath.Join(dir, "config.yaml"))
+	require.NoError(t, err)
+	return cfg
+}
+
 func TestCheckReportsMissingOperationalRepoFields(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Repo.GitHub = ""
@@ -71,6 +143,7 @@ func fakeDependencies(t *testing.T, missing string) Dependencies {
 	toolPaths := map[string]string{
 		"git":    "/usr/local/bin/git",
 		"gh":     "/usr/local/bin/gh",
+		"curl":   "/usr/local/bin/curl",
 		"jq":     "/usr/local/bin/jq",
 		"yq":     "/usr/local/bin/yq",
 		"lsof":   "/usr/local/bin/lsof",
@@ -150,4 +223,13 @@ func failureNames(failures []Failure) []string {
 		names = append(names, failure.Name)
 	}
 	return names
+}
+
+func failureByName(failures []Failure, name string) (Failure, bool) {
+	for _, failure := range failures {
+		if failure.Name == name {
+			return failure, true
+		}
+	}
+	return Failure{}, false
 }
