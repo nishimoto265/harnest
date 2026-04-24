@@ -19,8 +19,7 @@ import (
 )
 
 const (
-	MaxUntrackedBytes     = 32 << 20
-	EmptyDirtyFingerprint = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	MaxUntrackedBytes = 32 << 20
 )
 
 type State struct {
@@ -450,11 +449,10 @@ func FindExistingDir(agentDir, rescuedDirName, expectedBaseSHA string, nextRetry
 		if state.RescuedHeadSHA != currentHead {
 			continue
 		}
-		if state.DirtyFingerprint == "" {
-			if currentDirtyFingerprint != EmptyDirtyFingerprint {
-				continue
-			}
-		} else if state.DirtyFingerprint != currentDirtyFingerprint {
+		if state.DirtyFingerprint == "" || state.DirtyFingerprint != currentDirtyFingerprint {
+			continue
+		}
+		if !rescueStateHasIgnoredCoverage(state) {
 			continue
 		}
 		if err := verifyState(candidateDir); err != nil {
@@ -469,6 +467,20 @@ func FindExistingDir(agentDir, rescuedDirName, expectedBaseSHA string, nextRetry
 		return "", false, nil
 	}
 	return selectedDir, true, nil
+}
+
+func rescueStateHasIgnoredCoverage(state agentrunner.RescueStateFile) bool {
+	hasIgnoredList := false
+	hasIgnoredSkipped := false
+	for _, artifact := range state.Artifacts {
+		switch artifact.Path {
+		case "ignored.txt":
+			hasIgnoredList = true
+		case "ignored-skipped.txt":
+			hasIgnoredSkipped = true
+		}
+	}
+	return hasIgnoredList && hasIgnoredSkipped
 }
 
 type GitOutputBytesFunc func(context.Context, string, ...string) ([]byte, error)

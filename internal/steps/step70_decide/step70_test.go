@@ -93,6 +93,34 @@ func TestRun_RejectsWhenPolicyBranchAdvancedSinceRunSnapshot(t *testing.T) {
 	assert.NoFileExists(t, mustRunPath(t, runCtx, "70/decision.json"))
 }
 
+func TestRun_PlanningResumeRejectsWhenPolicyBranchAdvancedSinceRunSnapshot(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR1021")
+	policyDir := filepath.Join(runCtx.RunDir(), "policy")
+	require.NoError(t, os.MkdirAll(policyDir, 0o755))
+	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(policyDir, "snapshot.json"), policyrepo.SnapshotMetadata{
+		SchemaVersion: "1",
+		PolicyBranch:  "auto-improve/policy",
+		PolicyHead:    strings.Repeat("1", 40),
+		RegistryHead:  "",
+	}))
+	require.NoError(t, store.Save(planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)))
+	git := &fakeGit{head: strings.Repeat("9", 40)}
+
+	err := Run(context.Background(), 1021, runCtx, pkg, candidates, store, Deps{
+		Git:          git,
+		Resolver:     resolver,
+		Now:          fixedNow(),
+		PolicyBranch: "auto-improve/policy",
+		RepoRoot:     runCtx.RunsBase,
+	})
+
+	var stale *PolicySnapshotStaleError
+	require.ErrorAs(t, err, &stale)
+	assert.Equal(t, "policy_branch_stale", stale.Reason)
+	assert.Empty(t, git.pushCalls)
+	assert.NoFileExists(t, mustRunPath(t, runCtx, "70/decision.json"))
+}
+
 func TestRun_RejectsWhenLocalPolicyRegistryAdvancedSinceRunSnapshot(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR104")
 	policyDir := filepath.Join(runCtx.RunDir(), "policy")

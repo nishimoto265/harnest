@@ -118,14 +118,6 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 		return err
 	}
 
-	preserveWorktrees := true
-	defer func() {
-		if preserveWorktrees {
-			return
-		}
-		_ = cleanupWorktrees(run.IO, run.TaskPackage)
-	}()
-
 	for _, step := range pipelineFrom(start) {
 		if err := ctx.Err(); err != nil {
 			if appendErr := o.appendInterruptedIfContextDone(ctx, run, step, err); appendErr != nil {
@@ -329,13 +321,15 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 					return err
 				}
 			}
-			if err := o.appendTerminalDecision(run); err != nil {
-				return err
-			}
 			if err := o.runSingle(ctx, run, contracts.FailedStep70, o.steps.Archive); err != nil {
 				return err
 			}
-			preserveWorktrees = false
+			if err := cleanupWorktrees(run.IO, run.TaskPackage); err != nil {
+				return err
+			}
+			if err := o.appendTerminalDecision(run); err != nil {
+				return err
+			}
 		}
 		if err := o.loadPersistedArtifacts(run); err != nil {
 			return err

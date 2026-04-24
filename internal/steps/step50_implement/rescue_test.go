@@ -102,6 +102,7 @@ func TestResumeIfNeeded_AdoptsExistingRescueAfterCrashBeforeResumeStateSave(t *t
 
 	rescueDir := filepath.Join(agentDir, rescuedDirName, "existing-rescue")
 	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
+	artifacts := writeIgnoredCoverageArtifacts(t, rescueDir)
 	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
 		ExpectedBaseSHA:  env.run.TaskPackage.BaseSHA,
 		RescuedHeadSHA:   allocation.BaseSHA,
@@ -109,7 +110,7 @@ func TestResumeIfNeeded_AdoptsExistingRescueAfterCrashBeforeResumeStateSave(t *t
 		CommitCount:      0,
 		BundleMode:       agentrunner.RescueBundleModeNone,
 		CreatedAt:        time.Now().UTC(),
-		Artifacts:        []agentrunner.RescueArtifactDigest{},
+		Artifacts:        artifacts,
 		DirtyFingerprint: currentDirtyFingerprint,
 	}))
 
@@ -255,4 +256,18 @@ func rescueDirEntries(t *testing.T, agentDir string) []os.DirEntry {
 	}
 	require.NoError(t, err)
 	return entries
+}
+
+func writeIgnoredCoverageArtifacts(t *testing.T, rescueDir string) []agentrunner.RescueArtifactDigest {
+	t.Helper()
+	paths := []string{"ignored-skipped.txt", "ignored.txt"}
+	artifacts := make([]agentrunner.RescueArtifactDigest, 0, len(paths))
+	for _, rel := range paths {
+		path := filepath.Join(rescueDir, rel)
+		require.NoError(t, os.WriteFile(path, nil, 0o644))
+		digest, err := fileDigest(path)
+		require.NoError(t, err)
+		artifacts = append(artifacts, agentrunner.RescueArtifactDigest{Path: rel, SHA256: digest})
+	}
+	return artifacts
 }

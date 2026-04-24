@@ -1811,6 +1811,11 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 		if target.BestBranch != "" {
 			persistedTarget.BestBranch = target.BestBranch
 		}
+		if reason, err := policySnapshotPreAdoptBlockReason(ctx, runCtx, deps); err != nil {
+			return err
+		} else if reason != "" {
+			return newPolicySnapshotStaleError(reason)
+		}
 		return planningDecision(ctx, pr, runCtx, pkg, candidates, persistedTarget, *intention, store, writer, deps)
 	case contracts.IntentionStageBranchPushed:
 		return resumeBranchPushed(ctx, pr, runCtx, pkg, *intention, store, writer, deps)

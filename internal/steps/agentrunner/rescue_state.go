@@ -40,7 +40,8 @@ type RescueStateFile struct {
 	// resume-state finalize left uncaptured new edits on disk). Empty string
 	// preserves backward compatibility with rescue dirs written before this
 	// field was introduced — callers MUST treat an empty fingerprint as
-	// "unknown, do not adopt" when the current worktree is dirty.
+	// "unknown" unless they can prove the rescue snapshot fully covers every
+	// file class that reset/clean will remove.
 	DirtyFingerprint string `json:"dirty_fingerprint,omitempty"`
 }
 
