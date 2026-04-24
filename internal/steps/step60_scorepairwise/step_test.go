@@ -2,6 +2,7 @@ package step60_scorepairwise
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -468,18 +469,80 @@ func TestRun_RebuildsWhenDoneMarkerJSONIsMalformed(t *testing.T) {
 	}))
 	require.NoError(t, os.WriteFile(mustResolve(t, runIO, "60/done.marker"), []byte("{"), 0o644))
 
-	var called bool
-	noJudge := unexpectedCallJudge{called: &called}
+	primary := &countingJudge{delegate: judges.NewPrimaryStub()}
+	secondary := &countingJudge{delegate: judges.NewSecondaryStub()}
 	require.NoError(t, Run(context.Background(), Input{
 		IO:          runIO,
 		TaskPackage: &pkg,
-		Primary:     noJudge,
-		Secondary:   noJudge,
-		Arbiter:     noJudge,
+		Primary:     primary,
+		Secondary:   secondary,
+		Arbiter:     judges.NewArbiterStub(),
 		Now:         func() time.Time { return now },
 	}))
-	assert.False(t, called)
+	assert.Greater(t, primary.callCount(), int32(0))
+	assert.Greater(t, secondary.callCount(), int32(0))
 	require.NoError(t, mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker")).Validate())
+}
+
+func TestRun_RerunsJudgesWhenLegacyDoneMarkerMissingInputHashesAndCandidateChanges(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	candidateV1 := []judges.CandidateRule{{
+		ID:    "cand-1",
+		Kind:  "new",
+		Title: "Candidate rule",
+		Body:  "first body",
+	}}
+	firstNow := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:             runIO,
+		TaskPackage:    &pkg,
+		Primary:        scriptedJudge{score: 60, reasonPrefix: "primary-v1", compliance: map[string]contracts.ComplianceVerdict{"cand-1": contracts.ComplianceVerdictCompliant}},
+		Secondary:      scriptedJudge{score: 60, reasonPrefix: "secondary-v1", compliance: map[string]contracts.ComplianceVerdict{"cand-1": contracts.ComplianceVerdictCompliant}},
+		Arbiter:        judges.NewArbiterStub(),
+		CandidateRules: candidateV1,
+		Now:            func() time.Time { return firstNow },
+	}))
+
+	donePath := mustResolve(t, runIO, "60/done.marker")
+	legacyMarker := mustReadJSON[contracts.Step60DoneMarker](t, donePath)
+	legacyPayload, err := json.Marshal(legacyMarker)
+	require.NoError(t, err)
+	var legacy map[string]any
+	require.NoError(t, json.Unmarshal(legacyPayload, &legacy))
+	delete(legacy, "input_hashes")
+	legacyPayload, err = json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteAtomic(donePath, legacyPayload))
+
+	candidateV2 := []judges.CandidateRule{{
+		ID:    "cand-1",
+		Kind:  "new",
+		Title: "Candidate rule",
+		Body:  "second body",
+	}}
+	primary := &countingJudge{delegate: scriptedJudge{score: 90, reasonPrefix: "primary-v2", compliance: map[string]contracts.ComplianceVerdict{"cand-1": contracts.ComplianceVerdictCompliant}}}
+	secondary := &countingJudge{delegate: scriptedJudge{score: 90, reasonPrefix: "secondary-v2", compliance: map[string]contracts.ComplianceVerdict{"cand-1": contracts.ComplianceVerdictCompliant}}}
+	later := firstNow.Add(2 * time.Hour)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:             runIO,
+		TaskPackage:    &pkg,
+		Primary:        primary,
+		Secondary:      secondary,
+		Arbiter:        judges.NewArbiterStub(),
+		CandidateRules: candidateV2,
+		Now:            func() time.Time { return later },
+	}))
+
+	scores := mustReadJSONL[contracts.ScoreEntry](t, runIO, "60/scores-B.jsonl")
+	require.Len(t, scores, len(canonicalDimensions))
+	assert.Greater(t, primary.callCount(), int32(0))
+	assert.Greater(t, secondary.callCount(), int32(0))
+	for _, score := range scores {
+		assert.Equal(t, 90, score.Score)
+	}
 }
 
 func TestRun_RebuildDropsStaleRowsForAgentsNoLongerScorable(t *testing.T) {

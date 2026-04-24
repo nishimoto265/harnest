@@ -65,18 +65,6 @@ type complianceKey struct {
 	RuleID string
 }
 
-type rawScoreKey struct {
-	Agent     contracts.AgentID
-	JudgeRole contracts.JudgeRole
-	Dimension contracts.Dimension
-}
-
-type rawComplianceKey struct {
-	Agent     contracts.AgentID
-	JudgeRole contracts.JudgeRole
-	RuleID    string
-}
-
 type step60Paths struct {
 	Lock            string
 	Done            string
@@ -886,7 +874,7 @@ func emitCompliance(
 func doneMarkerMatchesCurrentState(runIO internalio.RunContext, paths step60Paths, expectedAgents []contracts.AgentID, inputHashes contracts.Step60DoneInputHashes) (bool, bool, error) {
 	marker, err := internalio.ReadJSON[contracts.Step60DoneMarker](paths.Done)
 	if err != nil {
-		return false, true, nil
+		return false, false, nil
 	}
 	if err := marker.Validate(); err != nil {
 		return false, false, nil
@@ -2057,30 +2045,6 @@ func reduceRawScores(rows []contracts.RawScoreEntry) []contracts.RawScoreEntry {
 
 func reduceRawCompliance(rows []contracts.RawComplianceEntry) []contracts.RawComplianceEntry {
 	return scorecore.CollapseRawCompliance(rows)
-}
-
-func collapseRawScoresByRole(rows []contracts.RawScoreEntry, role contracts.JudgeRole) []contracts.RawScoreEntry {
-	filtered := make([]contracts.RawScoreEntry, 0, len(rows))
-	for _, entry := range rows {
-		if entry.JudgeRole == role {
-			filtered = append(filtered, entry)
-		}
-	}
-	return internalio.CollapseByKey(filtered, func(entry contracts.RawScoreEntry) rawScoreKey {
-		return rawScoreKey{Agent: entry.Agent, JudgeRole: entry.JudgeRole, Dimension: entry.Dimension}
-	})
-}
-
-func collapseRawComplianceByRole(rows []contracts.RawComplianceEntry, role contracts.JudgeRole) []contracts.RawComplianceEntry {
-	filtered := make([]contracts.RawComplianceEntry, 0, len(rows))
-	for _, entry := range rows {
-		if entry.JudgeRole == role {
-			filtered = append(filtered, entry)
-		}
-	}
-	return internalio.CollapseByKey(filtered, func(entry contracts.RawComplianceEntry) rawComplianceKey {
-		return rawComplianceKey{Agent: entry.Agent, JudgeRole: entry.JudgeRole, RuleID: entry.RuleID}
-	})
 }
 
 func hashCanonicalRows[T any](rows []T) (string, error) {
