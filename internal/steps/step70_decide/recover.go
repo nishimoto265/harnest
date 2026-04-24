@@ -132,7 +132,7 @@ func recoverAdoptAnywayUnlocked(ctx context.Context, pr int, runCtx internalio.R
 		return err
 	}
 	if idempotencyHit {
-		result, err := currentPlannedRegistryAppendResult(runCtx, *intention)
+		result, err := plannedRegistryAppendResult(runCtx, *intention)
 		if err != nil {
 			return &RecoverRefusalError{
 				Message: fmt.Sprintf(
