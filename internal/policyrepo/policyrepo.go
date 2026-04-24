@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/auto-improve/internal/gitremote"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/registryview"
@@ -735,25 +736,7 @@ func originPushURL(ctx context.Context, repoRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return preferredRemoteURLForAuth(string(out)), nil
-}
-
-func preferredRemoteURLForAuth(output string) string {
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	first := ""
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if first == "" {
-			first = line
-		}
-		if strings.HasPrefix(strings.ToLower(line), "https://") {
-			return line
-		}
-	}
-	return first
+	return gitremote.PreferredRemoteURLForAuth(string(out)), nil
 }
 
 func branchHead(ctx context.Context, repoRoot, branch string) (string, error) {
