@@ -41,6 +41,10 @@ type PanelProvider interface {
 	Judges(input judges.JudgeInput) (primary, secondary, arbiter judges.Judge, err error)
 }
 
+type PanelVersionProvider interface {
+	PanelPromptVersion(base string) string
+}
+
 // Step implements the pass-1 scoring step. Safe to reuse across runs.
 type Step struct {
 	panel    PanelProvider
@@ -137,7 +141,11 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		return err
 	}
 	if valid {
-		versionsMatch, err := step30VersionsMatch(paths, s.rubricVersion, s.promptVersion)
+		promptVersion := s.promptVersion
+		if versioned, ok := s.panel.(PanelVersionProvider); ok {
+			promptVersion = versioned.PanelPromptVersion(s.promptVersion)
+		}
+		versionsMatch, err := step30VersionsMatch(paths, s.rubricVersion, promptVersion)
 		if err != nil {
 			return err
 		}
@@ -161,6 +169,10 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 	}
 
 	rubricPath, err := s.resolveRubricPath(req.RunContext)
+	if err != nil {
+		return err
+	}
+	expectedComplianceRuleIDs, err := judges.ActiveComplianceRuleIDs(rubricPath)
 	if err != nil {
 		return err
 	}
@@ -198,16 +210,18 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		}
 
 		judgeInput := judges.JudgeInput{
-			RunID:      req.RunContext.RunID,
-			Pass:       1,
-			Agent:      agent.agent,
-			OutputPath: snapshotPath,
-			RubricPath: rubricPath,
+			RunID:                     req.RunContext.RunID,
+			Pass:                      1,
+			Agent:                     agent.agent,
+			OutputPath:                snapshotPath,
+			RubricPath:                rubricPath,
+			ExpectedComplianceRuleIDs: expectedComplianceRuleIDs,
 		}
 		primary, secondary, arbiter, err := s.panel.Judges(judgeInput)
 		if err != nil {
 			return fmt.Errorf("step30_score: panel agent=%s: %w", agent.agent, err)
 		}
+		promptVersion := judges.PanelPromptVersion(s.promptVersion, primary, secondary, arbiter)
 
 		panelInput := scorecore.PanelInput{
 			Primary:               primary,
@@ -216,21 +230,21 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 			JudgeInput:            judgeInput,
 			OutputSha256:          outputSha,
 			RubricVersion:         s.rubricVersion,
-			PromptVersion:         s.promptVersion,
+			PromptVersion:         promptVersion,
 			DisagreementThreshold: s.threshold,
 			RunContext:            req.RunContext,
 			StepDir:               "30",
 		}
 		agentState := state.agent(agent.agent)
 
-		if err := s.ensureRole(ctx, paths, panelInput, agentState, contracts.JudgeRolePrimary, primary, s.rubricVersion, s.promptVersion); err != nil {
+		if err := s.ensureRole(ctx, paths, panelInput, agentState, contracts.JudgeRolePrimary, primary, s.rubricVersion, promptVersion, expectedComplianceRuleIDs); err != nil {
 			return fmt.Errorf("step30_score: resolve primary agent=%s: %w", agent.agent, err)
 		}
 		if secondary != nil {
-			if err := s.ensureRole(ctx, paths, panelInput, agentState, contracts.JudgeRoleSecondary, secondary, s.rubricVersion, s.promptVersion); err != nil {
+			if err := s.ensureRole(ctx, paths, panelInput, agentState, contracts.JudgeRoleSecondary, secondary, s.rubricVersion, promptVersion, expectedComplianceRuleIDs); err != nil {
 				return fmt.Errorf("step30_score: resolve secondary agent=%s: %w", agent.agent, err)
 			}
-			if err := s.refreshPrimarySecondaryIfNeeded(ctx, paths, panelInput, agentState, primary, secondary, s.rubricVersion, s.promptVersion); err != nil {
+			if err := s.refreshPrimarySecondaryIfNeeded(ctx, paths, panelInput, agentState, primary, secondary); err != nil {
 				return fmt.Errorf("step30_score: refresh panel agent=%s: %w", agent.agent, err)
 			}
 		}
@@ -248,7 +262,7 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 			}
 		}
 		if secondary != nil && disagree && arbiter != nil {
-			if !agentState.arbiterCompleteFor(primaryCompliance, panelInput.OutputSha256, s.rubricVersion, s.promptVersion) {
+			if !agentState.arbiterCompleteFor(primaryCompliance, panelInput.OutputSha256, s.rubricVersion, promptVersion) {
 				if err := s.runRole(ctx, paths, panelInput, agentState, contracts.JudgeRoleArbiter, arbiter); err != nil {
 					return fmt.Errorf("step30_score: resolve arbiter agent=%s: %w", agent.agent, err)
 				}
@@ -313,8 +327,9 @@ func (s *Step) ensureRole(
 	judge judges.Judge,
 	rubricVersion string,
 	promptVersion string,
+	expectedRuleIDs []string,
 ) error {
-	if agentState.roleComplete(role, panelInput.OutputSha256, rubricVersion, promptVersion) {
+	if agentState.roleComplete(role, panelInput.OutputSha256, rubricVersion, promptVersion, expectedRuleIDs) {
 		return nil
 	}
 	return s.runRole(ctx, paths, panelInput, agentState, role, judge)
@@ -326,8 +341,6 @@ func (s *Step) refreshPrimarySecondaryIfNeeded(
 	panelInput scorecore.PanelInput,
 	agentState *resumeAgentState,
 	primary, secondary judges.Judge,
-	rubricVersion string,
-	promptVersion string,
 ) error {
 	_, err := scorecore.PanelDisagrees(
 		agentState.rawScoreSlice(contracts.JudgeRolePrimary),
@@ -593,14 +606,18 @@ func (s *resumeAgentState) clearArbiter() {
 	s.rawCompliance[contracts.JudgeRoleArbiter] = map[string]contracts.RawComplianceEntry{}
 }
 
-func (s *resumeAgentState) roleComplete(role contracts.JudgeRole, outputSha, rubricVersion, promptVersion string) bool {
+func (s *resumeAgentState) roleComplete(role contracts.JudgeRole, outputSha, rubricVersion, promptVersion string, expectedRuleIDs []string) bool {
 	if !hasAllDimensions(s.rawScores[role]) {
 		return false
 	}
 	if !s.roleOutputShaMatches(role, outputSha) || !s.roleVersionMatches(role, rubricVersion, promptVersion) {
 		return false
 	}
-	return s.roleComplianceCoverage(role, s.expectedComplianceRuleIDs())
+	expected := s.expectedComplianceRuleIDs()
+	if len(expectedRuleIDs) > 0 {
+		expected = expectedComplianceRuleSet(expectedRuleIDs)
+	}
+	return s.roleComplianceCoverage(role, expected)
 }
 
 func (s *resumeAgentState) rawScoreSlice(role contracts.JudgeRole) []contracts.RawScoreEntry {
@@ -714,6 +731,17 @@ func (s *resumeAgentState) roleComplianceCoverage(role contracts.JudgeRole, expe
 		}
 	}
 	return true
+}
+
+func expectedComplianceRuleSet(ruleIDs []string) map[string]struct{} {
+	if len(ruleIDs) == 0 {
+		return nil
+	}
+	rules := make(map[string]struct{}, len(ruleIDs))
+	for _, ruleID := range ruleIDs {
+		rules[ruleID] = struct{}{}
+	}
+	return rules
 }
 
 func appendExpectedFinalScores(paths stepPathsResult, state *resumeAgentState, result scorecore.PanelResult) error {

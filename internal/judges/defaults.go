@@ -180,6 +180,15 @@ func ExpectedComplianceRuleIDs(rubricPath string) ([]string, error) {
 	return []string{stubRuleID}, nil
 }
 
+// ActiveComplianceRuleIDs returns rule IDs explicitly declared by the current
+// rubric without applying stub fallback behavior.
+func ActiveComplianceRuleIDs(rubricPath string) ([]string, error) {
+	if err := contracts.EnsureCleanAbsolutePath(rubricPath); err != nil {
+		return nil, err
+	}
+	return parseActiveRuleIDs(rubricPath)
+}
+
 func parseActiveRuleIDs(rubricPath string) ([]string, error) {
 	data, err := os.ReadFile(rubricPath)
 	if err != nil {

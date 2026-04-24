@@ -119,14 +119,76 @@ func TestRun_Pass2JudgeInputIncludesCandidateRules(t *testing.T) {
 	assert.Contains(t, secondary.inputs[0].ExpectedComplianceRuleIDs, "cand-1")
 
 	finalCompliance := mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl")
+	finalRuleIDs := make([]string, 0, len(finalCompliance))
 	var found bool
 	for _, row := range finalCompliance {
+		finalRuleIDs = append(finalRuleIDs, row.RuleID)
 		if row.RuleID == "cand-1" {
 			found = true
 			assert.Equal(t, contracts.ComplianceVerdictCompliant, row.Verdict)
 		}
 	}
+	sort.Strings(finalRuleIDs)
+	assert.Equal(t, []string{"cand-1", "cand-1", "cand-1"}, finalRuleIDs)
 	assert.True(t, found)
+}
+
+func TestRun_RejectsMissingExpectedCandidateComplianceRule(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+
+	err := Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary: scriptedJudge{
+			score:            80,
+			reasonPrefix:     "primary",
+			compliance:       map[string]contracts.ComplianceVerdict{},
+			strictCompliance: true,
+		},
+		Secondary: judges.NewSecondaryStub(),
+		Arbiter:   judges.NewArbiterStub(),
+		CandidateRules: []judges.CandidateRule{{
+			ID:    "cand-1",
+			Kind:  "new",
+			Title: "Candidate rule",
+			Body:  "Rule body",
+		}},
+		Now: func() time.Time { return time.Date(2026, 4, 21, 15, 4, 5, 0, time.UTC) },
+	})
+	require.ErrorIs(t, err, judges.ErrJudgeOutputMissingCompliance)
+	assert.ErrorContains(t, err, "cand-1")
+}
+
+func TestRun_RejectsMissingExpectedActiveAndPass1ComplianceRules(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+	writePass1Compliance(t, runIO, pkg.RunID, "a1", map[string]contracts.ComplianceVerdict{
+		"pass1-rule": contracts.ComplianceVerdictCompliant,
+	})
+	rubricPath := filepath.Join(t.TempDir(), "rubric.md")
+	require.NoError(t, os.WriteFile(rubricPath, []byte("## Active Rule IDs\n- active-rule\n"), 0o644))
+
+	err := Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		RubricPath:  rubricPath,
+		Primary: scriptedJudge{
+			score:        80,
+			reasonPrefix: "primary",
+			compliance: map[string]contracts.ComplianceVerdict{
+				"active-rule": contracts.ComplianceVerdictCompliant,
+			},
+			strictCompliance: true,
+		},
+		Secondary: judges.NewSecondaryStub(),
+		Arbiter:   judges.NewArbiterStub(),
+		Now:       func() time.Time { return time.Date(2026, 4, 21, 15, 4, 5, 0, time.UTC) },
+	})
+	require.ErrorIs(t, err, judges.ErrJudgeOutputMissingCompliance)
+	assert.ErrorContains(t, err, "pass1-rule")
 }
 
 func TestRun_RejectsTaskPackageRunIDMismatch(t *testing.T) {
@@ -715,6 +777,7 @@ func TestExpectedComplianceRuleIDsForAgent_IgnoresRawRuleIDs(t *testing.T) {
 			map[contracts.AgentID]map[string]struct{}{
 				"a1": {"pass1-rule": {}},
 			},
+			nil,
 			[]string{"fallback-rule"},
 			nil,
 		)
@@ -725,6 +788,7 @@ func TestExpectedComplianceRuleIDsForAgent_IgnoresRawRuleIDs(t *testing.T) {
 		got := expectedComplianceRuleIDsForAgent(
 			"a1",
 			map[contracts.AgentID]map[string]struct{}{},
+			nil,
 			[]string{"fallback-rule"},
 			nil,
 		)
@@ -737,6 +801,7 @@ func TestExpectedComplianceRuleIDsForAgent_IgnoresRawRuleIDs(t *testing.T) {
 			map[contracts.AgentID]map[string]struct{}{},
 			nil,
 			nil,
+			nil,
 		)
 		assert.Nil(t, got)
 	})
@@ -747,10 +812,24 @@ func TestExpectedComplianceRuleIDsForAgent_IgnoresRawRuleIDs(t *testing.T) {
 			map[contracts.AgentID]map[string]struct{}{
 				"a1": {"pass1-rule": {}},
 			},
+			nil,
 			[]string{"fallback-rule"},
 			[]judges.CandidateRule{{ID: "cand-1"}},
 		)
 		assert.Equal(t, map[string]struct{}{"pass1-rule": {}, "cand-1": {}}, got)
+	})
+
+	t.Run("active rules are included with pass1 and candidate rules", func(t *testing.T) {
+		got := expectedComplianceRuleIDsForAgent(
+			"a1",
+			map[contracts.AgentID]map[string]struct{}{
+				"a1": {"pass1-rule": {}},
+			},
+			[]string{"active-rule"},
+			[]string{"fallback-rule"},
+			[]judges.CandidateRule{{ID: "cand-1"}},
+		)
+		assert.Equal(t, map[string]struct{}{"active-rule": {}, "pass1-rule": {}, "cand-1": {}}, got)
 	})
 }
 
@@ -912,6 +991,42 @@ func TestRun_FailsClosedOnPass1VersionMismatch(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrPass1VersionMismatch)
 	assert.False(t, called, "judges must not run before pass1 version gate passes")
+}
+
+func TestRun_FailsClosedWhenJudgeProviderPromptVersionChanges(t *testing.T) {
+	promptV1 := judges.PanelPromptVersion(
+		"phase0-stub",
+		versionedJudge{delegate: judges.NewPrimaryStub(), version: "provider-a"},
+		versionedJudge{delegate: judges.NewSecondaryStub(), version: "provider-a"},
+		versionedJudge{delegate: judges.NewArbiterStub(), version: "provider-a"},
+	)
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:    true,
+		pass1PromptVersion: promptV1,
+	})
+	now := time.Date(2026, 4, 21, 11, 30, 0, 0, time.UTC)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     versionedJudge{delegate: judges.NewPrimaryStub(), version: "provider-a"},
+		Secondary:   versionedJudge{delegate: judges.NewSecondaryStub(), version: "provider-a"},
+		Arbiter:     versionedJudge{delegate: judges.NewArbiterStub(), version: "provider-a"},
+		Now:         func() time.Time { return now },
+	}))
+
+	var called bool
+	noJudge := versionedJudge{delegate: unexpectedCallJudge{called: &called}, version: "provider-b"}
+	err := Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     noJudge,
+		Secondary:   noJudge,
+		Arbiter:     noJudge,
+		Now:         func() time.Time { return now },
+	})
+	require.ErrorIs(t, err, ErrPass1VersionMismatch)
+	assert.False(t, called)
 }
 
 func TestRun_IgnoresHistoricalRawVersionsAfterMigration(t *testing.T) {
@@ -1853,10 +1968,11 @@ type fixtureOptions struct {
 }
 
 type scriptedJudge struct {
-	score        int
-	reasonPrefix string
-	compliance   map[string]contracts.ComplianceVerdict
-	resolvedAt   time.Time
+	score            int
+	reasonPrefix     string
+	compliance       map[string]contracts.ComplianceVerdict
+	resolvedAt       time.Time
+	strictCompliance bool
 }
 
 type echoExpectedComplianceJudge struct {
@@ -1866,6 +1982,10 @@ type echoExpectedComplianceJudge struct {
 
 type overflowRefJudge struct{}
 type duplicateComplianceJudge struct{}
+type versionedJudge struct {
+	delegate judges.Judge
+	version  string
+}
 
 func (j *echoExpectedComplianceJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
 	j.inputs = append(j.inputs, input)
@@ -1949,11 +2069,21 @@ func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput)
 	for ruleID := range j.compliance {
 		ruleIDs = append(ruleIDs, ruleID)
 	}
+	if !j.strictCompliance {
+		for _, ruleID := range input.ExpectedComplianceRuleIDs {
+			if _, ok := j.compliance[ruleID]; !ok {
+				ruleIDs = append(ruleIDs, ruleID)
+			}
+		}
+	}
 	sort.Strings(ruleIDs)
 
 	compliance := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
 	for _, ruleID := range ruleIDs {
-		verdict := j.compliance[ruleID]
+		verdict, ok := j.compliance[ruleID]
+		if !ok {
+			verdict = contracts.ComplianceVerdictCompliant
+		}
 		compliance = append(compliance, contracts.ComplianceEntry{
 			SchemaVersion: "1",
 			RunID:         input.RunID,
@@ -2005,20 +2135,25 @@ func (overflowRefJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput
 			ResolvedAt:         time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
 		})
 	}
-	compliance := []contracts.ComplianceEntry{{
-		SchemaVersion:        "1",
-		RunID:                input.RunID,
-		Pass:                 input.Pass,
-		Agent:                input.Agent,
-		RuleID:               "shared",
-		Verdict:              contracts.ComplianceVerdictCompliant,
-		Rationale:            inlineText,
-		RationaleOverflowRef: bogus,
-		VerdictPath:          contracts.VerdictPathSingle,
-		RubricVersion:        "overflow-rubric",
-		PromptVersion:        "overflow-prompt",
-		ResolvedAt:           time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
-	}}
+	ruleIDs := append([]string{"shared"}, input.ExpectedComplianceRuleIDs...)
+	sort.Strings(ruleIDs)
+	compliance := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
+	for _, ruleID := range ruleIDs {
+		compliance = append(compliance, contracts.ComplianceEntry{
+			SchemaVersion:        "1",
+			RunID:                input.RunID,
+			Pass:                 input.Pass,
+			Agent:                input.Agent,
+			RuleID:               ruleID,
+			Verdict:              contracts.ComplianceVerdictCompliant,
+			Rationale:            inlineText,
+			RationaleOverflowRef: bogus,
+			VerdictPath:          contracts.VerdictPathSingle,
+			RubricVersion:        "overflow-rubric",
+			PromptVersion:        "overflow-prompt",
+			ResolvedAt:           time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+		})
+	}
 	output := judges.JudgeOutput{Scores: scores, Compliance: compliance}
 	return output, output.ValidateFor(input)
 }
@@ -2037,6 +2172,14 @@ func (duplicateComplianceJudge) ScoreOutput(ctx context.Context, input judges.Ju
 	duplicate.ResolvedAt = duplicate.ResolvedAt.Add(time.Second)
 	output.Compliance = append(output.Compliance, duplicate)
 	return output, output.ValidateFor(input)
+}
+
+func (j versionedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	return j.delegate.ScoreOutput(ctx, input)
+}
+
+func (j versionedJudge) JudgePromptVersion() string {
+	return j.version
 }
 
 type cancelingJudge struct {
