@@ -2,6 +2,8 @@ package step10restorebase
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -236,6 +238,44 @@ func TestRun_HappyPath_SixWorktrees(t *testing.T) {
 	assert.Contains(t, reloaded.ReconstructedTaskPrompt, "## Goal")
 	assert.Contains(t, reloaded.ReconstructedTaskPrompt, "### Linked Issues")
 	assert.Contains(t, reloaded.ReconstructedTaskPrompt, "### PR Title")
+}
+
+func TestRun_NoPolicyBranchSnapshotsLocalPolicy(t *testing.T) {
+	rc := newRunCtx(t)
+	const localRule = "# Local policy\n\nbody\n"
+	require.NoError(t, os.MkdirAll(filepath.Join(rc.RunsBase, "rules"), 0o755))
+	registry := "{\"kind\":\"added\",\"schema_version\":\"1\",\"rule_id\":\"r-local\",\"rule_path\":\"rules/r-local.md\",\"sha256\":\"" + sha256HexForStep10Test(localRule) + "\",\"idempotency_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_seq\":1,\"prev_hash\":\"\",\"by_run_id\":\"2026-04-21-PR1-abcdef0\",\"at\":\"2026-04-21T08:00:00Z\"}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(rc.RunsBase, "rules-registry.jsonl"), []byte(registry), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(rc.RunsBase, "rules", "r-local.md"), []byte(localRule), 0o644))
+	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
+	runner := &Runner{
+		GH:  stubGH{info: PRInfo{Number: 42, Title: "improve X", MergeCommitOID: testMergeCommitOID}},
+		Git: git,
+	}
+
+	_, err := runner.Run(context.Background(), Input{
+		PR:           42,
+		BestBranch:   "auto-improve/best",
+		HarnessFiles: true,
+		RepoRoot:     t.TempDir(),
+		RunCtx:       rc,
+		Now:          func() time.Time { return time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC) },
+	})
+	require.NoError(t, err)
+
+	registryBytes, err := os.ReadFile(filepath.Join(rc.RunDir(), "policy", "rules-registry.jsonl"))
+	require.NoError(t, err)
+	assert.Equal(t, registry, string(registryBytes))
+	ruleBytes, err := os.ReadFile(filepath.Join(rc.RunDir(), "policy", "rules", "r-local.md"))
+	require.NoError(t, err)
+	assert.Equal(t, localRule, string(ruleBytes))
+	assert.FileExists(t, filepath.Join(rc.RunDir(), "policy", "snapshot.json"))
+}
+
+func sha256HexForStep10Test(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func TestRun_FetchesMergeCommitBeforeResolveRef(t *testing.T) {

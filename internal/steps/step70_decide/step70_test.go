@@ -93,6 +93,28 @@ func TestRun_RejectsWhenPolicyBranchAdvancedSinceRunSnapshot(t *testing.T) {
 	assert.NoFileExists(t, mustRunPath(t, runCtx, "70/decision.json"))
 }
 
+func TestRun_RejectsWhenLocalPolicyRegistryAdvancedSinceRunSnapshot(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR104")
+	policyDir := filepath.Join(runCtx.RunDir(), "policy")
+	require.NoError(t, os.MkdirAll(policyDir, 0o755))
+	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(policyDir, "snapshot.json"), policyrepo.SnapshotMetadata{
+		SchemaVersion: "1",
+		RegistryHead:  "",
+	}))
+	_, _ = seedRegistryUniqueAdd(t, runCtx.RulesRegistryPath(), "rule-other", strings.Repeat("9", 64), string(runCtx.RunID))
+
+	err := Run(context.Background(), 104, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: strings.Repeat("1", 40)},
+		Resolver: resolver,
+		Now:      fixedNow(),
+	})
+
+	var stale *PolicySnapshotStaleError
+	require.ErrorAs(t, err, &stale)
+	assert.Equal(t, "policy_registry_stale", stale.Reason)
+	assert.NoFileExists(t, mustRunPath(t, runCtx, "70/decision.json"))
+}
+
 func TestDrivePolicyPublish_PolicyPublishingEmptyAfterAdoptsMatchingRemoteSnapshot(t *testing.T) {
 	runCtx, _, candidates, _, resolver := newFixtureWithResolver(t, "PR103")
 	store := newMemStore(intentionPath(t, runCtx))

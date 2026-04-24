@@ -92,6 +92,34 @@ func TestHydrateAndSnapshotFromBranchCopiesPolicyFilesToRunDir(t *testing.T) {
 	assert.NotContains(t, active[0].Body, "stale global body")
 }
 
+func TestSnapshotLocalForRunCopiesLocalPolicyAndMetadata(t *testing.T) {
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
+	runID := contracts.RunID("2026-04-23-PR3-feedbee")
+	runCtx, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, rulesLocalDirName), 0o755))
+	const localRule = "# Local rule\n\nbody\n"
+	registry := "{\"kind\":\"added\",\"schema_version\":\"1\",\"rule_id\":\"r-local\",\"rule_path\":\"rules/r-local.md\",\"sha256\":\"" + sha256Hex([]byte(localRule)) + "\",\"idempotency_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_seq\":1,\"prev_hash\":\"\",\"by_run_id\":\"2026-04-23-PR1-feedbee\",\"at\":\"2026-04-23T08:00:00Z\"}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, registryLocalName), []byte(registry), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, rulesLocalDirName, "r-local.md"), []byte(localRule), 0o644))
+
+	require.NoError(t, SnapshotLocalForRun(context.Background(), runsBase, runCtx.RunDir()))
+
+	registryBytes, err := os.ReadFile(filepath.Join(runCtx.RunDir(), "policy", registryLocalName))
+	require.NoError(t, err)
+	assert.Equal(t, registry, string(registryBytes))
+	ruleBytes, err := os.ReadFile(filepath.Join(runCtx.RunDir(), "policy", rulesLocalDirName, "r-local.md"))
+	require.NoError(t, err)
+	assert.Equal(t, localRule, string(ruleBytes))
+	meta, ok, err := LoadSnapshotMetadata(runCtx)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Empty(t, meta.PolicyBranch)
+	assert.Empty(t, meta.PolicyHead)
+	assert.NotEmpty(t, meta.RegistryHead)
+}
+
 func TestPublishSnapshotPushesRunsBasePolicyToBranch(t *testing.T) {
 	repoRoot := newClonedRepoWithPolicyBranch(t)
 	runsBase := filepath.Join(t.TempDir(), "runs")

@@ -18,10 +18,19 @@ func RunSunsetTick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	transitions, err := archive.BuildTransitionPlan(runsBase)
+	if err != nil {
+		return err
+	}
+	if len(transitions) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
 	_, err = archive.RunSunsetWithLock(ctx, archive.Opts{
 		RunsBase:       runsBase,
-		SunsetRunID:    fmt.Sprintf("sunset-%d", time.Now().UTC().Unix()),
-		Now:            func() time.Time { return time.Now().UTC() },
+		SunsetRunID:    fmt.Sprintf("sunset-%d", now.Unix()),
+		Transitions:    transitions,
+		Now:            func() time.Time { return now },
 		RegistryHighAt: cfg.RegistryHighThreshold,
 		RegistryCritAt: cfg.RegistryCriticalThreshold,
 	})

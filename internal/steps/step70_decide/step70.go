@@ -244,7 +244,7 @@ func startFresh(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 func policySnapshotPreAdoptBlockReason(ctx context.Context, runCtx internalio.RunContext, deps Deps) (string, error) {
 	branch := strings.TrimSpace(deps.PolicyBranch)
 	if branch == "" {
-		return "", nil
+		return localPolicySnapshotPreAdoptBlockReason(runCtx)
 	}
 	meta, ok, err := policySnapshotMetadataForBranch(runCtx, branch)
 	if err != nil {
@@ -269,6 +269,27 @@ func policySnapshotPreAdoptBlockReason(ctx context.Context, runCtx internalio.Ru
 	}
 	if policyHead != meta.PolicyHead {
 		return "policy_branch_stale", nil
+	}
+	return "", nil
+}
+
+func localPolicySnapshotPreAdoptBlockReason(runCtx internalio.RunContext) (string, error) {
+	meta, ok, err := policyrepo.LoadSnapshotMetadata(runCtx)
+	if err != nil {
+		return "", err
+	}
+	globalRegistryHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", nil
+	}
+	if strings.TrimSpace(meta.PolicyBranch) != "" {
+		return "", fmt.Errorf("step70: local policy snapshot has branch metadata: snapshot=%s", meta.PolicyBranch)
+	}
+	if globalRegistryHead != meta.RegistryHead {
+		return "policy_registry_stale", nil
 	}
 	return "", nil
 }
