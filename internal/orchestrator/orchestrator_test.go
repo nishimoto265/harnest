@@ -121,8 +121,9 @@ func TestRun_ResumesFromIntentionStage(t *testing.T) {
 func TestRun_ResumeUsesConfigSnapshotPolicyBranch(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Repo.PolicyBranch = "current-policy"
+	snapshotWorktreeBase := cfg.Worktree.Base
 	runID := contracts.RunID("2026-04-21-PR56-abcdef0")
-	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, snapshotWorktreeBase)
 	require.NoError(t, err)
 	require.NoError(t, seedResumeRun(t, runCtx, 56))
 	require.NoError(t, os.WriteFile(filepath.Join(runCtx.RunDir(), "config.snapshot.yaml"), []byte(
@@ -134,8 +135,11 @@ func TestRun_ResumeUsesConfigSnapshotPolicyBranch(t *testing.T) {
 			"paths:\n"+
 			"  runs: "+cfg.Paths.Runs+"\n"+
 			"worktree:\n"+
-			"  base: "+cfg.Worktree.Base+"\n",
+			"  base: "+snapshotWorktreeBase+"\n",
 	), 0o644))
+	currentWorktreeBase := filepath.Join(t.TempDir(), "current-worktrees")
+	require.NoError(t, os.MkdirAll(currentWorktreeBase, 0o755))
+	cfg.Worktree.Base = currentWorktreeBase
 
 	orch, err := NewOrchestrator(cfg)
 	require.NoError(t, err)

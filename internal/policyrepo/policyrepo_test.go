@@ -2,6 +2,7 @@ package policyrepo
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -161,6 +162,34 @@ func TestPublishSnapshotRejectsMissingLocalRegistry(t *testing.T) {
 
 	_, err := PublishSnapshot(context.Background(), repoRoot, "policy", headBefore, runsBase, "2026-04-23-PR2-adopt")
 	require.Error(t, err)
+}
+
+func TestPreparedPublishCleanupCanRetryAfterFailure(t *testing.T) {
+	originalRemove := removePreparedPublishWorktree
+	calls := 0
+	removePreparedPublishWorktree = func(repoRoot, path string) error {
+		calls++
+		if calls == 1 {
+			return errors.New("transient cleanup failure")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		removePreparedPublishWorktree = originalRemove
+	})
+
+	worktreeDir := filepath.Join(t.TempDir(), "policy-worktree")
+	require.NoError(t, os.MkdirAll(worktreeDir, 0o755))
+	plan := &PreparedPublish{
+		RepoRoot:    "repo",
+		worktreeDir: worktreeDir,
+	}
+
+	require.Error(t, plan.Cleanup())
+	assert.False(t, plan.cleaned)
+	require.NoError(t, plan.Cleanup())
+	assert.True(t, plan.cleaned)
+	assert.Equal(t, 2, calls)
 }
 
 func TestLoadLocalSnapshotAllowsRegistryOnlyWithNoActiveRules(t *testing.T) {
