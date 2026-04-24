@@ -371,7 +371,7 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 	if err := store.Save(intention); err != nil {
 		return err
 	}
-	return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps)
+	return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps, false)
 }
 
 func drivePolicyPublish(ctx context.Context, pr int, runCtx internalio.RunContext, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) (contracts.IntentionRecord, error) {
@@ -510,13 +510,18 @@ func drivePolicyPublish(ctx context.Context, pr int, runCtx internalio.RunContex
 	return intention, nil
 }
 
-func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, store IntentionWriter, writer state.Writer, deps Deps) error {
+func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, store IntentionWriter, writer state.Writer, deps Deps, verifyRemoteHead bool) error {
 	if err := blockOnOtherRunSentinel(runCtx); err != nil {
 		return err
 	}
 	intention, err := store.Load()
 	if err != nil {
 		return err
+	}
+	if verifyRemoteHead && intention != nil {
+		if err := verifyPersistedAdoptRemoteHead(ctx, pr, runCtx, pkg, *intention, store, writer, deps); err != nil {
+			return err
+		}
 	}
 	if err := promoteStagedRuleSidecars(runCtx, intention, store); err != nil {
 		if ctx.Err() != nil {
@@ -542,12 +547,12 @@ func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.Ru
 	}
 	switch v := decision.Value.(type) {
 	case contracts.DecisionAdopt:
-		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps)
+		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps, true)
 	case *contracts.DecisionAdopt:
 		if v == nil {
 			return nil
 		}
-		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps)
+		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps, true)
 	case contracts.DecisionRollback:
 		return finalizeRollbackTerminal(ctx, pr, runCtx, pkg, v.RollbackReason, v.FailedStep, store, writer, deps)
 	case *contracts.DecisionRollback:
@@ -558,6 +563,24 @@ func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.Ru
 	default:
 		return cleanupWorktrees(ctx, runCtx, pkg, deps.Git)
 	}
+}
+
+func verifyPersistedAdoptRemoteHead(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
+	target := targetFromIntention(pkg, intention)
+	if target.BestBranch == "" {
+		return errors.New("step70: decision_written adopt requires best_branch")
+	}
+	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "decision_written_remote_head_failure")
+	}
+	if remoteHead != target.TargetSHA {
+		return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRemoteDivergence, "decision_written_remote_mismatch")
+	}
+	return nil
 }
 
 // ---- Rollback ----
@@ -780,25 +803,18 @@ func markManualRecoveryWithDetail(pr int, runCtx internalio.RunContext, intentio
 	intention.Stage = contracts.IntentionStageNeedsManualRecovery
 	intention.RecoveryReason = reason
 	intention.FailedStep = contracts.FailedStep70
-	// F9: persist the intention transition to needs_manual_recovery BEFORE
-	// writing the durable sentinel. If the sentinel write later fails, the
-	// intention is already parked at a stage that resume() treats as
-	// terminal-but-persisted (returns ErrNeedsManualRecovery and refuses to
-	// reopen transaction paths), so the operator-gate barrier holds (for the
-	// same run) even without the sentinel. The inverse ordering
-	// (sentinel-first) would leave a durable needs_manual_recovery file with
-	// an intention still at branch_pushed / registry_appended; once the
-	// operator cleared the sentinel, a subsequent tick would resume the old
-	// transaction path instead of re-blocking — a silent bypass of the
-	// manual-recovery barrier.
+	// F9: persist the parked intention first, then record the state event and
+	// sentinel as independent global barriers. If one global write fails, the
+	// other can still block or reconstruct the barrier on the next tick; the
+	// parked intention prevents this run from reopening transaction paths.
 	if err := store.Save(intention); err != nil {
 		return err
 	}
-	if err := writeSentinelFn(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, deps.Now()); err != nil {
-		return err
-	}
-	if err := appendStateOnce(runCtx, writer, contracts.StateKindNeedsManualRecovery, needsManualRecoveryEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, detail, deps.Now())); err != nil {
-		return err
+	now := deps.Now()
+	stateErr := appendStateOnce(runCtx, writer, contracts.StateKindNeedsManualRecovery, needsManualRecoveryEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, detail, now))
+	sentinelErr := writeSentinelFn(runCtx.RunsBase, runCtx.RunID, pr, reason, contracts.FailedStep70, now)
+	if stateErr != nil || sentinelErr != nil {
+		return errors.Join(ErrNeedsManualRecovery, stateErr, sentinelErr)
 	}
 	return ErrNeedsManualRecovery
 }
@@ -1729,7 +1745,7 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 		contracts.IntentionStagePolicyPublished:
 		return driveDecision(ctx, pr, runCtx, pkg, *intention, store, writer, deps)
 	case contracts.IntentionStageDecisionWritten:
-		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps)
+		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps, true)
 	case contracts.IntentionStageRollingBackBranchReverted,
 		contracts.IntentionStageRollingBackRegistryAppended,
 		contracts.IntentionStageRollingBackDecisionWritten:
