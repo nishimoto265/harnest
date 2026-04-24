@@ -95,6 +95,14 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 	start, err := o.resolveStartStep(run)
 	if err != nil {
 		if errors.Is(err, errNoScorableAgentsResume) {
+			if reason, detail, ok, classifyErr := providerInterruptionFromNonScorableManifests(run, 1); classifyErr != nil {
+				return classifyErr
+			} else if ok {
+				if appendErr := o.appendInterrupted(run.PR, run.IO.RunID, contracts.FailedStep20, reason, detail); appendErr != nil {
+					return appendErr
+				}
+				return nil
+			}
 			if err := o.appendState(failedEntry(pr, run.IO.RunID, contracts.FailedStep30, "no_scorable_agents", "step30 resume selected without any scorable pass1 manifests", time.Now().UTC())); err != nil {
 				return err
 			}
@@ -113,7 +121,10 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 
 	for _, step := range pipelineFrom(start) {
 		if err := ctx.Err(); err != nil {
-			return err
+			if appendErr := o.appendInterruptedIfContextDone(ctx, run, step, err); appendErr != nil {
+				return appendErr
+			}
+			return nil
 		}
 		if err := o.ensureNoGlobalSentinel(run.IO); err != nil {
 			return err
@@ -127,12 +138,18 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 					}
 					return nil
 				}
+				if handled, appendErr := o.handleContextCancellation(ctx, run, contracts.FailedStep10, err); handled {
+					return appendErr
+				}
 				return err
 			}
 		case contracts.FailedStep20:
 			if err := o.runParallel(ctx, run, 1, contracts.FailedStep20, o.steps.Step20); err != nil {
 				if errors.Is(err, errStopPipeline) {
 					return nil
+				}
+				if handled, appendErr := o.handleContextCancellation(ctx, run, contracts.FailedStep20, err); handled {
+					return appendErr
 				}
 				return err
 			}
@@ -144,6 +161,14 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 				return err
 			}
 			if len(scorableAgents) == 0 {
+				if reason, detail, ok, classifyErr := providerInterruptionFromNonScorableManifests(run, 1); classifyErr != nil {
+					return classifyErr
+				} else if ok {
+					if err := o.appendInterrupted(run.PR, run.IO.RunID, contracts.FailedStep20, reason, detail); err != nil {
+						return err
+					}
+					return nil
+				}
 				if err := o.appendState(failedEntry(pr, run.IO.RunID, contracts.FailedStep20, "no_scorable_agents", "step20 completed without any scorable pass1 manifests", time.Now().UTC())); err != nil {
 					return err
 				}
@@ -151,6 +176,9 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 			}
 		case contracts.FailedStep30:
 			if err := o.runSingle(ctx, run, contracts.FailedStep30, o.steps.Step30); err != nil {
+				if handled, appendErr := o.handleContextCancellation(ctx, run, contracts.FailedStep30, err); handled {
+					return appendErr
+				}
 				return err
 			}
 			if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep30, time.Now().UTC())); err != nil {
@@ -158,6 +186,9 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 			}
 		case contracts.FailedStep40:
 			if err := o.runSingle(ctx, run, contracts.FailedStep40, o.steps.Step40); err != nil {
+				if handled, appendErr := o.handleContextCancellation(ctx, run, contracts.FailedStep40, err); handled {
+					return appendErr
+				}
 				return err
 			}
 			if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep40, time.Now().UTC())); err != nil {
@@ -171,10 +202,27 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 				if errors.Is(err, errStopPipeline) {
 					return nil
 				}
+				if handled, appendErr := o.handleContextCancellation(ctx, run, contracts.FailedStep50, err); handled {
+					return appendErr
+				}
 				return err
 			}
 			if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep50, time.Now().UTC())); err != nil {
 				return err
+			}
+			scorableAgents, err := scorableAgentsForPass(run.IO, run.TaskPackage, 2)
+			if err != nil {
+				return err
+			}
+			if len(scorableAgents) == 0 {
+				if reason, detail, ok, classifyErr := providerInterruptionFromNonScorableManifests(run, 2); classifyErr != nil {
+					return classifyErr
+				} else if ok {
+					if err := o.appendInterrupted(run.PR, run.IO.RunID, contracts.FailedStep50, reason, detail); err != nil {
+						return err
+					}
+					return nil
+				}
 			}
 		case contracts.FailedStep60:
 			if noActionableCandidates(run.Candidates) {
@@ -186,6 +234,9 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 						return appendErr
 					}
 					return nil
+				}
+				if handled, appendErr := o.handleContextCancellation(ctx, run, contracts.FailedStep60, err); handled {
+					return appendErr
 				}
 				return err
 			}
@@ -212,17 +263,14 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 					}
 					return nil
 				}
+				if handled, appendErr := o.handleContextCancellation(ctx, run, contracts.FailedStep70, err); handled {
+					return appendErr
+				}
 				return err
 			}
 			if err := ctx.Err(); err != nil {
-				terminal, terminalErr := hasTerminalEvent(run.IO, run.IO.RunID)
-				if terminalErr != nil {
-					return terminalErr
-				}
-				if !terminal {
-					if appendErr := o.appendInterrupted(run.PR, run.IO.RunID, contracts.FailedStep70, interruptedReasonFromContext(err), err.Error()); appendErr != nil {
-						return appendErr
-					}
+				if appendErr := o.appendInterruptedIfContextDone(ctx, run, contracts.FailedStep70, err); appendErr != nil {
+					return appendErr
 				}
 				return nil
 			}

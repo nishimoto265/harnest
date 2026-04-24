@@ -575,6 +575,162 @@ func TestRun_AllNonScorablePass2StopsBeforeStep70(t *testing.T) {
 	assert.NotContains(t, recorder.snapshot(), "70")
 }
 
+func TestRun_ProviderInterruptedPass1IsNonTerminalInterrupted(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	recorder := &callRecorder{}
+	orch.steps = Steps{
+		Step10:  stubStep10{},
+		Step20:  providerInterruptedAgentSteps("rate_limit"),
+		Step30:  recordingStep{label: "30", recorder: recorder},
+		Step40:  recordingStep{label: "40", recorder: recorder},
+		Step50:  stubAgentSteps(),
+		Step60:  recordingStep{label: "60", recorder: recorder},
+		Step70:  stubStep70{},
+		Archive: recordingStep{label: "archive", recorder: recorder},
+	}
+
+	runID := contracts.RunID("2026-04-21-PR452-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 452, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindInterrupted, last.Kind)
+	interrupted, ok := last.Value.(contracts.StateEntryInterrupted)
+	require.True(t, ok)
+	assert.Equal(t, contracts.FailedStep20, interrupted.Step)
+	assert.Equal(t, contracts.InterruptedReasonRateLimit, interrupted.Reason)
+	assert.Empty(t, recorder.snapshot())
+}
+
+func TestRun_ProviderInterruptedPass2IsNonTerminalInterrupted(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	recorder := &callRecorder{}
+	orch.steps = Steps{
+		Step10:  stubStep10{},
+		Step20:  stubAgentSteps(),
+		Step30:  stubMarkerStep{path: "30/done.marker"},
+		Step40:  forcedCandidateStep{},
+		Step50:  providerInterruptedAgentSteps("budget"),
+		Step60:  recordingStep{label: "60", recorder: recorder},
+		Step70:  recordingStep{label: "70", recorder: recorder},
+		Archive: recordingStep{label: "archive", recorder: recorder},
+	}
+
+	runID := contracts.RunID("2026-04-21-PR453-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 453, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindInterrupted, last.Kind)
+	interrupted, ok := last.Value.(contracts.StateEntryInterrupted)
+	require.True(t, ok)
+	assert.Equal(t, contracts.FailedStep50, interrupted.Step)
+	assert.Equal(t, contracts.InterruptedReasonBudget, interrupted.Reason)
+	assert.NotContains(t, recorder.snapshot(), "60")
+	assert.NotContains(t, recorder.snapshot(), "70")
+}
+
+func TestRun_ContextCancellationDuringStepRecordsInterrupted(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	orch.steps = Steps{
+		Step10: cancelingStep{cancel: cancel},
+		Step20: stubAgentSteps(),
+		Step70: stubStep70{},
+	}
+
+	runID := contracts.RunID("2026-04-21-PR454-abcdef0")
+	require.NoError(t, orch.Run(ctx, 454, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindInterrupted, last.Kind)
+	interrupted, ok := last.Value.(contracts.StateEntryInterrupted)
+	require.True(t, ok)
+	assert.Equal(t, contracts.FailedStep10, interrupted.Step)
+	assert.Equal(t, contracts.InterruptedReasonContext, interrupted.Reason)
+}
+
+func TestRun_FromScratchSupersedesNonTerminalRunAndPrunesWorktrees(t *testing.T) {
+	cfg := testConfig(t)
+	oldRunID := contracts.RunID("2026-04-21-PR455-abcdef0")
+	oldRunCtx, err := internalio.NewRunContext(oldRunID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(oldRunCtx.RunDir(), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(oldRunCtx.RunDir(), "config.snapshot.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+cfg.Repo.Root+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: best\n"+
+			"paths:\n"+
+			"  runs: "+cfg.Paths.Runs+"\n"+
+			"worktree:\n"+
+			"  base: "+cfg.Worktree.Base+"\n",
+	), 0o644))
+	pkg := stubTaskPackageForRun(oldRunCtx, 455)
+	require.NoError(t, internalio.WriteJSONAtomic(oldRunCtx.TaskPackagePath(), pkg))
+	for _, wt := range pkg.Worktrees {
+		require.NoError(t, os.MkdirAll(wt.Path, 0o755))
+	}
+	require.NoError(t, state.NewWriter(oldRunCtx).Append(startedEntry(455, oldRunID, time.Now().UTC())))
+	require.NoError(t, state.NewWriter(oldRunCtx).Append(contracts.StateEntry{
+		Kind: contracts.StateKindInterrupted,
+		Value: contracts.StateEntryInterrupted{
+			Kind:   contracts.StateKindInterrupted,
+			PR:     455,
+			RunID:  oldRunID,
+			Step:   contracts.FailedStep20,
+			Reason: contracts.InterruptedReasonUnknown,
+			At:     time.Now().UTC(),
+		},
+	}))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps = stubPipelineSteps(nil, stubStep70{})
+
+	require.NoError(t, orch.Run(context.Background(), 455, RunOptions{FromScratch: true}))
+
+	oldEvents, err := state.ScanEventsForRun(oldRunCtx, oldRunID)
+	require.NoError(t, err)
+	require.NotEmpty(t, oldEvents)
+	lastOld := oldEvents[len(oldEvents)-1]
+	assert.Equal(t, contracts.StateKindSkipped, lastOld.Kind)
+	skipped, ok := lastOld.Value.(contracts.StateEntrySkipped)
+	require.True(t, ok)
+	assert.Equal(t, "superseded_by_from_scratch", skipped.Detail)
+	for _, wt := range pkg.Worktrees {
+		assert.NoDirExists(t, wt.Path)
+	}
+
+	latest, err := state.LatestRunForPR(oldRunCtx, 455)
+	require.NoError(t, err)
+	require.NotNil(t, latest.LastEvent)
+	assert.NotEqual(t, oldRunID, latest.RunID)
+	assert.Equal(t, state.NextActionFreshStart, latest.Action)
+}
+
 func TestRun_Step70NeedsManualRecovery_EndToEnd(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
@@ -2501,7 +2657,19 @@ func stubAgentSteps() map[contracts.AgentID]Step {
 }
 
 type nonScorableImplementStep struct {
-	kind contracts.ManifestKind
+	kind   contracts.ManifestKind
+	reason string
+}
+
+type cancelingStep struct {
+	cancel context.CancelFunc
+}
+
+func (s cancelingStep) Run(ctx context.Context, run *StepRunContext) error {
+	_ = run
+	s.cancel()
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 func (s nonScorableImplementStep) Run(ctx context.Context, run *StepRunContext) error {
@@ -2527,6 +2695,10 @@ func (s nonScorableImplementStep) Run(ctx context.Context, run *StepRunContext) 
 			},
 		})
 	default:
+		reason := s.reason
+		if reason == "" {
+			reason = "unknown"
+		}
 		return internalio.WriteJSONAtomic(manifestPath, contracts.Manifest{
 			Kind: contracts.ManifestKindError,
 			Value: contracts.ManifestError{
@@ -2536,7 +2708,7 @@ func (s nonScorableImplementStep) Run(ctx context.Context, run *StepRunContext) 
 				Pass:          run.Pass,
 				Agent:         run.Agent,
 				ExitCode:      1,
-				Reason:        "unknown",
+				Reason:        reason,
 				Detail:        "fixture non-scorable manifest",
 				StartedAt:     startedAt,
 				FinishedAt:    startedAt,
@@ -2549,6 +2721,14 @@ func nonScorableAgentSteps(kind contracts.ManifestKind) map[contracts.AgentID]St
 	steps := make(map[contracts.AgentID]Step, len(defaultAgents))
 	for _, agent := range defaultAgents {
 		steps[agent] = nonScorableImplementStep{kind: kind}
+	}
+	return steps
+}
+
+func providerInterruptedAgentSteps(reason string) map[contracts.AgentID]Step {
+	steps := make(map[contracts.AgentID]Step, len(defaultAgents))
+	for _, agent := range defaultAgents {
+		steps[agent] = nonScorableImplementStep{kind: contracts.ManifestKindError, reason: reason}
 	}
 	return steps
 }

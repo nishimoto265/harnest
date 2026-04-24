@@ -28,7 +28,8 @@ import (
 var defaultAgents = []contracts.AgentID{"a1", "a2", "a3"}
 
 type RunOptions struct {
-	RunID contracts.RunID
+	RunID       contracts.RunID
+	FromScratch bool
 }
 
 type ContractDecoders struct {
@@ -264,6 +265,14 @@ func (o *Orchestrator) selectRun(pr int, opts RunOptions) (runSelection, error) 
 	if latest.LastEvent == nil {
 		return newFreshSelection(pr, opts, runsBase, worktreeBase)
 	}
+	if opts.FromScratch {
+		if err := o.supersedeNonTerminalRun(pr, latest, runsBase, worktreeBase); err != nil {
+			return runSelection{}, err
+		}
+		freshOpts := opts
+		freshOpts.RunID = ""
+		return newFreshSelection(pr, freshOpts, runsBase, worktreeBase)
+	}
 
 	action := latest.Action
 	switch action {
@@ -298,6 +307,44 @@ func (o *Orchestrator) selectRun(pr int, opts RunOptions) (runSelection, error) 
 	default:
 		return newFreshSelection(pr, opts, runsBase, worktreeBase)
 	}
+}
+
+func (o *Orchestrator) supersedeNonTerminalRun(pr int, latest state.LatestRun, runsBase, worktreeBase string) error {
+	if latest.LastEvent == nil || latest.LastEvent.Kind.IsTerminal() {
+		return nil
+	}
+	runID, ok := stateRunID(*latest.LastEvent)
+	if !ok {
+		return errors.New("orchestrator: latest non-terminal event is missing run_id")
+	}
+	runCtx, err := loadRunContext(runID, runsBase, worktreeBase)
+	if err != nil {
+		return err
+	}
+	var pkg *contracts.TaskPackage
+	if fileExists(runCtx.TaskPackagePath()) {
+		loaded, err := internalio.ReadJSON[contracts.TaskPackage](runCtx.TaskPackagePath())
+		if err != nil {
+			return err
+		}
+		pkg = &loaded
+	}
+	step := latest.Step
+	if step == "" {
+		step = contracts.FailedStep10
+	}
+	value := contracts.StateEntrySkipped{
+		Kind:   contracts.StateKindSkipped,
+		PR:     pr,
+		RunID:  runID,
+		Step:   step,
+		Detail: "superseded_by_from_scratch",
+		At:     time.Now().UTC(),
+	}
+	if err := state.NewWriter(runCtx).Append(contracts.StateEntry{Kind: value.Kind, Value: value}); err != nil {
+		return err
+	}
+	return cleanupWorktrees(runCtx, pkg)
 }
 
 func isPolicySnapshotStaleInterrupted(entry contracts.StateEntry) bool {
@@ -972,7 +1019,10 @@ func stepDoneEntry(pr int, runID contracts.RunID, step contracts.FailedStep, at 
 	return contracts.StateEntry{Kind: contracts.StateKindStepDone, Value: value}
 }
 
-func interruptedReasonFromContext(err error) contracts.InterruptedReason {
+func interruptedReasonFromContext(ctx context.Context, err error) contracts.InterruptedReason {
+	if cause := context.Cause(ctx); cause != nil && strings.HasPrefix(cause.Error(), "signal:") {
+		return contracts.InterruptedReasonSignal
+	}
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		return contracts.InterruptedReasonContext
@@ -981,6 +1031,31 @@ func interruptedReasonFromContext(err error) contracts.InterruptedReason {
 	default:
 		return contracts.InterruptedReasonUnknown
 	}
+}
+
+func (o *Orchestrator) handleContextCancellation(ctx context.Context, run *StepRunContext, step contracts.FailedStep, err error) (bool, error) {
+	if ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return false, nil
+	}
+	if appendErr := o.appendInterruptedIfContextDone(ctx, run, step, err); appendErr != nil {
+		return true, appendErr
+	}
+	return true, nil
+}
+
+func (o *Orchestrator) appendInterruptedIfContextDone(ctx context.Context, run *StepRunContext, step contracts.FailedStep, err error) error {
+	terminal, terminalErr := hasTerminalEvent(run.IO, run.IO.RunID)
+	if terminalErr != nil {
+		return terminalErr
+	}
+	if terminal {
+		return nil
+	}
+	detail := err.Error()
+	if cause := context.Cause(ctx); cause != nil {
+		detail = cause.Error()
+	}
+	return o.appendInterrupted(run.PR, run.IO.RunID, step, interruptedReasonFromContext(ctx, err), detail)
 }
 
 func completedEntry(pr int, runID contracts.RunID, step contracts.FailedStep, at time.Time) contracts.StateEntry {
@@ -1073,6 +1148,72 @@ func scorableAgentsForPass(runIO internalio.RunContext, pkg *contracts.TaskPacka
 		agents = append(agents, wt.Agent)
 	}
 	return agents, nil
+}
+
+func providerInterruptionFromNonScorableManifests(run *StepRunContext, pass int) (contracts.InterruptedReason, string, bool, error) {
+	if run == nil || run.TaskPackage == nil {
+		return "", "", false, errors.New("orchestrator: task package is required")
+	}
+	agents := passAgents(run.TaskPackage, pass)
+	if len(agents) == 0 {
+		return "", "", false, nil
+	}
+	var reason contracts.InterruptedReason
+	details := make([]string, 0, len(agents))
+	for _, agent := range agents {
+		manifest, err := internalio.LoadFinalizedManifest(run.IO, pass, agent)
+		if err != nil {
+			return "", "", false, err
+		}
+		switch value := manifest.Value.(type) {
+		case contracts.ManifestError:
+			agentReason, ok := providerManifestReason(value.Reason)
+			if !ok {
+				return "", "", false, nil
+			}
+			if reason == "" {
+				reason = agentReason
+			} else if reason != agentReason {
+				reason = contracts.InterruptedReasonUnknown
+			}
+			details = append(details, fmt.Sprintf("agent=%s reason=%s", agent, value.Reason))
+		case *contracts.ManifestError:
+			if value == nil {
+				return "", "", false, nil
+			}
+			agentReason, ok := providerManifestReason(value.Reason)
+			if !ok {
+				return "", "", false, nil
+			}
+			if reason == "" {
+				reason = agentReason
+			} else if reason != agentReason {
+				reason = contracts.InterruptedReasonUnknown
+			}
+			details = append(details, fmt.Sprintf("agent=%s reason=%s", agent, value.Reason))
+		default:
+			return "", "", false, nil
+		}
+	}
+	if reason == "" {
+		return "", "", false, nil
+	}
+	return reason, strings.Join(details, "; "), true, nil
+}
+
+func providerManifestReason(reason string) (contracts.InterruptedReason, bool) {
+	switch reason {
+	case string(contracts.InterruptedReasonRateLimit):
+		return contracts.InterruptedReasonRateLimit, true
+	case string(contracts.InterruptedReasonBudget):
+		return contracts.InterruptedReasonBudget, true
+	case string(contracts.InterruptedReasonContext):
+		return contracts.InterruptedReasonContext, true
+	case string(contracts.InterruptedReasonSignal):
+		return contracts.InterruptedReasonSignal, true
+	default:
+		return "", false
+	}
 }
 
 func shouldSkipScorableManifest(err error) bool {
