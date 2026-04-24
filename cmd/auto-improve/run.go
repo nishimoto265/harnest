@@ -128,12 +128,18 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 	if err := checkDetectLoopRecoveryGateForRunsBase(ctx, runsBase); err != nil {
 		return err
 	}
-	resumeTargets, err := state.ResumeTargetPath(processedPath)
-	if err != nil {
-		return err
-	}
-	resumedPRs := make(map[int]struct{}, len(resumeTargets))
-	for _, item := range resumeTargets {
+	hadResumeTargets := false
+	resumedPRs := make(map[int]struct{})
+	for {
+		resumeTargets, err := state.ResumeTargetPath(processedPath)
+		if err != nil {
+			return err
+		}
+		if len(resumeTargets) == 0 {
+			break
+		}
+		hadResumeTargets = true
+		item := resumeTargets[0]
 		resumedPRs[item.PR] = struct{}{}
 		if err := runner.Run(ctx, item.PR, orchestrator.RunOptions{RunID: item.RunID}); err != nil {
 			if commandErr := recoveryGateExitError(err); commandErr != nil {
@@ -144,20 +150,20 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 		if err := checkDetectLoopRecoveryGateForRunsBase(ctx, runsBase); err != nil {
 			return err
 		}
-	}
-	remainingResumeTargets, err := state.ResumeTargetPath(processedPath)
-	if err != nil {
-		return err
-	}
-	if len(remainingResumeTargets) > 0 {
-		return nil
+		remainingResumeTargets, err := state.ResumeTargetPath(processedPath)
+		if err != nil {
+			return err
+		}
+		if resumeTargetStillPending(remainingResumeTargets, item) {
+			return nil
+		}
 	}
 	prs, err := detectMergedPRs(ctx, cfg, processedPath)
 	if err != nil {
 		return err
 	}
 	prs = filterFreshPRsResumedThisTick(prs, resumedPRs)
-	if len(resumeTargets) == 0 && len(prs) == 0 {
+	if !hadResumeTargets && len(prs) == 0 {
 		if err := checkDetectLoopRecoveryGateForRunsBase(ctx, runsBase); err != nil {
 			return err
 		}
@@ -174,6 +180,15 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 		}
 	}
 	return nil
+}
+
+func resumeTargetStillPending(targets []state.ResumeRequest, current state.ResumeRequest) bool {
+	for _, target := range targets {
+		if target.PR == current.PR && target.RunID == current.RunID {
+			return true
+		}
+	}
+	return false
 }
 
 func filterFreshPRsResumedThisTick(prs []detect.MergedPR, resumed map[int]struct{}) []detect.MergedPR {
