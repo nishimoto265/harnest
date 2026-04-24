@@ -513,6 +513,14 @@ func gitOutputContext(ctx context.Context, transform func(string) string, worktr
 	return transform(string(out)), nil
 }
 
+func gitOutputContextWithEnv(ctx context.Context, transform func(string) string, worktreePath string, env []string, args ...string) (string, error) {
+	out, err := gitOutputBytesContextWithEnv(ctx, worktreePath, env, args...)
+	if err != nil {
+		return "", err
+	}
+	return transform(string(out)), nil
+}
+
 func gitOutputBytes(worktreePath string, args ...string) ([]byte, error) {
 	cmd, err := trustedGitCommand("git", args...)
 	if err != nil {
@@ -528,12 +536,16 @@ func gitOutputBytes(worktreePath string, args ...string) ([]byte, error) {
 }
 
 func gitOutputBytesContext(ctx context.Context, worktreePath string, args ...string) ([]byte, error) {
+	return gitOutputBytesContextWithEnv(ctx, worktreePath, processenv.GitLocalEnv(), args...)
+}
+
+func gitOutputBytesContextWithEnv(ctx context.Context, worktreePath string, env []string, args ...string) ([]byte, error) {
 	cmd, err := trustedGitCommandContext(ctx, "git", args...)
 	if err != nil {
 		return nil, fmt.Errorf("step20: resolve git: %w", err)
 	}
 	cmd.Dir = worktreePath
-	cmd.Env = processenv.GitLocalEnv()
+	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -542,6 +554,15 @@ func gitOutputBytesContext(ctx context.Context, worktreePath string, args ...str
 		return nil, fmt.Errorf("step20: git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+func syntheticCommitEnv() []string {
+	return append(processenv.GitLocalEnv(),
+		"GIT_AUTHOR_NAME=auto-improve",
+		"GIT_AUTHOR_EMAIL=auto-improve@example.invalid",
+		"GIT_COMMITTER_NAME=auto-improve",
+		"GIT_COMMITTER_EMAIL=auto-improve@example.invalid",
+	)
 }
 
 func commitCountForRevision(ctx context.Context, worktreePath, rev string) (int, error) {

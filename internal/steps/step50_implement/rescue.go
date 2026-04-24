@@ -441,11 +441,15 @@ func runGitCommand(ctx context.Context, dir string, args ...string) error {
 }
 
 func gitOutputBytesContext(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	return gitOutputBytesContextWithEnv(ctx, dir, processenv.GitLocalEnv(), args...)
+}
+
+func gitOutputBytesContextWithEnv(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
 	cmd, err := trustedGitCommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
 	if err != nil {
 		return nil, fmt.Errorf("step50: resolve git: %w", err)
 	}
-	cmd.Env = processenv.GitLocalEnv()
+	cmd.Env = env
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -464,6 +468,23 @@ func gitOutputContext(ctx context.Context, mapFn func(string) string, dir string
 		return "", err
 	}
 	return mapFn(string(output)), nil
+}
+
+func gitOutputContextWithEnv(ctx context.Context, mapFn func(string) string, dir string, env []string, args ...string) (string, error) {
+	output, err := gitOutputBytesContextWithEnv(ctx, dir, env, args...)
+	if err != nil {
+		return "", err
+	}
+	return mapFn(string(output)), nil
+}
+
+func syntheticCommitEnv() []string {
+	return append(processenv.GitLocalEnv(),
+		"GIT_AUTHOR_NAME=auto-improve",
+		"GIT_AUTHOR_EMAIL=auto-improve@example.invalid",
+		"GIT_COMMITTER_NAME=auto-improve",
+		"GIT_COMMITTER_EMAIL=auto-improve@example.invalid",
+	)
 }
 
 func writeGitOutputContext(ctx context.Context, dir, dest string, args ...string) error {

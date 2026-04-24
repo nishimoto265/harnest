@@ -176,6 +176,47 @@ roles:
 	assert.Equal(t, contracts.ManifestKindSuccess, manifest.Kind)
 }
 
+func TestSynthesizeSuccessCommit_SetsIdentityUnderHardenedGitEnv(t *testing.T) {
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "xdg"))
+
+	repo := t.TempDir()
+	runCommand(t, "", "git", "init", "-b", "main", repo)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644))
+	runCommand(t, repo, "git", "add", "README.md")
+	runCommand(t, repo, "git", "-c", "user.name=Seed User", "-c", "user.email=seed@example.invalid", "commit", "-m", "base")
+	runCommand(t, repo, "git", "checkout", "-b", "auto-improve/test/pass2/a1")
+	baseSHA := strings.TrimSpace(runCommand(t, repo, "git", "rev-parse", "HEAD"))
+	localIdentity := exec.Command("git", "config", "--local", "--get", "user.email")
+	localIdentity.Dir = repo
+	localIdentityOut, localIdentityErr := localIdentity.CombinedOutput()
+	require.Error(t, localIdentityErr, string(localIdentityOut))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("changed\n"), 0o644))
+
+	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
+	runIO, err := internalio.NewRunContext(runID, t.TempDir(), t.TempDir())
+	require.NoError(t, err)
+	allocation := contracts.WorktreeAllocation{
+		Agent:   "a1",
+		Pass:    2,
+		Path:    repo,
+		Branch:  "auto-improve/test/pass2/a1",
+		BaseSHA: baseSHA,
+		HeadSHA: baseSHA,
+	}
+
+	commitSHA, parent, err := synthesizeSuccessCommit(context.Background(), allocation, RunContext{
+		IO:    runIO,
+		Agent: "a1",
+	})
+	require.NoError(t, err)
+	require.Equal(t, baseSHA, parent)
+
+	commit := runCommand(t, repo, "git", "cat-file", "-p", commitSHA)
+	require.Contains(t, commit, "author auto-improve <auto-improve@example.invalid>")
+	require.Contains(t, commit, "committer auto-improve <auto-improve@example.invalid>")
+}
+
 func TestStepRun_PersistsChildPIDAndPGIDInResumeState(t *testing.T) {
 	env := newStepTestEnv(t, "fake-claude-timeout.sh", 30)
 	t.Setenv("FAKE_SLEEP_SECONDS", "1")
