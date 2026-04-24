@@ -2,6 +2,7 @@ package policyrepo
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"os/exec"
@@ -111,6 +112,35 @@ func TestHydrateFromBranchUsesSafeGitProfiles(t *testing.T) {
 	assert.GreaterOrEqual(t, localChecked, 2)
 }
 
+func TestBranchSnapshotMatchesLocalUsesScopedHTTPSTokenAuthForFetch(t *testing.T) {
+	t.Setenv("GH_TOKEN", "test-token")
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	require.NoError(t, HydrateFromBranch(context.Background(), repoRoot, "policy", runsBase))
+	mustGit(t, repoRoot, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+
+	originalRunGit := runGit
+	fetchChecked := 0
+	runGit = func(ctx context.Context, env []string, args ...string) ([]byte, error) {
+		if slicesContains(args, "fetch") {
+			fetchChecked++
+			assertSafeGitEnv(t, env)
+			assert.Contains(t, env, "GH_TOKEN=test-token")
+			assertScopedGitHubExtraHeader(t, env, "github.com", "test-token")
+			return nil, nil
+		}
+		return originalRunGit(ctx, env, args...)
+	}
+	t.Cleanup(func() {
+		runGit = originalRunGit
+	})
+
+	matches, err := BranchSnapshotMatchesLocal(context.Background(), repoRoot, "policy", runsBase)
+	require.NoError(t, err)
+	assert.True(t, matches)
+	assert.Equal(t, 1, fetchChecked)
+}
+
 func TestHydrateAndSnapshotFromBranchCopiesPolicyFilesToRunDir(t *testing.T) {
 	repoRoot := newClonedRepoWithPolicyBranch(t)
 	runsBase := filepath.Join(t.TempDir(), "runs")
@@ -215,6 +245,39 @@ func TestPublishSnapshotPushesRunsBasePolicyToBranch(t *testing.T) {
 	mustGit(t, repoRoot, "fetch", "--no-tags", "origin", "policy")
 	body := string(mustGitOutput(t, repoRoot, "show", "origin/policy:"+RulesRepoDirRelPath+"/r-sync-message-details.md"))
 	assert.Contains(t, body, "# Updated rule")
+}
+
+func TestPreparedPublishPushUsesScopedHTTPSTokenAuth(t *testing.T) {
+	t.Setenv("GH_TOKEN", "test-token")
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	head := strings.TrimSpace(string(mustGitOutput(t, repoRoot, "rev-parse", "origin/policy")))
+	mustGit(t, repoRoot, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+
+	originalRunGit := runGit
+	pushChecked := 0
+	runGit = func(ctx context.Context, env []string, args ...string) ([]byte, error) {
+		if slicesContains(args, "push") {
+			pushChecked++
+			assertSafeGitEnv(t, env)
+			assert.Contains(t, env, "GH_TOKEN=test-token")
+			assertScopedGitHubExtraHeader(t, env, "github.com", "test-token")
+			return nil, nil
+		}
+		return originalRunGit(ctx, env, args...)
+	}
+	t.Cleanup(func() {
+		runGit = originalRunGit
+	})
+
+	plan := &PreparedPublish{
+		RepoRoot:     repoRoot,
+		Branch:       "policy",
+		ExpectedHead: head,
+		Head:         head,
+		needsPush:    true,
+	}
+	require.NoError(t, plan.Push(context.Background()))
+	assert.Equal(t, 1, pushChecked)
 }
 
 func TestHydrateFromBranchKeepsPreviousLocalPolicyWhenRemoteSnapshotIsInvalid(t *testing.T) {
@@ -395,6 +458,13 @@ func assertSafeGitEnv(t *testing.T, env []string) {
 	assert.NotContains(t, env, "GIT_CONFIG_GLOBAL=/tmp/malicious-gitconfig")
 	assert.NotContains(t, env, "GIT_SSH_COMMAND=ssh -F /tmp/malicious-ssh-config")
 	assert.NotContains(t, env, "GIT_ASKPASS=/tmp/malicious-askpass")
+}
+
+func assertScopedGitHubExtraHeader(t *testing.T, env []string, host, token string) {
+	t.Helper()
+	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token))
+	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://"+host+"/.extraheader")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+header)
 }
 
 func envValue(env []string, key string) string {

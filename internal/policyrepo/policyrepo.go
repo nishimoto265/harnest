@@ -243,7 +243,11 @@ func (p *PreparedPublish) Push(ctx context.Context) error {
 	if !p.needsPush {
 		return nil
 	}
-	if _, err := runGit(ctx, processenv.GitNetworkEnv(), "-C", p.RepoRoot, "push", "origin", fmt.Sprintf("%s:%s", p.Head, p.Branch), fmt.Sprintf("--force-with-lease=%s:%s", p.Branch, p.ExpectedHead)); err != nil {
+	remoteURL, err := originRemoteURL(ctx, p.RepoRoot)
+	if err != nil {
+		return err
+	}
+	if _, err := runGit(ctx, processenv.GitNetworkEnvForRemoteURL(remoteURL), "-C", p.RepoRoot, "push", "origin", fmt.Sprintf("%s:%s", p.Head, p.Branch), fmt.Sprintf("--force-with-lease=%s:%s", p.Branch, p.ExpectedHead)); err != nil {
 		return fmt.Errorf("policyrepo: push policy snapshot: %w", err)
 	}
 	return nil
@@ -707,11 +711,23 @@ func moveSnapshotIntoPlace(runsBase, stageDir string, snap snapshot) error {
 }
 
 func fetchBranch(ctx context.Context, repoRoot, branch string) error {
-	_, err := runGit(ctx, processenv.GitNetworkEnv(), "-C", repoRoot, "fetch", "--no-tags", "origin", branch)
+	remoteURL, err := originRemoteURL(ctx, repoRoot)
+	if err != nil {
+		return err
+	}
+	_, err = runGit(ctx, processenv.GitNetworkEnvForRemoteURL(remoteURL), "-C", repoRoot, "fetch", "--no-tags", "origin", branch)
 	if err != nil {
 		return fmt.Errorf("policyrepo: fetch branch %s: %w", branch, err)
 	}
 	return nil
+}
+
+func originRemoteURL(ctx context.Context, repoRoot string) (string, error) {
+	out, err := gitText(ctx, repoRoot, "remote", "get-url", "origin")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func branchHead(ctx context.Context, repoRoot, branch string) (string, error) {
