@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/config"
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 )
 
 type Failure struct {
@@ -43,9 +43,12 @@ var versionPattern = regexp.MustCompile(`(\d+)\.(\d+)(?:\.(\d+))?`)
 
 func New() Checker {
 	return NewWithDependencies(Dependencies{
-		LookPath: exec.LookPath,
+		LookPath: processenv.TrustedLookPath,
 		Run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			cmd := exec.CommandContext(ctx, name, args...)
+			cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
+			if err != nil {
+				return nil, err
+			}
 			return cmd.CombinedOutput()
 		},
 	})
@@ -53,11 +56,14 @@ func New() Checker {
 
 func NewWithDependencies(deps Dependencies) Checker {
 	if deps.LookPath == nil {
-		deps.LookPath = exec.LookPath
+		deps.LookPath = processenv.TrustedLookPath
 	}
 	if deps.Run == nil {
 		deps.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			cmd := exec.CommandContext(ctx, name, args...)
+			cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
+			if err != nil {
+				return nil, err
+			}
 			return cmd.CombinedOutput()
 		}
 	}

@@ -42,6 +42,8 @@ var (
 	ErrRescueAbortedLeaseActive = errors.New("step20: rescue aborted because lease is active")
 )
 
+var collectSuccessDiffBytes = agentrunner.SuccessDiffBytes
+
 //go:embed prompts/step20-implement.tmpl
 var step20PromptFS embed.FS
 
@@ -447,7 +449,7 @@ func ensureDir(path string) error {
 }
 
 func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte, error) {
-	return agentrunner.SuccessDiffBytes(ctx, worktreePath, baseSHA, "step20")
+	return collectSuccessDiffBytes(ctx, worktreePath, baseSHA, "step20")
 }
 
 func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeAllocation, run RunContext) (string, string, error) {

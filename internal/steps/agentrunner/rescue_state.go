@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -58,7 +57,10 @@ func ReadRescueState(path string) (RescueStateFile, error) {
 // entries are sorted before hashing, so it can be compared across adoption
 // attempts to detect uncaptured worktree changes.
 func ComputeDirtyFingerprint(ctx context.Context, worktreePath string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "status", "--porcelain=v1", "-z")
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", worktreePath, "status", "--porcelain=v1", "-z")
+	if err != nil {
+		return "", fmt.Errorf("agentrunner: resolve git: %w", err)
+	}
 	cmd.Env = processenv.Sanitize()
 	out, err := cmd.Output()
 	if err != nil {

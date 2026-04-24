@@ -11,13 +11,17 @@ import (
 )
 
 func TestImplementerCommandClaude(t *testing.T) {
+	dir := t.TempDir()
+	claudePath := filepath.Join(dir, "claude")
+	require.NoError(t, os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
 	binary, args, err := ImplementerCommand(agents.Profile{
 		Provider: agents.ProviderClaude,
-		Binary:   "claude",
+		Binary:   claudePath,
 		Args:     []string{"--print"},
 	}, "/tmp/worktree")
 	require.NoError(t, err)
-	assert.Equal(t, "claude", binary)
+	assert.Equal(t, claudePath, binary)
 	assert.Equal(t, []string{"--print"}, args)
 }
 
@@ -69,4 +73,18 @@ func TestImplementerCommandCodexDangerousBypassRequiresProfileOptIn(t *testing.T
 		"--dangerously-bypass-approvals-and-sandbox",
 		"-",
 	}, args)
+}
+
+func TestPrepareProviderBinary_IgnoresParentPathShadow(t *testing.T) {
+	shadowDir := t.TempDir()
+	shadowPath := filepath.Join(shadowDir, "shadow-agent")
+	require.NoError(t, os.WriteFile(shadowPath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	t.Setenv("PATH", shadowDir)
+
+	binary, args, err := PrepareProviderBinary(agents.ProviderClaude, filepath.Base(shadowPath))
+
+	require.Error(t, err)
+	assert.Empty(t, binary)
+	assert.Empty(t, args)
+	assert.Contains(t, err.Error(), "trusted PATH")
 }

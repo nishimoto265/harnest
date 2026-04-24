@@ -303,6 +303,9 @@ var rescueQuiesceInterval = 25 * time.Millisecond
 var rescueSleep = time.Sleep
 var rescueExecLookPath = exec.LookPath
 var rescueCommandContext = exec.CommandContext
+var trustedGitCommand = processenv.TrustedCommand
+var trustedGitCommandContext = processenv.TrustedCommandContext
+var streamGitOutputWithLimit = agentrunner.StreamGitOutputWithLimit
 
 func writeCommitBundle(ctx context.Context, worktreePath, rescueDir, baseSHA string) (int, string, error) {
 	bundlePath := filepath.Join(rescueDir, "commits.bundle")
@@ -339,7 +342,7 @@ func writeCommitBundle(ctx context.Context, worktreePath, rescueDir, baseSHA str
 }
 
 func writeGitOutputContext(ctx context.Context, worktreePath, target string, args ...string) error {
-	_, err := agentrunner.StreamGitOutputWithLimit(ctx, worktreePath, "step20", target, agentrunner.RescueDiffLimitBytes, args...)
+	_, err := streamGitOutputWithLimit(ctx, worktreePath, "step20", target, agentrunner.RescueDiffLimitBytes, args...)
 	return err
 }
 
@@ -512,7 +515,10 @@ func gitOutputContext(ctx context.Context, transform func(string) string, worktr
 }
 
 func gitOutputBytes(worktreePath string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", args...)
+	cmd, err := trustedGitCommand("git", args...)
+	if err != nil {
+		return nil, fmt.Errorf("step20: resolve git: %w", err)
+	}
 	cmd.Dir = worktreePath
 	cmd.Env = processenv.Sanitize()
 	out, err := cmd.CombinedOutput()
@@ -523,7 +529,10 @@ func gitOutputBytes(worktreePath string, args ...string) ([]byte, error) {
 }
 
 func gitOutputBytesContext(ctx context.Context, worktreePath string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd, err := trustedGitCommandContext(ctx, "git", args...)
+	if err != nil {
+		return nil, fmt.Errorf("step20: resolve git: %w", err)
+	}
 	cmd.Dir = worktreePath
 	cmd.Env = processenv.Sanitize()
 	out, err := cmd.CombinedOutput()

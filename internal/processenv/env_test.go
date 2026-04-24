@@ -1,9 +1,12 @@
 package processenv
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func setSanitizeTestEnv(t *testing.T) {
@@ -104,4 +107,23 @@ func TestSanitizeForNetworkExec_PreservesAuthEnvButBlocksShellInit(t *testing.T)
 	assert.NotContains(t, env, "GIT_SSH_COMMAND=ssh -F /tmp/config")
 	// GH_REPO is not in the allowlist — callers pass --repo explicitly.
 	assert.NotContains(t, env, "GH_REPO=owner/repo")
+}
+
+func TestTrustedLookPath_IgnoresParentPathShadow(t *testing.T) {
+	shadowDir := t.TempDir()
+	shadowPath := filepath.Join(shadowDir, "sh")
+	require.NoError(t, os.WriteFile(shadowPath, []byte("#!/bin/sh\nexit 99\n"), 0o755))
+	t.Setenv("PATH", shadowDir)
+
+	resolved, err := TrustedLookPath("sh")
+	require.NoError(t, err)
+	assert.NotEqual(t, shadowPath, resolved)
+	assert.Contains(t, filepath.SplitList(trustedPATH), filepath.Dir(resolved))
+}
+
+func TestTrustedLookPath_RejectsRelativePathWithSeparator(t *testing.T) {
+	_, err := TrustedLookPath("./agent")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "relative executable path")
 }

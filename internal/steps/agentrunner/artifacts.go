@@ -164,7 +164,10 @@ func LoadChecklistArtifactContext(ctx context.Context, worktreePath, filename, e
 }
 
 func gitOutputBytesContext(ctx context.Context, worktreePath, errPrefix string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
+	if err != nil {
+		return nil, fmt.Errorf("%s: resolve git: %w", errPrefix, err)
+	}
 	cmd.Env = processenv.Sanitize()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -187,7 +190,10 @@ func gitOutputContext(ctx context.Context, mapFn func(string) string, worktreePa
 }
 
 func streamGitCommandContext(ctx context.Context, worktreePath, errPrefix string, writer io.Writer, exitOneAllowed bool, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
+	if err != nil {
+		return fmt.Errorf("%s: resolve git: %w", errPrefix, err)
+	}
 	cmd.Env = processenv.Sanitize()
 	cmd.Stdout = writer
 	var stderr bytes.Buffer
@@ -206,7 +212,10 @@ func streamGitCommandContext(ctx context.Context, worktreePath, errPrefix string
 }
 
 func streamGitNoIndexDiffContext(ctx context.Context, worktreePath, relativePath, errPrefix string, writer io.Writer) error {
-	cmd := exec.CommandContext(ctx, "git", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", relativePath)
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", relativePath)
+	if err != nil {
+		return fmt.Errorf("%s: resolve git: %w", errPrefix, err)
+	}
 	cmd.Dir = worktreePath
 	cmd.Env = processenv.Sanitize()
 	cmd.Stdout = writer

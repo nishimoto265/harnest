@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -41,7 +40,10 @@ func gitOutputTrimmed(ctx context.Context, worktreePath, errPrefix string, args 
 }
 
 func gitOutput(ctx context.Context, worktreePath, errPrefix string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
+	if err != nil {
+		return nil, fmt.Errorf("%s: resolve git: %w", errPrefix, err)
+	}
 	cmd.Env = processenv.Sanitize()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -56,7 +58,10 @@ func gitOutput(ctx context.Context, worktreePath, errPrefix string, args ...stri
 }
 
 func runGitCommand(ctx context.Context, worktreePath, errPrefix string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
+	if err != nil {
+		return fmt.Errorf("%s: resolve git: %w", errPrefix, err)
+	}
 	cmd.Env = processenv.Sanitize()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

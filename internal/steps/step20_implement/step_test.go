@@ -1002,12 +1002,11 @@ func TestStepRunSerializesWorktreeRecreationUnderRescueLock(t *testing.T) {
 	wrapperDir := t.TempDir()
 	logPath := filepath.Join(wrapperDir, "git.log")
 	writeFakeGitWrapper(t, wrapperDir)
+	useFakeGitWrapper(t, filepath.Join(wrapperDir, "git"))
 	t.Setenv("REAL_GIT", realGit)
 	t.Setenv("FAKE_GIT_LOG", logPath)
 	t.Setenv("FAKE_GIT_SLEEP_ON_PREFIX", "worktree add")
 	t.Setenv("FAKE_GIT_SLEEP_SECONDS", "1")
-	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	firstErrCh := make(chan error, 1)
 	go func() {
 		firstErrCh <- step.Run(context.Background(), run)
@@ -1036,12 +1035,12 @@ func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
 	wrapperDir := t.TempDir()
 	logPath := filepath.Join(wrapperDir, "git.log")
 	writeFakeGitWrapper(t, wrapperDir)
+	useFakeGitWrapper(t, filepath.Join(wrapperDir, "git"))
+	useFakeStreamGitOutputWithLimit(t, filepath.Join(wrapperDir, "git"))
 	t.Setenv("REAL_GIT", realGit)
 	t.Setenv("FAKE_GIT_LOG", logPath)
 	t.Setenv("FAKE_GIT_SLEEP_ON_SUBSTRING", " diff HEAD --binary --no-ext-diff --no-textconv")
 	t.Setenv("FAKE_GIT_SLEEP_SECONDS", "5")
-	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1407,12 +1406,11 @@ func TestStepRunSuccessArtifactsHonorContextCancellation(t *testing.T) {
 	wrapperDir := t.TempDir()
 	logPath := filepath.Join(wrapperDir, "git.log")
 	writeFakeGitWrapper(t, wrapperDir)
+	useFakeGitWrapper(t, filepath.Join(wrapperDir, "git"))
 	t.Setenv("REAL_GIT", realGit)
 	t.Setenv("FAKE_GIT_LOG", logPath)
 	t.Setenv("FAKE_GIT_SLEEP_ON_SUBSTRING", " rev-parse HEAD")
 	t.Setenv("FAKE_GIT_SLEEP_SECONDS", "5")
-	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1761,4 +1759,51 @@ fi
 exec "$REAL_GIT" "$@"
 `
 	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+}
+
+func useFakeGitWrapper(t *testing.T, wrapperPath string) {
+	t.Helper()
+	oldCommand := trustedGitCommand
+	oldCommandContext := trustedGitCommandContext
+	trustedGitCommand = func(name string, args ...string) (*exec.Cmd, error) {
+		if name == "git" {
+			return exec.Command(wrapperPath, args...), nil
+		}
+		return oldCommand(name, args...)
+	}
+	trustedGitCommandContext = func(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
+		if name == "git" {
+			return exec.CommandContext(ctx, wrapperPath, args...), nil
+		}
+		return oldCommandContext(ctx, name, args...)
+	}
+	t.Cleanup(func() {
+		trustedGitCommand = oldCommand
+		trustedGitCommandContext = oldCommandContext
+	})
+}
+
+func useFakeStreamGitOutputWithLimit(t *testing.T, wrapperPath string) {
+	t.Helper()
+	oldStream := streamGitOutputWithLimit
+	streamGitOutputWithLimit = func(ctx context.Context, worktreePath, errPrefix, destPath string, limit int64, args ...string) (int64, error) {
+		cmd := exec.CommandContext(ctx, wrapperPath, append([]string{"-C", worktreePath}, args...)...)
+		cmd.Env = os.Environ()
+		out, err := cmd.Output()
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		if err != nil {
+			return 0, err
+		}
+		if int64(len(out)) > limit {
+			return int64(len(out)), fmt.Errorf("%w: git %s bytes=%d limit=%d", agentrunner.ErrRescueDiffOverLimit, strings.Join(args, " "), len(out), limit)
+		}
+		require.NoError(t, os.MkdirAll(filepath.Dir(destPath), 0o755))
+		require.NoError(t, os.WriteFile(destPath, out, 0o644))
+		return int64(len(out)), nil
+	}
+	t.Cleanup(func() {
+		streamGitOutputWithLimit = oldStream
+	})
 }

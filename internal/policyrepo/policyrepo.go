@@ -32,7 +32,10 @@ const (
 )
 
 var runGit = func(ctx context.Context, env []string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", args...)
+	if err != nil {
+		return nil, err
+	}
 	cmd.Env = env
 	return cmd.CombinedOutput()
 }

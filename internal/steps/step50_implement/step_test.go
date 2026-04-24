@@ -496,8 +496,7 @@ func TestStep50GitHelpers_ReturnContextCancellation(t *testing.T) {
 	wrapperPath := filepath.Join(wrapperDir, "git")
 	wrapper := "#!/bin/sh\nsleep 5\nexit 1\n"
 	require.NoError(t, os.WriteFile(wrapperPath, []byte(wrapper), 0o755))
-	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
+	useFakeGitWrapper(t, wrapperPath)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(100 * time.Millisecond)
@@ -716,11 +715,10 @@ func TestStepRun_StopsHeartbeatBeforeSlowFinalize(t *testing.T) {
 	require.NoError(t, err)
 	wrapperDir := t.TempDir()
 	writeContainsFakeGitWrapper(t, wrapperDir)
+	useFakeGitWrapper(t, filepath.Join(wrapperDir, "git"))
 	t.Setenv("REAL_GIT", realGit)
 	t.Setenv("FAKE_GIT_SLEEP_ON_SUBSTRING", " rev-parse HEAD")
 	t.Setenv("FAKE_GIT_SLEEP_SECONDS", "1")
-	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	step := newStep(env.run.Config, stepOptions{
 		now:               time.Now,
 		heartbeatInterval: 10 * time.Millisecond,
@@ -1417,6 +1415,45 @@ fi
 exec "$REAL_GIT" "$@"
 `
 	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+}
+
+func useFakeGitWrapper(t *testing.T, wrapperPath string) {
+	t.Helper()
+	oldCommandContext := trustedGitCommandContext
+	trustedGitCommandContext = func(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
+		if name == "git" {
+			return exec.CommandContext(ctx, wrapperPath, args...), nil
+		}
+		return oldCommandContext(ctx, name, args...)
+	}
+	t.Cleanup(func() {
+		trustedGitCommandContext = oldCommandContext
+	})
+}
+
+func useFakeStreamGitOutputWithLimit(t *testing.T, wrapperPath string) {
+	t.Helper()
+	oldStream := streamGitOutputWithLimit
+	streamGitOutputWithLimit = func(ctx context.Context, worktreePath, errPrefix, destPath string, limit int64, args ...string) (int64, error) {
+		cmd := exec.CommandContext(ctx, wrapperPath, append([]string{"-C", worktreePath}, args...)...)
+		cmd.Env = os.Environ()
+		out, err := cmd.Output()
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		if err != nil {
+			return 0, err
+		}
+		if int64(len(out)) > limit {
+			return int64(len(out)), fmt.Errorf("%w: git %s bytes=%d limit=%d", agentrunner.ErrRescueDiffOverLimit, strings.Join(args, " "), len(out), limit)
+		}
+		require.NoError(t, os.MkdirAll(filepath.Dir(destPath), 0o755))
+		require.NoError(t, os.WriteFile(destPath, out, 0o644))
+		return int64(len(out)), nil
+	}
+	t.Cleanup(func() {
+		streamGitOutputWithLimit = oldStream
+	})
 }
 
 func processDead(pid int) bool {

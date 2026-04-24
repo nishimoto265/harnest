@@ -62,7 +62,10 @@ func NewGHClientWithRunner(runner cmdRunner) GHClient {
 }
 
 func defaultCmdRunner(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
+	if err != nil {
+		return nil, nil, err
+	}
 	// gh reaches GitHub; preserve GH_TOKEN / SSH_AUTH_SOCK / GH_HOST etc.
 	cmd.Env = processenv.SanitizeForNetworkExec()
 	stdout, err := cmd.Output()
