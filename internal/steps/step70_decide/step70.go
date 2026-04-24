@@ -1855,14 +1855,16 @@ func cleanupWorktrees(ctx context.Context, runCtx internalio.RunContext, pkg *co
 			return err
 		}
 		if git != nil {
-			if err := git.RemoveWorktree(ctx, wt.Path); err != nil && !os.IsNotExist(err) {
+			if err := git.RemoveWorktree(ctx, wt.Path); err != nil && !os.IsNotExist(err) && !errors.Is(err, ErrWorktreeUnregistered) {
 				return err
 			}
 		}
-		if _, err := os.Stat(wt.Path); err == nil {
+		if _, err := os.Lstat(wt.Path); err == nil {
 			if err := os.RemoveAll(filepath.Clean(wt.Path)); err != nil {
 				return err
 			}
+		} else if !os.IsNotExist(err) {
+			return err
 		}
 	}
 	return nil

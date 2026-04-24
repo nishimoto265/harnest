@@ -26,6 +26,11 @@ var (
 	// while we were planning.
 	ErrRegistryDivergence = errors.New("step70: rules-registry advanced during planning with no idempotency match")
 
+	// ErrWorktreeUnregistered means git metadata no longer contains the
+	// planned worktree path. Cleanup treats this as crash/resume-idempotent
+	// after the task-package path has been validated against worktree_base.
+	ErrWorktreeUnregistered = errors.New("step70: git worktree path is not registered")
+
 	// ErrNeedsManualRecovery signals the caller that a needs-recovery sentinel
 	// was written and the flow exited without completing.
 	ErrNeedsManualRecovery = errors.New("step70: needs_manual_recovery sentinel written")
