@@ -173,6 +173,10 @@ func Run(ctx context.Context, in Input) error {
 	if err != nil {
 		return err
 	}
+	activeComplianceRuleIDs, err := judges.ActiveComplianceRuleIDs(in.RubricPath)
+	if err != nil {
+		return err
+	}
 	fallbackComplianceRuleIDs, err := judges.ExpectedComplianceRuleIDs(in.RubricPath)
 	if err != nil {
 		return err
@@ -205,6 +209,7 @@ func Run(ctx context.Context, in Input) error {
 		expectedCompliance := expectedComplianceRuleIDsForAgent(
 			run.Agent,
 			pass1ComplianceRuleIDs,
+			activeComplianceRuleIDs,
 			fallbackComplianceRuleIDs,
 			in.CandidateRules,
 		)
@@ -267,7 +272,9 @@ func Run(ctx context.Context, in Input) error {
 		var arbiterScores map[contracts.Dimension]contracts.ScoreEntry
 		var arbiterCompliance map[string]contracts.ComplianceEntry
 		if scoreNeedsArbiter || len(complianceDisagreements) > 0 {
-			arbiterOutput, err := scoreJudgeOutput(ctx, "arbiter", in.Arbiter, run.JudgeInput)
+			arbiterInput := run.JudgeInput
+			arbiterInput.ExpectedComplianceRuleIDs = append([]string(nil), complianceDisagreements...)
+			arbiterOutput, err := scoreJudgeOutput(ctx, "arbiter", in.Arbiter, arbiterInput)
 			if err != nil {
 				return err
 			}
@@ -418,6 +425,7 @@ func applyDefaults(in Input) (Input, error) {
 	if in.Arbiter == nil {
 		in.Arbiter = judges.NewArbiterStub()
 	}
+	in.PromptVersion = judges.PanelPromptVersion(in.PromptVersion, in.Primary, in.Secondary, in.Arbiter)
 	return in, nil
 }
 
@@ -1596,28 +1604,31 @@ func loadPass1ComplianceRuleIDs(runIO internalio.RunContext, rubricVersion, prom
 }
 
 // expectedComplianceRuleIDsForAgent computes the rule-id set that pass2 raw
-// compliance rows must cover for the given agent. F18: the set is derived
-// solely from the current pass1 compliance rows (or the rubric fallback
-// when pass1 has no rules yet). Rule IDs that only appear in the agent's
-// existing step60 raw/final artifacts are treated as stale so a rerun is
-// forced to rejudge rather than self-authorize historical evidence.
+// compliance rows must cover for the given agent. The set is derived from the
+// active rubric rules, current pass1 compliance rows, and candidate rules.
+// Stub fallback rules are used only when no explicit coverage source exists.
+// Rule IDs that only appear in existing step60 raw/final artifacts are stale.
 func expectedComplianceRuleIDsForAgent(
 	agent contracts.AgentID,
 	pass1Rules map[contracts.AgentID]map[string]struct{},
+	activeRules []string,
 	fallbackRules []string,
 	candidateRules []judges.CandidateRule,
 ) map[string]struct{} {
 	rules := make(map[string]struct{})
+	for _, ruleID := range activeRules {
+		rules[ruleID] = struct{}{}
+	}
 	for ruleID := range pass1Rules[agent] {
 		rules[ruleID] = struct{}{}
+	}
+	for _, rule := range candidateRules {
+		rules[rule.ID] = struct{}{}
 	}
 	if len(rules) == 0 {
 		for _, ruleID := range fallbackRules {
 			rules[ruleID] = struct{}{}
 		}
-	}
-	for _, rule := range candidateRules {
-		rules[rule.ID] = struct{}{}
 	}
 	if len(rules) == 0 {
 		return nil

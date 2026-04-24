@@ -19,6 +19,14 @@ func (defaultPanelProvider) Judges(_ judges.JudgeInput) (judges.Judge, judges.Ju
 	return judges.NewPrimaryStub(), judges.NewSecondaryStub(), judges.NewArbiterStub(), nil
 }
 
+func (defaultPanelProvider) PanelPromptVersion(base string) string {
+	primary, secondary, arbiter, err := defaultPanelProvider{}.Judges(judges.JudgeInput{})
+	if err != nil {
+		return base
+	}
+	return judges.PanelPromptVersion(base, primary, secondary, arbiter)
+}
+
 type configPanelProvider struct {
 	cfg *config.Config
 }
@@ -41,6 +49,14 @@ func (p configPanelProvider) Judges(_ judges.JudgeInput) (judges.Judge, judges.J
 		return nil, nil, nil, err
 	}
 	return primary, secondary, arbiter, nil
+}
+
+func (p configPanelProvider) PanelPromptVersion(base string) string {
+	primary, secondary, arbiter, err := p.Judges(judges.JudgeInput{})
+	if err != nil {
+		return base
+	}
+	return judges.PanelPromptVersion(base, primary, secondary, arbiter)
 }
 
 // FuncPanelProvider adapts a plain closure to the PanelProvider interface so

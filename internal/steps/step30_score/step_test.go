@@ -337,6 +337,26 @@ func TestStep30Score_AllowsEmptyComplianceAcrossPanel(t *testing.T) {
 	assert.Empty(t, complianceFinal)
 }
 
+func TestStep30Score_RejectsMissingExpectedActiveComplianceRule(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	rubricPath := filepath.Join(t.TempDir(), "rubric.md")
+	require.NoError(t, os.WriteFile(rubricPath, []byte("## Active Rule IDs\n- active-rule\n"), 0o644))
+
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			return makeJudgeOutput(input, role, 80, []ruleVerdict{{ruleID: "wrong-rule", verdict: contracts.ComplianceVerdictCompliant}})
+		},
+	}
+	step := New(WithPanelProvider(provider))
+	step.rubricPathFn = func(internalio.RunContext) (string, error) {
+		return rubricPath, nil
+	}
+
+	err := step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg})
+	require.ErrorIs(t, err, judges.ErrJudgeOutputMissingCompliance)
+	assert.ErrorContains(t, err, "active-rule")
+}
+
 // F16 regression: the judge must see the exact bytes that output_sha256
 // was computed over. We verify that (a) JudgeInput.OutputPath is not the
 // live manifest diff, and (b) rewriting the original diff after step30 has

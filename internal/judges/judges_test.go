@@ -2,6 +2,8 @@ package judges
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -67,4 +69,25 @@ func TestJudgeOutputValidate_RejectsDuplicateComplianceRuleIDs(t *testing.T) {
 	err = output.ValidateFor(input)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrJudgeOutputDuplicateCompliance)
+}
+
+func TestJudgeOutputValidateFor_RejectsMissingExpectedComplianceRule(t *testing.T) {
+	input := JudgeInput{
+		RunID:                     "2026-04-21-PR1-deadbee",
+		Pass:                      1,
+		Agent:                     "a1",
+		OutputPath:                filepath.Join(t.TempDir(), "out.patch"),
+		RubricPath:                filepath.Join(t.TempDir(), "rubric.md"),
+		ExpectedComplianceRuleIDs: []string{"active-rule", "candidate-rule"},
+	}
+	require.NoError(t, os.WriteFile(input.OutputPath, []byte("diff"), 0o644))
+	require.NoError(t, os.WriteFile(input.RubricPath, []byte("# rubric"), 0o644))
+
+	output, err := NewPrimaryStub().ScoreOutput(context.Background(), input)
+	require.NoError(t, err)
+	output.Compliance = output.Compliance[:1]
+
+	err = output.ValidateFor(input)
+	assert.ErrorIs(t, err, ErrJudgeOutputMissingCompliance)
+	assert.ErrorContains(t, err, "candidate-rule")
 }

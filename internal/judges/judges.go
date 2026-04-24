@@ -30,6 +30,7 @@ var (
 	ErrJudgeOutputMissingScores       = errors.New("judges: output must contain one score per dimension")
 	ErrJudgeOutputDuplicateScore      = errors.New("judges: output contains duplicate dimension score")
 	ErrJudgeOutputDuplicateCompliance = errors.New("judges: output contains duplicate compliance rule")
+	ErrJudgeOutputMissingCompliance   = errors.New("judges: output missing expected compliance rule")
 	ErrJudgeOutputIdentity            = errors.New("judges: output row identity mismatch")
 	ErrJudgeOutputMissingInput        = errors.New("judges: output does not match input")
 )
@@ -167,6 +168,17 @@ func (out JudgeOutput) ValidateFor(input JudgeInput) error {
 	for _, compliance := range out.Compliance {
 		if compliance.RunID != input.RunID || compliance.Pass != input.Pass || compliance.Agent != input.Agent {
 			return fmt.Errorf("%w: compliance rule_id=%s", ErrJudgeOutputMissingInput, compliance.RuleID)
+		}
+	}
+	if len(input.ExpectedComplianceRuleIDs) > 0 {
+		seen := make(map[string]struct{}, len(out.Compliance))
+		for _, compliance := range out.Compliance {
+			seen[compliance.RuleID] = struct{}{}
+		}
+		for _, ruleID := range input.ExpectedComplianceRuleIDs {
+			if _, ok := seen[ruleID]; !ok {
+				return fmt.Errorf("%w: rule_id=%s", ErrJudgeOutputMissingCompliance, ruleID)
+			}
 		}
 	}
 	return nil

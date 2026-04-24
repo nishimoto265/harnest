@@ -3,7 +3,9 @@ package judges
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,6 +24,7 @@ import (
 var cliJudgePromptFS embed.FS
 
 const defaultCLIJudgeTimeout = 2 * time.Minute
+const cliJudgePromptVersion = "cli-judge-v1"
 
 type cliJudge struct {
 	role    Role
@@ -86,6 +89,41 @@ func (j cliJudge) ScoreOutput(ctx context.Context, input JudgeInput) (JudgeOutpu
 		return JudgeOutput{}, err
 	}
 	return j.toJudgeOutput(input, response)
+}
+
+func (j cliJudge) JudgePromptVersion() string {
+	payload := struct {
+		PromptVersion string          `json:"prompt_version"`
+		Role          Role            `json:"role"`
+		Provider      agents.Provider `json:"provider"`
+		Binary        string          `json:"binary"`
+		Args          []string        `json:"args"`
+		Step30Hash    string          `json:"step30_hash"`
+		Step60Hash    string          `json:"step60_hash"`
+	}{
+		PromptVersion: cliJudgePromptVersion,
+		Role:          j.role,
+		Provider:      j.profile.Provider,
+		Binary:        j.profile.Binary,
+		Args:          append([]string(nil), j.profile.Args...),
+		Step30Hash:    embeddedPromptHash("prompts/step30-score.tmpl"),
+		Step60Hash:    embeddedPromptHash("prompts/step60-score-pass2.tmpl"),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return cliJudgePromptVersion
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%s-%s-%s", cliJudgePromptVersion, j.profile.Provider, hex.EncodeToString(sum[:])[:12])
+}
+
+func embeddedPromptHash(name string) string {
+	data, err := cliJudgePromptFS.ReadFile(name)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func renderCLIJudgePrompt(role Role, input JudgeInput) (string, error) {
@@ -267,7 +305,7 @@ func (j cliJudge) toJudgeOutput(input JudgeInput, response modelJudgeResponse) (
 			Reasons:       score.Reason,
 			VerdictPath:   verdictPath,
 			RubricVersion: stubRubricVersion,
-			PromptVersion: "cli-judge-v1",
+			PromptVersion: cliJudgePromptVersion,
 			ResolvedAt:    resolvedAt,
 		})
 	}
@@ -283,7 +321,7 @@ func (j cliJudge) toJudgeOutput(input JudgeInput, response modelJudgeResponse) (
 			Rationale:     row.Rationale,
 			VerdictPath:   verdictPath,
 			RubricVersion: stubRubricVersion,
-			PromptVersion: "cli-judge-v1",
+			PromptVersion: cliJudgePromptVersion,
 			ResolvedAt:    resolvedAt,
 		})
 	}
