@@ -512,8 +512,77 @@ func TestStep30Score_AcceptsArbiterCoveringOnlyDisputedRules(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestStep30Score_PreservesComplianceHistoryAfterRuleShrink(t *testing.T) {
+func TestStep30Score_DiscardsStaleArbiterComplianceWhenRebuildIsStrictEmpty(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	mode := "disputed"
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			rules := []ruleVerdict{{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant}}
+			switch role {
+			case contracts.JudgeRoleSecondary:
+				score = 60
+				if mode == "disputed" {
+					rules = []ruleVerdict{{ruleID: "rule-a", verdict: contracts.ComplianceVerdictViolated}}
+				}
+			case contracts.JudgeRoleArbiter:
+				score = 75
+			}
+			if mode == "empty" {
+				rules = nil
+			}
+			return makeJudgeOutput(input, role, score, rules)
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(markerPath, []byte("stale marker\n"), 0o644))
+
+	mode = "empty"
+	for _, agent := range []contracts.AgentID{"a1", "a2", "a3"} {
+		manifest, manifestErr := internalio.LoadScorableManifest(runCtx, 1, agent)
+		require.NoError(t, manifestErr)
+		writeRel(t, runCtx, manifest.DiffPath, "strict-empty fixture diff for "+string(agent)+"\n")
+	}
+	provider.reset()
+
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleArbiter])
+
+	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
+	require.NoError(t, err)
+	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](complianceFinalPath)
+	require.NoError(t, err)
+	assert.Empty(t, complianceFinal)
+
+	complianceRawPath, err := runCtx.ResolveRunRelative("30/compliance-A-raw.jsonl")
+	require.NoError(t, err)
+	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](complianceRawPath)
+	require.NoError(t, err)
+	assert.Empty(t, complianceRaw)
+
+	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), marker.ExpectedCounts.Compliance)
+
+	provider.reset()
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+	assert.Zero(t, provider.calls[contracts.JudgeRolePrimary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleArbiter])
+}
+
+func TestStep30Score_DiscardsStaleFinalComplianceAfterInvalidMarkerRuleShrink(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	rubricPath := filepath.Join(t.TempDir(), "rubric.md")
+	require.NoError(t, os.WriteFile(rubricPath, []byte("## Active Rule IDs\n- rule-a\n- rule-b\n"), 0o644))
+
 	currentVerdicts := []ruleVerdict{
 		{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
 		{ruleID: "rule-b", verdict: contracts.ComplianceVerdictViolated},
@@ -530,40 +599,57 @@ func TestStep30Score_PreservesComplianceHistoryAfterRuleShrink(t *testing.T) {
 	}
 
 	step := New(WithPanelProvider(provider))
+	step.rubricPathFn = func(internalio.RunContext) (string, error) {
+		return rubricPath, nil
+	}
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
 	require.NoError(t, err)
-	require.NoError(t, os.Remove(markerPath))
+	require.NoError(t, os.WriteFile(markerPath, []byte("stale marker\n"), 0o644))
 
+	require.NoError(t, os.WriteFile(rubricPath, []byte("## Active Rule IDs\n- rule-a\n"), 0o644))
 	currentVerdicts = []ruleVerdict{
 		{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
 	}
-	for _, agent := range []contracts.AgentID{"a1", "a2", "a3"} {
-		manifest, manifestErr := internalio.LoadScorableManifest(runCtx, 1, agent)
-		require.NoError(t, manifestErr)
-		writeRel(t, runCtx, manifest.DiffPath, "updated fixture diff for "+string(agent)+"\n")
-	}
+	provider.reset()
 
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
 
 	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
 	require.NoError(t, err)
 	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](complianceFinalPath)
 	require.NoError(t, err)
-	require.Len(t, complianceFinal, 6)
+	require.Len(t, complianceFinal, 3)
 	collapsed := scorecore.CollapseFinalCompliance(complianceFinal)
-	require.Len(t, collapsed, 6)
+	require.Len(t, collapsed, 3)
 
 	ruleCounts := map[string]int{}
 	for _, row := range complianceFinal {
 		ruleCounts[row.RuleID]++
 	}
-	assert.Equal(t, map[string]int{"rule-a": 3, "rule-b": 3}, ruleCounts)
+	assert.Equal(t, map[string]int{"rule-a": 3}, ruleCounts)
+
+	complianceRawPath, err := runCtx.ResolveRunRelative("30/compliance-A-raw.jsonl")
+	require.NoError(t, err)
+	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](complianceRawPath)
+	require.NoError(t, err)
+	require.Len(t, complianceRaw, 6)
+	for _, row := range complianceRaw {
+		assert.Equal(t, "rule-a", row.RuleID)
+	}
 
 	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
 	require.NoError(t, err)
-	assert.Equal(t, int64(6), marker.ExpectedCounts.Compliance)
+	assert.Equal(t, int64(3), marker.ExpectedCounts.Compliance)
+
+	provider.reset()
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+	assert.Zero(t, provider.calls[contracts.JudgeRolePrimary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleArbiter])
 }
 
 func TestStep30Score_RunSerializesConcurrentWriters(t *testing.T) {
