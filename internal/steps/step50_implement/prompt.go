@@ -8,6 +8,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 )
 
 //go:embed prompts/step50-implement-pass2.tmpl
@@ -21,6 +22,7 @@ type PromptData struct {
 	Agent            contracts.AgentID
 	CandidateRuleIDs []string
 	RulePayloads     []RulePayload
+	ActiveRules      []policyrepo.ActiveRule
 	WorktreePath     string
 	Pass             int
 }
@@ -45,6 +47,7 @@ func sanitizePromptData(data PromptData) PromptData {
 	safe.WorktreePath = internalio.SanitizeForPromptEmbedding(data.WorktreePath)
 	safe.CandidateRuleIDs = sanitizeStrings(data.CandidateRuleIDs)
 	safe.RulePayloads = sanitizeRulePayloads(data.RulePayloads)
+	safe.ActiveRules = sanitizeActiveRules(data.ActiveRules)
 	return safe
 }
 
@@ -93,6 +96,24 @@ func sanitizeStrings(items []string) []string {
 	safe := make([]string, len(items))
 	for i, item := range items {
 		safe[i] = internalio.SanitizeForPromptEmbedding(item)
+	}
+	return safe
+}
+
+func sanitizeActiveRules(rules []policyrepo.ActiveRule) []policyrepo.ActiveRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	safe := make([]policyrepo.ActiveRule, len(rules))
+	for i, rule := range rules {
+		safe[i] = policyrepo.ActiveRule{
+			RuleID:   internalio.SanitizeForPromptEmbedding(rule.RuleID),
+			RulePath: internalio.SanitizeForPromptEmbedding(rule.RulePath),
+			Body: internalio.SanitizeForPromptEmbedding(rule.Body, internalio.SafeTextOptions{
+				Label: "active_rule",
+				Fence: true,
+			}),
+		}
 	}
 	return safe
 }

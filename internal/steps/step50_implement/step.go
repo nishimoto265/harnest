@@ -13,6 +13,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/prompt"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
@@ -170,11 +171,16 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	if err != nil {
 		return fmt.Errorf("step50: load rule payloads: %w", err)
 	}
+	activeRules, err := policyrepo.LoadActiveRulesForRun(run.IO)
+	if err != nil {
+		return fmt.Errorf("step50: load active policy rules: %w", err)
+	}
 	promptText, err := RenderPrompt(PromptData{
 		TaskPackage:      *run.TaskPackage,
 		Agent:            run.Agent,
 		CandidateRuleIDs: rulePayloadIDs(rulePayloads),
 		RulePayloads:     rulePayloads,
+		ActiveRules:      activeRules,
 		WorktreePath:     allocation.Path,
 		Pass:             passNumber,
 	})

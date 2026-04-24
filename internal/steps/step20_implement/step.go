@@ -16,6 +16,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/prompt"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
@@ -152,6 +153,10 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 	}
 
 	deadline := stepStartedAt.Add(timeout)
+	activeRules, err := policyrepo.LoadActiveRulesForRun(run.IO)
+	if err != nil {
+		return fmt.Errorf("step20: load active policy rules: %w", err)
+	}
 	promptText, err := renderPrompt(run.Config, promptData{
 		TaskPackage: run.TaskPackage,
 		Agent:       run.Agent,
@@ -160,6 +165,7 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 			Label: "task_brief",
 			Fence: true,
 		}),
+		ActiveRules: sanitizeActiveRules(activeRules),
 	})
 	if err != nil {
 		return err
@@ -606,6 +612,7 @@ type promptData struct {
 	Agent       contracts.AgentID
 	OutputDir   string
 	TaskPrompt  string
+	ActiveRules []policyrepo.ActiveRule
 }
 
 func renderPrompt(cfg *config.Config, data promptData) (string, error) {
@@ -618,6 +625,24 @@ func renderPrompt(cfg *config.Config, data promptData) (string, error) {
 		return "", err
 	}
 	return out.String(), nil
+}
+
+func sanitizeActiveRules(rules []policyrepo.ActiveRule) []policyrepo.ActiveRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	safe := make([]policyrepo.ActiveRule, len(rules))
+	for i, rule := range rules {
+		safe[i] = policyrepo.ActiveRule{
+			RuleID:   internalio.SanitizeForPromptEmbedding(rule.RuleID),
+			RulePath: internalio.SanitizeForPromptEmbedding(rule.RulePath),
+			Body: internalio.SanitizeForPromptEmbedding(rule.Body, internalio.SafeTextOptions{
+				Label: "active_rule",
+				Fence: true,
+			}),
+		}
+	}
+	return safe
 }
 
 func loadChecklistArtifact(ctx context.Context, worktreePath string, runID contracts.RunID, pass int, agent contracts.AgentID) (contracts.ChecklistResult, error) {

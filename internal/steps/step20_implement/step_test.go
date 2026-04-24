@@ -19,6 +19,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1469,11 +1470,19 @@ func TestRenderPrompt_UsesChecklistAtWorktreeRoot(t *testing.T) {
 		Agent:       fx.run.Agent,
 		OutputDir:   manifestPrefix(fx.run.Pass, fx.run.Agent),
 		TaskPrompt:  "Implement the requested change.",
+		ActiveRules: []policyrepo.ActiveRule{{
+			RuleID:   "r-existing",
+			RulePath: "rules/r-existing.md",
+			Body:     "Follow existing policy.",
+		}},
 	})
 	require.NoError(t, err)
 	assert.Contains(t, promptText, "checklist_output_path: checklist-result.json")
 	assert.Contains(t, promptText, "Write `checklist-result.json` at the worktree root.")
 	assert.Contains(t, promptText, "Do not create or overwrite `manifest.json`, `session.jsonl`, or `diff.patch` yourself.")
+	assert.Contains(t, promptText, "Current Learned Rules")
+	assert.Contains(t, promptText, "r-existing")
+	assert.Contains(t, promptText, "Follow existing policy.")
 }
 
 type failBeforeStartRunner struct{}

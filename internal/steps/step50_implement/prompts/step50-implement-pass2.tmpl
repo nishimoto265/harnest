@@ -18,11 +18,22 @@ Task Brief
 Pass 2 requirements
 - Implement the task brief in this worktree.
 - Modify repository files only.
+- Write `checklist-result.json` at the worktree root.
+- Follow the current learned rules listed below.
 - Treat every candidate rule below as an additional required constraint for pass2.
-- If a candidate rule calls out a missing companion edit, missing file sync, or another concrete gap from pass1, make the corresponding code/file changes in this pass.
-- Do not stop at pass1 parity when a candidate rule identifies work that is still missing.
-- Before finishing, read each candidate's `Problem`, `Evidence`, and `Proposed rule` sections and make sure those pass1 failure statements are no longer true of your pass2 diff.
-- A pass2 output that repeats the same violated condition from pass1 is incorrect, even if it satisfies the original task brief.
+
+Current Learned Rules
+{{- if .ActiveRules }}
+{{ range .ActiveRules }}
+## {{ .RuleID }}
+- path: {{ .RulePath }}
+
+{{ .Body }}
+
+{{ end }}
+{{- else }}
+- none
+{{- end }}
 
 Candidate Rules
 {{- if .RulePayloads }}
@@ -40,7 +51,7 @@ Candidate Rules
 {{- end }}
 
 Expected agent-owned artifact
-- checklist-result.json
+- checklist-result.json (write this at the worktree root)
 
 Checklist artifact contract
 - `checklist-result.json` must be strict JSON with exactly these top-level keys:

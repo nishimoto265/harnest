@@ -97,9 +97,10 @@ func Legacy(defaults LegacyDefaults) File {
 	if defaults.JudgeSecondaryBinary == "" {
 		defaults.JudgeSecondaryBinary = "codex"
 	}
+	implementerProvider := inferProviderFromBinary(defaults.ImplementerBinary, ProviderClaude)
 	return File{
 		Profiles: map[string]Profile{
-			"claude":          {Provider: ProviderClaude, Binary: defaults.ImplementerBinary},
+			"claude":          {Provider: implementerProvider, Binary: defaults.ImplementerBinary},
 			"judge-primary":   {Provider: ProviderStub},
 			"judge-secondary": {Provider: ProviderStub},
 			"judge-arbiter":   {Provider: ProviderStub},
@@ -110,6 +111,18 @@ func Legacy(defaults LegacyDefaults) File {
 			RoleJudgeSecondary: "judge-secondary",
 			RoleJudgeArbiter:   "judge-arbiter",
 		},
+	}
+}
+
+func inferProviderFromBinary(binary string, fallback Provider) Provider {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(binary)))
+	switch {
+	case strings.Contains(base, "codex"):
+		return ProviderCodex
+	case strings.Contains(base, "claude"):
+		return ProviderClaude
+	default:
+		return fallback
 	}
 }
 

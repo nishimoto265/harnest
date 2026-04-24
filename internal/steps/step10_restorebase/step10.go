@@ -35,6 +35,8 @@ import (
 // each pass of the worktree matrix when Input.Agents is empty.
 var DefaultAgents = []contracts.AgentID{"a1", "a2", "a3"}
 
+var ErrTaskPromptSourceUnavailable = errors.New("step10: task prompt source unavailable")
+
 // Input is the Runner entry point parameter set.
 type Input struct {
 	PR               int
@@ -114,7 +116,7 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 	mode := normalizeTaskPromptSource(in.TaskPromptSource)
 	usableIssues := usableLinkedIssues(pr.LinkedIssues)
 	if mode == TaskPromptSourceIssue && len(usableIssues) == 0 {
-		return Result{}, errors.New("step10: task_prompt.source=issue requires at least one usable linked issue")
+		return Result{}, fmt.Errorf("%w: task_prompt.source=issue requires at least one usable linked issue", ErrTaskPromptSourceUnavailable)
 	}
 	var changedFiles []string
 	var diffText string

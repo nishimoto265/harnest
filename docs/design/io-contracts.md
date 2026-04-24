@@ -461,7 +461,7 @@ You are a code judge. Consider this task description:
 何をしているか:
 - `<untrusted-text source="label">…</untrusted-text>` で fence
 - `SYSTEM:` / `ASSISTANT:` / ` ```` ` を zero-width space で分解
-- 上限長でtruncate
+- サイズ上限は caller 側の artifact / prompt builder で管理する
 
 攻撃者モデルは「自分 or 偶然」だが、再帰的に LLM-as-Judge を回すので自己増幅による regression を防ぐ価値がある。
 

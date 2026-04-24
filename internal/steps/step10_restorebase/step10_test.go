@@ -1217,6 +1217,8 @@ func TestSynthesizeTaskBrief_IssueSourceIncludesIssuesAndSkipsDiffContext(t *tes
 	})
 	assert.Contains(t, got, "### Linked Issues")
 	assert.Contains(t, got, "#7: issue title")
+	assert.Contains(t, got, "### Weak Supporting PR Context")
+	assert.NotContains(t, got, "### PR Body")
 	assert.NotContains(t, got, "### Diff Excerpt")
 	assert.Contains(t, got, "- issue body")
 }

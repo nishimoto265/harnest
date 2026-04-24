@@ -198,6 +198,11 @@ func startFresh(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 		}
 		return writeReject(runCtx, pkg, "below_threshold", deps)
 	}
+	if reason, err := policySnapshotPreAdoptBlockReason(ctx, runCtx, deps); err != nil {
+		return err
+	} else if reason != "" {
+		return writeReject(runCtx, pkg, reason, deps)
+	}
 	target, err = resolveBestShaBefore(ctx, pkg, target, deps)
 	if err != nil {
 		return err
@@ -232,6 +237,49 @@ func startFresh(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 		return err
 	}
 	return driveAdopt(ctx, pr, runCtx, pkg, target, intention, store, writer, deps)
+}
+
+func policySnapshotPreAdoptBlockReason(ctx context.Context, runCtx internalio.RunContext, deps Deps) (string, error) {
+	branch := strings.TrimSpace(deps.PolicyBranch)
+	if branch == "" {
+		return "", nil
+	}
+	meta, ok, err := policySnapshotMetadataForBranch(runCtx, branch)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "policy_snapshot_missing", nil
+	}
+	globalRegistryHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
+	if err != nil {
+		return "", err
+	}
+	if globalRegistryHead != meta.RegistryHead {
+		return "policy_registry_stale", nil
+	}
+	policyHead, err := deps.Git.RemoteHead(ctx, branch)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", err
+	}
+	if policyHead != meta.PolicyHead {
+		return "policy_branch_stale", nil
+	}
+	return "", nil
+}
+
+func policySnapshotMetadataForBranch(runCtx internalio.RunContext, branch string) (policyrepo.SnapshotMetadata, bool, error) {
+	meta, ok, err := policyrepo.LoadSnapshotMetadata(runCtx)
+	if err != nil || !ok {
+		return meta, ok, err
+	}
+	if strings.TrimSpace(meta.PolicyBranch) != strings.TrimSpace(branch) {
+		return policyrepo.SnapshotMetadata{}, false, fmt.Errorf("step70: policy snapshot branch mismatch: snapshot=%s config=%s", meta.PolicyBranch, branch)
+	}
+	return meta, true, nil
 }
 
 func driveAdopt(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
@@ -298,6 +346,13 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 		if strings.TrimSpace(deps.RepoRoot) == "" {
 			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_repo_root_missing")
 		}
+		meta, ok, err := policySnapshotMetadataForBranch(runCtx, deps.PolicyBranch)
+		if err != nil {
+			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_snapshot_metadata_failure")
+		}
+		if !ok {
+			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_snapshot_missing")
+		}
 		policyHeadBefore, err := deps.Git.RemoteHead(ctx, deps.PolicyBranch)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -305,7 +360,10 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 			}
 			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_remote_head_failure")
 		}
-		if _, err := policyrepo.PublishSnapshot(ctx, deps.RepoRoot, deps.PolicyBranch, policyHeadBefore, runCtx.RunsBase, string(runCtx.RunID)); err != nil {
+		if policyHeadBefore != meta.PolicyHead {
+			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_branch_stale")
+		}
+		if _, err := policyrepo.PublishSnapshot(ctx, deps.RepoRoot, deps.PolicyBranch, meta.PolicyHead, runCtx.RunsBase, string(runCtx.RunID)); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}

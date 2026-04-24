@@ -12,7 +12,7 @@ type SafeTextOptions struct {
 
 var (
 	promptRoleMarkerPattern = regexp.MustCompile(`(?i)\b(system|assistant|user)\s*:`)
-	promptTagPattern        = regexp.MustCompile(`(?i)</?(system|assistant|user)>`)
+	promptTagPattern        = regexp.MustCompile(`(?i)<\s*/?\s*(system|assistant|user)(?:\s+[^>]*)?>`)
 )
 
 // SanitizeForPromptEmbedding removes NUL bytes and normalizes line endings

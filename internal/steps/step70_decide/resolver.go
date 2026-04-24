@@ -10,6 +10,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/registryview"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 )
@@ -48,7 +49,11 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 	}
 	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), manifest.HeadSHA, "", candidates.CandidatesHash)
 
-	registryLines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	registryPath, err := policyrepo.RegistryPathForRun(runCtx)
+	if err != nil {
+		return Target{}, false, err
+	}
+	registryLines, err := readRegistryLines(registryPath)
 	if err != nil {
 		return Target{}, false, err
 	}

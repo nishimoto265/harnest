@@ -319,6 +319,29 @@ func TestRunsBaseAndWorktreeBase_NamespaceCustomLeafPaths(t *testing.T) {
 	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/repo-a-wt"), worktreeBase)
 }
 
+func TestRunsBaseAndWorktreeBase_NamespaceWhenNamespaceOnlyAppearsInAncestor(t *testing.T) {
+	cfg := Config{
+		Repo: RepoConfig{
+			GitHub: "owner/repo",
+			Root:   "/tmp/project",
+		},
+		Paths: PathsConfig{
+			Runs: "/var/lib/owner__repo/shared/runs",
+		},
+		Worktree: WorktreeConfig{
+			Base: "/var/lib/owner__repo/shared/worktrees",
+		},
+	}
+
+	runsBase, err := cfg.RunsBase()
+	require.NoError(t, err)
+	worktreeBase, err := cfg.WorktreeBase()
+	require.NoError(t, err)
+
+	assert.Equal(t, filepath.Clean("/var/lib/owner__repo/shared/owner__repo/runs"), runsBase)
+	assert.Equal(t, filepath.Clean("/var/lib/owner__repo/shared/owner__repo/worktrees"), worktreeBase)
+}
+
 func TestLoadConfig_RejectsConflictingPathAliases(t *testing.T) {
 	path := writeConfigFixture(t, `
 runs_base: "/tmp/auto-improve/legacy-runs"

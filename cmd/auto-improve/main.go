@@ -442,7 +442,7 @@ func runRecoverClearSentinel(cmd *cobra.Command, runID string) error {
 	defer func() { _ = lock.Unlock() }()
 	events, err := state.ScanEventsForRun(runCtx, runCtx.RunID)
 	if err != nil {
-		events = nil
+		return err
 	}
 	if !lastRunEventIsTerminal(events) {
 		if pr, ok := recoverPRForClearSentinel(runCtx, events); ok {

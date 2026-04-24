@@ -18,6 +18,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/state"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,6 +64,33 @@ func TestRun_DuplicateOnlyCandidatesEmitNoop(t *testing.T) {
 
 	require.NoError(t, Run(context.Background(), 1, runCtx, pkg, candidates, store, Deps{Now: fixedNow()}))
 	assert.Equal(t, contracts.DecisionActionNoop, readDecision(t, runCtx).Action)
+}
+
+func TestRun_RejectsWhenPolicyBranchAdvancedSinceRunSnapshot(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR102")
+	policyDir := filepath.Join(runCtx.RunDir(), "policy")
+	require.NoError(t, os.MkdirAll(policyDir, 0o755))
+	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(policyDir, "snapshot.json"), policyrepo.SnapshotMetadata{
+		SchemaVersion: "1",
+		PolicyBranch:  "auto-improve/policy",
+		PolicyHead:    strings.Repeat("1", 40),
+		RegistryHead:  "",
+	}))
+	git := &fakeGit{head: strings.Repeat("9", 40)}
+
+	require.NoError(t, Run(context.Background(), 102, runCtx, pkg, candidates, store, Deps{
+		Git:          git,
+		Resolver:     resolver,
+		Now:          fixedNow(),
+		PolicyBranch: "auto-improve/policy",
+		RepoRoot:     runCtx.RunsBase,
+	}))
+
+	decision := readDecision(t, runCtx)
+	require.Equal(t, contracts.DecisionActionReject, decision.Action)
+	reject := decision.Value.(contracts.DecisionReject)
+	assert.Equal(t, "policy_branch_stale", reject.Reason)
+	assert.Empty(t, git.pushCalls)
 }
 
 func TestFilesystemResolver_LeaseFailureLeavesCanonicalRuleUntouched(t *testing.T) {

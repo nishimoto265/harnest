@@ -224,7 +224,7 @@ func (c Config) namespaceStatePath(path, leaf string) string {
 	if !ok {
 		return path
 	}
-	if pathContainsComponent(path, namespace) {
+	if filepath.Base(filepath.Dir(path)) == namespace {
 		return path
 	}
 	return filepath.Join(filepath.Dir(path), namespace, filepath.Base(path))
@@ -258,20 +258,6 @@ func sanitizeRepoNamespace(repo string) string {
 		}
 	}
 	return strings.Trim(b.String(), "-._")
-}
-
-func pathContainsComponent(path, component string) bool {
-	path = filepath.Clean(path)
-	for {
-		if filepath.Base(path) == component {
-			return true
-		}
-		parent := filepath.Dir(path)
-		if parent == path {
-			return false
-		}
-		path = parent
-	}
 }
 
 func (c Config) ProcessedPath() (string, error) {

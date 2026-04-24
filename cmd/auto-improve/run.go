@@ -5,11 +5,10 @@ import (
 	"errors"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/detect"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/orchestrator"
 	"github.com/nishimoto265/auto-improve/internal/preflight"
+	"github.com/nishimoto265/auto-improve/internal/state"
 	"github.com/spf13/cobra"
 )
 
@@ -79,11 +78,11 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 	if err != nil {
 		return commandExitError{code: 2, msg: err.Error()}
 	}
-	entries, err := internalio.ReadJSONL[contracts.StateEntry](processedPath)
+	resumeTargets, err := state.ResumeTargetPath(processedPath)
 	if err != nil {
 		return err
 	}
-	for _, item := range orchestrator.ResumeQueue(entries) {
+	for _, item := range resumeTargets {
 		if err := runner.Run(ctx, item.PR, orchestrator.RunOptions{RunID: item.RunID}); err != nil {
 			var blocked *orchestrator.GlobalNeedsRecoveryError
 			if errors.As(err, &blocked) {

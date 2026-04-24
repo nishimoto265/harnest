@@ -11,6 +11,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/registryview"
 )
 
@@ -52,7 +53,10 @@ func ResolveRunRubricPath(runCtx internalio.RunContext) (string, error) {
 }
 
 func loadActiveRuleSnapshots(runCtx internalio.RunContext) ([]activeRuleSnapshot, error) {
-	registryPath := policyRegistryPath(runCtx)
+	registryPath, err := policyrepo.RegistryPathForRun(runCtx)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(registryPath); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -96,13 +100,6 @@ func loadActiveRuleSnapshots(runCtx internalio.RunContext) ([]activeRuleSnapshot
 		})
 	}
 	return snapshots, nil
-}
-
-func policyRegistryPath(runCtx internalio.RunContext) string {
-	if _, err := os.Stat(runCtx.PolicySnapshotRegistryPath()); err == nil {
-		return runCtx.PolicySnapshotRegistryPath()
-	}
-	return runCtx.RulesRegistryPath()
 }
 
 func buildRuntimeRubric(activeRules []activeRuleSnapshot) ([]byte, error) {

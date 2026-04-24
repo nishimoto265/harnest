@@ -55,6 +55,19 @@ func TestLegacyBuildsDefaultRoleMap(t *testing.T) {
 	assert.Equal(t, ProviderStub, arbiter.Provider)
 }
 
+func TestLegacyInfersCodexImplementerProviderFromBinary(t *testing.T) {
+	cfg := Legacy(LegacyDefaults{
+		ImplementerBinary:    "/opt/bin/codex",
+		JudgePrimaryBinary:   "claude",
+		JudgeSecondaryBinary: "codex",
+	})
+
+	impl, err := cfg.ProfileForRole(RoleImplementer)
+	require.NoError(t, err)
+	assert.Equal(t, ProviderCodex, impl.Provider)
+	assert.Equal(t, "/opt/bin/codex", impl.Binary)
+}
+
 func TestValidateRejectsUnknownProfileReference(t *testing.T) {
 	cfg := File{
 		Profiles: map[string]Profile{

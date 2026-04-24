@@ -20,6 +20,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -548,6 +549,47 @@ func TestStepRunIncludesRulePayloadsInPrompt(t *testing.T) {
 	assert.Contains(t, string(promptBytes), "Add a new implementation rule")
 	assert.Contains(t, string(promptBytes), proposedBody)
 	assert.NotContains(t, string(promptBytes), "stale registry body")
+}
+
+func TestRenderPrompt_IncludesActiveRulesAndNoPass1FailureOracle(t *testing.T) {
+	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
+	promptText, err := RenderPrompt(PromptData{
+		TaskPackage: contracts.TaskPackage{
+			SchemaVersion:           "1",
+			RunID:                   runID,
+			PR:                      42,
+			Title:                   "step50 test",
+			BaseSHA:                 strings.Repeat("a", 40),
+			BestBranch:              "best/main",
+			ReconstructedTaskPrompt: "Implement the requested change safely.",
+			CreatedAt:               time.Now().UTC(),
+		},
+		Agent:            "a1",
+		CandidateRuleIDs: []string{"cand-1"},
+		RulePayloads: []RulePayload{{
+			ID:           "cand-1",
+			Kind:         string(contracts.CandidateKindNew),
+			Title:        "Candidate rule",
+			ProposedBody: "## Proposed rule\n- Keep companion files in sync.",
+		}},
+		ActiveRules: []policyrepo.ActiveRule{{
+			RuleID:   "r-existing",
+			RulePath: "rules/r-existing.md",
+			Body:     "Follow existing policy.",
+		}},
+		WorktreePath: "/tmp/worktree",
+		Pass:         2,
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, promptText, "Current Learned Rules")
+	assert.Contains(t, promptText, "r-existing")
+	assert.Contains(t, promptText, "Follow existing policy.")
+	assert.Contains(t, promptText, "Candidate Rules")
+	assert.Contains(t, promptText, "Keep companion files in sync.")
+	assert.Contains(t, promptText, "Write `checklist-result.json` at the worktree root.")
+	assert.NotContains(t, promptText, "make sure those pass1 failure statements are no longer true")
+	assert.NotContains(t, promptText, "A pass2 output that repeats the same violated condition from pass1 is incorrect")
 }
 
 func TestStepRunParentCancelDoesNotWriteManifest(t *testing.T) {

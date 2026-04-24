@@ -135,8 +135,10 @@ func SynthesizeTaskBrief(source string, input TaskBriefInput) string {
 	b.WriteString("- The implementation should address the requested change without introducing unrelated behavioral drift.\n")
 
 	b.WriteString("\n## Non-goals\n")
-	b.WriteString("- Do not broaden scope beyond the affected behavior suggested by the PR body, tests, and diff.\n")
-	b.WriteString("- Do not treat the provided diff as the only acceptable solution shape.\n")
+	b.WriteString(nonGoalScopeLine(mode, usableIssues, changedTests, changedNonTests))
+	if includeDiffContext(mode, usableIssues) {
+		b.WriteString("- Do not treat the provided diff as the only acceptable solution shape.\n")
+	}
 
 	b.WriteString("\n## Source Context\n")
 	if includeIssues(mode, usableIssues) {
@@ -148,7 +150,7 @@ func SynthesizeTaskBrief(source string, input TaskBriefInput) string {
 			}
 		}
 	}
-	if mode == TaskPromptSourceDiffSynth {
+	if mode == TaskPromptSourceDiffSynth || mode == TaskPromptSourceIssue {
 		b.WriteString("\n### Weak Supporting PR Context\n")
 		if title := strings.TrimSpace(input.Title); title != "" {
 			fmt.Fprintf(&b, "- title: %s\n", title)
@@ -184,6 +186,26 @@ func SynthesizeTaskBrief(source string, input TaskBriefInput) string {
 	}
 
 	return ensureTrailingNewlineWithinLimit(truncateUTF8Bytes(b.String(), reconstructedPromptMaxBytes), reconstructedPromptMaxBytes)
+}
+
+func nonGoalScopeLine(mode TaskPromptSource, issues []LinkedIssue, changedTests, changedNonTests []string) string {
+	parts := make([]string, 0, 4)
+	if includeIssues(mode, issues) {
+		parts = append(parts, "linked issues")
+	}
+	if mode != TaskPromptSourceIssue {
+		parts = append(parts, "PR body")
+	}
+	if len(changedTests) > 0 {
+		parts = append(parts, "changed tests")
+	}
+	if len(changedNonTests) > 0 || includeDiffContext(mode, issues) {
+		parts = append(parts, "diff evidence")
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "source context")
+	}
+	return "- Do not broaden scope beyond the affected behavior suggested by the " + strings.Join(parts, ", ") + ".\n"
 }
 
 func normalizeTaskPromptSource(source string) TaskPromptSource {

@@ -135,7 +135,7 @@ func AppendStateEntry(ctx internalio.RunContext, entry contracts.StateEntry) err
 }
 
 func ScanEventsForRun(ctx internalio.RunContext, runID contracts.RunID) ([]contracts.StateEntry, error) {
-	entries, err := internalio.ReadJSONL[contracts.StateEntry](ctx.ProcessedPath())
+	entries, err := readProcessedEntriesPath(ctx.ProcessedPath())
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +178,14 @@ func LatestRunForPR(ctx internalio.RunContext, pr int) (LatestRun, error) {
 		result.Step = step
 	}
 	return result, nil
+}
+
+func ResumeTargetPath(path string) ([]ResumeRequest, error) {
+	entries, err := readProcessedEntriesPath(path)
+	if err != nil {
+		return nil, err
+	}
+	return ResumeTarget(entries), nil
 }
 
 func NeedsManualRecoveryRunsPath(path string) ([]LatestRun, error) {
@@ -355,19 +363,15 @@ type processedFileSnapshot struct {
 }
 
 func latestEntriesByPRPath(path string) (map[int]contracts.StateEntry, error) {
-	lines, err := readProcessedLines(path)
+	entries, err := readProcessedEntriesPath(path)
 	if err != nil {
 		return nil, err
 	}
-	if len(lines) == 0 {
+	if len(entries) == 0 {
 		return nil, nil
 	}
 	grouped := make(map[int][]contracts.StateEntry)
-	for _, line := range lines {
-		entry, err := decodeStateLine(line)
-		if err != nil {
-			return nil, err
-		}
+	for _, entry := range entries {
 		pr, ok := stateEntryPR(entry)
 		if !ok {
 			continue
@@ -408,6 +412,25 @@ func eventsForPRPath(path string, pr int) ([]contracts.StateEntry, error) {
 		}
 	}
 	return events, nil
+}
+
+func readProcessedEntriesPath(path string) ([]contracts.StateEntry, error) {
+	lines, err := readProcessedLines(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	entries := make([]contracts.StateEntry, 0, len(lines))
+	for _, line := range lines {
+		entry, err := decodeStateLine(line)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
 }
 
 func latestActionEntry(entries []contracts.StateEntry) *contracts.StateEntry {

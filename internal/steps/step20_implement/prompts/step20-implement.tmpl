@@ -8,9 +8,10 @@ Inputs
 - checklist_output_path: checklist-result.json (write this at the worktree root)
 
 Task
-- Apply the requested change in the checked-out worktree.
+- Apply the task brief in the checked-out worktree.
 - Modify repository files only.
 - Write `checklist-result.json` at the worktree root.
+- Follow the current learned rules listed below.
 
 Checklist artifact contract
 - `checklist-result.json` must be strict JSON with exactly these top-level keys:
@@ -33,3 +34,16 @@ Harness-owned artifacts
 
 Task Brief
 {{ .TaskPrompt }}
+
+Current Learned Rules
+{{- if .ActiveRules }}
+{{ range .ActiveRules }}
+## {{ .RuleID }}
+- path: {{ .RulePath }}
+
+{{ .Body }}
+
+{{ end }}
+{{- else }}
+- none
+{{- end }}

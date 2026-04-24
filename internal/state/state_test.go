@@ -189,6 +189,41 @@ func TestLatestRunForPR_IgnoresPartialTrailingLineWhileWriterHoldsStateLock(t *t
 	assert.Equal(t, contracts.StateKindStarted, latest.LastEvent.Kind)
 }
 
+func TestResumeTargetPath_IgnoresPartialTrailingLineWhileWriterHoldsStateLock(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	ctx := testRunContext(t, "2026-04-21-PR42-abcdef0", runsBase, worktreeBase)
+	path := ctx.ProcessedPath()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+
+	entry := startedEntry(42, ctx.RunID, time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC))
+	payload, err := contracts.MarshalStrict(entry)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, append(payload, '\n'), 0o644))
+
+	lock, err := internalio.AcquireFileLock(filepath.Join(filepath.Dir(path), "state.lock"))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, lock.Unlock())
+	}()
+
+	stepDone := stepDoneEntry(42, ctx.RunID, contracts.FailedStep20, time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC))
+	stepPayload, err := contracts.MarshalStrict(stepDone)
+	require.NoError(t, err)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	require.NoError(t, err)
+	_, err = f.Write(stepPayload[:len(stepPayload)/2])
+	require.NoError(t, err)
+	require.NoError(t, f.Sync())
+	require.NoError(t, f.Close())
+
+	targets, err := ResumeTargetPath(path)
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	assert.Equal(t, 42, targets[0].PR)
+	assert.Equal(t, contracts.FailedStep10, targets[0].Step)
+}
+
 func TestClassifyNextAction_CoversAllStateKinds(t *testing.T) {
 	tests := map[contracts.StateKind]NextAction{
 		contracts.StateKindStarted:                     NextActionResume,

@@ -16,6 +16,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	step10restorebase "github.com/nishimoto265/auto-improve/internal/steps/step10_restorebase"
 	"github.com/nishimoto265/auto-improve/internal/steps/step20_implement"
 	"github.com/nishimoto265/auto-improve/internal/steps/step30_score"
@@ -585,8 +586,11 @@ type stubStep40 struct {
 }
 
 func (s stubStep40) Run(ctx context.Context, run *StepRunContext) error {
-	registryPath := runScopedPolicyRegistryPath(run.IO)
-	_, err := step40_classify.Run(ctx, step40_classify.Config{
+	registryPath, err := policyrepo.RegistryPathForRun(run.IO)
+	if err != nil {
+		return err
+	}
+	_, err = step40_classify.Run(ctx, step40_classify.Config{
 		IO:           run.IO,
 		RegistryPath: registryPath,
 		TaskPackage:  run.TaskPackage,
@@ -630,13 +634,6 @@ func (s stubStep40) Run(ctx context.Context, run *StepRunContext) error {
 	}
 	run.Candidates = &candidates
 	return nil
-}
-
-func runScopedPolicyRegistryPath(runIO internalio.RunContext) string {
-	if _, err := os.Stat(runIO.PolicySnapshotRegistryPath()); err == nil {
-		return runIO.PolicySnapshotRegistryPath()
-	}
-	return runIO.RulesRegistryPath()
 }
 
 type stubStep70 struct{}

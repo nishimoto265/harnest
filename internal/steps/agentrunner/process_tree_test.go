@@ -15,6 +15,8 @@ import (
 )
 
 func TestCleanupProcessTree_KillsDetachedGrandchildSpawnedAfterRootExit(t *testing.T) {
+	requireProcessInspection(t)
+
 	helperPath := writeDetachedGrandchildHelper(t, t.TempDir())
 	pidPath := filepath.Join(t.TempDir(), "detached-grandchild.pid")
 
@@ -48,6 +50,13 @@ func TestCleanupProcessTree_KillsDetachedGrandchildSpawnedAfterRootExit(t *testi
 	require.Eventually(t, func() bool {
 		return processDead(pid)
 	}, 10*time.Second, 20*time.Millisecond)
+}
+
+func requireProcessInspection(t *testing.T) {
+	t.Helper()
+	if _, err := processStartTime(os.Getpid()); err != nil {
+		t.Skipf("process inspection unavailable in this sandbox: %v", err)
+	}
 }
 
 func TestKillTrackedPIDs_SkipsRecycledPIDWhenStartTimeDiffers(t *testing.T) {

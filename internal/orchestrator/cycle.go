@@ -10,6 +10,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	ilog "github.com/nishimoto265/auto-improve/internal/logger"
 	"github.com/nishimoto265/auto-improve/internal/state"
+	step10restorebase "github.com/nishimoto265/auto-improve/internal/steps/step10_restorebase"
 	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
 	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 )
@@ -112,6 +113,12 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 		switch step {
 		case contracts.FailedStep10:
 			if err := o.runStep10(ctx, run); err != nil {
+				if errors.Is(err, step10restorebase.ErrTaskPromptSourceUnavailable) {
+					if appendErr := o.appendState(failedEntry(pr, run.IO.RunID, contracts.FailedStep10, "task_prompt_source_unavailable", err.Error(), time.Now().UTC())); appendErr != nil {
+						return appendErr
+					}
+					return nil
+				}
 				return err
 			}
 		case contracts.FailedStep20:

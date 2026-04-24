@@ -7,7 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/contracts"
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -34,7 +37,10 @@ func TestHydrateFromBranchCopiesPolicyFilesToRunsBase(t *testing.T) {
 func TestHydrateAndSnapshotFromBranchCopiesPolicyFilesToRunDir(t *testing.T) {
 	repoRoot := newClonedRepoWithPolicyBranch(t)
 	runsBase := filepath.Join(t.TempDir(), "runs")
-	runDir := filepath.Join(runsBase, "2026-04-23-PR2-feedbee")
+	runID := contracts.RunID("2026-04-23-PR2-feedbee")
+	runCtx, err := internalio.NewRunContext(runID, runsBase, filepath.Join(t.TempDir(), "worktrees"))
+	require.NoError(t, err)
+	runDir := runCtx.RunDir()
 	require.NoError(t, os.MkdirAll(runDir, 0o755))
 
 	require.NoError(t, HydrateAndSnapshotFromBranch(context.Background(), repoRoot, "policy", runsBase, runDir))
@@ -45,6 +51,20 @@ func TestHydrateAndSnapshotFromBranchCopiesPolicyFilesToRunDir(t *testing.T) {
 	ruleBytes, err := os.ReadFile(filepath.Join(runDir, "policy", rulesLocalDirName, "r-sync-message-details.md"))
 	require.NoError(t, err)
 	assert.Contains(t, string(ruleBytes), "Sync companion files")
+	meta, ok, err := LoadSnapshotMetadata(runCtx)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "policy", meta.PolicyBranch)
+	assert.NotEmpty(t, meta.PolicyHead)
+	assert.NotEmpty(t, meta.RegistryHead)
+
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, rulesLocalDirName, "r-sync-message-details.md"), []byte("stale global body\n"), 0o644))
+	active, err := LoadActiveRulesForRun(runCtx)
+	require.NoError(t, err)
+	require.Len(t, active, 1)
+	assert.Equal(t, "r-sync-message-details", active[0].RuleID)
+	assert.Contains(t, active[0].Body, "Sync companion files")
+	assert.NotContains(t, active[0].Body, "stale global body")
 }
 
 func TestPublishSnapshotPushesRunsBasePolicyToBranch(t *testing.T) {
@@ -117,6 +137,43 @@ func TestPublishSnapshotRejectsMissingLocalRegistry(t *testing.T) {
 
 	_, err := PublishSnapshot(context.Background(), repoRoot, "policy", headBefore, runsBase, "2026-04-23-PR2-adopt")
 	require.Error(t, err)
+}
+
+func TestLoadLocalSnapshotAllowsRegistryOnlyWithNoActiveRules(t *testing.T) {
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	entry := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindArchived,
+		Value: contracts.RuleRegistryArchived{
+			Kind:          contracts.RegistryKindArchived,
+			SchemaVersion: "1",
+			RuleID:        "r-archived",
+			PrevStatus:    contracts.RuleStatusActive,
+			NewStatus:     contracts.RuleStatusArchived,
+			OpID:          strings.Repeat("a", 64),
+			VersionSeq:    1,
+			PrevHash:      "",
+			BySunsetRunID: "sunset-2026-04-23",
+			At:            mustTime("2026-04-23T08:00:00Z"),
+		},
+	}
+	payload, err := contracts.CanonicalMarshal(entry)
+	require.NoError(t, err)
+	registry := string(payload) + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, registryLocalName), []byte(registry), 0o644))
+
+	snap, err := loadLocalSnapshot(runsBase)
+	require.NoError(t, err)
+	assert.Equal(t, registry, string(snap.registry))
+	assert.Empty(t, snap.rules)
+}
+
+func mustTime(value string) time.Time {
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		panic(err)
+	}
+	return parsed
 }
 
 func newClonedRepoWithPolicyBranch(t *testing.T) string {
