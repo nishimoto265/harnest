@@ -196,6 +196,64 @@ func TestFilesystemResolver_AdoptPromotesExactSidecarBytes(t *testing.T) {
 	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, filepath.Join("rules", ruleID+".md")))
 }
 
+func TestFilesystemResolver_RejectsDuplicateUpdateTargetsBeforeBuildingRegistryEntries(t *testing.T) {
+	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
+	targetRuleID := "r-existing"
+	existingBody := "# Existing rule\n"
+	_, err := internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         targetRuleID,
+			RulePath:       "rules/" + targetRuleID + ".md",
+			Sha256:         sha256String(existingBody),
+			IdempotencyKey: strings.Repeat("d", 64),
+			VersionSeq:     1,
+			ByRunID:        "2026-04-21-PR99-abcdef0",
+			At:             time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteAtomic(filepath.Join(runCtx.RunsBase, "rules", targetRuleID+".md"), []byte(existingBody)))
+
+	firstBody := "# Updated body one\n"
+	secondBody := "# Updated body two\n"
+	first := contracts.Candidate{
+		CandidateID:        "cand-update-1",
+		Kind:               contracts.CandidateKindUpdate,
+		TargetRuleID:       targetRuleID,
+		Title:              "Update one",
+		ProposedBodyPath:   "40/candidates/cand-update-1.md",
+		ProposedBodySha256: sha256String(firstBody),
+	}
+	second := contracts.Candidate{
+		CandidateID:        "cand-update-2",
+		Kind:               contracts.CandidateKindUpdate,
+		TargetRuleID:       targetRuleID,
+		Title:              "Update two",
+		ProposedBodyPath:   "40/candidates/cand-update-2.md",
+		ProposedBodySha256: sha256String(secondBody),
+	}
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, first.ProposedBodyPath), []byte(firstBody)))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, second.ProposedBodyPath), []byte(secondBody)))
+
+	candidates.Candidates = []contracts.Candidate{first, second}
+	candidates.CandidatesHash = contracts.CanonicalCandidatesHash(candidates.Candidates)
+	require.NoError(t, candidates.Validate())
+	require.NoError(t, internalio.WriteJSONAtomic(mustRunPath(t, runCtx, "40/candidates.json"), candidates))
+	seedResolverGateCompliance(t, runCtx, first.CandidateID, contracts.ComplianceVerdictCompliant)
+	seedResolverGateCompliance(t, runCtx, second.CandidateID, contracts.ComplianceVerdictCompliant)
+	writeStep60DoneMarkerForResolverFixture(t, runCtx)
+
+	resolver := FilesystemResolver{RepoDir: runCtx.RunsBase, Now: fixedNow()}
+	target, ok, err := resolver.Resolve(runCtx, pkg, candidates)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Empty(t, target.RulesToAppend)
+	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, filepath.Join("rules", targetRuleID+".md")))
+}
+
 func TestFilesystemResolver_RequiresStep60DoneMarker(t *testing.T) {
 	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
 	markerPath, err := runCtx.ResolveRunRelative("60/done.marker")
