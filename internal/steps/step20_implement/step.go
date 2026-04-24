@@ -142,7 +142,7 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 	}
 	defer leaseLock.Unlock()
 
-	if err := ensureAllocationWorktree(ctx, run.Config, allocation); err != nil {
+	if err := ensureAllocationWorktreeBeforeResume(ctx, run, allocation, agentDir); err != nil {
 		return err
 	}
 
@@ -497,6 +497,25 @@ func finalizeSyntheticSuccessCommit(ctx context.Context, allocation contracts.Wo
 }
 
 func ensureAllocationWorktree(ctx context.Context, cfg *config.Config, allocation contracts.WorktreeAllocation) error {
+	return ensureAllocationWorktreeAtRef(ctx, cfg, allocation, allocation.HeadSHA, true)
+}
+
+func ensureAllocationWorktreeBeforeResume(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, agentDir string) error {
+	state, ok, err := loadResumeState(agentDir)
+	if err != nil {
+		return err
+	}
+	if ok && state.Pid != 0 {
+		return nil
+	}
+	return ensureAllocationWorktree(ctx, run.Config, allocation)
+}
+
+func ensureAllocationWorktreeForRescue(ctx context.Context, cfg *config.Config, allocation contracts.WorktreeAllocation) error {
+	return ensureAllocationWorktreeAtRef(ctx, cfg, allocation, allocation.Branch, false)
+}
+
+func ensureAllocationWorktreeAtRef(ctx context.Context, cfg *config.Config, allocation contracts.WorktreeAllocation, ref string, resetBranch bool) error {
 	// No-follow Lstat at use time (not just at step10 validation). A symlink
 	// could have been swapped in between ValidateWorktreeAllocation and now;
 	// os.Stat would follow it and accept an arbitrary target directory.
@@ -522,8 +541,11 @@ func ensureAllocationWorktree(ctx context.Context, cfg *config.Config, allocatio
 	if cfg == nil {
 		return errors.New("step20: config is required to recreate missing worktree")
 	}
-	if allocation.HeadSHA == "" {
-		return errors.New("step20: cannot recreate worktree without immutable head_sha")
+	if ref == "" {
+		if resetBranch {
+			return errors.New("step20: cannot recreate worktree without immutable head_sha")
+		}
+		return errors.New("step20: cannot recreate rescue worktree without allocation branch")
 	}
 	repoRoot, err := cfg.RepoRoot()
 	if err != nil {
@@ -539,22 +561,31 @@ func ensureAllocationWorktree(ctx context.Context, cfg *config.Config, allocatio
 	if _, err := gitOutputContext(ctx, identity, repoRoot, "worktree", "prune"); err != nil {
 		return err
 	}
-	// Pin the recreated worktree to the immutable HeadSHA recorded in the
-	// task package rather than trusting the current tip of allocation.Branch
-	// (the branch may have advanced via a prior attempt / manual edit, which
-	// would break the BaseSHA-anchored rescue/diff invariant). `-B` forces
-	// the branch to point at HeadSHA; combined with an explicit commit ref
-	// this is a fresh checkout of the recorded immutable state.
-	if _, err := gitOutputContext(ctx, identity, repoRoot,
-		"worktree", "add", "-B", allocation.Branch, allocation.Path, allocation.HeadSHA); err != nil {
-		return err
+	if resetBranch {
+		// Fresh runs pin the recreated worktree to the immutable HeadSHA
+		// recorded in the task package rather than trusting the current tip of
+		// allocation.Branch.
+		if _, err := gitOutputContext(ctx, identity, repoRoot,
+			"worktree", "add", "-B", allocation.Branch, allocation.Path, ref); err != nil {
+			return err
+		}
+	} else {
+		// Rescue runs must not move allocation.Branch before performRescue has
+		// captured commits from the branch's current tip.
+		if _, err := gitOutputContext(ctx, identity, repoRoot,
+			"worktree", "add", allocation.Path, ref); err != nil {
+			return err
+		}
 	}
 	// Re-check symlink components after creation: refuse to continue if the
 	// freshly created path or any ancestor was swapped to a symlink mid-setup.
 	if err := internalio.EnsureNoSymlinkPathComponents(allocation.Path); err != nil {
 		return fmt.Errorf("step20: worktree path swapped after create: %w", err)
 	}
-	return verifyAllocationHead(ctx, allocation)
+	if resetBranch {
+		return verifyAllocationHead(ctx, allocation)
+	}
+	return nil
 }
 
 // verifyAllocationHead refuses to continue if the worktree's HEAD does not

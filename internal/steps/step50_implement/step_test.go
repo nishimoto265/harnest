@@ -633,6 +633,52 @@ func TestStepRun_RecreatesDeletedPass2Worktree(t *testing.T) {
 	assert.FileExists(t, filepath.Join(allocation.Path, "implemented.txt"))
 }
 
+func TestStepRun_MissingRescueWorktreeCapturesAdvancedBranchBeforeReset(t *testing.T) {
+	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
+	t.Setenv("FAKE_AGENT", "a1")
+
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "rescuable.txt"), []byte("rescue me\n"), 0o644))
+	runCommand(t, allocation.Path, "git", "add", "rescuable.txt")
+	runCommand(t, allocation.Path, "git", "commit", "-m", "rescuable commit")
+	advancedHead := strings.TrimSpace(runCommand(t, allocation.Path, "git", "rev-parse", "HEAD"))
+	require.NotEqual(t, allocation.HeadSHA, advancedHead)
+
+	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	require.NoError(t, saveResumeState(agentDir, resumeState{
+		ExpectedBaseSHA: allocation.BaseSHA,
+		StartedAt:       oldTime,
+		Pid:             999999,
+		LeaderStartTime: "stale-start",
+		RetryCount:      0,
+		LastHeartbeat:   oldTime,
+	}))
+	require.NoError(t, touchHeartbeat(agentDir, oldTime))
+
+	originalWorktreePIDs := rescueWorktreeProcessIDs
+	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) { return nil, nil }
+	t.Cleanup(func() {
+		rescueWorktreeProcessIDs = originalWorktreePIDs
+	})
+
+	require.NoError(t, os.RemoveAll(allocation.Path))
+
+	require.NoError(t, (Step{}).Run(context.Background(), env.run))
+
+	entries := rescueDirEntries(t, agentDir)
+	require.Len(t, entries, 1)
+	rescueState, err := agentrunner.ReadRescueState(filepath.Join(agentDir, rescuedDirName, entries[0].Name(), "state.json"))
+	require.NoError(t, err)
+	assert.Equal(t, advancedHead, rescueState.RescuedHeadSHA)
+	assert.Greater(t, rescueState.CommitCount, 0)
+}
+
 func TestStepRun_FinalizeFailureForcesImmediateRescueOnNextResume(t *testing.T) {
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
 	agentDir, err := agentDir(env.run.IO, 2, "a1")
