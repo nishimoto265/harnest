@@ -249,9 +249,11 @@ func TestPublishSnapshotPushesRunsBasePolicyToBranch(t *testing.T) {
 
 func TestPreparedPublishPushUsesScopedHTTPSTokenAuth(t *testing.T) {
 	t.Setenv("GH_TOKEN", "test-token")
+	t.Setenv("GH_HOST", "github.example.com")
 	repoRoot := newClonedRepoWithPolicyBranch(t)
 	head := strings.TrimSpace(string(mustGitOutput(t, repoRoot, "rev-parse", "origin/policy")))
 	mustGit(t, repoRoot, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+	mustGit(t, repoRoot, "remote", "set-url", "--push", "origin", "https://github.example.com/owner/repo.git")
 
 	originalRunGit := runGit
 	pushChecked := 0
@@ -260,7 +262,7 @@ func TestPreparedPublishPushUsesScopedHTTPSTokenAuth(t *testing.T) {
 			pushChecked++
 			assertSafeGitEnv(t, env)
 			assert.Contains(t, env, "GH_TOKEN=test-token")
-			assertScopedGitHubExtraHeader(t, env, "github.com", "test-token")
+			assertScopedGitHubExtraHeader(t, env, "github.example.com", "test-token")
 			return nil, nil
 		}
 		return originalRunGit(ctx, env, args...)

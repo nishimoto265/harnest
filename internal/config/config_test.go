@@ -174,6 +174,36 @@ worktree:
 	assert.ErrorContains(t, err, "repo.default_branch is required")
 }
 
+func TestLoadConfig_RejectsPolicyBranchMatchingDefaultOrBestBranch(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		policyBranch string
+		want         string
+	}{
+		{name: "default", policyBranch: "main", want: "repo.default_branch"},
+		{name: "best", policyBranch: "auto-improve/best", want: "repo.best_branch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfigFixture(t, `
+repo:
+  github: "owner/repo"
+  root: "/tmp/auto-improve"
+  default_branch: "main"
+  best_branch: "auto-improve/best"
+  policy_branch: "`+tc.policyBranch+`"
+paths:
+  runs: "/tmp/auto-improve/runs"
+worktree:
+  base: "/tmp/auto-improve/worktrees"
+`)
+
+			_, err := LoadConfig(path)
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
 func TestLoadConfig_LoadsAgentsFileWhenPresent(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")

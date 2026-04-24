@@ -93,7 +93,7 @@ func (g RealGitOps) remoteURL(ctx context.Context, remote string) string {
 }
 
 func (g RealGitOps) remotePushURL(ctx context.Context, remote string) string {
-	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "remote", "get-url", "--push", remote)
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "remote", "get-url", "--push", "--all", remote)
 	if err != nil {
 		return g.remoteURL(ctx, remote)
 	}
@@ -102,8 +102,26 @@ func (g RealGitOps) remotePushURL(ctx context.Context, remote string) string {
 	if err != nil {
 		return g.remoteURL(ctx, remote)
 	}
-	if remoteURL := strings.TrimSpace(string(out)); remoteURL != "" {
+	if remoteURL := preferredRemoteURLForAuth(string(out)); remoteURL != "" {
 		return remoteURL
 	}
 	return g.remoteURL(ctx, remote)
+}
+
+func preferredRemoteURLForAuth(output string) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	first := ""
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if first == "" {
+			first = line
+		}
+		if strings.HasPrefix(strings.ToLower(line), "https://") {
+			return line
+		}
+	}
+	return first
 }

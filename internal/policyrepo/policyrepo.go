@@ -243,7 +243,7 @@ func (p *PreparedPublish) Push(ctx context.Context) error {
 	if !p.needsPush {
 		return nil
 	}
-	remoteURL, err := originRemoteURL(ctx, p.RepoRoot)
+	remoteURL, err := originPushURL(ctx, p.RepoRoot)
 	if err != nil {
 		return err
 	}
@@ -728,6 +728,32 @@ func originRemoteURL(ctx context.Context, repoRoot string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func originPushURL(ctx context.Context, repoRoot string) (string, error) {
+	out, err := gitText(ctx, repoRoot, "remote", "get-url", "--push", "--all", "origin")
+	if err != nil {
+		return "", err
+	}
+	return preferredRemoteURLForAuth(string(out)), nil
+}
+
+func preferredRemoteURLForAuth(output string) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	first := ""
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if first == "" {
+			first = line
+		}
+		if strings.HasPrefix(strings.ToLower(line), "https://") {
+			return line
+		}
+	}
+	return first
 }
 
 func branchHead(ctx context.Context, repoRoot, branch string) (string, error) {

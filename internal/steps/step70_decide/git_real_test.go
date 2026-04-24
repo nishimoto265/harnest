@@ -122,7 +122,7 @@ exit 1
 	env := string(envBytes)
 	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:token"))
 	assert.Contains(t, env, "ARGS:-C /tmp/repo remote get-url origin")
-	assert.Contains(t, env, "ARGS:-C /tmp/repo remote get-url --push origin")
+	assert.Contains(t, env, "ARGS:-C /tmp/repo remote get-url --push --all origin")
 	assert.Contains(t, env, "ARGS:-C /tmp/repo ls-remote --heads origin "+realGitBranch)
 	assert.Contains(t, env, "ARGS:-C /tmp/repo push origin "+strings.Repeat("b", 40)+":"+realGitBranch)
 	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.com/.extraheader")
