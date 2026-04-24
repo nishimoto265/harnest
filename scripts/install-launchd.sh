@@ -14,6 +14,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 TARGET="${TARGET:-$INSTALL_DIR/auto-improve}"
 REPO_ROOT_INPUT="${REPO_ROOT:-$(pwd -P)}"
+PLIST_OVERRIDE_SET=0
+if [[ -n "${PLIST:-}" ]]; then
+  PLIST_OVERRIDE_SET=1
+fi
 
 if ! REPO_ROOT="$(cd "$REPO_ROOT_INPUT" 2>/dev/null && pwd -P)"; then
   echo "REPO_ROOT=$REPO_ROOT_INPUT does not exist" >&2
@@ -76,4 +80,8 @@ EOF
 mv "$tmp_plist" "$PLIST"
 if [[ "$(id -un)" != "$LAUNCHD_USER" ]]; then
   chown "$LAUNCHD_USER" "$PLIST"
+fi
+
+if [[ "$PLIST_OVERRIDE_SET" -eq 0 ]]; then
+  auto_improve_migrate_legacy_launchd_plist "$PLIST"
 fi

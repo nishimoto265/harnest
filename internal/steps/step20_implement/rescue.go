@@ -336,14 +336,6 @@ func writeCommitBundle(ctx context.Context, worktreePath, rescueDir, baseSHA str
 	return commitCount, agentrunner.RescueBundleModeFullHead, nil
 }
 
-func writeGitOutput(worktreePath, target string, args ...string) error {
-	out, err := gitOutputBytes(worktreePath, args...)
-	if err != nil {
-		return err
-	}
-	return internalio.WriteAtomic(target, out)
-}
-
 func writeGitOutputContext(ctx context.Context, worktreePath, target string, args ...string) error {
 	_, err := agentrunner.StreamGitOutputWithLimit(ctx, worktreePath, "step20", target, agentrunner.RescueDiffLimitBytes, args...)
 	return err

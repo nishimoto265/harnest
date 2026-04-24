@@ -73,6 +73,10 @@ auto_improve_launchd_label() {
   printf 'com.nishimoto265.auto-improve.%s\n' "$(auto_improve_launchd_instance)"
 }
 
+auto_improve_legacy_launchd_label() {
+  printf 'com.nishimoto265.auto-improve\n'
+}
+
 auto_improve_launchd_domain() {
   local user
   user="$(auto_improve_launchd_user)"
@@ -95,6 +99,10 @@ auto_improve_launchd_plist_path() {
   printf '%s/%s.plist\n' "$(auto_improve_launchd_plist_dir)" "$(auto_improve_launchd_label)"
 }
 
+auto_improve_legacy_launchd_plist_path() {
+  printf '%s/%s.plist\n' "$(auto_improve_launchd_plist_dir)" "$(auto_improve_legacy_launchd_label)"
+}
+
 auto_improve_launchd_path() {
   if [[ -n "${AUTO_IMPROVE_LAUNCHD_PATH:-}" ]]; then
     printf '%s\n' "$AUTO_IMPROVE_LAUNCHD_PATH"
@@ -111,6 +119,17 @@ auto_improve_launchctl_bootout() {
 auto_improve_launchctl_bootstrap() {
   local plist="$1"
   launchctl bootstrap "$(auto_improve_launchd_domain)" "$plist"
+}
+
+auto_improve_migrate_legacy_launchd_plist() {
+  local current_plist="$1"
+  local legacy_plist
+  legacy_plist="$(auto_improve_legacy_launchd_plist_path)"
+  if [[ "$legacy_plist" == "$current_plist" || ! -e "$legacy_plist" ]]; then
+    return 0
+  fi
+  auto_improve_launchctl_bootout "$legacy_plist"
+  rm -f "$legacy_plist"
 }
 
 auto_improve_xml_escape() {

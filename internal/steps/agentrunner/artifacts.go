@@ -186,24 +186,6 @@ func gitOutputContext(ctx context.Context, mapFn func(string) string, worktreePa
 	return mapFn(string(output)), nil
 }
 
-func gitNoIndexDiffContext(ctx context.Context, worktreePath, relativePath, errPrefix string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", relativePath)
-	cmd.Dir = worktreePath
-	cmd.Env = processenv.Sanitize()
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		return output, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-		return output, nil
-	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	return nil, fmt.Errorf("%s: git diff --binary --no-index -- /dev/null %s: %w: %s", errPrefix, relativePath, err, strings.TrimSpace(string(output)))
-}
-
 func streamGitCommandContext(ctx context.Context, worktreePath, errPrefix string, writer io.Writer, exitOneAllowed bool, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
 	cmd.Env = processenv.Sanitize()
@@ -285,18 +267,6 @@ func (w *cappedDiffWriter) Write(p []byte) (int, error) {
 func ensureArtifactSourceRegular(path string) error {
 	_, _, _, err := validatedRegularFileIdentity(path)
 	return err
-}
-
-func diffableArtifactSource(path string) (bool, error) {
-	file, _, _, err := OpenValidatedRegularFile(path)
-	if err != nil {
-		if errors.Is(err, ErrArtifactNotRegular) {
-			return false, nil
-		}
-		return false, err
-	}
-	_ = file.Close()
-	return true, nil
 }
 
 func loadChecklistArtifactFileContext(ctx context.Context, path string) (contracts.ChecklistResult, error) {
