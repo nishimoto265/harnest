@@ -21,7 +21,7 @@ check-sync:
 	bash scripts/check-contracts-sync.sh
 
 script-test:
-	bash -n scripts/install.sh scripts/install-launchd.sh scripts/launchd-common.sh scripts/install-migration-test.sh scripts/check-contracts-sync.sh scripts/check-contracts-sync_test.sh
+	bash -n scripts/install.sh scripts/install-launchd.sh scripts/launchd-common.sh scripts/install-migration-test.sh scripts/check-contracts-sync.sh scripts/check-contracts-sync_test.sh scripts/render-workflow-config.sh
 	bash scripts/install-migration-test.sh
 	bash scripts/check-contracts-sync_test.sh
 
