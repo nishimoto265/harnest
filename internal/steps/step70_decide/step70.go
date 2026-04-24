@@ -1289,14 +1289,20 @@ func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contract
 	if err != nil {
 		return err
 	}
+	if intention == nil || intention.PlannedAdoption == nil {
+		if _, err := os.Stat(stagingDir); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		return errMissingPlannedAdoptionForStaging
+	}
 	if _, err := os.Stat(stagingDir); err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return verifyPlannedRuleSidecarDestinations(runCtx, intention.PlannedAdoption.Entries)
 		}
 		return err
-	}
-	if intention == nil || intention.PlannedAdoption == nil {
-		return errMissingPlannedAdoptionForStaging
 	}
 	published := make(map[string]struct{}, len(intention.PublishedRuleOpIDs))
 	for _, opID := range intention.PublishedRuleOpIDs {
@@ -1322,7 +1328,28 @@ func promoteStagedRuleSidecars(runCtx internalio.RunContext, intention *contract
 			}
 		}
 	}
+	if err := verifyPlannedRuleSidecarDestinations(runCtx, intention.PlannedAdoption.Entries); err != nil {
+		return err
+	}
 	return cleanupStagedRuleSidecars(runCtx)
+}
+
+func verifyPlannedRuleSidecarDestinations(runCtx internalio.RunContext, entries []contracts.PlannedAdoptionEntry) error {
+	for _, entry := range entries {
+		dstPath := filepath.Join(runCtx.RunsBase, filepath.FromSlash(entry.RulePath))
+		data, err := internalio.ReadValidatedRegularFile(dstPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("%w: destination=%s", errRulePublishStagedMissing, dstPath)
+			}
+			return fmt.Errorf("%w: read destination=%s: %v", errRulePublishDestinationType, dstPath, err)
+		}
+		sum := sha256.Sum256(data)
+		if hex.EncodeToString(sum[:]) != entry.Sha256 {
+			return fmt.Errorf("%w: destination=%s", errRulePublishIntegrity, dstPath)
+		}
+	}
+	return nil
 }
 
 func promoteRuleSidecar(stagedPath, dstPath, wantSHA, prevSHA string) error {

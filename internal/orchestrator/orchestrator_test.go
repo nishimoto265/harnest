@@ -1448,6 +1448,7 @@ func TestRun_ResumeFromBranchPushed_EndToEnd(t *testing.T) {
 	intention := validPlanningIntention(runID)
 	intention.Stage = contracts.IntentionStageBranchPushed
 	require.NoError(t, store.Save(intention))
+	require.NoError(t, internalio.WriteAtomic(filepath.Join(runCtx.RunDir(), "staging", "rules", "r-0001.md"), []byte("r-0001 body\n")))
 
 	orch, err := NewOrchestrator(cfg)
 	require.NoError(t, err)
@@ -2532,6 +2533,21 @@ func (testStep70Resolver) Resolve(runCtx internalio.RunContext, pkg *contracts.T
 		return step70_decide.Target{}, false, nil
 	}
 	ruleID := "r-bf1d22bf4a85"
+	ruleBodyPath, err := runCtx.ResolveRunRelative("staging/rules/" + ruleID + ".md")
+	if err != nil {
+		return step70_decide.Target{}, false, err
+	}
+	bodyPath, err := runCtx.ResolveRunRelative(candidates.Candidates[0].ProposedBodyPath)
+	if err != nil {
+		return step70_decide.Target{}, false, err
+	}
+	body, err := os.ReadFile(bodyPath)
+	if err != nil {
+		return step70_decide.Target{}, false, err
+	}
+	if err := internalio.WriteAtomic(ruleBodyPath, body); err != nil {
+		return step70_decide.Target{}, false, err
+	}
 	return step70_decide.Target{
 		BestBranch:    "best",
 		BestShaBefore: strings.Repeat("1", 40),
@@ -2543,7 +2559,7 @@ func (testStep70Resolver) Resolve(runCtx internalio.RunContext, pkg *contracts.T
 				SchemaVersion: "1",
 				RuleID:        ruleID,
 				RulePath:      "rules/" + ruleID + ".md",
-				Sha256:        strings.Repeat("a", 64),
+				Sha256:        candidates.Candidates[0].ProposedBodySha256,
 			},
 		}},
 	}, true, nil
@@ -2995,6 +3011,7 @@ func validPlanningIntention(runID contracts.RunID) contracts.IntentionRecord {
 	best := strings.Repeat("1", 40)
 	target := strings.Repeat("2", 40)
 	hash := strings.Repeat("3", 64)
+	body := "r-0001 body\n"
 	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(runID), target, best, hash)
 	return contracts.IntentionRecord{
 		SchemaVersion:      "1",
@@ -3013,7 +3030,7 @@ func validPlanningIntention(runID contracts.RunID) contracts.IntentionRecord {
 					Kind:     contracts.RegistryKindAdded,
 					RuleID:   "r-0001",
 					RulePath: "rules/r-0001.md",
-					Sha256:   strings.Repeat("4", 64),
+					Sha256:   sha256String(body),
 				},
 			},
 		},
