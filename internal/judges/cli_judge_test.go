@@ -133,7 +133,7 @@ EOF
 }
 
 func TestCodexJudgeExecArgsAreReadOnlyAndKeepSafeProfileArgs(t *testing.T) {
-	args, err := codexJudgeExecArgs([]string{"--model", "gpt-5"}, "/tmp/worktree", "/tmp/output.json")
+	args, err := codexJudgeExecArgs([]string{"--model", "gpt-5", "--model=gpt-5-mini", "-m", "gpt-5"}, "/tmp/worktree", "/tmp/output.json")
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{
@@ -143,6 +143,8 @@ func TestCodexJudgeExecArgsAreReadOnlyAndKeepSafeProfileArgs(t *testing.T) {
 		"--ephemeral",
 		"-C", "/tmp/worktree",
 		"--model", "gpt-5",
+		"--model=gpt-5-mini",
+		"-m", "gpt-5",
 		"-o", "/tmp/output.json",
 		"-",
 	}, args)
@@ -161,6 +163,7 @@ func TestCodexJudgeExecArgsRejectUnsafeProfileArgs(t *testing.T) {
 		{name: "danger sandbox equals", args: []string{"--sandbox=danger-full-access"}},
 		{name: "short sandbox", args: []string{"-s", "workspace-write"}},
 		{name: "sandbox config", args: []string{"-c", `sandbox_mode="danger-full-access"`}},
+		{name: "model config bypass", args: []string{"-c", `model="gpt-5"`}},
 		{name: "approval config", args: []string{"--config=approval_policy=\"never\""}},
 		{name: "shell env config", args: []string{"-c", "shell_environment_policy.inherit=all"}},
 		{name: "profile config", args: []string{"-c", "profile=\"judge-ci\""}},
@@ -175,6 +178,11 @@ func TestCodexJudgeExecArgsRejectUnsafeProfileArgs(t *testing.T) {
 		{name: "output equals", args: []string{"-o=/tmp/other.json"}},
 		{name: "last message output", args: []string{"--output-last-message", "/tmp/other.json"}},
 		{name: "last message output equals", args: []string{"--output-last-message=/tmp/other.json"}},
+		{name: "ignore rules", args: []string{"--ignore-rules"}},
+		{name: "ignore user config", args: []string{"--ignore-user-config"}},
+		{name: "model consumes flag-like value", args: []string{"--model", "--ignore-rules"}},
+		{name: "model equals empty", args: []string{"--model="}},
+		{name: "unknown passthrough", args: []string{"--json"}},
 	}
 
 	for _, tt := range tests {

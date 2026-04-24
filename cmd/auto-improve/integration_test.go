@@ -200,6 +200,18 @@ func TestIntegrationFakeGitFixtureCreatesPlainDirectoriesNotWorktrees(t *testing
 	assert.DirExists(t, worktreePath)
 	assert.NoFileExists(t, filepath.Join(worktreePath, ".git"), "fake git records paths but does not create real git worktrees")
 
+	removeCmd := exec.Command(filepath.Join(binDir, "git"), "-C", root, "worktree", "remove", "--force", worktreePath)
+	removeCmd.Env = append(os.Environ(), "AUTO_IMPROVE_GIT_STATE_DIR="+stateDir)
+	removeOut, removeErr := removeCmd.CombinedOutput()
+	require.NoError(t, removeErr, string(removeOut))
+	assert.NoDirExists(t, worktreePath)
+
+	listCmd := exec.Command(filepath.Join(binDir, "git"), "-C", root, "worktree", "list", "--porcelain")
+	listCmd.Env = append(os.Environ(), "AUTO_IMPROVE_GIT_STATE_DIR="+stateDir)
+	listOut, listErr := listCmd.CombinedOutput()
+	require.NoError(t, listErr, string(listOut))
+	assert.NotContains(t, string(listOut), worktreePath)
+
 	realGit := exec.Command("git", "-C", worktreePath, "rev-parse", "--is-inside-work-tree")
 	realOut, realErr := realGit.CombinedOutput()
 	require.Error(t, realErr, string(realOut))

@@ -33,6 +33,9 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Integration test
+        run: AUTO_IMPROVE_INTEGRATION=1 go test ./cmd/auto-improve -count=1
+
       - name: Smoke build
         run: |
           set -euo pipefail
