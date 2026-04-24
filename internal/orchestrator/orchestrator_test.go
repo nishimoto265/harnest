@@ -1840,6 +1840,40 @@ func TestRun_ArchiveFailureDoesNotAppendTerminalState(t *testing.T) {
 	assert.Equal(t, state.NextActionFreshStart, latest.Action)
 }
 
+func TestRun_CleanupFailureDoesNotAppendTerminalState(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	orch.steps.Step10 = stubStep10{}
+	orch.steps.Step20 = stubAgentSteps()
+	orch.steps.Step30 = stubMarkerStep{path: "30/done.marker"}
+	orch.steps.Step40 = duplicateOnlyCandidateStep{}
+	orch.steps.Step50 = stubAgentSteps()
+	orch.steps.Step60 = scriptedStep60Step{decode: orch.decoders.Step60}
+	orch.steps.Step70 = corruptCleanupStep70{}
+
+	runID := contracts.RunID("2026-04-21-PR82-abcdef0")
+	err = orch.Run(context.Background(), 82, RunOptions{RunID: runID})
+	require.ErrorContains(t, err, "worktree path escapes")
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	latest, err := state.LatestRunForPR(runCtx, 82)
+	require.NoError(t, err)
+	require.NotNil(t, latest.LastEvent)
+	assert.Equal(t, contracts.StateKindStepDone, latest.LastEvent.Kind)
+	assert.Equal(t, state.NextActionResume, latest.Action)
+
+	orch.steps.Step70 = stubStep70{}
+	require.NoError(t, orch.Run(context.Background(), 82, RunOptions{}))
+	latest, err = state.LatestRunForPR(runCtx, 82)
+	require.NoError(t, err)
+	require.NotNil(t, latest.LastEvent)
+	assert.Equal(t, contracts.StateKindCompleted, latest.LastEvent.Kind)
+	assert.Equal(t, state.NextActionFreshStart, latest.Action)
+}
+
 func TestRun_LeaseContentionBecomesInterruptedAndResumeSucceeds(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
@@ -3357,6 +3391,19 @@ func (s *failOnceStep) Run(ctx context.Context, run *StepRunContext) error {
 		s.seen = true
 		return s.err
 	}
+	return nil
+}
+
+type corruptCleanupStep70 struct{}
+
+func (corruptCleanupStep70) Run(ctx context.Context, run *StepRunContext) error {
+	if err := (stubStep70{}).Run(ctx, run); err != nil {
+		return err
+	}
+	if run.TaskPackage == nil || len(run.TaskPackage.Worktrees) == 0 {
+		return nil
+	}
+	run.TaskPackage.Worktrees[0].Path = filepath.Join(filepath.Dir(run.IO.WorktreeBase), "outside-cleanup")
 	return nil
 }
 

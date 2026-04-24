@@ -151,6 +151,47 @@ func TestResumeIfNeeded_SkipsStaleRescueDirWhenDirtyFingerprintDrifts(t *testing
 	assert.GreaterOrEqual(t, len(rescueDirEntries(t, fx.agentDir)), 2, "new rescue dir must be captured when fingerprint drifts")
 }
 
+func TestResumeIfNeeded_SkipsRescueDirWithPartialIgnoredCoverage(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	allocation, err := worktreeFor(fx.run.TaskPackage, fx.run.Pass, fx.run.Agent)
+	require.NoError(t, err)
+	stubQuiescentRescueWorktree(t)
+
+	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	require.NoError(t, saveResumeState(fx.agentDir, resumeState{
+		ExpectedBaseSHA: fx.baseSHA,
+		StartedAt:       oldTime,
+		Pid:             999999,
+		LeaderStartTime: "stale-start",
+		RetryCount:      0,
+		LastHeartbeat:   oldTime,
+	}))
+	require.NoError(t, touchHeartbeat(fx.agentDir, oldTime))
+	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, "dirty.txt"), []byte("dirty\n"), 0o644))
+	currentDirtyFingerprint, err := agentrunner.ComputeDirtyFingerprint(context.Background(), fx.worktree)
+	require.NoError(t, err)
+
+	rescueDir := filepath.Join(fx.agentDir, rescuedDirName, "partial-rescue")
+	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
+	artifacts := writePartialIgnoredCoverageArtifacts(t, rescueDir)
+	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
+		ExpectedBaseSHA:  fx.baseSHA,
+		RescuedHeadSHA:   allocation.BaseSHA,
+		RetryCount:       1,
+		CommitCount:      0,
+		BundleMode:       agentrunner.RescueBundleModeNone,
+		CreatedAt:        time.Now().UTC(),
+		Artifacts:        artifacts,
+		DirtyFingerprint: currentDirtyFingerprint,
+	}))
+
+	retryCount, err := fx.step.resumeIfNeeded(context.Background(), fx.run, allocation, fx.agentDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, retryCount)
+	assert.NoFileExists(t, filepath.Join(fx.worktree, "dirty.txt"))
+	assert.GreaterOrEqual(t, len(rescueDirEntries(t, fx.agentDir)), 2, "partial ignored coverage must force a fresh rescue capture")
+}
+
 func TestEnsureRescueLeaseQuiesced_PreservesTimeoutSentinel(t *testing.T) {
 	originalWorktreePIDs := rescueWorktreeProcessIDs
 	originalKillPID := rescueKillPID
@@ -242,4 +283,13 @@ func writeIgnoredCoverageArtifacts(t *testing.T, rescueDir string) []agentrunner
 		artifacts = append(artifacts, agentrunner.RescueArtifactDigest{Path: rel, SHA256: digest})
 	}
 	return artifacts
+}
+
+func writePartialIgnoredCoverageArtifacts(t *testing.T, rescueDir string) []agentrunner.RescueArtifactDigest {
+	t.Helper()
+	path := filepath.Join(rescueDir, "ignored.txt")
+	require.NoError(t, os.WriteFile(path, nil, 0o644))
+	digest, err := fileDigest(path)
+	require.NoError(t, err)
+	return []agentrunner.RescueArtifactDigest{{Path: "ignored.txt", SHA256: digest}}
 }
