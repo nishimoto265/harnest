@@ -22,6 +22,8 @@ func setSanitizeTestEnv(t *testing.T) {
 	t.Setenv("TMPDIR", "/tmp/runtime")
 	t.Setenv("GH_TOKEN", "token")
 	t.Setenv("GITHUB_TOKEN", "gh-pat")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "enterprise-token")
+	t.Setenv("GITHUB_ENTERPRISE_TOKEN", "enterprise-gh-pat")
 	t.Setenv("GH_HOST", "github.example.com")
 	t.Setenv("GH_REPO", "owner/repo")
 	t.Setenv("GIT_ASKPASS", "/usr/local/bin/gh-askpass")
@@ -59,6 +61,8 @@ func TestSanitizeForLocalExec_UsesStrictAllowlistForBaseAndExtraEnv(t *testing.T
 	assert.NotContains(t, env, "GH_TOKEN=token")
 	assert.NotContains(t, env, "GH_TOKEN=override")
 	assert.NotContains(t, env, "GITHUB_TOKEN=gh-pat")
+	assert.NotContains(t, env, "GH_ENTERPRISE_TOKEN=enterprise-token")
+	assert.NotContains(t, env, "GITHUB_ENTERPRISE_TOKEN=enterprise-gh-pat")
 	assert.NotContains(t, env, "GH_HOST=github.example.com")
 	assert.NotContains(t, env, "GH_REPO=owner/repo")
 	assert.NotContains(t, env, "GIT_ASKPASS=/usr/local/bin/gh-askpass")
@@ -93,6 +97,8 @@ func TestSanitizeForNetworkExec_PreservesAuthEnvButBlocksHooks(t *testing.T) {
 	assert.Contains(t, env, "SSH_AUTH_SOCK=/tmp/ssh.sock")
 	assert.Contains(t, env, "GH_HOST=github.example.com")
 	assert.Contains(t, env, "GITHUB_TOKEN=gh-pat")
+	assert.Contains(t, env, "GH_ENTERPRISE_TOKEN=enterprise-token")
+	assert.Contains(t, env, "GITHUB_ENTERPRISE_TOKEN=enterprise-gh-pat")
 	// Caller-provided override wins for auth tokens.
 	assert.Contains(t, env, "GH_TOKEN=override")
 	assert.NotContains(t, env, "GH_TOKEN=token")
@@ -156,6 +162,8 @@ func TestGitNetworkEnv_PreservesNetworkAuthAndAppendsSafeGitProfile(t *testing.T
 	assert.Contains(t, env, "SSH_AUTH_SOCK=/tmp/ssh.sock")
 	assert.Contains(t, env, "GH_TOKEN=override")
 	assert.Contains(t, env, "GITHUB_TOKEN=gh-pat")
+	assert.Contains(t, env, "GH_ENTERPRISE_TOKEN=enterprise-token")
+	assert.Contains(t, env, "GITHUB_ENTERPRISE_TOKEN=enterprise-gh-pat")
 	assert.Contains(t, env, "GH_HOST=github.example.com")
 	assert.Contains(t, env, "GIT_CONFIG_NOSYSTEM=1")
 	assert.Contains(t, env, "GIT_CONFIG_GLOBAL="+os.DevNull)
@@ -181,6 +189,16 @@ func TestGitNetworkEnvForRemoteURL_AddsScopedHTTPSGitHubTokenHeader(t *testing.T
 	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+header)
 }
 
+func TestGitNetworkEnvForRemoteURL_DoesNotUseEnterpriseTokenForGitHubDotCom(t *testing.T) {
+	setSanitizeTestEnv(t)
+
+	env := GitNetworkEnvForRemoteURL("https://github.com/owner/repo.git")
+	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:token"))
+
+	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.com/.extraheader")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+header)
+}
+
 func TestGitNetworkEnvForRemoteURL_DoesNotScopeTokenToWrongHost(t *testing.T) {
 	setSanitizeTestEnv(t)
 
@@ -197,6 +215,21 @@ func TestGitNetworkEnvForRemoteURL_AllowsConfiguredGHHost(t *testing.T) {
 	setSanitizeTestEnv(t)
 
 	env := GitNetworkEnvForRemoteURL("https://github.example.com/owner/repo.git", "GH_TOKEN=override")
+	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:enterprise-token"))
+
+	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.example.com/.extraheader")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+header)
+}
+
+func TestGitNetworkEnvForRemoteURL_ConfiguredGHHostFallsBackToRegularToken(t *testing.T) {
+	setSanitizeTestEnv(t)
+
+	env := GitNetworkEnvForRemoteURL(
+		"https://github.example.com/owner/repo.git",
+		"GH_ENTERPRISE_TOKEN=",
+		"GITHUB_ENTERPRISE_TOKEN=",
+		"GH_TOKEN=override",
+	)
 	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:override"))
 
 	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.example.com/.extraheader")

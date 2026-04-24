@@ -275,6 +275,41 @@ agent_file_snapshot:
 	assert.Equal(t, "codex", profile.Binary)
 }
 
+func TestLoadConfig_RejectsStubImplementerProfile(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	agentsPath := filepath.Join(dir, "agents.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+repo:
+  github: "owner/repo"
+  root: "/tmp/auto-improve"
+  default_branch: "main"
+  best_branch: "auto-improve/best"
+paths:
+  runs: "/tmp/auto-improve/runs"
+worktree:
+  base: "/tmp/auto-improve/worktrees"
+agent_config_path: "./agents.yaml"
+`), 0o644))
+	require.NoError(t, os.WriteFile(agentsPath, []byte(`
+profiles:
+  stub:
+    provider: stub
+roles:
+  implementer: stub
+  judge_primary: stub
+  judge_secondary: stub
+  judge_arbiter: stub
+`), 0o644))
+
+	_, err := LoadConfig(configPath)
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "implementer")
+	assert.ErrorContains(t, err, "claude")
+	assert.ErrorContains(t, err, "codex")
+}
+
 func TestLoadConfig_DefaultsTaskPromptSourceToAuto(t *testing.T) {
 	path := writeConfigFixture(t, `
 repo:

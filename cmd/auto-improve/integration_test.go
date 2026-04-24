@@ -443,9 +443,8 @@ if [ "${1:-}" = "--version" ]; then
   printf 'git version 2.45.0\n'
   exit 0
 fi
-if [ "${1:-}" = "-C" ] && [ "${3:-}" = "remote" ] && [ "${4:-}" = "get-url" ] && [ "${5:-}" = "--push" ] && [ "${6:-}" = "--all" ] && [ "${7:-}" = "origin" ]; then
-  printf '%s\n' "git@github.com:owner/repo.git"
-  exit 0
+if [ "${1:-}" = "-C" ] && [ "${3:-}" = "config" ] && [ "${4:-}" = "--get-all" ] && [ "${5:-}" = "remote.origin.pushurl" ]; then
+  exit 1
 fi
 
 exec "$0.fixture" "$@"
@@ -694,6 +693,7 @@ func writeExecutable(t *testing.T, path, body string) {
 func fakeClaudeScript(delay time.Duration) string {
 	return "#!/bin/sh\n" +
 		"set -eu\n" +
+		"if [ \"${1:-}\" = \"--version\" ]; then printf 'claude 1.0.0\\n'; exit 0; fi\n" +
 		"sleep " + formatSleep(delay) + "\n" +
 		"cat > checklist-result.json <<EOF\n" +
 		"{\"schema_version\":\"1\",\"run_id\":\"${AUTO_IMPROVE_RUN_ID}\",\"pass\":${AUTO_IMPROVE_PASS},\"agent\":\"${AUTO_IMPROVE_AGENT}\",\"items\":[]}\n" +

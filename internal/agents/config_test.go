@@ -97,3 +97,48 @@ func TestValidateRejectsUnknownProfileReference(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "unknown profile")
 }
+
+func TestValidateRejectsStubImplementerProfiles(t *testing.T) {
+	for _, provider := range []Provider{ProviderStub, ProviderStubViolation, ProviderStubAdopt} {
+		t.Run(string(provider), func(t *testing.T) {
+			cfg := File{
+				Profiles: map[string]Profile{
+					"impl": {Provider: provider},
+					"stub": {Provider: ProviderStub},
+				},
+				Roles: map[Role]string{
+					RoleImplementer:    "impl",
+					RoleJudgePrimary:   "stub",
+					RoleJudgeSecondary: "stub",
+					RoleJudgeArbiter:   "stub",
+				},
+			}
+
+			err := cfg.Validate()
+
+			require.Error(t, err)
+			assert.ErrorContains(t, err, "implementer")
+			assert.ErrorContains(t, err, "claude")
+			assert.ErrorContains(t, err, "codex")
+		})
+	}
+}
+
+func TestValidateAllowsStubJudgeProfiles(t *testing.T) {
+	cfg := File{
+		Profiles: map[string]Profile{
+			"impl":           {Provider: ProviderCodex, Binary: "codex"},
+			"stub":           {Provider: ProviderStub},
+			"stub-violation": {Provider: ProviderStubViolation},
+			"stub-adopt":     {Provider: ProviderStubAdopt},
+		},
+		Roles: map[Role]string{
+			RoleImplementer:    "impl",
+			RoleJudgePrimary:   "stub",
+			RoleJudgeSecondary: "stub-violation",
+			RoleJudgeArbiter:   "stub-adopt",
+		},
+	}
+
+	require.NoError(t, cfg.Validate())
+}

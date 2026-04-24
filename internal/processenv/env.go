@@ -124,6 +124,7 @@ func SanitizeForLocalExec(extra ...string) []string {
 // network-crossing subprocesses:
 //   - SSH_AUTH_SOCK: ssh-agent auth for git+ssh clones/pushes
 //   - GH_TOKEN / GITHUB_TOKEN: gh CLI PAT auth
+//   - GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN: gh CLI GHES PAT auth
 //   - GH_HOST: gh CLI enterprise host override
 //
 // Shell-init-injection vectors (BASH_ENV, LD_PRELOAD, GIT_CONFIG_* overrides,
@@ -154,15 +155,16 @@ func GitNetworkEnv(extra ...string) []string {
 }
 
 // GitNetworkEnvForRemoteURL returns GitNetworkEnv plus an HTTPS-only GitHub
-// Authorization extraheader scoped to the remote host when GH_TOKEN or
-// GITHUB_TOKEN is present. The header is only added for github.com or GH_HOST,
+// Authorization extraheader scoped to the remote host. github.com uses regular
+// GitHub tokens; GHES hosts prefer enterprise tokens and fall back to regular
+// tokens for compatibility. The header is only added for github.com or GH_HOST,
 // so a token is not sent to same-slug remotes on unrelated hosts.
 func GitNetworkEnvForRemoteURL(remoteURL string, extra ...string) []string {
 	env := SanitizeForNetworkExec(extra...)
 	config := make([]gitConfigEntry, 0, 1)
-	token := gitTokenFromEnv(env)
-	if token != "" {
-		if info, err := gitremote.ParseGitHubRemote(remoteURL, gitremote.AllowedGitHubHostsFromEnv(env)); err == nil && info.Scheme == "https" {
+	if info, err := gitremote.ParseGitHubRemote(remoteURL, gitremote.AllowedGitHubHostsFromEnv(env)); err == nil && info.Scheme == "https" {
+		token := gitTokenForHostFromEnv(env, info.Host)
+		if token != "" {
 			config = append(config, gitConfigEntry{
 				key:   "http.https://" + info.Host + "/.extraheader",
 				value: "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)),
@@ -233,6 +235,8 @@ func networkAllowlist(key string) bool {
 	case "SSH_AUTH_SOCK",
 		"GH_TOKEN",
 		"GITHUB_TOKEN",
+		"GH_ENTERPRISE_TOKEN",
+		"GITHUB_ENTERPRISE_TOKEN",
 		"GH_HOST",
 		"KRB5CCNAME":
 		return true
@@ -290,7 +294,17 @@ func appendSafeGitProfileWithConfig(env []string, extraConfig []gitConfigEntry) 
 	return filtered
 }
 
-func gitTokenFromEnv(env []string) string {
+func gitTokenForHostFromEnv(env []string, host string) string {
+	if strings.EqualFold(host, gitremote.DefaultGitHubHost) {
+		return regularGitTokenFromEnv(env)
+	}
+	if token := enterpriseGitTokenFromEnv(env); token != "" {
+		return token
+	}
+	return regularGitTokenFromEnv(env)
+}
+
+func regularGitTokenFromEnv(env []string) string {
 	fallback := ""
 	for _, item := range env {
 		key, value, ok := strings.Cut(item, "=")
@@ -301,6 +315,25 @@ func gitTokenFromEnv(env []string) string {
 		case "GH_TOKEN":
 			return value
 		case "GITHUB_TOKEN":
+			if fallback == "" {
+				fallback = value
+			}
+		}
+	}
+	return fallback
+}
+
+func enterpriseGitTokenFromEnv(env []string) string {
+	fallback := ""
+	for _, item := range env {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok || value == "" {
+			continue
+		}
+		switch key {
+		case "GH_ENTERPRISE_TOKEN":
+			return value
+		case "GITHUB_ENTERPRISE_TOKEN":
 			if fallback == "" {
 				fallback = value
 			}
