@@ -593,6 +593,41 @@ func TestIntentionRecord_Validate_RegistryAppended_RequiresAppendResult(t *testi
 	assert.NoError(t, r.Validate())
 }
 
+func TestIntentionRecord_Validate_PolicyPublishing_RequiresAppendResultAndPolicyMetadata(t *testing.T) {
+	r := validIntentionBase()
+	r.Stage = IntentionStagePolicyPublishing
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingRegistryAppendResult)
+
+	r.RegistryAppendResult = &RegistryAppendResult{Offset: 0, Sha256: "0000000000000000000000000000000000000000000000000000000000000003"}
+	err = r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingPolicyBranch)
+
+	r.PolicyBranch = "auto-improve/policy"
+	err = r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingPolicyHeadBefore)
+
+	r.PolicyHeadBefore = "1111111111111111111111111111111111111111"
+	assert.NoError(t, r.Validate())
+}
+
+func TestIntentionRecord_Validate_PolicyPublished_RequiresPolicyHeadAfter(t *testing.T) {
+	r := validIntentionBase()
+	r.Stage = IntentionStagePolicyPublished
+	r.RegistryAppendResult = &RegistryAppendResult{Offset: 0, Sha256: "0000000000000000000000000000000000000000000000000000000000000003"}
+	r.PolicyBranch = "auto-improve/policy"
+	r.PolicyHeadBefore = "1111111111111111111111111111111111111111"
+	err := r.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIntentionMissingPolicyHeadAfter)
+
+	r.PolicyHeadAfter = "2222222222222222222222222222222222222222"
+	assert.NoError(t, r.Validate())
+}
+
 func TestIntentionRecord_Validate_DecisionWritten_RequiresAppendResult(t *testing.T) {
 	r := validIntentionBase()
 	r.Stage = IntentionStageDecisionWritten
@@ -658,14 +693,17 @@ func TestIntentionRecord_Validate_NeedsManualRecovery_RequiresRecoveryAndFailedS
 }
 
 func TestIntentionRecord_AllStagesEnumerated(t *testing.T) {
-	// 仕様: Stage enum は 8 種 (planning / branch_pushed / registry_appended /
-	// decision_written / rolling_back_branch_reverted /
+	// 仕様: Stage enum は 10 種 (planning / branch_pushed / registry_appended /
+	// policy_publishing / policy_published / decision_written /
+	// rolling_back_branch_reverted /
 	// rolling_back_registry_appended / rolling_back_decision_written /
 	// needs_manual_recovery)。enum そのものの validator 動作確認.
 	all := []IntentionStage{
 		IntentionStagePlanning,
 		IntentionStageBranchPushed,
 		IntentionStageRegistryAppended,
+		IntentionStagePolicyPublishing,
+		IntentionStagePolicyPublished,
 		IntentionStageDecisionWritten,
 		IntentionStageRollingBackBranchReverted,
 		IntentionStageRollingBackRegistryAppended,
@@ -690,7 +728,7 @@ func TestIntentionRecord_AllStagesEnumerated(t *testing.T) {
 		}
 		assert.NoError(t, validation.Instance().Struct(i), string(s))
 	}
-	assert.Len(t, all, 8)
+	assert.Len(t, all, 10)
 }
 
 func TestIntentionRecord_Validate_RejectsForgedIdempotencyKeyAcrossStages(t *testing.T) {
@@ -698,6 +736,8 @@ func TestIntentionRecord_Validate_RejectsForgedIdempotencyKeyAcrossStages(t *tes
 		IntentionStagePlanning,
 		IntentionStageBranchPushed,
 		IntentionStageRegistryAppended,
+		IntentionStagePolicyPublishing,
+		IntentionStagePolicyPublished,
 		IntentionStageDecisionWritten,
 		IntentionStageRollingBackBranchReverted,
 		IntentionStageRollingBackRegistryAppended,
@@ -712,6 +752,8 @@ func TestIntentionRecord_Validate_RejectsForgedIdempotencyKeyAcrossStages(t *tes
 			r.IdempotencyKey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 			switch stage {
 			case IntentionStageRegistryAppended,
+				IntentionStagePolicyPublishing,
+				IntentionStagePolicyPublished,
 				IntentionStageDecisionWritten,
 				IntentionStageRollingBackRegistryAppended,
 				IntentionStageRollingBackDecisionWritten:
@@ -719,6 +761,15 @@ func TestIntentionRecord_Validate_RejectsForgedIdempotencyKeyAcrossStages(t *tes
 					Offset: 0,
 					Sha256: "0000000000000000000000000000000000000000000000000000000000000003",
 				}
+			}
+			switch stage {
+			case IntentionStagePolicyPublishing:
+				r.PolicyBranch = "auto-improve/policy"
+				r.PolicyHeadBefore = "1111111111111111111111111111111111111111"
+			case IntentionStagePolicyPublished:
+				r.PolicyBranch = "auto-improve/policy"
+				r.PolicyHeadBefore = "1111111111111111111111111111111111111111"
+				r.PolicyHeadAfter = "2222222222222222222222222222222222222222"
 			}
 			switch stage {
 			case IntentionStageRollingBackBranchReverted,

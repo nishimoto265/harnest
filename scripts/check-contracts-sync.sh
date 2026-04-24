@@ -15,26 +15,51 @@ while IFS= read -r variant; do
   fi
 done < <(rg -o 'RuleRegistry[A-Za-z]+' "$docs_file" | sort -u)
 
-go_stage_values="$(sed -n 's/^[[:space:]]*IntentionStage[A-Za-z0-9_]*[[:space:]]*IntentionStage = \"\\([^\"]*\\)\"/\\1/p' "$intention_go" | sort -u)"
 recovery_section="$(awk '
   /^\*\*Recovery state machine\*\*/ { in_section=1; next }
   /^\*\*planning recovery decision tree\*\*/ { in_section=0 }
   in_section { print }
 ' "$docs_file")"
 
-while IFS= read -r stage; do
-  [[ -z "$stage" ]] && continue
-  if ! grep -Fq "\`${stage}\`" <<<"$recovery_section"; then
-    mismatches+=("intention stage missing in recovery state machine table: ${stage}")
-  fi
-done <<<"$go_stage_values"
+go_stage_values="$(awk '
+  /^[[:space:]]*IntentionStage[A-Za-z0-9_]+[[:space:]]+IntentionStage[[:space:]]*=/ {
+    stage = $0
+    sub(/.*=[[:space:]]*"/, "", stage)
+    sub(/".*/, "", stage)
+    if (stage != "") print stage
+  }
+' "$intention_go" | sort -u)"
+docs_stage_values="$(awk '
+  /^\| stage \| entry condition \| allowed next transitions \| required fields \| startup \/ recovery 動作 \|/ { in_table=1; next }
+  in_table && /^\|---/ { next }
+  in_table && !/^\|/ { exit }
+  in_table {
+    split($0, cols, "|")
+    stage = cols[2]
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", stage)
+    if (stage ~ /^`[^`]+`$/) {
+      gsub(/`/, "", stage)
+      if (stage != "finalized") print stage
+    }
+  }
+' <<<"$recovery_section" | sort -u)"
+
+if [[ -z "$go_stage_values" ]]; then
+  mismatches+=("no intention stages extracted from code")
+fi
+if [[ -z "$docs_stage_values" ]]; then
+  mismatches+=("no intention stages extracted from recovery state machine table")
+fi
 
 while IFS= read -r stage; do
   [[ -z "$stage" ]] && continue
-  if ! grep -Fq "\"${stage}\"" "$intention_go"; then
-    mismatches+=("recovery state machine table mentions unknown Go intention stage: ${stage}")
-  fi
-done < <(grep -oE '`(planning|branch_pushed|registry_appended|decision_written|rolling_back_branch_reverted|rolling_back_registry_appended|rolling_back_decision_written|needs_manual_recovery)`' <<<"$recovery_section" | tr -d '`' | sort -u)
+  mismatches+=("intention stage missing in recovery state machine table: ${stage}")
+done < <(comm -23 <(printf '%s\n' "$go_stage_values") <(printf '%s\n' "$docs_stage_values"))
+
+while IFS= read -r stage; do
+  [[ -z "$stage" ]] && continue
+  mismatches+=("recovery state machine table mentions unknown Go intention stage: ${stage}")
+done < <(comm -13 <(printf '%s\n' "$go_stage_values") <(printf '%s\n' "$docs_stage_values"))
 
 if ((${#mismatches[@]} > 0)); then
   printf 'contracts/docs drift detected:\n' >&2
