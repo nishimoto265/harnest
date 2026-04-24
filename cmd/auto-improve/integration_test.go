@@ -313,7 +313,9 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 
 	shas := seedRealGitIntegrationRepo(t, repoRoot)
 	writeIntegrationConfigForRepo(t, root, repoRoot, runsBase, worktreeBase)
+	ensureIntegrationRepoGitHubConfig(t, filepath.Join(root, "config.yaml"), "owner/repo")
 	copyExecutable(t, filepath.Join(mustRepoRoot(t), "internal", "orchestrator", "testdata", "bin", "gh"), filepath.Join(binDir, "gh"))
+	installPreflightRuntimeToolsWithoutGit(t, binDir)
 	implementerPath := filepath.Join(binDir, "fake-implementer")
 	judgePath := filepath.Join(binDir, "fake-judge")
 	writeExecutable(t, implementerPath, fakeAdoptImplementerScript())
@@ -321,7 +323,7 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	writeIntegrationAdoptAgentsConfig(t, root, implementerPath, judgePath)
 
 	bin := buildIntegrationBinary(t)
-	cmd := exec.Command(bin, "run", "--pr", "77")
+	cmd := exec.Command(bin, "run", "--pr", "77", "--with-preflight")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
 		integrationTrustedPathEnvVar+"="+trustedPathWithFakeBin(binDir),
@@ -336,7 +338,9 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	cmd.Stderr = &stderr
 	require.NoError(t, cmd.Run(), "stdout=%s stderr=%s", stdout.String(), stderr.String())
 
-	runDirs := cliIntegrationEnv{runsBase: runsBase}.runDirs(t)
+	effectiveRunsBase := filepath.Join(root, "owner__repo", "runs")
+	effectiveWorktreeBase := filepath.Join(root, "owner__repo", "worktrees")
+	runDirs := cliIntegrationEnv{runsBase: effectiveRunsBase}.runDirs(t)
 	require.Len(t, runDirs, 1)
 	runDir := runDirs[0]
 	pkg, err := internalio.ReadJSON[contracts.TaskPackage](filepath.Join(runDir, "task-package.json"))
@@ -355,7 +359,7 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	remoteHead := strings.Fields(runIntegrationGit(t, repoRoot, "ls-remote", "origin", "auto-improve/best"))[0]
 	assert.Equal(t, adopt.TargetSha, remoteHead)
 
-	lines, err := internalio.RegistryLines(filepath.Join(runsBase, "rules-registry.jsonl"))
+	lines, err := internalio.RegistryLines(filepath.Join(effectiveRunsBase, "rules-registry.jsonl"))
 	require.NoError(t, err)
 	require.Len(t, lines, 1)
 	added, ok := lines[0].Entry.Value.(contracts.RuleRegistryAdded)
@@ -363,9 +367,9 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	assert.Equal(t, pkg.RunID, added.ByRunID)
 	assert.NotEmpty(t, added.IdempotencyKey)
 	assert.Equal(t, adopt.RegistryAppendResult.Sha256, lines[0].Sha256)
-	assert.FileExists(t, filepath.Join(runsBase, added.RulePath))
+	assert.FileExists(t, filepath.Join(effectiveRunsBase, added.RulePath))
 
-	events, err := state.ScanEventsForRun(mustNewRunCtx(t, pkg.RunID, runsBase, worktreeBase), pkg.RunID)
+	events, err := state.ScanEventsForRun(mustNewRunCtx(t, pkg.RunID, effectiveRunsBase, effectiveWorktreeBase), pkg.RunID)
 	require.NoError(t, err)
 	require.NotEmpty(t, events)
 	assert.Equal(t, contracts.StateKindPromoted, events[len(events)-1].Kind)
@@ -499,6 +503,11 @@ func trustedPathWithFakeBin(binDir string) string {
 func installPreflightRuntimeTools(t *testing.T, binDir string) {
 	t.Helper()
 	wrapIntegrationGitForPreflight(t, binDir)
+	installPreflightRuntimeToolsWithoutGit(t, binDir)
+}
+
+func installPreflightRuntimeToolsWithoutGit(t *testing.T, binDir string) {
+	t.Helper()
 	wrapIntegrationGHForPreflight(t, binDir)
 	writeExecutable(t, filepath.Join(binDir, "curl"), "#!/bin/sh\nexit 0\n")
 	writeExecutable(t, filepath.Join(binDir, "jq"), "#!/bin/sh\nprintf 'jq-1.6\\n'\n")
@@ -814,6 +823,11 @@ func fakeAdoptImplementerScript() string {
 	return `#!/bin/sh
 set -eu
 
+if [ "${1:-}" = "--version" ]; then
+  printf 'claude 1.0.0\n'
+  exit 0
+fi
+
 cat > checklist-result.json <<EOF
 {"schema_version":"1","run_id":"${AUTO_IMPROVE_RUN_ID}","pass":${AUTO_IMPROVE_PASS},"agent":"${AUTO_IMPROVE_AGENT}","items":[]}
 EOF
@@ -826,6 +840,11 @@ printf '{"event":"ok"}\n'
 func fakeAdoptJudgeScript() string {
 	return `#!/bin/sh
 set -eu
+
+if [ "${1:-}" = "--version" ]; then
+  printf 'claude 1.0.0\n'
+  exit 0
+fi
 
 prompt="$(cat)"
 if printf '%s' "$prompt" | grep -q 'step30 pass1'; then

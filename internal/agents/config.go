@@ -161,6 +161,9 @@ func (f File) Validate() error {
 		if _, ok := f.Profiles[profileName]; !ok {
 			return fmt.Errorf("agents: role %q references unknown profile %q", role, profileName)
 		}
+		if err := ValidateProfileArgsForRole(role, f.Profiles[profileName]); err != nil {
+			return err
+		}
 	}
 	implementer := f.Profiles[f.Roles[RoleImplementer]]
 	if implementer.Provider != ProviderClaude && implementer.Provider != ProviderCodex {
@@ -179,4 +182,110 @@ func (f File) ProfileForRole(role Role) (Profile, error) {
 		return Profile{}, fmt.Errorf("agents: role %q references unknown profile %q", role, name)
 	}
 	return profile, nil
+}
+
+func ValidateProfileArgsForRole(role Role, profile Profile) error {
+	switch role {
+	case RoleJudgePrimary, RoleJudgeSecondary, RoleJudgeArbiter:
+		return ValidateJudgeProfileArgs(profile.Provider, profile.Args)
+	default:
+		return nil
+	}
+}
+
+func ValidateJudgeProfileArgs(provider Provider, args []string) error {
+	switch provider {
+	case ProviderClaude:
+		return validateClaudeJudgeProfileArgs(args)
+	case ProviderCodex:
+		return validateCodexJudgeProfileArgs(args)
+	default:
+		return nil
+	}
+}
+
+func validateClaudeJudgeProfileArgs(args []string) error {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if claudeJudgeProfileArgIsBlocked(arg) {
+			return fmt.Errorf("agents: claude judge profile arg %q is not allowed", arg)
+		}
+		if claudeJudgeProfileArgRequiresValue(arg) {
+			if i+1 >= len(args) {
+				return fmt.Errorf("agents: claude judge profile arg %q requires a value", arg)
+			}
+			i++
+		}
+	}
+	return nil
+}
+
+func claudeJudgeProfileArgIsBlocked(arg string) bool {
+	name, _, hasValue := strings.Cut(arg, "=")
+	if hasValue {
+		arg = name
+	}
+	switch arg {
+	case "--allowedTools",
+		"--allowed-tools",
+		"--disallowedTools",
+		"--disallowed-tools",
+		"--cwd",
+		"--add-dir",
+		"--permission-mode",
+		"--permission-prompt-tool",
+		"--dangerously-skip-permissions",
+		"--mcp-config",
+		"--settings",
+		"--profile":
+		return true
+	default:
+		return false
+	}
+}
+
+func claudeJudgeProfileArgRequiresValue(arg string) bool {
+	if strings.Contains(arg, "=") {
+		return false
+	}
+	switch arg {
+	case "--model",
+		"--append-system-prompt",
+		"--fallback-model",
+		"--max-turns":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateCodexJudgeProfileArgs(args []string) error {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--model" || arg == "-m":
+			if i+1 >= len(args) {
+				return fmt.Errorf("agents: codex judge profile arg %q requires a value", arg)
+			}
+			if !codexJudgeProfileArgValueIsSafe(args[i+1]) {
+				return fmt.Errorf("agents: codex judge profile arg %q has invalid value %q", arg, args[i+1])
+			}
+			i++
+		case strings.HasPrefix(arg, "--model="):
+			if !codexJudgeProfileArgValueIsSafe(strings.TrimPrefix(arg, "--model=")) {
+				return fmt.Errorf("agents: codex judge profile arg %q requires a value", arg)
+			}
+		case strings.HasPrefix(arg, "-m="):
+			if !codexJudgeProfileArgValueIsSafe(strings.TrimPrefix(arg, "-m=")) {
+				return fmt.Errorf("agents: codex judge profile arg %q requires a value", arg)
+			}
+		default:
+			return fmt.Errorf("agents: codex judge profile arg %q is not allowed", arg)
+		}
+	}
+	return nil
+}
+
+func codexJudgeProfileArgValueIsSafe(value string) bool {
+	return value != "" && !strings.HasPrefix(value, "-")
 }

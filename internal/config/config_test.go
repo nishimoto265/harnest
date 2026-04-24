@@ -310,6 +310,47 @@ roles:
 	assert.ErrorContains(t, err, "codex")
 }
 
+func TestLoadConfig_RejectsUnsafeJudgeProfileArgs(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	agentsPath := filepath.Join(dir, "agents.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+repo:
+  github: "owner/repo"
+  root: "/tmp/auto-improve"
+  default_branch: "main"
+  best_branch: "auto-improve/best"
+paths:
+  runs: "/tmp/auto-improve/runs"
+worktree:
+  base: "/tmp/auto-improve/worktrees"
+agent_config_path: "./agents.yaml"
+`), 0o644))
+	require.NoError(t, os.WriteFile(agentsPath, []byte(`
+profiles:
+  codex:
+    provider: codex
+    binary: codex
+  judge:
+    provider: claude
+    binary: claude
+    args: ["--allowedTools", "Read,Bash"]
+  stub:
+    provider: stub
+roles:
+  implementer: codex
+  judge_primary: judge
+  judge_secondary: stub
+  judge_arbiter: stub
+`), 0o644))
+
+	_, err := LoadConfig(configPath)
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "claude judge profile arg")
+	assert.ErrorContains(t, err, "--allowedTools")
+}
+
 func TestLoadConfig_DefaultsTaskPromptSourceToAuto(t *testing.T) {
 	path := writeConfigFixture(t, `
 repo:

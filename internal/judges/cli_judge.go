@@ -242,7 +242,7 @@ func runCLIJudge(ctx context.Context, binary string, prefixArgs []string, profil
 }
 
 func codexJudgeExecArgs(profileArgs []string, workdir, outputPath string) ([]string, error) {
-	if err := validateCodexJudgeProfileArgs(profileArgs); err != nil {
+	if err := agents.ValidateJudgeProfileArgs(agents.ProviderCodex, profileArgs); err != nil {
 		return nil, err
 	}
 	args := []string{
@@ -258,7 +258,7 @@ func codexJudgeExecArgs(profileArgs []string, workdir, outputPath string) ([]str
 }
 
 func claudeJudgeExecArgs(profileArgs []string, workdir string) ([]string, error) {
-	if err := validateClaudeJudgeProfileArgs(profileArgs); err != nil {
+	if err := agents.ValidateJudgeProfileArgs(agents.ProviderClaude, profileArgs); err != nil {
 		return nil, err
 	}
 	args := []string{
@@ -269,92 +269,6 @@ func claudeJudgeExecArgs(profileArgs []string, workdir string) ([]string, error)
 	}
 	args = append(args, profileArgs...)
 	return args, nil
-}
-
-func validateClaudeJudgeProfileArgs(args []string) error {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if claudeJudgeProfileArgIsBlocked(arg) {
-			return fmt.Errorf("judges: claude judge profile arg %q is not allowed", arg)
-		}
-		if claudeJudgeProfileArgRequiresValue(arg) {
-			if i+1 >= len(args) {
-				return fmt.Errorf("judges: claude judge profile arg %q requires a value", arg)
-			}
-			i++
-		}
-	}
-	return nil
-}
-
-func claudeJudgeProfileArgIsBlocked(arg string) bool {
-	name, _, hasValue := strings.Cut(arg, "=")
-	if hasValue {
-		arg = name
-	}
-	switch arg {
-	case "--allowedTools",
-		"--allowed-tools",
-		"--disallowedTools",
-		"--disallowed-tools",
-		"--cwd",
-		"--add-dir",
-		"--permission-mode",
-		"--permission-prompt-tool",
-		"--dangerously-skip-permissions",
-		"--mcp-config",
-		"--settings",
-		"--profile":
-		return true
-	default:
-		return false
-	}
-}
-
-func claudeJudgeProfileArgRequiresValue(arg string) bool {
-	if strings.Contains(arg, "=") {
-		return false
-	}
-	switch arg {
-	case "--model",
-		"--append-system-prompt",
-		"--fallback-model",
-		"--max-turns":
-		return true
-	default:
-		return false
-	}
-}
-
-func validateCodexJudgeProfileArgs(args []string) error {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "--model" || arg == "-m":
-			if i+1 >= len(args) {
-				return fmt.Errorf("judges: codex judge profile arg %q requires a value", arg)
-			}
-			if !codexJudgeProfileArgValueIsSafe(args[i+1]) {
-				return fmt.Errorf("judges: codex judge profile arg %q has invalid value %q", arg, args[i+1])
-			}
-			i++
-		case strings.HasPrefix(arg, "--model="):
-			if !codexJudgeProfileArgValueIsSafe(strings.TrimPrefix(arg, "--model=")) {
-				return fmt.Errorf("judges: codex judge profile arg %q requires a value", arg)
-			}
-		case strings.HasPrefix(arg, "-m="):
-			if !codexJudgeProfileArgValueIsSafe(strings.TrimPrefix(arg, "-m=")) {
-				return fmt.Errorf("judges: codex judge profile arg %q requires a value", arg)
-			}
-		default:
-			return fmt.Errorf("judges: codex judge profile arg %q is not allowed", arg)
-		}
-	}
-	return nil
-}
-
-func codexJudgeProfileArgValueIsSafe(value string) bool {
-	return value != "" && !strings.HasPrefix(value, "-")
 }
 
 func readModelJudgeResponse(path string) (modelJudgeResponse, error) {

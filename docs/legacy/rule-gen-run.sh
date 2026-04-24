@@ -6,6 +6,9 @@
 # 方式B: バッチ一括型（1回で全処理）
 # 方式C: 逐次リファイン型（5回逐次）
 
+echo "ERROR: docs/legacy/rule-gen-run.sh is an archived historical script and is not runnable in the current repository layout." >&2
+exit 1
+
 APPROACH=$1
 
 if [ -z "$APPROACH" ]; then

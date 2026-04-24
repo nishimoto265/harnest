@@ -6,6 +6,9 @@
 # FROM_BRANCH: worktreeの設定元ブランチ（省略時はbest設定を適用）
 # MAIN_SURFACE: 完了時にcmux sendで通知するsurface ID（省略可）
 
+echo "ERROR: docs/legacy/harness-run.sh is an archived historical script and is not runnable in the current repository layout." >&2
+exit 1
+
 PR=$1
 EXPERIMENT_ID=$2
 TASK=$3

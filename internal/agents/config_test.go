@@ -142,3 +142,62 @@ func TestValidateAllowsStubJudgeProfiles(t *testing.T) {
 
 	require.NoError(t, cfg.Validate())
 }
+
+func TestValidateRejectsUnsafeJudgeProfileArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile Profile
+		want    string
+	}{
+		{
+			name:    "claude tool override",
+			profile: Profile{Provider: ProviderClaude, Binary: "claude", Args: []string{"--allowedTools", "Read,Bash"}},
+			want:    "claude judge profile arg",
+		},
+		{
+			name:    "codex write sandbox",
+			profile: Profile{Provider: ProviderCodex, Binary: "codex", Args: []string{"--sandbox", "workspace-write"}},
+			want:    "codex judge profile arg",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := File{
+				Profiles: map[string]Profile{
+					"impl":  {Provider: ProviderCodex, Binary: "codex", Args: []string{"--dangerously-bypass-approvals-and-sandbox"}},
+					"judge": tt.profile,
+					"stub":  {Provider: ProviderStub},
+				},
+				Roles: map[Role]string{
+					RoleImplementer:    "impl",
+					RoleJudgePrimary:   "judge",
+					RoleJudgeSecondary: "stub",
+					RoleJudgeArbiter:   "stub",
+				},
+			}
+
+			err := cfg.Validate()
+
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+func TestValidateAllowsUnsafeImplementerProfileArgs(t *testing.T) {
+	cfg := File{
+		Profiles: map[string]Profile{
+			"impl": {Provider: ProviderCodex, Binary: "codex", Args: []string{"--dangerously-bypass-approvals-and-sandbox"}},
+			"stub": {Provider: ProviderStub},
+		},
+		Roles: map[Role]string{
+			RoleImplementer:    "impl",
+			RoleJudgePrimary:   "stub",
+			RoleJudgeSecondary: "stub",
+			RoleJudgeArbiter:   "stub",
+		},
+	}
+
+	require.NoError(t, cfg.Validate())
+}

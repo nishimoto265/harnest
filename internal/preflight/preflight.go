@@ -255,6 +255,10 @@ func (c Checker) checkAgentBinaries(ctx context.Context, cfg config.Config) []Fa
 			failures = append(failures, Failure{Name: string(role), Detail: err.Error()})
 			continue
 		}
+		if err := agents.ValidateProfileArgsForRole(role, profile); err != nil {
+			failures = append(failures, Failure{Name: string(role), Detail: err.Error()})
+			continue
+		}
 		if agents.IsGatedTestStubProvider(profile.Provider) {
 			if !agents.AllowTestStubProviders() {
 				failures = append(failures, Failure{
