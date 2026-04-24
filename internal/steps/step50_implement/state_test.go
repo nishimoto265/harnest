@@ -52,6 +52,32 @@ func TestLoadResumeState_MigratesLegacyActiveLeaseWithoutLeaderStartTime(t *test
 	assert.Equal(t, 2, state.RetryCount, "retry_count must survive migration")
 }
 
+func TestLoadResumeState_RejectsLiveLegacyLeaseWithoutLeaderStartTime(t *testing.T) {
+	originalKillProcess := killProcess
+	var gotPID int
+	var gotSignal syscall.Signal
+	killProcess = func(pid int, sig syscall.Signal) error {
+		gotPID = pid
+		gotSignal = sig
+		return nil
+	}
+	t.Cleanup(func() {
+		killProcess = originalKillProcess
+	})
+
+	agentDir := t.TempDir()
+	oldTime := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339Nano)
+	baseSHA := strings.Repeat("a", 40)
+	legacy := `{"expected_base_sha":"` + baseSHA + `","started_at":"` + oldTime + `","pid":1234,"pgid":1234,"retry_count":2,"last_heartbeat":"` + oldTime + `"}`
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, resumeStateFileName), []byte(legacy), 0o644))
+
+	_, ok, err := loadResumeState(agentDir)
+	require.ErrorIs(t, err, ErrLegacyResumeStateLiveLease)
+	assert.False(t, ok)
+	assert.Equal(t, 1234, gotPID)
+	assert.Equal(t, syscall.Signal(0), gotSignal)
+}
+
 func TestLoadResumeState_RejectsMalformedCurrentResumeState(t *testing.T) {
 	agentDir := t.TempDir()
 	baseSHA := strings.Repeat("a", 40)
