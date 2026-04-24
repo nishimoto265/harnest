@@ -33,14 +33,14 @@ func validateArbiterComplianceCoverage(
 	}
 	disputed := disputedComplianceRuleIDsFromRaw(primary, secondary)
 	arbiterIDs := uniqueSortedComplianceRuleIDs(arbiter)
-	return validateArbiterSupersetsDisputed(disputed, arbiterIDs)
+	return validateArbiterCoversDisputed(disputed, arbiterIDs)
 }
 
-// validateArbiterSupersetsDisputed requires the arbiter rule-id set to cover
+// validateArbiterCoversDisputed requires the arbiter rule-id set to cover
 // every disputed rule. Extra arbiter rows (full-coverage arbiters, legacy
 // stubs) are tolerated — they simply go unused during compliance
 // finalization. Missing disputed rules fail closed.
-func validateArbiterSupersetsDisputed(disputedRuleIDs, arbiterRuleIDs []string) error {
+func validateArbiterCoversDisputed(disputedRuleIDs, arbiterRuleIDs []string) error {
 	arbiterSet := make(map[string]struct{}, len(arbiterRuleIDs))
 	for _, id := range arbiterRuleIDs {
 		arbiterSet[id] = struct{}{}
@@ -58,9 +58,10 @@ func validateArbiterSupersetsDisputed(disputedRuleIDs, arbiterRuleIDs []string) 
 	return nil
 }
 
-// ValidateArbiterComplianceRuleCoverage requires all three rule-id sets to be
-// equal. Callers that only need arbiter to cover the disputed subset should
-// pass the disputed slice as both the primary and secondary argument.
+// ValidateArbiterComplianceRuleCoverage requires primary, secondary, and
+// arbiter rule-id sets to match exactly. Step60 uses this strict helper for
+// raw reuse, where accepting legacy full-coverage arbiter rows would bypass
+// the current disputed-only arbiter contract.
 func ValidateArbiterComplianceRuleCoverage(primaryRuleIDs, secondaryRuleIDs, arbiterRuleIDs []string) error {
 	if !equalRuleIDSets(primaryRuleIDs, secondaryRuleIDs) {
 		return fmt.Errorf(
@@ -70,7 +71,15 @@ func ValidateArbiterComplianceRuleCoverage(primaryRuleIDs, secondaryRuleIDs, arb
 			secondaryRuleIDs,
 		)
 	}
-	return validateArbiterSupersetsDisputed(primaryRuleIDs, arbiterRuleIDs)
+	if !equalRuleIDSets(primaryRuleIDs, arbiterRuleIDs) {
+		return fmt.Errorf(
+			"%w: expected=%v arbiter=%v",
+			ErrPanelArbiterRuleCoverage,
+			primaryRuleIDs,
+			arbiterRuleIDs,
+		)
+	}
+	return nil
 }
 
 func uniqueSortedComplianceRuleIDs(rows []contracts.RawComplianceEntry) []string {

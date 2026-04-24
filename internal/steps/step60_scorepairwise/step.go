@@ -269,7 +269,7 @@ func Run(ctx context.Context, in Input) error {
 			return err
 		}
 
-		complianceDisagreements := complianceDisagreementRuleIDs(primaryCompliance, secondaryCompliance)
+		complianceDisagreements := disputedComplianceRuleIDs(primaryCompliance, secondaryCompliance)
 		primaryRawScores, primaryScoreRefs, err := buildRawScores(primaryScores, outputHash, contracts.JudgeRolePrimary, nil, nil, meta.ResolvedAt)
 		if err != nil {
 			return err
@@ -706,18 +706,6 @@ func canonicalizeComplianceOverflow(runIO internalio.RunContext, entry contracts
 	return entry, nil
 }
 
-func complianceDisagreementRuleIDs(primary, secondary map[string]contracts.ComplianceEntry) []string {
-	disagreements := make([]string, 0, minInt(len(primary), len(secondary)))
-	for ruleID, primaryEntry := range primary {
-		secondaryEntry, ok := secondary[ruleID]
-		if ok && primaryEntry.Verdict != secondaryEntry.Verdict {
-			disagreements = append(disagreements, ruleID)
-		}
-	}
-	sort.Strings(disagreements)
-	return disagreements
-}
-
 func complianceRuleSetsMatch(primary, secondary map[string]contracts.ComplianceEntry) bool {
 	if len(primary) != len(secondary) {
 		return false
@@ -804,7 +792,7 @@ func emitCompliance(
 	); err != nil && len(arbiter) > 0 {
 		return nil, fmt.Errorf("step60: agent=%s: %w", agent, err)
 	}
-	ruleIDs := complianceRuleIDs(primary, secondary, arbiter)
+	ruleIDs := complianceRuleIDs(primary, secondary)
 	finalEntries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
 	for _, ruleID := range ruleIDs {
 		primaryEntry, primaryOK := primary[ruleID]
@@ -1252,7 +1240,7 @@ func rebuildFinalComplianceFromRaw(
 		return nil, err
 	}
 	if len(disputed) == 0 {
-		ruleIDs := complianceRuleIDs(primary, secondary, nil)
+		ruleIDs := complianceRuleIDs(primary, secondary)
 		finalEntries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
 		for _, ruleID := range ruleIDs {
 			entry := primary[ruleID]
@@ -1268,7 +1256,7 @@ func rebuildFinalComplianceFromRaw(
 		return nil, err
 	}
 
-	ruleIDs := complianceRuleIDs(primary, secondary, nil)
+	ruleIDs := complianceRuleIDs(primary, secondary)
 	finalEntries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
 	for _, ruleID := range ruleIDs {
 		primaryEntry := primary[ruleID]
@@ -1848,7 +1836,6 @@ func complianceVerdictPath(primary, secondary, arbiter contracts.ComplianceEntry
 func complianceRuleIDs(
 	primary map[string]contracts.ComplianceEntry,
 	secondary map[string]contracts.ComplianceEntry,
-	_ map[string]contracts.ComplianceEntry,
 ) []string {
 	set := make(map[string]struct{}, len(primary)+len(secondary))
 	for ruleID := range primary {
