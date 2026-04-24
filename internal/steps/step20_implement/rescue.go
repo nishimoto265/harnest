@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -301,8 +300,8 @@ var rescueKillPID = syscall.Kill
 var rescueQuiesceMaxWait = 750 * time.Millisecond
 var rescueQuiesceInterval = 25 * time.Millisecond
 var rescueSleep = time.Sleep
-var rescueExecLookPath = exec.LookPath
-var rescueCommandContext = exec.CommandContext
+var rescueExecLookPath = processenv.TrustedLookPath
+var rescueCommandContext = processenv.TrustedCommandContext
 var trustedGitCommand = processenv.TrustedCommand
 var trustedGitCommandContext = processenv.TrustedCommandContext
 var streamGitOutputWithLimit = agentrunner.StreamGitOutputWithLimit

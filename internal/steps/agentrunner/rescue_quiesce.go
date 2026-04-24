@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 )
 
 var (
@@ -26,7 +28,7 @@ type RescueLeaseState struct {
 
 type WorktreeProcessIDsOptions struct {
 	LookPath       func(string) (string, error)
-	CommandContext func(context.Context, string, ...string) *exec.Cmd
+	CommandContext func(context.Context, string, ...string) (*exec.Cmd, error)
 }
 
 type RescueLeaseQuiesceOptions struct {
@@ -168,17 +170,21 @@ func EnsureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state R
 func WorktreeProcessIDs(ctx context.Context, worktreePath string, opts WorktreeProcessIDsOptions) ([]int, error) {
 	lookPath := opts.LookPath
 	if lookPath == nil {
-		lookPath = exec.LookPath
+		lookPath = processenv.TrustedLookPath
 	}
 	commandContext := opts.CommandContext
 	if commandContext == nil {
-		commandContext = exec.CommandContext
+		commandContext = processenv.TrustedCommandContext
 	}
 	lsofPath, err := lookPath("lsof")
 	if err != nil {
 		return nil, fmt.Errorf("lsof is required for rescue quiesce: %w", err)
 	}
-	cmd := commandContext(ctx, lsofPath, "-t", "+D", worktreePath)
+	cmd, err := commandContext(ctx, lsofPath, "-t", "+D", worktreePath)
+	if err != nil {
+		return nil, fmt.Errorf("lsof is required for rescue quiesce: %w", err)
+	}
+	cmd.Env = processenv.SanitizeForLocalExec()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
