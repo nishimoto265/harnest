@@ -64,6 +64,9 @@ profile_for_role() {
   printf '  root: %s\n' "$(yaml_quote "${GITHUB_WORKSPACE}")"
   printf '  default_branch: %s\n' "$(yaml_quote "${default_branch}")"
   printf '  best_branch: %s\n' "$(yaml_quote "${INPUT_BEST_BRANCH}")"
+  if [[ -n "${INPUT_POLICY_BRANCH:-}" ]]; then
+    printf '  policy_branch: %s\n' "$(yaml_quote "${INPUT_POLICY_BRANCH}")"
+  fi
   printf 'paths:\n'
   printf '  runs: %s\n' "$(yaml_quote "${runs_base}")"
   printf 'worktree:\n'

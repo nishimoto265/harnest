@@ -31,6 +31,10 @@ on:
         required: true
         default: auto-improve/best
         type: string
+      policy_branch:
+        description: "Optional policy_branch for config.yaml"
+        required: false
+        type: string
       runs_base:
         description: "Absolute runs_base override (defaults to $HOME/.auto-improve/runs)"
         required: false
@@ -117,6 +121,7 @@ jobs:
           INPUT_REPO_GITHUB: ${{ inputs.repo_github }}
           INPUT_DEFAULT_BRANCH: ${{ inputs.default_branch }}
           INPUT_BEST_BRANCH: ${{ inputs.best_branch }}
+          INPUT_POLICY_BRANCH: ${{ inputs.policy_branch }}
           INPUT_RUNS_BASE: ${{ inputs.runs_base }}
           INPUT_WORKTREE_BASE: ${{ inputs.worktree_base }}
           INPUT_CLAUDE_CLI_PATH: ${{ inputs.claude_cli_path }}

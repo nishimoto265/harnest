@@ -35,6 +35,22 @@ func TestHydrateFromBranchCopiesPolicyFilesToRunsBase(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(runsBase, rulesLocalDirName, "stale.md"))
 }
 
+func TestHydrateFromBranchAppliesEmptyRegistrySnapshot(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	branch := createEmptyRegistryPolicyBranch(t, repoRoot)
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, rulesLocalDirName), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, registryLocalName), []byte("stale\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, rulesLocalDirName, "stale.md"), []byte("stale\n"), 0o644))
+
+	require.NoError(t, HydrateFromBranch(context.Background(), repoRoot, branch, runsBase))
+
+	registryBytes, err := os.ReadFile(filepath.Join(runsBase, registryLocalName))
+	require.NoError(t, err)
+	assert.Empty(t, registryBytes)
+	assert.NoDirExists(t, filepath.Join(runsBase, rulesLocalDirName))
+}
+
 func TestHydrateFromBranchFetchesAndLoadsWhilePromotionLockHeld(t *testing.T) {
 	repoRoot := newClonedRepoWithPolicyBranch(t)
 	runsBase := filepath.Join(t.TempDir(), "runs")
@@ -126,6 +142,32 @@ func TestHydrateAndSnapshotFromBranchCopiesPolicyFilesToRunDir(t *testing.T) {
 	assert.Equal(t, "r-sync-message-details", active[0].RuleID)
 	assert.Contains(t, active[0].Body, "Sync companion files")
 	assert.NotContains(t, active[0].Body, "stale global body")
+}
+
+func TestHydrateAndSnapshotFromBranchCopiesEmptyRegistryToRunDir(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	branch := createEmptyRegistryPolicyBranch(t, repoRoot)
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	runID := contracts.RunID("2026-04-23-PR2-feedbee")
+	runCtx, err := internalio.NewRunContext(runID, runsBase, filepath.Join(t.TempDir(), "worktrees"))
+	require.NoError(t, err)
+	runDir := runCtx.RunDir()
+	require.NoError(t, os.MkdirAll(runDir, 0o755))
+
+	require.NoError(t, HydrateAndSnapshotFromBranch(context.Background(), repoRoot, branch, runsBase, runDir))
+
+	registryBytes, err := os.ReadFile(filepath.Join(runDir, "policy", registryLocalName))
+	require.NoError(t, err)
+	assert.Empty(t, registryBytes)
+	active, err := LoadActiveRulesForRun(runCtx)
+	require.NoError(t, err)
+	assert.Empty(t, active)
+	meta, ok, err := LoadSnapshotMetadata(runCtx)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, branch, meta.PolicyBranch)
+	assert.NotEmpty(t, meta.PolicyHead)
+	assert.Empty(t, meta.RegistryHead)
 }
 
 func TestSnapshotLocalForRunCopiesLocalPolicyAndMetadata(t *testing.T) {
@@ -318,6 +360,20 @@ func newClonedRepoWithPolicyBranch(t *testing.T) string {
 	mustGit(t, work, "push", "-u", "origin", "policy")
 	mustGit(t, work, "fetch", "--no-tags", "origin", "policy")
 	return work
+}
+
+func createEmptyRegistryPolicyBranch(t *testing.T, repoRoot string) string {
+	t.Helper()
+	const branch = "empty-registry-policy"
+	mustGit(t, repoRoot, "checkout", "--orphan", branch)
+	mustGit(t, repoRoot, "rm", "-rf", ".")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, RepoDirName), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, RegistryRepoRelPath), nil, 0o644))
+	mustGit(t, repoRoot, "add", RegistryRepoRelPath)
+	mustGit(t, repoRoot, "commit", "-m", "empty policy registry")
+	mustGit(t, repoRoot, "push", "-u", "origin", branch)
+	mustGit(t, repoRoot, "fetch", "--no-tags", "origin", branch)
+	return branch
 }
 
 func assertSafeGitEnv(t *testing.T, env []string) {
