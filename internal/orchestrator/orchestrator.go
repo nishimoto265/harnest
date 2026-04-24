@@ -240,7 +240,7 @@ func acquirePRRunLock(ctx context.Context, runsBase string, pr int) (*internalio
 	return lock, err
 }
 
-func (o *Orchestrator) selectRun(pr int, opts RunOptions) (runSelection, error) {
+func (o *Orchestrator) selectRun(ctx context.Context, pr int, opts RunOptions) (runSelection, error) {
 	runsBase, err := o.cfg.RunsBase()
 	if err != nil {
 		return runSelection{}, err
@@ -266,7 +266,7 @@ func (o *Orchestrator) selectRun(pr int, opts RunOptions) (runSelection, error) 
 		return newFreshSelection(pr, opts, runsBase, worktreeBase)
 	}
 	if opts.FromScratch {
-		if err := o.supersedeNonTerminalRun(pr, latest, runsBase, worktreeBase); err != nil {
+		if err := o.supersedeNonTerminalRun(ctx, pr, latest, runsBase, worktreeBase); err != nil {
 			return runSelection{}, err
 		}
 		freshOpts := opts
@@ -309,7 +309,7 @@ func (o *Orchestrator) selectRun(pr int, opts RunOptions) (runSelection, error) 
 	}
 }
 
-func (o *Orchestrator) supersedeNonTerminalRun(pr int, latest state.LatestRun, runsBase, worktreeBase string) error {
+func (o *Orchestrator) supersedeNonTerminalRun(ctx context.Context, pr int, latest state.LatestRun, runsBase, worktreeBase string) error {
 	if latest.LastEvent == nil || latest.LastEvent.Kind.IsTerminal() {
 		return nil
 	}
@@ -333,6 +333,13 @@ func (o *Orchestrator) supersedeNonTerminalRun(pr int, latest state.LatestRun, r
 	if step == "" {
 		step = contracts.FailedStep10
 	}
+	repoRoot, err := o.cfg.RepoRoot()
+	if err != nil {
+		return err
+	}
+	if err := cleanupWorktreesWithGit(ctx, runCtx, pkg, repoRoot); err != nil {
+		return err
+	}
 	value := contracts.StateEntrySkipped{
 		Kind:   contracts.StateKindSkipped,
 		PR:     pr,
@@ -341,14 +348,7 @@ func (o *Orchestrator) supersedeNonTerminalRun(pr int, latest state.LatestRun, r
 		Detail: "superseded_by_from_scratch",
 		At:     time.Now().UTC(),
 	}
-	if err := state.NewWriter(runCtx).Append(contracts.StateEntry{Kind: value.Kind, Value: value}); err != nil {
-		return err
-	}
-	repoRoot, err := o.cfg.RepoRoot()
-	if err != nil {
-		return err
-	}
-	return cleanupWorktreesWithGit(runCtx, pkg, repoRoot)
+	return state.NewWriter(runCtx).Append(contracts.StateEntry{Kind: value.Kind, Value: value})
 }
 
 func isPolicySnapshotStaleInterrupted(entry contracts.StateEntry) bool {

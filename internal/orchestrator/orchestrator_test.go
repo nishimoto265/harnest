@@ -731,6 +731,62 @@ func TestRun_FromScratchSupersedesNonTerminalRunAndPrunesWorktrees(t *testing.T)
 	assert.Equal(t, state.NextActionFreshStart, latest.Action)
 }
 
+func TestRun_FromScratchCleanupFailureDoesNotAppendSkipped(t *testing.T) {
+	if _, err := processenv.TrustedLookPath("git"); err != nil {
+		t.Skipf("git not available in trusted PATH: %v", err)
+	}
+	cfg := testConfig(t)
+	repoRoot := filepath.Join(t.TempDir(), "invalid-repo")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755))
+	cfg.Repo.Root = repoRoot
+
+	oldRunID := contracts.RunID("2026-04-21-PR457-abcdef0")
+	oldRunCtx, err := internalio.NewRunContext(oldRunID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(oldRunCtx.RunDir(), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(oldRunCtx.RunDir(), "config.snapshot.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+cfg.Repo.Root+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: best\n"+
+			"paths:\n"+
+			"  runs: "+cfg.Paths.Runs+"\n"+
+			"worktree:\n"+
+			"  base: "+cfg.Worktree.Base+"\n",
+	), 0o644))
+	pkg := stubTaskPackageForRun(oldRunCtx, 457)
+	require.NoError(t, internalio.WriteJSONAtomic(oldRunCtx.TaskPackagePath(), pkg))
+	for _, wt := range pkg.Worktrees {
+		require.NoError(t, os.MkdirAll(wt.Path, 0o755))
+	}
+	require.NoError(t, state.NewWriter(oldRunCtx).Append(startedEntry(457, oldRunID, time.Now().UTC())))
+	require.NoError(t, state.NewWriter(oldRunCtx).Append(contracts.StateEntry{
+		Kind: contracts.StateKindInterrupted,
+		Value: contracts.StateEntryInterrupted{
+			Kind:   contracts.StateKindInterrupted,
+			PR:     457,
+			RunID:  oldRunID,
+			Step:   contracts.FailedStep20,
+			Reason: contracts.InterruptedReasonUnknown,
+			At:     time.Now().UTC(),
+		},
+	}))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps = stubPipelineSteps(nil, stubStep70{})
+
+	err = orch.Run(context.Background(), 457, RunOptions{FromScratch: true})
+	require.Error(t, err)
+
+	oldEvents, err := state.ScanEventsForRun(oldRunCtx, oldRunID)
+	require.NoError(t, err)
+	assert.NotContains(t, eventKinds(oldEvents), contracts.StateKindSkipped)
+	for _, wt := range pkg.Worktrees {
+		assert.DirExists(t, wt.Path)
+	}
+}
+
 func TestRun_FromScratchPrunesRegisteredGitWorktrees(t *testing.T) {
 	if _, err := processenv.TrustedLookPath("git"); err != nil {
 		t.Skipf("git not available in trusted PATH: %v", err)

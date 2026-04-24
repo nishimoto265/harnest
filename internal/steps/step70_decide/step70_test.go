@@ -1364,6 +1364,44 @@ func TestRun_ResumeFromDecisionWritten(t *testing.T) {
 	assert.NoFileExists(t, intentionPath(t, runCtx))
 }
 
+func TestRun_AdoptDeleteFailureDoesNotAppendPromoted(t *testing.T) {
+	runCtx, pkg, candidates, baseStore, resolver := newFixtureWithResolver(t, "PR506")
+	registryPath := runCtx.RulesRegistryPath()
+	appendResult, _ := seedRegistryAdd(t, registryPath, resolver, runCtx.RunID, candidates.CandidatesHash)
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageDecisionWritten
+	intention.RegistryAppendResult = &appendResult
+	require.NoError(t, baseStore.Save(intention))
+
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, contracts.Decision{
+		Action: contracts.DecisionActionAdopt,
+		Value: contracts.DecisionAdopt{
+			Action:               contracts.DecisionActionAdopt,
+			SchemaVersion:        "1",
+			RunID:                runCtx.RunID,
+			IdempotencyKey:       intention.IdempotencyKey,
+			BestShaBefore:        intention.BestShaBefore,
+			TargetSha:            intention.TargetSha,
+			CandidatesHash:       intention.CandidatesHash,
+			RegistryAppendResult: appendResult,
+			DecidedAt:            fixedNow()(),
+		},
+	}))
+
+	store := deleteFailStore{IntentionWriter: baseStore, deleteErr: errors.New("delete intention")}
+	err = Run(context.Background(), 506, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.TargetSHA},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	})
+	require.ErrorContains(t, err, "delete intention")
+	assert.NotContains(t, readStateKinds(t, runCtx), contracts.StateKindPromoted)
+	assert.FileExists(t, intentionPath(t, runCtx))
+}
+
 func TestRun_ResumeFromDecisionWritten_RemoteMismatchNeedsManualRecovery(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR501")
 	registryPath := runCtx.RulesRegistryPath()
@@ -1928,6 +1966,43 @@ func TestRun_ResumeFromRollingBackDecisionWritten(t *testing.T) {
 	require.NotEmpty(t, events)
 	assert.Equal(t, contracts.StateKindRollback, events[len(events)-1].Kind)
 	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
+func TestRun_RollbackDeleteFailureDoesNotAppendRollback(t *testing.T) {
+	runCtx, pkg, candidates, baseStore, resolver := newFixtureWithResolver(t, "PR125")
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageRollingBackDecisionWritten
+	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
+	intention.FailedStep = contracts.FailedStep70
+	intention.RegistryAppendResult = &contracts.RegistryAppendResult{Offset: 123, Sha256: strings.Repeat("d", 64)}
+	require.NoError(t, baseStore.Save(intention))
+
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, contracts.Decision{
+		Action: contracts.DecisionActionRollback,
+		Value: contracts.DecisionRollback{
+			Action:         contracts.DecisionActionRollback,
+			SchemaVersion:  "1",
+			RunID:          runCtx.RunID,
+			IdempotencyKey: intention.IdempotencyKey,
+			RollbackReason: contracts.RollbackReasonTransactionalFailure,
+			FailedStep:     contracts.FailedStep70,
+			BestShaBefore:  intention.BestShaBefore,
+			TargetSha:      intention.TargetSha,
+			DecidedAt:      fixedNow()(),
+		},
+	}))
+
+	store := deleteFailStore{IntentionWriter: baseStore, deleteErr: errors.New("delete intention")}
+	err = Run(context.Background(), 125, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.BestShaBefore},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	})
+	require.ErrorContains(t, err, "delete intention")
+	assert.NotContains(t, readStateKinds(t, runCtx), contracts.StateKindRollback)
+	assert.FileExists(t, intentionPath(t, runCtx))
 }
 
 func TestRun_NeedsManualRecoveryStageRequiresExplicitCleanup(t *testing.T) {
@@ -3361,6 +3436,11 @@ type loadHookStore struct {
 
 type noopStore struct{}
 
+type deleteFailStore struct {
+	IntentionWriter
+	deleteErr error
+}
+
 func newTrackingStore(path string) *trackingStore {
 	return &trackingStore{memStore: newMemStore(path)}
 }
@@ -3410,6 +3490,8 @@ func (s *loadHookStore) Delete() error {
 func (noopStore) Load() (*contracts.IntentionRecord, error) { return nil, nil }
 func (noopStore) Save(contracts.IntentionRecord) error      { return nil }
 func (noopStore) Delete() error                             { return nil }
+
+func (s deleteFailStore) Delete() error { return s.deleteErr }
 
 func (m *memStore) Save(r contracts.IntentionRecord) error {
 	if m.path == "" {

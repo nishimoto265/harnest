@@ -4,12 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
+	"github.com/nishimoto265/auto-improve/internal/worktreecleanup"
 )
 
 // RealGitOps executes the production git commands against the source repo.
@@ -66,45 +64,7 @@ func (g RealGitOps) PushForceWithLease(ctx context.Context, branch, targetSHA, e
 }
 
 func (g RealGitOps) RemoveWorktree(ctx context.Context, path string) error {
-	ok, err := g.worktreeBelongsToRepo(ctx, path)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		if _, err := os.Lstat(path); err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		return fmt.Errorf("%w: %s", ErrWorktreeUnregistered, path)
-	}
-	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "worktree", "remove", "--force", path)
-	if err != nil {
-		return err
-	}
-	cmd.Env = processenv.GitLocalEnv()
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		msgs := make([]string, 0, 2)
-		if out := strings.TrimSpace(stdout.String()); out != "" {
-			msgs = append(msgs, "stdout="+out)
-		}
-		if out := strings.TrimSpace(stderr.String()); out != "" {
-			msgs = append(msgs, "stderr="+out)
-		}
-		if len(msgs) == 0 {
-			return fmt.Errorf("step70: git worktree remove --force %s: %w", path, err)
-		}
-		return fmt.Errorf("step70: git worktree remove --force %s: %w: %s", path, err, strings.Join(msgs, "; "))
-	}
-	return nil
+	return worktreecleanup.RepoGit{RepoDir: g.RepoDir}.RemoveWorktree(ctx, path)
 }
 
 func (g RealGitOps) remoteName() string {
@@ -112,49 +72,4 @@ func (g RealGitOps) remoteName() string {
 		return g.Remote
 	}
 	return "origin"
-}
-
-func (g RealGitOps) worktreeBelongsToRepo(ctx context.Context, path string) (bool, error) {
-	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "worktree", "list", "--porcelain")
-	if err != nil {
-		return false, err
-	}
-	cmd.Env = processenv.GitLocalEnv()
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		msgs := make([]string, 0, 2)
-		if out := strings.TrimSpace(stdout.String()); out != "" {
-			msgs = append(msgs, "stdout="+out)
-		}
-		if out := strings.TrimSpace(stderr.String()); out != "" {
-			msgs = append(msgs, "stderr="+out)
-		}
-		if len(msgs) == 0 {
-			return false, fmt.Errorf("step70: git worktree list --porcelain: %w", err)
-		}
-		return false, fmt.Errorf("step70: git worktree list --porcelain: %w: %s", err, strings.Join(msgs, "; "))
-	}
-	want, err := contracts.CanonicalizePathForUniqueness(filepath.Clean(path))
-	if err != nil {
-		return false, err
-	}
-	for _, line := range strings.Split(stdout.String(), "\n") {
-		if !strings.HasPrefix(line, "worktree ") {
-			continue
-		}
-		have, err := contracts.CanonicalizePathForUniqueness(filepath.Clean(strings.TrimSpace(strings.TrimPrefix(line, "worktree "))))
-		if err != nil {
-			return false, err
-		}
-		if have == want {
-			return true, nil
-		}
-	}
-	return false, nil
 }

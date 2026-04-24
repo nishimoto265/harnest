@@ -38,7 +38,7 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 		_ = prLock.Unlock()
 	}()
 
-	selection, err := o.selectRun(pr, opts)
+	selection, err := o.selectRun(ctx, pr, opts)
 	if err != nil {
 		return err
 	}
