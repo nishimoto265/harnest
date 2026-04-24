@@ -28,8 +28,10 @@ type CommandRequest struct {
 	OnStart                func(ProcessLease, time.Time) error
 	ErrPrefix              string
 	Now                    func() time.Time
+	ResolveProcessLease    func(int) (ProcessLease, error)
 	StartDescendantTracker func(int, time.Duration) *DescendantTracker
 	CleanupProcessTree     func(ProcessLease, int, *DescendantTracker) error
+	KillProcessGroup       func(int) error
 }
 
 type CommandResult struct {
@@ -50,8 +52,14 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 	if req.StartDescendantTracker == nil {
 		req.StartDescendantTracker = StartDescendantTracker
 	}
+	if req.ResolveProcessLease == nil {
+		req.ResolveProcessLease = ResolveProcessLease
+	}
 	if req.CleanupProcessTree == nil {
 		req.CleanupProcessTree = CleanupProcessTree
+	}
+	if req.KillProcessGroup == nil {
+		req.KillProcessGroup = KillProcessGroup
 	}
 	if err := os.MkdirAll(filepath.Dir(req.SessionPath), 0o755); err != nil {
 		return CommandResult{}, err
@@ -87,13 +95,26 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 	if err := cmd.Start(); err != nil {
 		return CommandResult{}, err
 	}
-	lease, err := ResolveProcessLease(cmd.Process.Pid)
+	tracker := req.StartDescendantTracker(cmd.Process.Pid, 25*time.Millisecond)
+	lease, err := req.ResolveProcessLease(cmd.Process.Pid)
 	if err != nil {
-		_ = KillProcessGroup(cmd.Process.Pid)
+		if tracker != nil {
+			tracker.Stop()
+		}
+		_ = req.KillProcessGroup(cmd.Process.Pid)
 		_ = cmd.Wait()
 		return CommandResult{}, err
 	}
-	tracker := req.StartDescendantTracker(lease.PID, 25*time.Millisecond)
+
+	groupKillDone := make(chan struct{})
+	go func(pgid int) {
+		select {
+		case <-timeoutCtx.Done():
+			_ = req.KillProcessGroup(pgid)
+		case <-groupKillDone:
+		}
+	}(lease.PGID)
+
 	if tracker != nil {
 		tracker.CaptureBurst(250 * time.Millisecond)
 	}
@@ -106,18 +127,10 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 			}
 			cleanupErr := req.CleanupProcessTree(lease, lease.PID, tracker)
 			_ = cmd.Wait()
+			close(groupKillDone)
 			return CommandResult{}, errors.Join(err, cleanupErr)
 		}
 	}
-
-	groupKillDone := make(chan struct{})
-	go func(pgid int) {
-		select {
-		case <-timeoutCtx.Done():
-			_ = KillProcessGroup(pgid)
-		case <-groupKillDone:
-		}
-	}(lease.PGID)
 
 	waitErr := cmd.Wait()
 	close(groupKillDone)
