@@ -286,9 +286,7 @@ func (c Config) PromotionLockPath() (string, error) {
 func (c Config) AgentFile() agents.File {
 	if len(c.agentFile.Profiles) == 0 && len(c.agentFile.Roles) == 0 {
 		return agents.Legacy(agents.LegacyDefaults{
-			ImplementerBinary:    c.legacyImplementerBinary(),
-			JudgePrimaryBinary:   c.legacyJudgePrimaryBinary(),
-			JudgeSecondaryBinary: c.legacyJudgeSecondaryBinary(),
+			ImplementerBinary: c.legacyImplementerBinary(),
 		})
 	}
 	return c.agentFile
@@ -400,9 +398,7 @@ func (c Config) TaskPromptSource() string {
 
 func (c *Config) loadAgentFile() error {
 	legacy := agents.Legacy(agents.LegacyDefaults{
-		ImplementerBinary:    c.legacyImplementerBinary(),
-		JudgePrimaryBinary:   c.legacyJudgePrimaryBinary(),
-		JudgeSecondaryBinary: c.legacyJudgeSecondaryBinary(),
+		ImplementerBinary: c.legacyImplementerBinary(),
 	})
 	if c.hasAgentFileSnapshot() {
 		c.agentFile = c.AgentFileSnapshot
@@ -449,26 +445,6 @@ func (c Config) legacyImplementerBinary() string {
 		return c.Agents.Implementer
 	}
 	return "claude"
-}
-
-func (c Config) legacyJudgePrimaryBinary() string {
-	if c.ClaudeCLIPath != "" {
-		return c.ClaudeCLIPath
-	}
-	if c.Agents.JudgePrimary != "" {
-		return c.Agents.JudgePrimary
-	}
-	return "claude"
-}
-
-func (c Config) legacyJudgeSecondaryBinary() string {
-	if c.CodexCLIPath != "" {
-		return c.CodexCLIPath
-	}
-	if c.Agents.JudgeSecondary != "" {
-		return c.Agents.JudgeSecondary
-	}
-	return "codex"
 }
 
 func (c Config) rejectConflictingPathAliases() error {

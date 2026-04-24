@@ -81,6 +81,7 @@ func TestIntegrationRecoverAdoptAnywaySubprocess(t *testing.T) {
 	requireIntegrationEnv(t)
 
 	root, runsBase, worktreeBase, runID := seedRecoverActionRun(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0o755))
 	runDir := filepath.Join(runsBase, string(runID))
 	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelFilename(runID)), []byte(`{"run_id":"2026-04-21-PR52-abcdef0","pr":52,"reason":"transactional_failure","failed_step":"70","created_at":"2026-04-21T12:00:00Z"}`), 0o644))
 	candidatesDoc, err := internalio.ReadJSON[contracts.Candidates](filepath.Join(runDir, "40", "candidates.json"))
@@ -321,6 +322,7 @@ func newCLIIntegrationEnv(t *testing.T, agentSleep time.Duration) cliIntegration
 	require.NoError(t, os.MkdirAll(runsBase, 0o755))
 	require.NoError(t, os.MkdirAll(worktrees, 0o755))
 	require.NoError(t, os.MkdirAll(binDir, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0o755))
 
 	writeTestConfig(t, root, runsBase, worktrees)
 

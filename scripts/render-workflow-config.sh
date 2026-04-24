@@ -69,6 +69,4 @@ profile_for_role() {
   printf 'worktree:\n'
   printf '  base: %s\n' "$(yaml_quote "${worktree_base}")"
   printf 'agent_config_path: "./agents.yaml"\n'
-  printf 'claude_cli_path: %s\n' "$(yaml_quote "${INPUT_CLAUDE_CLI_PATH}")"
-  printf 'codex_cli_path: %s\n' "$(yaml_quote "${INPUT_CODEX_CLI_PATH}")"
 } > "${output_dir}/config.yaml"

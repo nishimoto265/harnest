@@ -39,9 +39,7 @@ roles:
 
 func TestLegacyBuildsDefaultRoleMap(t *testing.T) {
 	cfg := Legacy(LegacyDefaults{
-		ImplementerBinary:    "claude",
-		JudgePrimaryBinary:   "claude",
-		JudgeSecondaryBinary: "codex",
+		ImplementerBinary: "claude",
 	})
 
 	require.NoError(t, cfg.Validate())
@@ -57,9 +55,7 @@ func TestLegacyBuildsDefaultRoleMap(t *testing.T) {
 
 func TestLegacyInfersCodexImplementerProviderFromBinary(t *testing.T) {
 	cfg := Legacy(LegacyDefaults{
-		ImplementerBinary:    "/opt/bin/codex",
-		JudgePrimaryBinary:   "claude",
-		JudgeSecondaryBinary: "codex",
+		ImplementerBinary: "/opt/bin/codex",
 	})
 
 	impl, err := cfg.ProfileForRole(RoleImplementer)

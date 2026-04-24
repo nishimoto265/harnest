@@ -333,11 +333,16 @@ func (o *Orchestrator) supersedeNonTerminalRun(ctx context.Context, pr int, late
 	if step == "" {
 		step = contracts.FailedStep10
 	}
+	if step == contracts.FailedStep70 {
+		return fmt.Errorf("orchestrator: --from-scratch refused for run_id=%s with unfinished step70; resume or recover first", runID)
+	}
+	if has, err := hasPersistedIntention(runCtx); err != nil {
+		return err
+	} else if has {
+		return fmt.Errorf("orchestrator: --from-scratch refused for run_id=%s with persisted step70 intention; resume or recover first", runID)
+	}
 	repoRoot, err := o.cfg.RepoRoot()
 	if err != nil {
-		return err
-	}
-	if err := cleanupWorktreesWithGit(ctx, runCtx, pkg, repoRoot); err != nil {
 		return err
 	}
 	value := contracts.StateEntrySkipped{
@@ -348,7 +353,23 @@ func (o *Orchestrator) supersedeNonTerminalRun(ctx context.Context, pr int, late
 		Detail: "superseded_by_from_scratch",
 		At:     time.Now().UTC(),
 	}
-	return state.NewWriter(runCtx).Append(contracts.StateEntry{Kind: value.Kind, Value: value})
+	if err := state.NewWriter(runCtx).Append(contracts.StateEntry{Kind: value.Kind, Value: value}); err != nil {
+		return err
+	}
+	return cleanupWorktreesWithGit(ctx, runCtx, pkg, repoRoot)
+}
+
+func hasPersistedIntention(runCtx internalio.RunContext) (bool, error) {
+	path, err := NewIntentionStore(runCtx).Path()
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return true, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	return false, nil
 }
 
 func isPolicySnapshotStaleInterrupted(entry contracts.StateEntry) bool {

@@ -609,10 +609,6 @@ func recoverRunPrereqs(runID string, requireSentinel bool) (context.Context, str
 	return context.Background(), runsBase, runCtx, pkg, candidates, store, lock, nil
 }
 
-func recoverRunSentinelPrereqs(runID string) (string, internalio.RunContext, *internalio.FileLock, error) {
-	return recoverRunSentinelPrereqsWithOptions(runID, false)
-}
-
 func recoverClearSentinelPrereqs(runID string) (string, internalio.RunContext, *internalio.FileLock, error) {
 	return recoverRunSentinelPrereqsWithOptions(runID, true)
 }
