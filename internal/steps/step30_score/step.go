@@ -136,6 +136,10 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 	}
 
 	// Short-circuit on a pre-existing valid marker (resume path).
+	markerExists, err := fileExists(paths.MarkerPath)
+	if err != nil {
+		return err
+	}
 	valid, err := scorecore.VerifyStep30DoneMarker(req.RunContext, paths.MarkerPaths)
 	if err != nil {
 		return err
@@ -153,12 +157,12 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 			return nil
 		}
 	}
-	if valid {
+	forcedRebuild := markerExists
+	if markerExists {
+		// Marker exists but no longer matches the underlying jsonl/version —
+		// remove it so BuildStep30DoneMarker can re-assert the invariant.
 		_ = os.Remove(paths.MarkerPath)
 	}
-	// Marker exists but no longer matches the underlying jsonl — remove it
-	// so BuildStep30DoneMarker can re-assert the invariant.
-	_ = os.Remove(paths.MarkerPath)
 
 	scorableAgents, err := resolveScorableAgents(req)
 	if err != nil {
@@ -180,6 +184,12 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 	state, err := loadResumeState(paths)
 	if err != nil {
 		return err
+	}
+
+	if forcedRebuild {
+		if err := resetStep30FinalFiles(paths); err != nil {
+			return err
+		}
 	}
 
 	for _, agent := range scorableAgents {
@@ -271,6 +281,8 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 					return fmt.Errorf("step30_score: resolve arbiter agent=%s: %w", agent.agent, err)
 				}
 			}
+		} else if secondary != nil && !disagree {
+			agentState.clearArbiter()
 		}
 
 		result, err := scorecore.BuildFinalResultFromRaw(
@@ -287,6 +299,9 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		if err != nil {
 			return fmt.Errorf("step30_score: resolve final agent=%s: %w", agent.agent, err)
 		}
+		if forcedRebuild {
+			agentState.clearFinal()
+		}
 		if err := appendExpectedFinalScores(paths, agentState, result); err != nil {
 			return fmt.Errorf("step30_score: append final scores agent=%s: %w", agent.agent, err)
 		}
@@ -298,6 +313,12 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 	agentIDs := make([]contracts.AgentID, 0, len(scorableAgents))
 	for _, a := range scorableAgents {
 		agentIDs = append(agentIDs, a.agent)
+	}
+
+	if forcedRebuild {
+		if err := rewriteCurrentRawFiles(paths, state, agentIDs); err != nil {
+			return err
+		}
 	}
 
 	marker, err := scorecore.BuildStep30DoneMarker(scorecore.Step30MarkerInputs{
@@ -610,6 +631,11 @@ func (s *resumeAgentState) clearArbiter() {
 	s.rawCompliance[contracts.JudgeRoleArbiter] = map[string]contracts.RawComplianceEntry{}
 }
 
+func (s *resumeAgentState) clearFinal() {
+	s.finalScores = make(map[contracts.Dimension]contracts.ScoreEntry)
+	s.finalCompliance = make(map[string]contracts.ComplianceEntry)
+}
+
 func (s *resumeAgentState) roleComplete(role contracts.JudgeRole, outputSha, rubricVersion, promptVersion string, expectedRuleIDs []string) bool {
 	if !hasAllDimensions(s.rawScores[role]) {
 		return false
@@ -807,6 +833,82 @@ func appendExpectedFinalCompliance(paths stepPathsResult, state *resumeAgentStat
 		state.upsertFinalCompliance([]contracts.ComplianceEntry{row})
 	}
 	return nil
+}
+
+func resetStep30FinalFiles(paths stepPathsResult) error {
+	if err := rewriteJSONL[contracts.ScoreEntry](paths.ScoreFinal, nil); err != nil {
+		return err
+	}
+	return rewriteJSONL[contracts.ComplianceEntry](paths.ComplianceFinal, nil)
+}
+
+func rewriteCurrentRawFiles(paths stepPathsResult, state *resumeState, agents []contracts.AgentID) error {
+	scoreRows := make([]contracts.RawScoreEntry, 0, len(agents)*15)
+	complianceRows := make([]contracts.RawComplianceEntry, 0)
+	for _, agent := range sortedUniqueAgentIDs(agents) {
+		agentState := state.agent(agent)
+		for _, role := range []contracts.JudgeRole{
+			contracts.JudgeRolePrimary,
+			contracts.JudgeRoleSecondary,
+			contracts.JudgeRoleArbiter,
+		} {
+			scoreRows = append(scoreRows, agentState.rawScoreSlice(role)...)
+			complianceRows = append(complianceRows, agentState.rawComplianceSlice(role)...)
+		}
+	}
+	if err := rewriteJSONL(paths.ScoreRaw, scoreRows); err != nil {
+		return err
+	}
+	return rewriteJSONL(paths.ComplianceRaw, complianceRows)
+}
+
+func rewriteJSONL[T any](path string, rows []T) error {
+	var buf bytes.Buffer
+	for _, row := range rows {
+		if _, err := contracts.MarshalStrict(row); err != nil {
+			return err
+		}
+		payload, err := contracts.CanonicalMarshal(row)
+		if err != nil {
+			return err
+		}
+		if len(payload)+1 > internalio.JSONLMaxLineBytes {
+			return internalio.ErrEntryTooLarge
+		}
+		buf.Write(payload)
+		buf.WriteByte('\n')
+	}
+	return internalio.WriteAtomic(path, buf.Bytes())
+}
+
+func sortedUniqueAgentIDs(agents []contracts.AgentID) []contracts.AgentID {
+	if len(agents) == 0 {
+		return nil
+	}
+	seen := make(map[contracts.AgentID]struct{}, len(agents))
+	out := make([]contracts.AgentID, 0, len(agents))
+	for _, agent := range agents {
+		if _, ok := seen[agent]; ok {
+			continue
+		}
+		seen[agent] = struct{}{}
+		out = append(out, agent)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i] < out[j]
+	})
+	return out
+}
+
+func fileExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 func sameCanonicalJSON(left, right any) (bool, error) {
