@@ -1035,6 +1035,7 @@ func TestMarkManualRecoveryWithDetail_ParksIntentionAtNeedsManualRecoveryWhenSen
 
 	err := markManualRecoveryWithDetail(416, runCtx, intention, store, writer, Deps{Now: fixedNow()}, contracts.RollbackReasonTransactionalFailure, "")
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
 	assert.Contains(t, err.Error(), "disk full")
 
 	loaded, loadErr := store.Load()
@@ -1044,7 +1045,13 @@ func TestMarkManualRecoveryWithDetail_ParksIntentionAtNeedsManualRecoveryWhenSen
 	assert.Equal(t, contracts.RollbackReasonTransactionalFailure, loaded.RecoveryReason)
 	assert.Equal(t, contracts.FailedStep70, loaded.FailedStep)
 
-	// No sentinel landed — the durable block is carried by the intention stage.
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
+	assert.Equal(t, contracts.RollbackReasonTransactionalFailure, recovery.Reason)
+
+	// No sentinel landed, but the processed state event lets the global gate
+	// block/reconstruct while the parked intention self-blocks this run.
 	blocked, blockErr := SentinelExists(runCtx.RunsBase)
 	require.NoError(t, blockErr)
 	assert.False(t, blocked)
@@ -1269,6 +1276,48 @@ func TestRun_ResumeFromDecisionWritten(t *testing.T) {
 	require.NotEmpty(t, events)
 	assert.Equal(t, contracts.StateKindPromoted, events[len(events)-1].Kind)
 	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
+func TestRun_ResumeFromDecisionWritten_RemoteMismatchNeedsManualRecovery(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR501")
+	registryPath := runCtx.RulesRegistryPath()
+	appendResult, _ := seedRegistryAdd(t, registryPath, resolver, runCtx.RunID, candidates.CandidatesHash)
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageDecisionWritten
+	intention.RegistryAppendResult = &appendResult
+	require.NoError(t, store.Save(intention))
+
+	decision := contracts.Decision{
+		Action: contracts.DecisionActionAdopt,
+		Value: contracts.DecisionAdopt{
+			Action:               contracts.DecisionActionAdopt,
+			SchemaVersion:        "1",
+			RunID:                runCtx.RunID,
+			IdempotencyKey:       intention.IdempotencyKey,
+			BestShaBefore:        intention.BestShaBefore,
+			TargetSha:            intention.TargetSha,
+			CandidatesHash:       intention.CandidatesHash,
+			RegistryAppendResult: appendResult,
+			DecidedAt:            fixedNow()(),
+		},
+	}
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, decision))
+
+	err = Run(context.Background(), 501, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: strings.Repeat("9", 40)},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	})
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
+
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
+	assert.Equal(t, contracts.RollbackReasonRemoteDivergence, recovery.Reason)
+	assert.Equal(t, "decision_written_remote_mismatch", recovery.Detail)
 }
 
 func TestRun_RollbackOnPushFailure(t *testing.T) {
