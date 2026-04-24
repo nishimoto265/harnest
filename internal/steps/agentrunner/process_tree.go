@@ -44,9 +44,18 @@ var killSessionProcessesUntilGoneKill = killPIDs
 var (
 	ErrCleanupTimeout               = errors.New("agentrunner: process cleanup timed out")
 	ErrCleanupInspectionUnavailable = errors.New("agentrunner: process inspection unavailable during active lease cleanup")
+	ErrCleanupOwnershipUnverified   = errors.New("agentrunner: process cleanup ownership could not be verified")
 )
 
 const processInspectionUnavailableStartTimePrefix = "process-inspection-unavailable:"
+
+type processIdentityStatus int
+
+const (
+	processIdentityMismatch processIdentityStatus = iota
+	processIdentityMatch
+	processIdentityGone
+)
 
 func StartDescendantTracker(rootPID int, interval time.Duration) *DescendantTracker {
 	if rootPID <= 0 {
@@ -253,15 +262,18 @@ func killProcessGroupUntilGoneOwned(lease ProcessLease, maxWait, interval time.D
 	deadline := cleanupNow().Add(maxWait)
 	var lastErr error
 	for {
-		matches, err := processIdentityMatches(lease.PID, lease.StartTime)
+		status, err := inspectProcessIdentity(lease.PID, lease.StartTime)
 		if err != nil {
 			if isProcessInspectionUnavailable(err) {
 				return errors.Join(lastErr, fmt.Errorf("%w: pid=%d pgid=%d", ErrCleanupInspectionUnavailable, lease.PID, lease.PGID))
 			}
 			return errors.Join(lastErr, err)
 		}
-		if !matches {
+		if status == processIdentityMismatch {
 			return lastErr
+		}
+		if status == processIdentityGone && lease.PGID != lease.PID {
+			return errors.Join(lastErr, fmt.Errorf("%w: pid=%d pgid=%d", ErrCleanupOwnershipUnverified, lease.PID, lease.PGID))
 		}
 		if err := killProcessGroupUntilGoneSignal(lease.PGID); err != nil {
 			lastErr = err
@@ -300,15 +312,18 @@ func killSessionProcessesUntilGoneOwned(lease ProcessLease, sessionID int, maxWa
 	deadline := cleanupNow().Add(maxWait)
 	var lastErr error
 	for {
-		matches, err := processIdentityMatches(lease.PID, lease.StartTime)
+		status, err := inspectProcessIdentity(lease.PID, lease.StartTime)
 		if err != nil {
 			if isProcessInspectionUnavailable(err) {
 				return errors.Join(lastErr, fmt.Errorf("%w: pid=%d session_id=%d", ErrCleanupInspectionUnavailable, lease.PID, sessionID))
 			}
 			return errors.Join(lastErr, err)
 		}
-		if !matches {
+		if status == processIdentityMismatch {
 			return lastErr
+		}
+		if status == processIdentityGone && sessionID != lease.PID {
+			return errors.Join(lastErr, fmt.Errorf("%w: pid=%d session_id=%d", ErrCleanupOwnershipUnverified, lease.PID, sessionID))
 		}
 		pids, err := sessionProcessesUntilGoneList(sessionID)
 		if err != nil {
@@ -332,25 +347,36 @@ func killSessionProcessesUntilGoneOwned(lease ProcessLease, sessionID int, maxWa
 }
 
 func processIdentityMatches(pid int, expectedStartTime string) (bool, error) {
+	status, err := inspectProcessIdentity(pid, expectedStartTime)
+	if err != nil {
+		return false, err
+	}
+	return status == processIdentityMatch, nil
+}
+
+func inspectProcessIdentity(pid int, expectedStartTime string) (processIdentityStatus, error) {
 	if pid <= 0 || expectedStartTime == "" {
-		return false, nil
+		return processIdentityMismatch, nil
 	}
 	if isProcessInspectionUnavailableStartTime(expectedStartTime) {
 		if err := killPIDSignal(pid, 0); errors.Is(err, syscall.ESRCH) {
-			return false, nil
+			return processIdentityGone, nil
 		} else if err != nil {
-			return false, err
+			return processIdentityMismatch, err
 		}
-		return false, ErrCleanupInspectionUnavailable
+		return processIdentityMismatch, ErrCleanupInspectionUnavailable
 	}
 	currentStartTime, err := lookupProcessStartTime(pid)
 	switch {
 	case errors.Is(err, syscall.ESRCH):
-		return false, nil
+		return processIdentityGone, nil
 	case err != nil:
-		return false, err
+		return processIdentityMismatch, err
 	default:
-		return currentStartTime == expectedStartTime, nil
+		if currentStartTime == expectedStartTime {
+			return processIdentityMatch, nil
+		}
+		return processIdentityMismatch, nil
 	}
 }
 

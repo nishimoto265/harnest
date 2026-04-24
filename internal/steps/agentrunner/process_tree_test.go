@@ -196,6 +196,117 @@ func TestCleanupProcessTree_SkipsRecycledGroupAndSessionButKillsTrackedDescendan
 	require.Equal(t, []int{777}, killed)
 }
 
+func TestCleanupProcessTree_CleansKnownGroupAndSessionAfterLeaderExit(t *testing.T) {
+	originalLookup := lookupProcessStartTime
+	originalGroupKill := killProcessGroupUntilGoneSignal
+	originalGroupMembers := processGroupMembersUntilGoneList
+	originalSessionList := sessionProcessesUntilGoneList
+	originalSessionKill := killSessionProcessesUntilGoneKill
+	t.Cleanup(func() {
+		lookupProcessStartTime = originalLookup
+		killProcessGroupUntilGoneSignal = originalGroupKill
+		processGroupMembersUntilGoneList = originalGroupMembers
+		sessionProcessesUntilGoneList = originalSessionList
+		killSessionProcessesUntilGoneKill = originalSessionKill
+	})
+
+	lookupProcessStartTime = func(int) (string, error) {
+		return "", syscall.ESRCH
+	}
+	groupMembers := []int{9001}
+	sessionMembers := []int{9002}
+	groupKills := 0
+	sessionKills := 0
+	killProcessGroupUntilGoneSignal = func(int) error {
+		groupKills++
+		groupMembers = nil
+		return nil
+	}
+	processGroupMembersUntilGoneList = func(int) ([]int, error) {
+		return append([]int(nil), groupMembers...), nil
+	}
+	sessionProcessesUntilGoneList = func(int) ([]int, error) {
+		return append([]int(nil), sessionMembers...), nil
+	}
+	killSessionProcessesUntilGoneKill = func([]int) error {
+		sessionKills++
+		sessionMembers = nil
+		return nil
+	}
+
+	err := CleanupProcessTree(ProcessLease{
+		PID:       4242,
+		PGID:      4242,
+		StartTime: "Tue Apr 22 10:00:00 2026",
+	}, 4242, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, groupKills)
+	require.Equal(t, 1, sessionKills)
+}
+
+func TestCleanupProcessTree_KillsBackgroundDescendantAfterRootExit(t *testing.T) {
+	requireProcessInspection(t)
+
+	pidPath := filepath.Join(t.TempDir(), "background.pid")
+	cmd := exec.Command("sh", "-c", "sleep 60 & echo $! > \"$1\"; exit 0", "sh", pidPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, cmd.Start())
+
+	lease, err := ResolveProcessLease(cmd.Process.Pid)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Wait())
+
+	pidBytes, err := os.ReadFile(pidPath)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if !processDead(pid) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+
+	err = CleanupProcessTree(lease, lease.PID, nil)
+	if err != nil {
+		require.ErrorIs(t, err, ErrCleanupOwnershipUnverified)
+		return
+	}
+	require.Eventually(t, func() bool {
+		return processDead(pid)
+	}, 10*time.Second, 20*time.Millisecond)
+}
+
+func TestCleanupProcessTree_FailsClosedWhenLeaderExitedAndGroupOwnershipUnsafe(t *testing.T) {
+	originalLookup := lookupProcessStartTime
+	originalGroupKill := killProcessGroupUntilGoneSignal
+	originalGroupMembers := processGroupMembersUntilGoneList
+	t.Cleanup(func() {
+		lookupProcessStartTime = originalLookup
+		killProcessGroupUntilGoneSignal = originalGroupKill
+		processGroupMembersUntilGoneList = originalGroupMembers
+	})
+
+	lookupProcessStartTime = func(int) (string, error) {
+		return "", syscall.ESRCH
+	}
+	killProcessGroupUntilGoneSignal = func(int) error {
+		t.Fatal("must not kill group with unverified ownership")
+		return nil
+	}
+	processGroupMembersUntilGoneList = func(int) ([]int, error) {
+		t.Fatal("must not inspect group with unverified ownership")
+		return nil, nil
+	}
+
+	err := CleanupProcessTree(ProcessLease{
+		PID:       4242,
+		PGID:      7777,
+		StartTime: "Tue Apr 22 10:00:00 2026",
+	}, 0, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCleanupOwnershipUnverified)
+}
+
 func TestCleanupProcessTree_FailsClosedWhenProcessInspectionUnavailableForActiveLease(t *testing.T) {
 	originalLookup := lookupProcessStartTime
 	originalGroupKill := killProcessGroupUntilGoneSignal
