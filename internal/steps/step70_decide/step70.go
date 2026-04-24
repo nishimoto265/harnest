@@ -338,7 +338,7 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 	} else if handled {
 		return nil
 	}
-	if err := verifyCurrentRegistryAppendProof(runCtx, intention); err != nil {
+	if err := verifyPlannedRegistryAppendProof(runCtx, intention); err != nil {
 		return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRegistryDivergence, "decision_registry_mismatch")
 	}
 	if err := promoteStagedRuleSidecars(runCtx, &intention, store); err != nil {
@@ -612,11 +612,11 @@ func verifyPersistedAdoptDecisionState(ctx context.Context, pr int, runCtx inter
 	if remoteHead != adopt.TargetSha {
 		return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonRemoteDivergence, "decision_written_remote_mismatch")
 	}
-	registryHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
+	exists, err := registryPromotionAppendResultExists(runCtx, adopt.RegistryAppendResult, adopt.RunID)
 	if err != nil {
 		return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "decision_written_registry_probe_failure")
 	}
-	if registryHead != adopt.RegistryAppendResult.Sha256 {
+	if !exists {
 		return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonRegistryDivergence, "decision_written_registry_mismatch")
 	}
 	return nil
@@ -1045,11 +1045,11 @@ func completePlannedRegistryMatches(matches []*plannedRegistryMatch) (contracts.
 	return last, true
 }
 
-func verifyCurrentRegistryAppendProof(runCtx internalio.RunContext, intention contracts.IntentionRecord) error {
+func verifyPlannedRegistryAppendProof(runCtx internalio.RunContext, intention contracts.IntentionRecord) error {
 	if intention.RegistryAppendResult == nil {
 		return ErrRegistryDivergence
 	}
-	result, err := currentPlannedRegistryAppendResult(runCtx, intention)
+	result, err := plannedRegistryAppendResult(runCtx, intention)
 	if err != nil {
 		return err
 	}
@@ -1059,20 +1059,13 @@ func verifyCurrentRegistryAppendProof(runCtx internalio.RunContext, intention co
 	return nil
 }
 
-func currentPlannedRegistryAppendResult(runCtx internalio.RunContext, intention contracts.IntentionRecord) (contracts.RegistryAppendResult, error) {
+func plannedRegistryAppendResult(runCtx internalio.RunContext, intention contracts.IntentionRecord) (contracts.RegistryAppendResult, error) {
 	matches, err := findPlannedRegistryMatches(runCtx, intention)
 	if err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
 	result, ok := completePlannedRegistryMatches(matches)
 	if !ok {
-		return contracts.RegistryAppendResult{}, ErrRegistryDivergence
-	}
-	currentHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
-	if err != nil {
-		return contracts.RegistryAppendResult{}, err
-	}
-	if currentHead != result.Sha256 {
 		return contracts.RegistryAppendResult{}, ErrRegistryDivergence
 	}
 	return result, nil
@@ -1598,6 +1591,27 @@ func findRegistryByIdempotencyKey(runCtx internalio.RunContext, key string) (con
 		}
 	}
 	return contracts.RegistryAppendResult{}, false, nil
+}
+
+func registryPromotionAppendResultExists(runCtx internalio.RunContext, result contracts.RegistryAppendResult, runID contracts.RunID) (bool, error) {
+	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
+	if err != nil {
+		return false, err
+	}
+	for _, line := range lines {
+		if line.Offset != result.Offset || line.Sha256 != result.Sha256 {
+			continue
+		}
+		switch v := line.Entry.Value.(type) {
+		case contracts.RuleRegistryAdded:
+			return v.ByRunID == runID, nil
+		case contracts.RuleRegistryUpdated:
+			return v.ByRunID == runID, nil
+		default:
+			return false, nil
+		}
+	}
+	return false, nil
 }
 
 func findRollbackByTarget(runCtx internalio.RunContext, targetOpID string, target contracts.RegistryAppendResult) (contracts.RegistryAppendResult, bool, error) {

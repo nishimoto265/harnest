@@ -1384,7 +1384,7 @@ func TestRun_ResumeFromDecisionWritten_RemoteMismatchNeedsManualRecovery(t *test
 	assert.Equal(t, "decision_written_remote_mismatch", recovery.Detail)
 }
 
-func TestRun_ResumeFromRegistryAppendedRequiresCurrentRegistryProof(t *testing.T) {
+func TestRun_ResumeFromRegistryAppendedAllowsLaterRegistryProgress(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR504")
 	registryPath := runCtx.RulesRegistryPath()
 	appendResult, _ := seedRegistryAdd(t, registryPath, resolver, runCtx.RunID, candidates.CandidatesHash)
@@ -1400,17 +1400,15 @@ func TestRun_ResumeFromRegistryAppendedRequiresCurrentRegistryProof(t *testing.T
 		Resolver: unexpectedResolver{t: t},
 		Now:      fixedNow(),
 	})
-	require.ErrorIs(t, err, ErrNeedsManualRecovery)
+	require.NoError(t, err)
 
 	events := readStateEvents(t, runCtx)
 	require.NotEmpty(t, events)
-	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
-	assert.Equal(t, contracts.RollbackReasonRegistryDivergence, recovery.Reason)
-	assert.Equal(t, "decision_registry_mismatch", recovery.Detail)
-	assert.NotContains(t, readStateKinds(t, runCtx), contracts.StateKindPromoted)
+	assert.Equal(t, contracts.StateKindPromoted, events[len(events)-1].Kind)
+	assert.NoFileExists(t, intentionPath(t, runCtx))
 }
 
-func TestRecoverAdoptAnywayRefusesStaleRegistryProof(t *testing.T) {
+func TestRecoverAdoptAnywayAllowsLaterRegistryProgress(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR505")
 	registryPath := runCtx.RulesRegistryPath()
 	appendResult, _ := seedRegistryAdd(t, registryPath, resolver, runCtx.RunID, candidates.CandidatesHash)
@@ -1427,10 +1425,12 @@ func TestRecoverAdoptAnywayRefusesStaleRegistryProof(t *testing.T) {
 		Git: &fakeGit{head: resolver.target.TargetSHA},
 		Now: fixedNow(),
 	})
-	var refused *RecoverRefusalError
-	require.ErrorAs(t, err, &refused)
-	assert.Contains(t, refused.Message, "registry proof mismatch")
-	assert.NoFileExists(t, mustRunPath(t, runCtx, "70/decision.json"))
+	require.NoError(t, err)
+
+	decision := readDecision(t, runCtx)
+	assert.Equal(t, contracts.DecisionActionAdopt, decision.Action)
+	assert.Contains(t, readStateKinds(t, runCtx), contracts.StateKindPromoted)
+	assert.NoFileExists(t, intentionPath(t, runCtx))
 }
 
 func TestRun_OrphanPersistedAdoptDecisionRemoteMismatchNeedsManualRecovery(t *testing.T) {
@@ -1473,7 +1473,7 @@ func TestRun_OrphanPersistedAdoptDecisionRemoteMismatchNeedsManualRecovery(t *te
 	assert.NotContains(t, readStateKinds(t, runCtx), contracts.StateKindPromoted)
 }
 
-func TestRun_OrphanPersistedAdoptDecisionRegistryMismatchNeedsManualRecovery(t *testing.T) {
+func TestRun_OrphanPersistedAdoptDecisionAllowsLaterRegistryProgress(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR503")
 	registryPath := runCtx.RulesRegistryPath()
 	appendResult, _ := seedRegistryAdd(t, registryPath, resolver, runCtx.RunID, candidates.CandidatesHash)
@@ -1500,6 +1500,45 @@ func TestRun_OrphanPersistedAdoptDecisionRegistryMismatchNeedsManualRecovery(t *
 	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, decision))
 
 	err = Run(context.Background(), 503, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.TargetSHA},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	})
+	require.NoError(t, err)
+
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindPromoted, events[len(events)-1].Kind)
+	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
+func TestRun_OrphanPersistedAdoptDecisionMissingRegistryRowNeedsManualRecovery(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR506")
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	require.NoError(t, cleanupStagedRuleSidecars(runCtx))
+
+	decision := contracts.Decision{
+		Action: contracts.DecisionActionAdopt,
+		Value: contracts.DecisionAdopt{
+			Action:         contracts.DecisionActionAdopt,
+			SchemaVersion:  "1",
+			RunID:          runCtx.RunID,
+			IdempotencyKey: intention.IdempotencyKey,
+			BestShaBefore:  intention.BestShaBefore,
+			TargetSha:      intention.TargetSha,
+			CandidatesHash: intention.CandidatesHash,
+			RegistryAppendResult: contracts.RegistryAppendResult{
+				Offset: 0,
+				Sha256: strings.Repeat("c", 64),
+			},
+			DecidedAt: fixedNow()(),
+		},
+	}
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, decision))
+
+	err = Run(context.Background(), 506, runCtx, pkg, candidates, store, Deps{
 		Git:      &fakeGit{head: resolver.target.TargetSHA},
 		Resolver: unexpectedResolver{t: t},
 		Now:      fixedNow(),
