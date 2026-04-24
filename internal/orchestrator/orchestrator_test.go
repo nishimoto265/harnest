@@ -731,6 +731,72 @@ func TestRun_FromScratchSupersedesNonTerminalRunAndPrunesWorktrees(t *testing.T)
 	assert.Equal(t, state.NextActionFreshStart, latest.Action)
 }
 
+func TestRun_FromScratchPrunesRegisteredGitWorktrees(t *testing.T) {
+	if _, err := processenv.TrustedLookPath("git"); err != nil {
+		t.Skipf("git not available in trusted PATH: %v", err)
+	}
+	root := t.TempDir()
+	repoRoot := filepath.Join(root, "repo")
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	runGit(t, "", "init", "-b", "main", repoRoot)
+	runGit(t, repoRoot, "config", "user.email", "auto-improve@example.test")
+	runGit(t, repoRoot, "config", "user.name", "auto-improve test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "README.md"), []byte("fixture\n"), 0o644))
+	runGit(t, repoRoot, "add", "README.md")
+	runGit(t, repoRoot, "commit", "-m", "initial")
+
+	cfg := testConfig(t)
+	cfg.Repo.Root = repoRoot
+	cfg.Paths.Runs = runsBase
+	cfg.Worktree.Base = worktreeBase
+
+	oldRunID := contracts.RunID("2026-04-21-PR456-abcdef0")
+	oldRunCtx, err := internalio.NewRunContext(oldRunID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(oldRunCtx.RunDir(), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(oldRunCtx.RunDir(), "config.snapshot.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+cfg.Repo.Root+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: best\n"+
+			"paths:\n"+
+			"  runs: "+cfg.Paths.Runs+"\n"+
+			"worktree:\n"+
+			"  base: "+cfg.Worktree.Base+"\n",
+	), 0o644))
+	pkg := stubTaskPackageForRun(oldRunCtx, 456)
+	require.NoError(t, internalio.WriteJSONAtomic(oldRunCtx.TaskPackagePath(), pkg))
+	for _, wt := range pkg.Worktrees {
+		runGit(t, repoRoot, "worktree", "add", "-b", wt.Branch, wt.Path, "HEAD")
+	}
+	require.NoError(t, state.NewWriter(oldRunCtx).Append(startedEntry(456, oldRunID, time.Now().UTC())))
+	require.NoError(t, state.NewWriter(oldRunCtx).Append(contracts.StateEntry{
+		Kind: contracts.StateKindInterrupted,
+		Value: contracts.StateEntryInterrupted{
+			Kind:   contracts.StateKindInterrupted,
+			PR:     456,
+			RunID:  oldRunID,
+			Step:   contracts.FailedStep20,
+			Reason: contracts.InterruptedReasonUnknown,
+			At:     time.Now().UTC(),
+		},
+	}))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps = stubPipelineSteps(nil, stubStep70{})
+
+	require.NoError(t, orch.Run(context.Background(), 456, RunOptions{FromScratch: true}))
+
+	list := runGit(t, repoRoot, "worktree", "list", "--porcelain")
+	for _, wt := range pkg.Worktrees {
+		assert.NoDirExists(t, wt.Path)
+		assert.NotContains(t, list, wt.Path)
+	}
+}
+
 func TestRun_Step70NeedsManualRecovery_EndToEnd(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
@@ -2947,6 +3013,20 @@ func repoRootFromTestFile(t *testing.T) string {
 	wd, err := os.Getwd()
 	require.NoError(t, err)
 	return filepath.Clean(filepath.Join(wd, "..", ".."))
+}
+
+func runGit(t *testing.T, repoRoot string, args ...string) string {
+	t.Helper()
+	cmdArgs := args
+	if repoRoot != "" {
+		cmdArgs = append([]string{"-C", repoRoot}, args...)
+	}
+	cmd, err := processenv.TrustedCommand("git", cmdArgs...)
+	require.NoError(t, err)
+	cmd.Env = processenv.Sanitize()
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %s\n%s", strings.Join(cmdArgs, " "), string(out))
+	return string(out)
 }
 
 func installFakeCLI(t *testing.T) string {
