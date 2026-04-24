@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -247,6 +248,7 @@ func TestIntegrationRunUsesRealGitWorktreesWhenFakeGitIsAbsent(t *testing.T) {
 		"AUTO_IMPROVE_TEST_TARGET_SHA="+shas.head,
 		"AUTO_IMPROVE_TEST_MERGE_SHA="+shas.merge,
 		"AUTO_IMPROVE_TEST_BEST_SHA="+shas.base,
+		"GH_HOST="+shas.remoteHost,
 	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -427,9 +429,10 @@ func writeIntegrationAgentsConfig(t *testing.T, root, claudePath string) {
 }
 
 type realGitIntegrationSHAs struct {
-	base  string
-	head  string
-	merge string
+	base       string
+	head       string
+	merge      string
+	remoteHost string
 }
 
 func seedRealGitIntegrationRepo(t *testing.T, repoRoot string) realGitIntegrationSHAs {
@@ -437,10 +440,11 @@ func seedRealGitIntegrationRepo(t *testing.T, repoRoot string) realGitIntegratio
 	runIntegrationGit(t, repoRoot, "init", "-b", "main")
 	runIntegrationGit(t, repoRoot, "config", "user.name", "Test User")
 	runIntegrationGit(t, repoRoot, "config", "user.email", "test@example.com")
-	relativeRemote := filepath.Join("github.com", "owner", "repo")
-	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, "github.com", "owner"), 0o755))
-	runIntegrationGit(t, repoRoot, "init", "--bare", relativeRemote)
-	runIntegrationGit(t, repoRoot, "remote", "add", "origin", relativeRemote)
+	daemonRoot := filepath.Join(filepath.Dir(repoRoot), "git-daemon")
+	bareRemote := filepath.Join(daemonRoot, "owner", "repo.git")
+	require.NoError(t, os.MkdirAll(filepath.Dir(bareRemote), 0o755))
+	runIntegrationGit(t, repoRoot, "init", "--bare", bareRemote)
+	runIntegrationGit(t, repoRoot, "remote", "add", "origin", bareRemote)
 
 	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, "app"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "app", "message.txt"), []byte("base\n"), 0o644))
@@ -460,7 +464,38 @@ func seedRealGitIntegrationRepo(t *testing.T, repoRoot string) realGitIntegratio
 	mergeSHA := strings.TrimSpace(runIntegrationGit(t, repoRoot, "rev-parse", "HEAD"))
 	runIntegrationGit(t, repoRoot, "push", "origin", "HEAD:refs/heads/main")
 
-	return realGitIntegrationSHAs{base: baseSHA, head: headSHA, merge: mergeSHA}
+	remoteURL, remoteHost := startIntegrationGitDaemon(t, daemonRoot)
+	runIntegrationGit(t, repoRoot, "remote", "set-url", "origin", remoteURL)
+	return realGitIntegrationSHAs{base: baseSHA, head: headSHA, merge: mergeSHA, remoteHost: remoteHost}
+}
+
+func startIntegrationGitDaemon(t *testing.T, basePath string) (string, string) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("loopback listener unavailable for git daemon integration: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	require.NoError(t, listener.Close())
+
+	cmd := exec.Command("git", "daemon", "--reuseaddr", "--export-all", "--enable=receive-pack", "--base-path="+basePath, "--listen=127.0.0.1", "--port="+strconv.Itoa(port))
+	if err := cmd.Start(); err != nil {
+		t.Skipf("git daemon unavailable for integration fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
+
+	remoteHost := "127.0.0.1:" + strconv.Itoa(port)
+	remoteURL := "git://" + remoteHost + "/owner/repo.git"
+	require.Eventually(t, func() bool {
+		probe := exec.Command("git", "ls-remote", remoteURL)
+		return probe.Run() == nil
+	}, 5*time.Second, 50*time.Millisecond)
+	return remoteURL, remoteHost
 }
 
 func writeIntegrationConfigForRepo(t *testing.T, root, repoRoot, runsBase, worktreeBase string) {
