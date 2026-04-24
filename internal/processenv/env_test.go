@@ -40,10 +40,10 @@ func setSanitizeTestEnv(t *testing.T) {
 	t.Setenv("LD_PRELOAD", "/tmp/preload.so")
 }
 
-func TestSanitize_UsesStrictAllowlistForBaseAndExtraEnv(t *testing.T) {
+func TestSanitizeForLocalExec_UsesStrictAllowlistForBaseAndExtraEnv(t *testing.T) {
 	setSanitizeTestEnv(t)
 
-	env := Sanitize("AUTO_IMPROVE_STEP=20", "GH_TOKEN=override", "BASH_ENV=/tmp/extra", "PATH=/override/bin")
+	env := SanitizeForLocalExec("AUTO_IMPROVE_STEP=20", "GH_TOKEN=override", "BASH_ENV=/tmp/extra", "PATH=/override/bin")
 
 	assert.Contains(t, env, "HOME=/tmp/home")
 	assert.Contains(t, env, "PATH="+defaultTrustedPATH)
@@ -76,15 +76,6 @@ func TestSanitize_UsesStrictAllowlistForBaseAndExtraEnv(t *testing.T) {
 	assert.NotContains(t, env, "BASH_ENV=/tmp/bash_env")
 	assert.NotContains(t, env, "BASH_ENV=/tmp/extra")
 	assert.NotContains(t, env, "LD_PRELOAD=/tmp/preload.so")
-}
-
-func TestSanitizeForLocalExec_IsSameAsSanitize(t *testing.T) {
-	setSanitizeTestEnv(t)
-
-	local := SanitizeForLocalExec("AUTO_IMPROVE_STEP=20")
-	legacy := Sanitize("AUTO_IMPROVE_STEP=20")
-
-	assert.Equal(t, legacy, local)
 }
 
 func TestSanitizeForNetworkExec_PreservesAuthEnvButBlocksHooks(t *testing.T) {
@@ -267,5 +258,5 @@ func TestSetTrustedPathForTest_ControlsLookupAndSanitizedPath(t *testing.T) {
 	resolved, err := TrustedLookPath("tool")
 	require.NoError(t, err)
 	assert.Equal(t, bin, resolved)
-	assert.Contains(t, Sanitize(), "PATH="+dir)
+	assert.Contains(t, SanitizeForLocalExec(), "PATH="+dir)
 }

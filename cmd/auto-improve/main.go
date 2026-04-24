@@ -136,7 +136,7 @@ type recoverInspectSnapshot struct {
 }
 
 func runRecoverInspect(cmd *cobra.Command, runID string) error {
-	runsBase, lock, err := recoverRunsBaseAndInspectLock()
+	runsBase, lock, err := recoverRunsBaseAndLock()
 	if err != nil {
 		return err
 	}
@@ -216,21 +216,6 @@ func recoverPaths() (string, string, error) {
 		return "", "", commandExitError{code: 2, msg: err.Error()}
 	}
 	return runsBase, lockPath, nil
-}
-
-func recoverRunsBaseAndInspectLock() (string, *internalio.FileLock, error) {
-	runsBase, lockPath, err := recoverPaths()
-	if err != nil {
-		return "", nil, err
-	}
-	lock, acquired, err := internalio.TryAcquireFileLock(lockPath)
-	if err != nil {
-		return "", nil, err
-	}
-	if !acquired {
-		return "", nil, commandExitError{code: 2, msg: "recover: promotion.lock is held by another process"}
-	}
-	return runsBase, lock, nil
 }
 
 func recoverRunsBaseAndLock() (string, *internalio.FileLock, error) {
