@@ -92,9 +92,13 @@ func Legacy(defaults LegacyDefaults) File {
 		defaults.ImplementerBinary = "claude"
 	}
 	implementerProvider := inferProviderFromBinary(defaults.ImplementerBinary, ProviderClaude)
+	implementerArgs := []string(nil)
+	if implementerProvider == ProviderClaude {
+		implementerArgs = []string{"-p"}
+	}
 	return File{
 		Profiles: map[string]Profile{
-			"claude":          {Provider: implementerProvider, Binary: defaults.ImplementerBinary},
+			"claude":          {Provider: implementerProvider, Binary: defaults.ImplementerBinary, Args: implementerArgs},
 			"judge-primary":   {Provider: ProviderStub},
 			"judge-secondary": {Provider: ProviderStub},
 			"judge-arbiter":   {Provider: ProviderStub},

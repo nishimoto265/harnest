@@ -15,7 +15,6 @@ func TestLoadConfig_RejectsUnknownField(t *testing.T) {
 runs_base: "/tmp/auto-improve/runs"
 worktree_base: "/tmp/auto-improve/worktrees"
 claude_cli_path: "claude"
-codex_cli_path: "codex"
 preflight_timeout_sec: 30
 rescue_max_retries: 3
 step_timeouts:
@@ -39,7 +38,6 @@ func TestLoadConfig_RejectsInvalidType(t *testing.T) {
 runs_base: "/tmp/auto-improve/runs"
 worktree_base: "/tmp/auto-improve/worktrees"
 claude_cli_path: "claude"
-codex_cli_path: "codex"
 preflight_timeout_sec: "thirty"
 rescue_max_retries: 3
 step_timeouts:
@@ -61,7 +59,6 @@ func TestLoadConfig_RejectsMissingRequiredField(t *testing.T) {
 	path := writeConfigFixture(t, `
 worktree_base: "/tmp/auto-improve/worktrees"
 claude_cli_path: "claude"
-codex_cli_path: "codex"
 preflight_timeout_sec: 30
 rescue_max_retries: 3
 step_timeouts:
@@ -85,7 +82,6 @@ func TestLoadConfig_RejectsYAMLSyntaxError(t *testing.T) {
 runs_base: "/tmp/auto-improve/runs"
 worktree_base: "/tmp/auto-improve/worktrees"
 claude_cli_path: "claude"
-codex_cli_path: "codex"
 preflight_timeout_sec: 30
 rescue_max_retries: 3
 step_timeouts: [
@@ -101,7 +97,6 @@ func TestLoadConfig_AppliesDefaultThresholds(t *testing.T) {
 runs_base: "/tmp/auto-improve/runs"
 worktree_base: "/tmp/auto-improve/worktrees"
 claude_cli_path: "claude"
-codex_cli_path: "codex"
 preflight_timeout_sec: 30
 rescue_max_retries: 3
 step_timeouts:
@@ -425,6 +420,40 @@ worktree:
 	assert.ErrorContains(t, err, "paths.runs and runs_base both set different paths")
 }
 
+func TestLoadConfig_RejectsDeprecatedCodexCLIPath(t *testing.T) {
+	path := writeConfigFixture(t, `
+runs_base: "/tmp/auto-improve/runs"
+worktree_base: "/tmp/auto-improve/worktrees"
+codex_cli_path: "codex"
+`)
+
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "codex_cli_path is deprecated")
+	assert.ErrorContains(t, err, "agents.yaml")
+	assert.ErrorContains(t, err, "agent_config_path")
+}
+
+func TestValidate_RejectsDeprecatedCodexCLIPath(t *testing.T) {
+	cfg := Config{
+		Paths: PathsConfig{
+			Runs: "/tmp/auto-improve/runs",
+		},
+		Worktree: WorktreeConfig{
+			Base: "/tmp/auto-improve/worktrees",
+		},
+		CodexCLIPath:              "codex",
+		RegistryHighThreshold:     DefaultRegistryHighThreshold,
+		RegistryCriticalThreshold: DefaultRegistryCriticalThreshold,
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "codex_cli_path is deprecated")
+	assert.ErrorContains(t, err, "agents.yaml")
+	assert.ErrorContains(t, err, "agent_config_path")
+}
+
 func TestLoadConfig_LegacyClaudeCLIPathOverridesDefaultImplementerBinary(t *testing.T) {
 	path := writeConfigFixture(t, `
 runs_base: "/tmp/auto-improve/runs"
@@ -437,6 +466,24 @@ claude_cli_path: "/opt/bin/claude"
 	profile, err := cfg.AgentProfile(agents.RoleImplementer)
 	require.NoError(t, err)
 	assert.Equal(t, "/opt/bin/claude", profile.Binary)
+	assert.Equal(t, []string{"-p"}, profile.Args)
+}
+
+func TestLoadConfig_LegacyCodexImplementerDoesNotUseClaudePromptFlag(t *testing.T) {
+	path := writeConfigFixture(t, `
+runs_base: "/tmp/auto-improve/runs"
+worktree_base: "/tmp/auto-improve/worktrees"
+agents:
+  implementer: "/opt/bin/codex"
+`)
+
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	profile, err := cfg.AgentProfile(agents.RoleImplementer)
+	require.NoError(t, err)
+	assert.Equal(t, agents.ProviderCodex, profile.Provider)
+	assert.Equal(t, "/opt/bin/codex", profile.Binary)
+	assert.Empty(t, profile.Args)
 }
 
 func writeConfigFixture(t *testing.T, body string) string {

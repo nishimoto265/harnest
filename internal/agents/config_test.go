@@ -47,6 +47,7 @@ func TestLegacyBuildsDefaultRoleMap(t *testing.T) {
 	impl, err := cfg.ProfileForRole(RoleImplementer)
 	require.NoError(t, err)
 	assert.Equal(t, ProviderClaude, impl.Provider)
+	assert.Equal(t, []string{"-p"}, impl.Args)
 
 	arbiter, err := cfg.ProfileForRole(RoleJudgeArbiter)
 	require.NoError(t, err)
@@ -62,6 +63,7 @@ func TestLegacyInfersCodexImplementerProviderFromBinary(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ProviderCodex, impl.Provider)
 	assert.Equal(t, "/opt/bin/codex", impl.Binary)
+	assert.Empty(t, impl.Args)
 }
 
 func TestAllowTestStubProvidersRequiresExplicitEnvGate(t *testing.T) {
