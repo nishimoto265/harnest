@@ -329,72 +329,32 @@ func claudeJudgeProfileArgRequiresValue(arg string) bool {
 func validateCodexJudgeProfileArgs(args []string) error {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		switch arg {
-		case "--full-auto", "--dangerously-bypass-approvals-and-sandbox":
-			return fmt.Errorf("judges: codex judge profile arg %q is not allowed", arg)
-		case "-C", "--cd", "--add-dir", "-o", "--output-last-message", "--profile":
-			return fmt.Errorf("judges: codex judge profile arg %q is not allowed", arg)
-		case "--sandbox", "-s":
+		switch {
+		case arg == "--model" || arg == "-m":
 			if i+1 >= len(args) {
 				return fmt.Errorf("judges: codex judge profile arg %q requires a value", arg)
 			}
-			if args[i+1] != "read-only" {
-				return fmt.Errorf("judges: codex judge profile sandbox must remain read-only")
+			if !codexJudgeProfileArgValueIsSafe(args[i+1]) {
+				return fmt.Errorf("judges: codex judge profile arg %q has invalid value %q", arg, args[i+1])
 			}
 			i++
-		case "-c", "--config":
-			if i+1 >= len(args) {
+		case strings.HasPrefix(arg, "--model="):
+			if !codexJudgeProfileArgValueIsSafe(strings.TrimPrefix(arg, "--model=")) {
 				return fmt.Errorf("judges: codex judge profile arg %q requires a value", arg)
 			}
-			if codexJudgeConfigOverrideTouchesSafety(args[i+1]) {
-				return fmt.Errorf("judges: codex judge profile config override %q is not allowed", args[i+1])
+		case strings.HasPrefix(arg, "-m="):
+			if !codexJudgeProfileArgValueIsSafe(strings.TrimPrefix(arg, "-m=")) {
+				return fmt.Errorf("judges: codex judge profile arg %q requires a value", arg)
 			}
-			i++
 		default:
-			if strings.HasPrefix(arg, "--sandbox=") {
-				if strings.TrimPrefix(arg, "--sandbox=") != "read-only" {
-					return fmt.Errorf("judges: codex judge profile sandbox must remain read-only")
-				}
-				continue
-			}
-			if strings.HasPrefix(arg, "-C=") ||
-				strings.HasPrefix(arg, "--cd=") ||
-				strings.HasPrefix(arg, "--add-dir=") ||
-				strings.HasPrefix(arg, "-o=") ||
-				strings.HasPrefix(arg, "--output-last-message=") ||
-				strings.HasPrefix(arg, "--profile=") {
-				return fmt.Errorf("judges: codex judge profile arg %q is not allowed", arg)
-			}
-			if strings.HasPrefix(arg, "-s=") {
-				if strings.TrimPrefix(arg, "-s=") != "read-only" {
-					return fmt.Errorf("judges: codex judge profile sandbox must remain read-only")
-				}
-				continue
-			}
-			if strings.HasPrefix(arg, "--config=") {
-				value := strings.TrimPrefix(arg, "--config=")
-				if codexJudgeConfigOverrideTouchesSafety(value) {
-					return fmt.Errorf("judges: codex judge profile config override %q is not allowed", value)
-				}
-			}
+			return fmt.Errorf("judges: codex judge profile arg %q is not allowed", arg)
 		}
 	}
 	return nil
 }
 
-func codexJudgeConfigOverrideTouchesSafety(value string) bool {
-	key, _, _ := strings.Cut(value, "=")
-	key = strings.TrimSpace(key)
-	return strings.Contains(key, "sandbox") ||
-		strings.Contains(key, "approval") ||
-		strings.Contains(key, "shell_environment_policy") ||
-		strings.Contains(key, "profile") ||
-		strings.Contains(key, "mcp") ||
-		strings.Contains(key, "permission") ||
-		strings.Contains(key, "cwd") ||
-		strings.Contains(key, "workdir") ||
-		strings.Contains(key, "output") ||
-		strings.Contains(key, "tool")
+func codexJudgeProfileArgValueIsSafe(value string) bool {
+	return value != "" && !strings.HasPrefix(value, "-")
 }
 
 func readModelJudgeResponse(path string) (modelJudgeResponse, error) {

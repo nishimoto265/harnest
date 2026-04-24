@@ -30,7 +30,7 @@ script-test:
 
 .PHONY: release install
 
-release: test lint check-sync
+release: test integration-test lint check-sync
 	@if [ "$${CI:-}" != "true" ] && [ "$${ALLOW_LOCAL_RELEASE:-0}" != "1" ]; then \
 		echo "local publish is disabled; use the guarded GitHub release workflow or rerun with ALLOW_LOCAL_RELEASE=1"; \
 		exit 1; \

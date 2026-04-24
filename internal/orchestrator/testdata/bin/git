@@ -67,7 +67,15 @@ case "$subcmd" in
         { grep -Fqx "$path" "$state_dir/worktrees.list" 2>/dev/null || printf '%s\n' "$path" >> "$state_dir/worktrees.list"; } || true
         ;;
       remove)
-        rm -rf "$3"
+        if [ "${2:-}" = "--force" ]; then
+          path="$3"
+        else
+          path="$2"
+        fi
+        tmp="$state_dir/worktrees.list.tmp"
+        grep -Fvx "$path" "$state_dir/worktrees.list" > "$tmp" || true
+        mv "$tmp" "$state_dir/worktrees.list"
+        rm -rf "$path"
         ;;
       list)
         while IFS= read -r path; do
