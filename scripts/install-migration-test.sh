@@ -269,4 +269,50 @@ if [[ "$(cat "$chown_plist")" != "old chown plist" ]]; then
   exit 1
 fi
 
+custom_log="$TMP_ROOT/custom-plist-launchctl.log"
+custom_plist="$TMP_ROOT/custom.plist"
+default_custom_plist="$plist_dir/com.nishimoto265.auto-improve.custom-override.plist"
+printf 'old custom plist\n' >"$custom_plist"
+printf 'legacy plist\n' >"$legacy_plist"
+
+PATH="$fake_bin:$PATH" \
+INSTALL_DIR="$install_dir" \
+REPO_ROOT="$repo_root" \
+PLIST="$custom_plist" \
+AUTO_IMPROVE_RELEASE_URL="https://example.invalid/auto-improve" \
+AUTO_IMPROVE_EXPECTED_SHA256="$expected_sha" \
+AUTO_IMPROVE_LAUNCHD_USER="testuser" \
+AUTO_IMPROVE_LAUNCHD_HOME="$home_dir" \
+AUTO_IMPROVE_PLIST_DIR="$plist_dir" \
+AUTO_IMPROVE_INSTANCE="custom-override" \
+AUTO_IMPROVE_TEST_PAYLOAD="$payload" \
+AUTO_IMPROVE_TEST_LAUNCHCTL_LOG="$custom_log" \
+bash "$ROOT/scripts/install.sh" >"$install_output_path" 2>&1
+
+if [[ "$(cat "$custom_plist")" == "old custom plist" ]]; then
+  cat "$install_output_path" >&2
+  echo "custom PLIST override was not updated by install.sh" >&2
+  exit 1
+fi
+if [[ -f "$default_custom_plist" ]]; then
+  cat "$install_output_path" >&2
+  echo "install.sh ignored custom PLIST and wrote default plist path" >&2
+  exit 1
+fi
+if [[ "$(cat "$legacy_plist")" != "legacy plist" ]]; then
+  cat "$install_output_path" >&2
+  echo "legacy plist was migrated despite custom PLIST override" >&2
+  exit 1
+fi
+if ! grep -F "$custom_plist" "$custom_log" >/dev/null 2>&1; then
+  cat "$custom_log" >&2
+  echo "launchctl did not receive the custom PLIST path" >&2
+  exit 1
+fi
+if grep -F "com.nishimoto265.auto-improve.plist" "$custom_log" >/dev/null 2>&1; then
+  cat "$custom_log" >&2
+  echo "legacy launchd job was touched despite custom PLIST override" >&2
+  exit 1
+fi
+
 printf 'install migration tests passed\n'

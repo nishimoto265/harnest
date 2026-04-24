@@ -22,3 +22,5 @@ jobs:
         run: go vet ./...
       - name: Check contracts sync
         run: bash scripts/check-contracts-sync.sh
+      - name: Script tests
+        run: make script-test
