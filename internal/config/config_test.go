@@ -296,7 +296,7 @@ func TestRunsBaseAndWorktreeBase_PreserveExplicitRepoScopedPaths(t *testing.T) {
 	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/worktrees"), worktreeBase)
 }
 
-func TestRunsBaseAndWorktreeBase_LeaveCustomLeafPathsUnchanged(t *testing.T) {
+func TestRunsBaseAndWorktreeBase_NamespaceCustomLeafPaths(t *testing.T) {
 	cfg := Config{
 		Repo: RepoConfig{
 			GitHub: "owner/repo",
@@ -315,8 +315,39 @@ func TestRunsBaseAndWorktreeBase_LeaveCustomLeafPathsUnchanged(t *testing.T) {
 	worktreeBase, err := cfg.WorktreeBase()
 	require.NoError(t, err)
 
-	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/repo-a-state"), runsBase)
-	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/repo-a-wt"), worktreeBase)
+	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/repo-a-state"), runsBase)
+	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/repo-a-wt"), worktreeBase)
+}
+
+func TestLoadConfig_RejectsConflictingPathAliases(t *testing.T) {
+	path := writeConfigFixture(t, `
+runs_base: "/tmp/auto-improve/legacy-runs"
+worktree_base: "/tmp/auto-improve/worktrees"
+paths:
+  runs: "/tmp/auto-improve/runs"
+worktree:
+  base: "/tmp/auto-improve/worktrees"
+`)
+
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "paths.runs and runs_base both set different paths")
+}
+
+func TestLoadConfig_LegacyCLIPathsOverrideDefaultAgentNames(t *testing.T) {
+	path := writeConfigFixture(t, `
+runs_base: "/tmp/auto-improve/runs"
+worktree_base: "/tmp/auto-improve/worktrees"
+claude_cli_path: "/opt/bin/claude"
+codex_cli_path: "/opt/bin/codex"
+`)
+
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	profile, err := cfg.AgentProfile(agents.RoleImplementer)
+	require.NoError(t, err)
+	assert.Equal(t, "/opt/bin/claude", profile.Binary)
+	assert.Equal(t, "/opt/bin/codex", cfg.CodexBinary())
 }
 
 func writeConfigFixture(t *testing.T, body string) string {

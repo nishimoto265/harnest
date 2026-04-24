@@ -5,7 +5,9 @@ import (
 	"errors"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
+	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/detect"
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/orchestrator"
 	"github.com/nishimoto265/auto-improve/internal/preflight"
 	"github.com/spf13/cobra"
@@ -76,6 +78,19 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 	processedPath, err := cfg.ProcessedPath()
 	if err != nil {
 		return commandExitError{code: 2, msg: err.Error()}
+	}
+	entries, err := internalio.ReadJSONL[contracts.StateEntry](processedPath)
+	if err != nil {
+		return err
+	}
+	for _, item := range orchestrator.ResumeQueue(entries) {
+		if err := runner.Run(ctx, item.PR, orchestrator.RunOptions{RunID: item.RunID}); err != nil {
+			var blocked *orchestrator.GlobalNeedsRecoveryError
+			if errors.As(err, &blocked) {
+				return commandExitError{code: 10, msg: err.Error()}
+			}
+			return err
+		}
 	}
 	prs, err := detectMergedPRs(ctx, cfg, processedPath)
 	if err != nil {

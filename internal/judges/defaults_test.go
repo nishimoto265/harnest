@@ -141,3 +141,56 @@ func TestResolveRunRubricPath_EmbedsActiveRules(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"r-sync-message-details"}, ruleIDs)
 }
+
+func TestResolveRunRubricPath_PrefersRunPolicySnapshot(t *testing.T) {
+	dir := t.TempDir()
+	SetDefaultRubricDirForTest(dir)
+	t.Cleanup(func() { SetDefaultRubricDirForTest("") })
+
+	runCtx, err := internalio.NewRunContext("2026-04-23-PR1-deadbee", filepath.Join(dir, "runs"), filepath.Join(dir, "worktrees"))
+	require.NoError(t, err)
+
+	globalBody := []byte("# Global Rule\n")
+	require.NoError(t, internalio.WriteAtomic(filepath.Join(runCtx.RunsBase, "rules", "r-global.md"), globalBody))
+	_, err = internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "r-global",
+			RulePath:       "rules/r-global.md",
+			Sha256:         runtimeRubricSHA256Hex(globalBody),
+			IdempotencyKey: strings.Repeat("a", 64),
+			ByRunID:        "2026-04-23-PR1-feedbee",
+			At:             time.Date(2026, 4, 23, 7, 0, 0, 0, time.UTC),
+			VersionSeq:     1,
+		},
+	})
+	require.NoError(t, err)
+
+	snapshotBody := []byte("# Snapshot Rule\n")
+	require.NoError(t, internalio.WriteAtomic(filepath.Join(runCtx.PolicySnapshotRulesDir(), "r-snapshot.md"), snapshotBody))
+	_, err = internalio.AppendRegistryEntry(runCtx.PolicySnapshotRegistryPath(), contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "r-snapshot",
+			RulePath:       "rules/r-snapshot.md",
+			Sha256:         runtimeRubricSHA256Hex(snapshotBody),
+			IdempotencyKey: strings.Repeat("b", 64),
+			ByRunID:        "2026-04-23-PR1-feedbee",
+			At:             time.Date(2026, 4, 23, 7, 0, 0, 0, time.UTC),
+			VersionSeq:     1,
+		},
+	})
+	require.NoError(t, err)
+
+	path, err := ResolveRunRubricPath(runCtx)
+	require.NoError(t, err)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	text := string(data)
+	assert.Contains(t, text, "r-snapshot")
+	assert.NotContains(t, text, "r-global")
+}

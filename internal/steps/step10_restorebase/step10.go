@@ -113,6 +113,9 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 	}
 	mode := normalizeTaskPromptSource(in.TaskPromptSource)
 	usableIssues := usableLinkedIssues(pr.LinkedIssues)
+	if mode == TaskPromptSourceIssue && len(usableIssues) == 0 {
+		return Result{}, errors.New("step10: task_prompt.source=issue requires at least one usable linked issue")
+	}
 	var changedFiles []string
 	var diffText string
 	if includeDiffContext(mode, usableIssues) {
@@ -133,7 +136,7 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 		}
 	}
 	if in.HarnessFiles && strings.TrimSpace(in.PolicyBranch) != "" {
-		if err := policyrepo.HydrateFromBranch(ctx, in.RepoRoot, in.PolicyBranch, in.RunCtx.RunsBase); err != nil {
+		if err := policyrepo.HydrateAndSnapshotFromBranch(ctx, in.RepoRoot, in.PolicyBranch, in.RunCtx.RunsBase, in.RunCtx.RunDir()); err != nil {
 			return Result{}, fmt.Errorf("step10: hydrate harness files from policy_branch=%s: %w", in.PolicyBranch, err)
 		}
 	}

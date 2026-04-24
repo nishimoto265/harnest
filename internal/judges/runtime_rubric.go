@@ -52,7 +52,7 @@ func ResolveRunRubricPath(runCtx internalio.RunContext) (string, error) {
 }
 
 func loadActiveRuleSnapshots(runCtx internalio.RunContext) ([]activeRuleSnapshot, error) {
-	registryPath := runCtx.RulesRegistryPath()
+	registryPath := policyRegistryPath(runCtx)
 	if _, err := os.Stat(registryPath); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -96,6 +96,13 @@ func loadActiveRuleSnapshots(runCtx internalio.RunContext) ([]activeRuleSnapshot
 		})
 	}
 	return snapshots, nil
+}
+
+func policyRegistryPath(runCtx internalio.RunContext) string {
+	if _, err := os.Stat(runCtx.PolicySnapshotRegistryPath()); err == nil {
+		return runCtx.PolicySnapshotRegistryPath()
+	}
+	return runCtx.RulesRegistryPath()
 }
 
 func buildRuntimeRubric(activeRules []activeRuleSnapshot) ([]byte, error) {

@@ -98,8 +98,8 @@ func ensureTrailingNewlineWithinLimit(value string, maxBytes int) string {
 func SynthesizeTaskBrief(source string, input TaskBriefInput) string {
 	mode := normalizeTaskPromptSource(source)
 	usableIssues := usableLinkedIssues(input.Issues)
-	goal := synthesizeGoal(mode, input.Title, input.Body, usableIssues)
 	changedTests, changedNonTests := splitChangedFiles(input.ChangedFiles)
+	goal := synthesizeGoal(mode, input.Title, input.Body, usableIssues, changedTests, changedNonTests)
 
 	var b strings.Builder
 	b.WriteString("# Task Brief\n\n")
@@ -148,12 +148,22 @@ func SynthesizeTaskBrief(source string, input TaskBriefInput) string {
 			}
 		}
 	}
-	b.WriteString("\n### PR Title\n")
-	fmt.Fprintf(&b, "%s\n", strings.TrimSpace(input.Title))
-	if trimmed := strings.TrimSpace(input.Body); trimmed != "" {
-		b.WriteString("\n### PR Body\n")
-		b.WriteString(strings.TrimRight(trimmed, "\n"))
-		b.WriteString("\n")
+	if mode == TaskPromptSourceDiffSynth {
+		b.WriteString("\n### Weak Supporting PR Context\n")
+		if title := strings.TrimSpace(input.Title); title != "" {
+			fmt.Fprintf(&b, "- title: %s\n", title)
+		}
+		if trimmed := strings.TrimSpace(input.Body); trimmed != "" {
+			fmt.Fprintf(&b, "- body: %s\n", strings.ReplaceAll(strings.TrimRight(trimmed, "\n"), "\n", " "))
+		}
+	} else {
+		b.WriteString("\n### PR Title\n")
+		fmt.Fprintf(&b, "%s\n", strings.TrimSpace(input.Title))
+		if trimmed := strings.TrimSpace(input.Body); trimmed != "" {
+			b.WriteString("\n### PR Body\n")
+			b.WriteString(strings.TrimRight(trimmed, "\n"))
+			b.WriteString("\n")
+		}
 	}
 	if includeDiffContext(mode, usableIssues) {
 		if len(changedTests) > 0 {
@@ -207,7 +217,10 @@ func includeDiffContext(source TaskPromptSource, issues []LinkedIssue) bool {
 	}
 }
 
-func synthesizeGoal(source TaskPromptSource, title, body string, issues []LinkedIssue) string {
+func synthesizeGoal(source TaskPromptSource, title, body string, issues []LinkedIssue, changedTests, changedNonTests []string) string {
+	if source == TaskPromptSourceDiffSynth {
+		return synthesizeDiffGoal(changedTests, changedNonTests)
+	}
 	if includeIssues(source, issues) && len(issues) > 0 {
 		for _, issue := range issues {
 			if goal := firstMeaningfulLine(issue.Body); goal != "" {
@@ -219,6 +232,17 @@ func synthesizeGoal(source TaskPromptSource, title, body string, issues []Linked
 		}
 	}
 	return synthesizePRGoal(title, body)
+}
+
+func synthesizeDiffGoal(changedTests, changedNonTests []string) string {
+	switch {
+	case len(changedTests) > 0:
+		return "Recreate the intended behavior covered by the changed tests and merged diff evidence."
+	case len(changedNonTests) > 0:
+		return "Recreate the intended behavior shown by the changed files and merged diff evidence."
+	default:
+		return "Infer and implement the intended behavior from the merged diff evidence."
+	}
 }
 
 func synthesizePRGoal(title, body string) string {

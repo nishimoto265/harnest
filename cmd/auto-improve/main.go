@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/archive"
@@ -60,6 +61,7 @@ func newRecoverCmd() *cobra.Command {
 	var finalizeCleanup bool
 	var remoteHead string
 	var registryHead string
+	var policyHead string
 	cmd := &cobra.Command{
 		Use:           "recover",
 		Short:         "Inspect or recover a stuck promotion run",
@@ -82,7 +84,7 @@ func newRecoverCmd() *cobra.Command {
 				return runRecoverClearDivergedSunset(cmd)
 			}
 			if finalizeCleanup {
-				return runRecoverFinalizeCleanup(cmd, runID, remoteHead, registryHead)
+				return runRecoverFinalizeCleanup(cmd, runID, remoteHead, registryHead, policyHead)
 			}
 			if inspect {
 				return runRecoverInspect(cmd, runID)
@@ -112,6 +114,7 @@ func newRecoverCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&finalizeCleanup, "finalize-cleanup", false, "Clear an .aborted.json sentinel after verifying manual cleanup state")
 	cmd.Flags().StringVar(&remoteHead, "remote-head", "", "Expected remote HEAD SHA for --finalize-cleanup")
 	cmd.Flags().StringVar(&registryHead, "registry-head", "", "Expected registry head SHA for --finalize-cleanup")
+	cmd.Flags().StringVar(&policyHead, "policy-head", "", "Expected policy_branch HEAD SHA for --finalize-cleanup when repo.policy_branch is configured")
 	return cmd
 }
 
@@ -183,6 +186,7 @@ type recoverFinalizeCleanupOutput struct {
 	RunID        string `json:"run_id"`
 	RemoteHead   string `json:"remote_head"`
 	RegistryHead string `json:"registry_head"`
+	PolicyHead   string `json:"policy_head,omitempty"`
 }
 
 type recoverActionOutput struct {
@@ -266,7 +270,7 @@ var recoverRegistryHead = func(runsBase string) (string, error) {
 	return lines[len(lines)-1].Sha256, nil
 }
 
-func runRecoverFinalizeCleanup(cmd *cobra.Command, runID, expectedRemoteHead, expectedRegistryHead string) error {
+func runRecoverFinalizeCleanup(cmd *cobra.Command, runID, expectedRemoteHead, expectedRegistryHead, expectedPolicyHead string) error {
 	if runID == "" {
 		return commandExitError{code: 2, msg: "recover: --finalize-cleanup requires --run <id>"}
 	}
@@ -318,6 +322,19 @@ func runRecoverFinalizeCleanup(cmd *cobra.Command, runID, expectedRemoteHead, ex
 	if actualRegistryHead != expectedRegistryHead {
 		return commandExitError{code: 2, msg: fmt.Sprintf("recover: registry HEAD mismatch: have=%s want=%s", actualRegistryHead, expectedRegistryHead)}
 	}
+	actualPolicyHead := ""
+	if strings.TrimSpace(cfg.Repo.PolicyBranch) != "" {
+		if !cmd.Flags().Changed("policy-head") {
+			return commandExitError{code: 2, msg: "recover: --finalize-cleanup requires --policy-head when repo.policy_branch is configured"}
+		}
+		actualPolicyHead, err = recoverRemoteHead(remoteHeadCtx, repoRoot, cfg.Repo.PolicyBranch)
+		if err != nil {
+			return commandExitError{code: 2, msg: fmt.Sprintf("recover: policy_branch HEAD check failed: %v", err)}
+		}
+		if actualPolicyHead != expectedPolicyHead {
+			return commandExitError{code: 2, msg: fmt.Sprintf("recover: policy_branch HEAD mismatch: have=%s want=%s", actualPolicyHead, expectedPolicyHead)}
+		}
+	}
 	if err := step70_decide.FinalizeCleanup(runCtx, recoverIntentionStore{runCtx: runCtx}); err != nil {
 		return err
 	}
@@ -327,6 +344,7 @@ func runRecoverFinalizeCleanup(cmd *cobra.Command, runID, expectedRemoteHead, ex
 		RunID:        string(runCtx.RunID),
 		RemoteHead:   actualRemoteHead,
 		RegistryHead: actualRegistryHead,
+		PolicyHead:   actualPolicyHead,
 	})
 }
 
@@ -426,12 +444,9 @@ func runRecoverClearSentinel(cmd *cobra.Command, runID string) error {
 	if err != nil {
 		events = nil
 	}
-	if err := step70_decide.RecoverClearSentinel(runCtx); err != nil {
-		return err
-	}
 	if !lastRunEventIsTerminal(events) {
 		if pr, ok := recoverPRForClearSentinel(runCtx, events); ok {
-			_ = state.NewWriter(runCtx).Append(contracts.StateEntry{
+			if err := state.NewWriter(runCtx).Append(contracts.StateEntry{
 				Kind: contracts.StateKindCompleted,
 				Value: contracts.StateEntryCompleted{
 					Kind:   contracts.StateKindCompleted,
@@ -441,8 +456,13 @@ func runRecoverClearSentinel(cmd *cobra.Command, runID string) error {
 					Detail: "sentinel_manually_cleared",
 					At:     time.Now().UTC(),
 				},
-			})
+			}); err != nil {
+				return err
+			}
 		}
+	}
+	if err := step70_decide.RecoverClearSentinel(runCtx); err != nil {
+		return err
 	}
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(recoverActionOutput{
 		Event:    "recover_clear_sentinel",

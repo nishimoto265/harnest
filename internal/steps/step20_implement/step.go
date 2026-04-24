@@ -156,7 +156,10 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 		TaskPackage: run.TaskPackage,
 		Agent:       run.Agent,
 		OutputDir:   manifestPrefix(run.Pass, run.Agent),
-		TaskPrompt:  internalio.SanitizeForPromptEmbedding(run.TaskPackage.ReconstructedTaskPrompt),
+		TaskPrompt: internalio.SanitizeForPromptEmbedding(run.TaskPackage.ReconstructedTaskPrompt, internalio.SafeTextOptions{
+			Label: "task_brief",
+			Fence: true,
+		}),
 	})
 	if err != nil {
 		return err

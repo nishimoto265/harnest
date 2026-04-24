@@ -585,9 +585,10 @@ type stubStep40 struct {
 }
 
 func (s stubStep40) Run(ctx context.Context, run *StepRunContext) error {
+	registryPath := runScopedPolicyRegistryPath(run.IO)
 	_, err := step40_classify.Run(ctx, step40_classify.Config{
 		IO:           run.IO,
-		RegistryPath: run.IO.RulesRegistryPath(),
+		RegistryPath: registryPath,
 		TaskPackage:  run.TaskPackage,
 		Now:          time.Now,
 	})
@@ -605,7 +606,7 @@ func (s stubStep40) Run(ctx context.Context, run *StepRunContext) error {
 	if s.decode != nil {
 		req := stepio.Step40Request{
 			TaskPackage:  *run.TaskPackage,
-			RegistryPath: run.IO.RulesRegistryPath(),
+			RegistryPath: registryPath,
 		}
 		resp := stepio.Step40Response{
 			RunID:           run.IO.RunID,
@@ -629,6 +630,13 @@ func (s stubStep40) Run(ctx context.Context, run *StepRunContext) error {
 	}
 	run.Candidates = &candidates
 	return nil
+}
+
+func runScopedPolicyRegistryPath(runIO internalio.RunContext) string {
+	if _, err := os.Stat(runIO.PolicySnapshotRegistryPath()); err == nil {
+		return runIO.PolicySnapshotRegistryPath()
+	}
+	return runIO.RulesRegistryPath()
 }
 
 type stubStep70 struct{}

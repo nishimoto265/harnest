@@ -52,7 +52,10 @@ func sanitizeTaskPackage(pkg contracts.TaskPackage) contracts.TaskPackage {
 	safe := pkg
 	safe.Title = internalio.SanitizeForPromptEmbedding(pkg.Title)
 	safe.BestBranch = internalio.SanitizeForPromptEmbedding(pkg.BestBranch)
-	safe.ReconstructedTaskPrompt = internalio.SanitizeForPromptEmbedding(pkg.ReconstructedTaskPrompt)
+	safe.ReconstructedTaskPrompt = internalio.SanitizeForPromptEmbedding(pkg.ReconstructedTaskPrompt, internalio.SafeTextOptions{
+		Label: "task_brief",
+		Fence: true,
+	})
 
 	safe.Worktrees = make([]contracts.WorktreeAllocation, len(pkg.Worktrees))
 	for i, worktree := range pkg.Worktrees {
@@ -74,7 +77,10 @@ func sanitizeRulePayloads(rulePayloads []RulePayload) []RulePayload {
 			Kind:         internalio.SanitizeForPromptEmbedding(rule.Kind),
 			TargetRuleID: internalio.SanitizeForPromptEmbedding(rule.TargetRuleID),
 			Title:        internalio.SanitizeForPromptEmbedding(rule.Title),
-			ProposedBody: internalio.SanitizeForPromptEmbedding(rule.ProposedBody),
+			ProposedBody: internalio.SanitizeForPromptEmbedding(rule.ProposedBody, internalio.SafeTextOptions{
+				Label: "candidate_rule",
+				Fence: true,
+			}),
 		}
 	}
 	return safe

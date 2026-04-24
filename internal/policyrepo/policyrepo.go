@@ -39,36 +39,41 @@ type snapshot struct {
 	rules    map[string][]byte
 }
 
-type Options struct {
-	Remote string
-}
-
 func HydrateFromBranch(ctx context.Context, repoRoot, branch, runsBase string) error {
-	return HydrateFromBranchWithOptions(ctx, repoRoot, branch, runsBase, Options{})
+	_, err := hydrateSnapshotFromBranch(ctx, repoRoot, branch, runsBase, "")
+	return err
 }
 
-func HydrateFromBranchWithOptions(ctx context.Context, repoRoot, branch, runsBase string, opts Options) error {
+func HydrateAndSnapshotFromBranch(ctx context.Context, repoRoot, branch, runsBase, runDir string) error {
+	_, err := hydrateSnapshotFromBranch(ctx, repoRoot, branch, runsBase, runDir)
+	return err
+}
+
+func hydrateSnapshotFromBranch(ctx context.Context, repoRoot, branch, runsBase, runDir string) (snapshot, error) {
 	lock, err := internalio.AcquireFileLockContext(ctx, filepath.Join(runsBase, "promotion.lock"))
 	if err != nil {
-		return err
+		return snapshot{}, err
 	}
 	defer func() { _ = lock.Unlock() }()
-	remote := opts.remoteName()
-	if err := fetchBranch(ctx, repoRoot, remote, branch); err != nil {
-		return err
+	if err := fetchBranch(ctx, repoRoot, branch); err != nil {
+		return snapshot{}, err
 	}
-	snap, err := loadBranchSnapshot(ctx, repoRoot, remote, branch)
+	snap, err := loadBranchSnapshot(ctx, repoRoot, branch)
 	if err != nil {
-		return err
+		return snapshot{}, err
 	}
-	return applySnapshot(runsBase, snap)
+	if err := applySnapshot(runsBase, snap); err != nil {
+		return snapshot{}, err
+	}
+	if strings.TrimSpace(runDir) != "" {
+		if err := applySnapshotToRunDir(runDir, snap); err != nil {
+			return snapshot{}, err
+		}
+	}
+	return snap, nil
 }
 
 func PublishSnapshot(ctx context.Context, repoRoot, branch, expectedHead, runsBase, runID string) (string, error) {
-	return PublishSnapshotWithOptions(ctx, repoRoot, branch, expectedHead, runsBase, runID, Options{})
-}
-
-func PublishSnapshotWithOptions(ctx context.Context, repoRoot, branch, expectedHead, runsBase, runID string, opts Options) (string, error) {
 	if expectedHead == "" {
 		return "", fmt.Errorf("policyrepo: expected head is required for publish")
 	}
@@ -76,8 +81,7 @@ func PublishSnapshotWithOptions(ctx context.Context, repoRoot, branch, expectedH
 	if err != nil {
 		return "", err
 	}
-	remote := opts.remoteName()
-	if err := fetchBranch(ctx, repoRoot, remote, branch); err != nil {
+	if err := fetchBranch(ctx, repoRoot, branch); err != nil {
 		return "", err
 	}
 	tmpDir, err := os.MkdirTemp(runsBase, "policy-publish-"+sanitizeRunID(runID)+"-")
@@ -127,9 +131,6 @@ func PublishSnapshotWithOptions(ctx context.Context, repoRoot, branch, expectedH
 		return "", err
 	}
 	newHead := strings.TrimSpace(string(headBytes))
-	if _, err := runGit(ctx, processenv.SanitizeForNetworkExec(), "-C", repoRoot, "push", remote, fmt.Sprintf("%s:%s", newHead, branch), fmt.Sprintf("--force-with-lease=%s:%s", branch, expectedHead)); err != nil {
-		return "", fmt.Errorf("policyrepo: push policy snapshot: %w", err)
-	}
 	cleanupDone = true
 	if err := removeWorktree(repoRoot, tmpDir); err != nil {
 		removeErr := os.RemoveAll(tmpDir)
@@ -138,15 +139,18 @@ func PublishSnapshotWithOptions(ctx context.Context, repoRoot, branch, expectedH
 		}
 		return newHead, fmt.Errorf("policyrepo: remove policy worktree after publish: %w", err)
 	}
+	if _, err := runGit(ctx, processenv.SanitizeForNetworkExec(), "-C", repoRoot, "push", "origin", fmt.Sprintf("%s:%s", newHead, branch), fmt.Sprintf("--force-with-lease=%s:%s", branch, expectedHead)); err != nil {
+		return "", fmt.Errorf("policyrepo: push policy snapshot: %w", err)
+	}
 	return newHead, nil
 }
 
-func (o Options) remoteName() string {
-	remote := strings.TrimSpace(o.Remote)
-	if remote == "" {
-		return "origin"
+func applySnapshotToRunDir(runDir string, snap snapshot) error {
+	dst := filepath.Join(runDir, "policy")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
 	}
-	return remote
+	return applySnapshot(dst, snap)
 }
 
 func syncSnapshotToWorktree(worktreeDir string, snap snapshot) error {
@@ -182,20 +186,20 @@ func syncSnapshotToWorktree(worktreeDir string, snap snapshot) error {
 	return nil
 }
 
-func loadBranchSnapshot(ctx context.Context, repoRoot, remote, branch string) (snapshot, error) {
-	files, err := listPolicyFiles(ctx, repoRoot, remote, branch)
+func loadBranchSnapshot(ctx context.Context, repoRoot, branch string) (snapshot, error) {
+	files, err := listPolicyFiles(ctx, repoRoot, branch)
 	if err != nil {
 		return snapshot{}, err
 	}
 	if len(files) == 0 {
-		return snapshot{rules: map[string][]byte{}}, nil
+		return snapshot{}, fmt.Errorf("policyrepo: %s has no managed policy files", branch)
 	}
 	if !slices.Contains(files, RegistryRepoRelPath) {
 		return snapshot{}, fmt.Errorf("policyrepo: %s is missing %s", branch, RegistryRepoRelPath)
 	}
 	snap := snapshot{rules: make(map[string][]byte, len(files))}
 	for _, rel := range files {
-		data, err := readBranchFile(ctx, repoRoot, remote, branch, rel)
+		data, err := readBranchFile(ctx, repoRoot, branch, rel)
 		if err != nil {
 			return snapshot{}, err
 		}
@@ -259,8 +263,8 @@ func loadLocalSnapshot(runsBase string) (snapshot, error) {
 	return snap, nil
 }
 
-func listPolicyFiles(ctx context.Context, repoRoot, remote, branch string) ([]string, error) {
-	out, err := gitText(ctx, repoRoot, "ls-tree", "-r", "--name-only", remoteRef(remote, branch), "--", RepoDirName)
+func listPolicyFiles(ctx context.Context, repoRoot, branch string) ([]string, error) {
+	out, err := gitText(ctx, repoRoot, "ls-tree", "-r", "--name-only", "origin/"+branch, "--", RepoDirName)
 	if err != nil {
 		return nil, err
 	}
@@ -279,8 +283,8 @@ func listPolicyFiles(ctx context.Context, repoRoot, remote, branch string) ([]st
 	return files, nil
 }
 
-func readBranchFile(ctx context.Context, repoRoot, remote, branch, rel string) ([]byte, error) {
-	out, err := gitRaw(ctx, repoRoot, "show", remoteRef(remote, branch)+":"+rel)
+func readBranchFile(ctx context.Context, repoRoot, branch, rel string) ([]byte, error) {
+	out, err := gitRaw(ctx, repoRoot, "show", "origin/"+branch+":"+rel)
 	if err != nil {
 		return nil, err
 	}
@@ -440,16 +444,12 @@ func moveSnapshotIntoPlace(runsBase, stageDir string, snap snapshot) error {
 	return nil
 }
 
-func fetchBranch(ctx context.Context, repoRoot, remote, branch string) error {
-	_, err := runGit(ctx, processenv.SanitizeForNetworkExec(), "-C", repoRoot, "fetch", "--no-tags", remote, branch)
+func fetchBranch(ctx context.Context, repoRoot, branch string) error {
+	_, err := runGit(ctx, processenv.SanitizeForNetworkExec(), "-C", repoRoot, "fetch", "--no-tags", "origin", branch)
 	if err != nil {
 		return fmt.Errorf("policyrepo: fetch branch %s: %w", branch, err)
 	}
 	return nil
-}
-
-func remoteRef(remote, branch string) string {
-	return strings.TrimSpace(remote) + "/" + branch
 }
 
 func gitRaw(ctx context.Context, repoRoot string, args ...string) ([]byte, error) {

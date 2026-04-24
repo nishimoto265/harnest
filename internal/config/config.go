@@ -224,14 +224,10 @@ func (c Config) namespaceStatePath(path, leaf string) string {
 	if !ok {
 		return path
 	}
-	if filepath.Base(path) != leaf {
+	if pathContainsComponent(path, namespace) {
 		return path
 	}
-	parent := filepath.Dir(path)
-	if filepath.Base(parent) == namespace {
-		return path
-	}
-	return filepath.Join(parent, namespace, leaf)
+	return filepath.Join(filepath.Dir(path), namespace, filepath.Base(path))
 }
 
 func (c Config) repoStateNamespace() (string, bool) {
@@ -264,10 +260,21 @@ func sanitizeRepoNamespace(repo string) string {
 	return strings.Trim(b.String(), "-._")
 }
 
-func (c Config) ProcessedPath() (string, error) {
-	if c.Paths.StateFile != "" {
-		return c.resolvePath(c.Paths.StateFile)
+func pathContainsComponent(path, component string) bool {
+	path = filepath.Clean(path)
+	for {
+		if filepath.Base(path) == component {
+			return true
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return false
+		}
+		path = parent
 	}
+}
+
+func (c Config) ProcessedPath() (string, error) {
 	runsBase, err := c.RunsBase()
 	if err != nil {
 		return "", err
@@ -335,6 +342,9 @@ func (c Config) Validate() error {
 	}
 	if c.Worktree.Base == "" && c.WorktreeBasePath == "" {
 		return errors.New("config: WorktreeBase is required")
+	}
+	if err := c.rejectConflictingPathAliases(); err != nil {
+		return err
 	}
 	if c.RegistryCriticalThreshold <= c.RegistryHighThreshold {
 		return fmt.Errorf(
@@ -438,33 +448,63 @@ func (c *Config) loadAgentFile() error {
 }
 
 func (c Config) legacyImplementerBinary() string {
-	if c.Agents.Implementer != "" {
-		return c.Agents.Implementer
-	}
 	if c.ClaudeCLIPath != "" {
 		return c.ClaudeCLIPath
+	}
+	if c.Agents.Implementer != "" {
+		return c.Agents.Implementer
 	}
 	return "claude"
 }
 
 func (c Config) legacyJudgePrimaryBinary() string {
-	if c.Agents.JudgePrimary != "" {
-		return c.Agents.JudgePrimary
-	}
 	if c.ClaudeCLIPath != "" {
 		return c.ClaudeCLIPath
+	}
+	if c.Agents.JudgePrimary != "" {
+		return c.Agents.JudgePrimary
 	}
 	return "claude"
 }
 
 func (c Config) legacyJudgeSecondaryBinary() string {
-	if c.Agents.JudgeSecondary != "" {
-		return c.Agents.JudgeSecondary
-	}
 	if c.CodexCLIPath != "" {
 		return c.CodexCLIPath
 	}
+	if c.Agents.JudgeSecondary != "" {
+		return c.Agents.JudgeSecondary
+	}
 	return "codex"
+}
+
+func (c Config) rejectConflictingPathAliases() error {
+	if c.Paths.Runs != "" && c.RunsBasePath != "" {
+		if same, err := c.sameResolvedPath(c.Paths.Runs, c.RunsBasePath); err != nil {
+			return err
+		} else if !same {
+			return errors.New("config: paths.runs and runs_base both set different paths; keep only paths.runs")
+		}
+	}
+	if c.Worktree.Base != "" && c.WorktreeBasePath != "" {
+		if same, err := c.sameResolvedPath(c.Worktree.Base, c.WorktreeBasePath); err != nil {
+			return err
+		} else if !same {
+			return errors.New("config: worktree.base and worktree_base both set different paths; keep only worktree.base")
+		}
+	}
+	return nil
+}
+
+func (c Config) sameResolvedPath(left, right string) (bool, error) {
+	resolvedLeft, err := c.resolvePath(left)
+	if err != nil {
+		return false, err
+	}
+	resolvedRight, err := c.resolvePath(right)
+	if err != nil {
+		return false, err
+	}
+	return resolvedLeft == resolvedRight, nil
 }
 
 func (c Config) resolveRepoRoot() (string, error) {

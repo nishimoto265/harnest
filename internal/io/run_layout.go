@@ -123,6 +123,14 @@ func (ctx RunContext) RulesRegistryPath() string {
 	return filepath.Join(ctx.RunsBase, "rules-registry.jsonl")
 }
 
+func (ctx RunContext) PolicySnapshotRegistryPath() string {
+	return filepath.Join(ctx.RunDir(), "policy", "rules-registry.jsonl")
+}
+
+func (ctx RunContext) PolicySnapshotRulesDir() string {
+	return filepath.Join(ctx.RunDir(), "policy", "rules")
+}
+
 func (ctx RunContext) RulesIdempotencyIndexPath() string {
 	return filepath.Join(ctx.RunsBase, "rules-idempotency-index.jsonl")
 }

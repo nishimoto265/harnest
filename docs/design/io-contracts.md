@@ -445,10 +445,10 @@ scoring は 2 層:
 ```go
 import autoio "github.com/nishimoto265/auto-improve/internal/io"
 
-safe, err := autoio.SanitizeForPromptEmbedding(pkg.ReconstructedTaskPrompt, autoio.SafeTextOptions{
+safe := autoio.SanitizeForPromptEmbedding(pkg.ReconstructedTaskPrompt, autoio.SafeTextOptions{
     Label: "task_prompt",
+    Fence: true,
 })
-if err != nil { return err }
 prompt := fmt.Sprintf(`
 You are a code judge. Consider this task description:
 %s
@@ -1184,7 +1184,7 @@ closed variant set: `adopt | reject | noop | rollback`
 refuse cell はすべて stderr に safe matrix を print し operator が手動判断。operator 向け追加オプション(rev9、Codex rev8 R2 対応):
 - `auto-improve recover --run <id> --inspect`: promotion.lock 取得後 read-only で全 state(intention / decision / sentinel / remote HEAD / registry head)を print、終了時 lock release、副作用無し
 - `auto-improve recover --run <id> --mark-manual-abort`: decision.json を `action: 'rollback', rollback_reason: 'manual_abort_pending_cleanup'` で書込 + sentinel を **`<runs_base>/needs-recovery/<run_id>.aborted.json` に rename**(block 継続) + processed `needs_manual_recovery { pr, run_id, step: '70', reason: 'manual_abort_pending_cleanup', failed_step: '70', at }` append。branch/registry 修復は operator 手動で、**sentinel は削除しない**(未修復 state で次 promotion が走るのを防止)。
-- `auto-improve recover --run <id> --finalize-cleanup --remote-head <sha> --registry-head <sha>`: operator が branch/registry を手動で整合させた後のみ使う。**両方 SHA が必須**(rev11、Codex rev10 R2 対応)。promotion.lock 下で remote HEAD と registry head の両方を再確認、両方一致で `.aborted.json` 削除、pipeline 復旧。片方でも不一致なら refuse
+- `auto-improve recover --run <id> --finalize-cleanup --remote-head <sha> --registry-head <sha> [--policy-head <sha>]`: operator が branch/registry/policy を手動で整合させた後のみ使う。**remote / registry SHA は必須**(rev11、Codex rev10 R2 対応)。`repo.policy_branch` 設定時は **policy SHA も必須**。promotion.lock 下で remote HEAD / registry head / policy_branch HEAD を再確認、全て一致で `.aborted.json` 削除、pipeline 復旧。片方でも不一致なら refuse
 - `--clear-sentinel`: sentinel(`<run_id>.json` または `<run_id>.aborted.json`)削除(intention は手動で整合を取った後の最終手段、上記 `--finalize-cleanup` を推奨)
 
 **safe matrix refuse cell の contract** (rev10 明文化):
@@ -1199,7 +1199,7 @@ refuse cell はすべて stderr に safe matrix を print し operator が手動
 | `--rollback` | safe matrix allowed cell(§Recover safety matrix) | `.json` 削除 | 削除 | `action: 'rollback'` 書込 | `rollback` append | block 解除、次 PR 進行可 |
 | `--adopt-anyway` | safe matrix allowed cell(HEAD==target_sha, idempotency hit) | `.json` 削除 | 削除(stage=decision_written 相当から resume 実行後) | `action: 'adopt'` 書込 | `promoted` append | block 解除、次 PR 進行可 |
 | `--mark-manual-abort` | 任意(inspect 後の最終手段) | `.json` → `.aborted.json` rename(**削除せず**) | 保持(stage=needs_manual_recovery、recovery_reason=`manual_abort_pending_cleanup`、failed_step=`70` 上書き) | `action: 'rollback', rollback_reason: 'manual_abort_pending_cleanup'` 書込 | `needs_manual_recovery { pr, run_id, step: '70', reason: 'manual_abort_pending_cleanup', failed_step: '70', at }` append | block 継続(operator が手動修復を行う状態) |
-| `--finalize-cleanup --remote-head <sha> --registry-head <sha>` | `.aborted.json` 存在 AND operator が渡した両 SHA が現実と一致 | `.aborted.json` 削除 | 削除 | 不変(既に rollback) | `completed { pr, run_id, step: '70', detail: 'manual_cleanup_finalized', at }` append | block 解除、次 PR 進行可 |
+| `--finalize-cleanup --remote-head <sha> --registry-head <sha> [--policy-head <sha>]` | `.aborted.json` 存在 AND operator が渡した SHA が現実と一致(`repo.policy_branch` 設定時は policy SHA も一致) | `.aborted.json` 削除 | 削除 | 不変(既に rollback) | `completed { pr, run_id, step: '70', detail: 'manual_cleanup_finalized', at }` append | block 解除、次 PR 進行可 |
 | `--clear-sentinel` | 最終手段、operator 全責任 | `.json` or `.aborted.json` 削除 | 不変 | 不変 | **条件付き append**: `processed.jsonl` の run_id 末尾 event が terminal (`needs_manual_recovery` 等) なら append しない(二重 terminal 禁止)。末尾が non-terminal なら `completed { pr, run_id, step, detail: 'sentinel_manually_cleared', at }` を append。いずれも resume は blocked(sentinel 削除で detect 再 queue もされない) | block 解除、整合性は operator 保証 |
 
 refuse cell は全て「stderr に safe matrix + suggested_action を print、state 変更なし」で戻る。

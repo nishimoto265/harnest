@@ -441,13 +441,30 @@ func TestRecoverFinalizeCleanupVerifiesHeadsAndClearsAbortedSentinel(t *testing.
 		},
 	}))
 
-	writeTestConfig(t, root, runsBase, worktreeBase)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "config.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+root+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: auto-improve/best\n"+
+			"  policy_branch: auto-improve/policy\n"+
+			"paths:\n"+
+			"  runs: "+runsBase+"\n"+
+			"worktree:\n"+
+			"  base: "+worktreeBase+"\n",
+	), 0o644))
 	originalRemoteHead := recoverRemoteHead
 	originalRegistryHead := recoverRegistryHead
 	recoverRemoteHead = func(_ context.Context, repoRoot, branch string) (string, error) {
 		assert.Equal(t, root, repoRoot)
-		assert.Equal(t, "auto-improve/best", branch)
-		return strings.Repeat("d", 40), nil
+		switch branch {
+		case "auto-improve/best":
+			return strings.Repeat("d", 40), nil
+		case "auto-improve/policy":
+			return strings.Repeat("f", 40), nil
+		default:
+			t.Fatalf("unexpected branch: %s", branch)
+			return "", nil
+		}
 	}
 	recoverRegistryHead = func(string) (string, error) {
 		return strings.Repeat("e", 64), nil
@@ -472,6 +489,7 @@ func TestRecoverFinalizeCleanupVerifiesHeadsAndClearsAbortedSentinel(t *testing.
 		"--finalize-cleanup",
 		"--remote-head", strings.Repeat("d", 40),
 		"--registry-head", strings.Repeat("e", 64),
+		"--policy-head", strings.Repeat("f", 40),
 	})
 	require.NoError(t, cmd.Execute())
 
@@ -829,11 +847,13 @@ func TestRecoverClearSentinelAllowsMissingTaskPackageAndCandidates(t *testing.T)
 }
 
 type stubPipelineRunner struct {
-	prs []int
+	prs  []int
+	opts []orchestrator.RunOptions
 }
 
-func (r *stubPipelineRunner) Run(_ context.Context, pr int, _ orchestrator.RunOptions) error {
+func (r *stubPipelineRunner) Run(_ context.Context, pr int, opts orchestrator.RunOptions) error {
 	r.prs = append(r.prs, pr)
+	r.opts = append(r.opts, opts)
 	return nil
 }
 
@@ -949,6 +969,67 @@ func TestRunDetectLoopUsesNamespacedProcessedPathWhenEnabled(t *testing.T) {
 	cmd.SetArgs([]string{"run", "--detect-loop"})
 	require.NoError(t, cmd.Execute())
 	assert.Equal(t, []int{201}, stub.prs)
+}
+
+func TestRunDetectLoopDrainsResumeQueueBeforeFreshDetection(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "owner__repo", "runs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "config.yaml"), []byte(
+		"repo:\n"+
+			"  github: owner/repo\n"+
+			"  root: "+root+"\n"+
+			"  default_branch: develop\n"+
+			"  best_branch: auto-improve/best\n"+
+			"paths:\n"+
+			"  runs: "+runsBase+"\n"+
+			"worktree:\n"+
+			"  base: "+worktreeBase+"\n",
+	), 0o644))
+	runID := contracts.RunID("2026-04-21-PR301-abcdef0")
+	ctx := mustNewRunCtx(t, runID, filepath.Join(root, "owner__repo", "runs"), filepath.Join(root, "owner__repo", "worktrees"))
+	require.NoError(t, state.NewWriter(ctx).Append(contracts.StateEntry{
+		Kind: contracts.StateKindInterrupted,
+		Value: contracts.StateEntryInterrupted{
+			Kind:   contracts.StateKindInterrupted,
+			PR:     301,
+			RunID:  runID,
+			Step:   contracts.FailedStep20,
+			Reason: contracts.InterruptedReasonUnknown,
+			At:     time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}))
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	stub := &stubPipelineRunner{}
+	originalNewPipelineRunner := newPipelineRunner
+	originalDetectMergedPRs := detectMergedPRs
+	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
+		return stub, nil
+	}
+	detectMergedPRs = func(_ context.Context, _ config.Config, _ string) ([]detect.MergedPR, error) {
+		assert.Equal(t, []int{301}, stub.prs)
+		require.Len(t, stub.opts, 1)
+		assert.Equal(t, runID, stub.opts[0].RunID)
+		return []detect.MergedPR{{Number: 302}}, nil
+	}
+	t.Cleanup(func() {
+		newPipelineRunner = originalNewPipelineRunner
+		detectMergedPRs = originalDetectMergedPRs
+	})
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--detect-loop"})
+	require.NoError(t, cmd.Execute())
+	assert.Equal(t, []int{301, 302}, stub.prs)
+	require.Len(t, stub.opts, 2)
+	assert.Equal(t, runID, stub.opts[0].RunID)
+	assert.Empty(t, stub.opts[1].RunID)
 }
 
 func TestSunsetCommandInvokesRunner(t *testing.T) {

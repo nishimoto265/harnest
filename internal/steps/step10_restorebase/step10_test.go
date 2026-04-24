@@ -506,6 +506,33 @@ func TestRun_TaskPromptSourceIssueSkipsDiffFetch(t *testing.T) {
 	assert.Zero(t, git.diffCalls)
 }
 
+func TestRun_TaskPromptSourceIssueRequiresUsableIssue(t *testing.T) {
+	rc := newRunCtx(t)
+	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
+	runner := &Runner{
+		GH: stubGH{info: PRInfo{
+			Number:         42,
+			Title:          "improve X",
+			Body:           "see linked issue",
+			MergeCommitOID: testMergeCommitOID,
+			LinkedIssues:   []LinkedIssue{{Number: 7, Title: "issue title", Body: "[issue #7: fetch failed]"}},
+		}},
+		Git: git,
+	}
+
+	_, err := runner.Run(context.Background(), Input{
+		PR:               42,
+		BestBranch:       "auto-improve/best",
+		TaskPromptSource: "issue",
+		RepoRoot:         t.TempDir(),
+		RunCtx:           rc,
+	})
+	require.ErrorContains(t, err, "task_prompt.source=issue requires at least one usable linked issue")
+	assert.Zero(t, git.changedFilesCalls)
+	assert.Zero(t, git.diffCalls)
+}
+
 func TestRun_TaskPromptSourceDiffSynthRequiresImmutableMergedDiff(t *testing.T) {
 	rc := newRunCtx(t)
 	git := newStubGit()
@@ -1226,6 +1253,19 @@ func TestSynthesizeTaskBrief_AutoIgnoresPlaceholderIssuesAndFallsBackToDiff(t *t
 	assert.NotContains(t, got, "### Linked Issues")
 	assert.Contains(t, got, "### Changed Tests")
 	assert.Contains(t, got, "spec/bar_spec.rb")
+}
+
+func TestSynthesizeTaskBrief_DiffSynthUsesDiffEvidenceAsGoal(t *testing.T) {
+	got := SynthesizeTaskBrief("diff_synth", TaskBriefInput{
+		PR:           42,
+		Title:        "misleading title",
+		Body:         "Misleading PR body.",
+		ChangedFiles: []string{"tests/test_api.py", "app/service.py"},
+		Diff:         "diff --git a/tests/test_api.py b/tests/test_api.py\n+assert True\n",
+	})
+	assert.Contains(t, got, "- Recreate the intended behavior covered by the changed tests and merged diff evidence.")
+	assert.Contains(t, got, "### Weak Supporting PR Context")
+	assert.NotContains(t, got, "### PR Body")
 }
 
 func TestTruncateUTF8Bytes_PreservesRuneBoundaries(t *testing.T) {
