@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -91,6 +92,9 @@ func ResumeIfNeeded(ctx context.Context, opts ResumeOptions) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	if err := validateResumeOptions(opts); err != nil {
+		return 0, err
+	}
 	state, ok, err := opts.LoadState(opts.AgentDir)
 	if err != nil || !ok {
 		return 0, err
@@ -134,6 +138,37 @@ func ResumeIfNeeded(ctx context.Context, opts ResumeOptions) (int, error) {
 	return nextRetry, nil
 }
 
+func validateResumeOptions(opts ResumeOptions) error {
+	if strings.TrimSpace(opts.StepName) == "" {
+		return errors.New("implementrescue: resume missing StepName")
+	}
+	if strings.TrimSpace(opts.AgentDir) == "" {
+		return errors.New("implementrescue: resume missing AgentDir")
+	}
+	if opts.LoadState == nil {
+		return errors.New("implementrescue: resume missing LoadState")
+	}
+	if opts.HeartbeatStale == nil {
+		return errors.New("implementrescue: resume missing HeartbeatStale")
+	}
+	if opts.ShouldAttemptRescue == nil {
+		return errors.New("implementrescue: resume missing ShouldAttemptRescue")
+	}
+	if opts.EnsureWorktreeForRescue == nil {
+		return errors.New("implementrescue: resume missing EnsureWorktreeForRescue")
+	}
+	if opts.PerformRescue == nil {
+		return errors.New("implementrescue: resume missing PerformRescue")
+	}
+	if opts.LeaseActiveError == nil {
+		return errors.New("implementrescue: resume missing LeaseActiveError")
+	}
+	if opts.NewRescueExhaustedError == nil {
+		return errors.New("implementrescue: resume missing NewRescueExhaustedError")
+	}
+	return nil
+}
+
 func MaxRetries(runCfg, defaultCfg *config.Config, fallback int) int {
 	switch {
 	case runCfg != nil && runCfg.RescueMaxRetries > 0:
@@ -169,6 +204,9 @@ type PerformOptions struct {
 
 func Perform(ctx context.Context, opts PerformOptions) (int, error) {
 	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := validatePerformOptions(opts); err != nil {
 		return 0, err
 	}
 	if err := opts.RunIO.ValidateWorktreeAllocation(opts.Allocation); err != nil {
@@ -236,6 +274,52 @@ func Perform(ctx context.Context, opts PerformOptions) (int, error) {
 	}
 
 	return opts.FinishState(opts.AgentDir, opts.State, nextRetry)
+}
+
+func validatePerformOptions(opts PerformOptions) error {
+	if strings.TrimSpace(opts.StepName) == "" {
+		return errors.New("implementrescue: perform missing StepName")
+	}
+	if strings.TrimSpace(opts.RunID) == "" {
+		return errors.New("implementrescue: perform missing RunID")
+	}
+	if strings.TrimSpace(opts.AgentDir) == "" {
+		return errors.New("implementrescue: perform missing AgentDir")
+	}
+	if strings.TrimSpace(opts.RescuedDirName) == "" {
+		return errors.New("implementrescue: perform missing RescuedDirName")
+	}
+	if opts.EnsureDir == nil {
+		return errors.New("implementrescue: perform missing EnsureDir")
+	}
+	if opts.Quiesce == nil {
+		return errors.New("implementrescue: perform missing Quiesce")
+	}
+	if opts.GitOutput == nil {
+		return errors.New("implementrescue: perform missing GitOutput")
+	}
+	if opts.WriteGitOutput == nil {
+		return errors.New("implementrescue: perform missing WriteGitOutput")
+	}
+	if opts.WriteBundle == nil {
+		return errors.New("implementrescue: perform missing WriteBundle")
+	}
+	if opts.CopyUntracked == nil {
+		return errors.New("implementrescue: perform missing CopyUntracked")
+	}
+	if opts.WriteIgnored == nil {
+		return errors.New("implementrescue: perform missing WriteIgnored")
+	}
+	if opts.FileDigest == nil {
+		return errors.New("implementrescue: perform missing FileDigest")
+	}
+	if opts.VerifyState == nil {
+		return errors.New("implementrescue: perform missing VerifyState")
+	}
+	if opts.FinishState == nil {
+		return errors.New("implementrescue: perform missing FinishState")
+	}
+	return nil
 }
 
 func CaptureArtifacts(ctx context.Context, opts PerformOptions, rescueDir, headSHA, dirtyFingerprint string, nextRetry int) error {
@@ -496,6 +580,25 @@ func CopyUntrackedFilesWithBudget(ctx context.Context, stepName, repoPath, rescu
 	}
 	artifacts = append(artifacts, agentrunner.RescueArtifactDigest{Path: "untracked-symlinks.txt", SHA256: digest})
 	return artifacts, nil
+}
+
+func WriteIgnoredList(ctx context.Context, repoPath, dest string, gitOutputBytes GitOutputBytesFunc) error {
+	output, err := gitOutputBytes(ctx, repoPath, "ls-files", "--others", "-i", "--exclude-standard", "-z")
+	if err != nil {
+		return err
+	}
+	entries := strings.Split(strings.Trim(string(output), "\x00"), "\x00")
+	lines := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry == "" {
+			continue
+		}
+		lines = append(lines, strconv.Quote(entry))
+	}
+	return internalio.WriteAtomic(dest, []byte(strings.Join(lines, "\n")))
 }
 
 func FinishState(agentDir string, state State, nextRetry int, heartbeatPath func(string) string, saveState func(string, State) error) (int, error) {

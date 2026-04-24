@@ -198,6 +198,27 @@ func writeRescueGitWrapper(t *testing.T, dir, body string) {
 	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
 }
 
+func TestWriteIgnoredList_QuotesIgnoredFilenamesWithNewlines(t *testing.T) {
+	fx := newTestFixture(t, 5)
+	allocation, err := worktreeFor(fx.run.TaskPackage, 1, "a1")
+	require.NoError(t, err)
+
+	ignoredName := "ignored\nfile.txt"
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ".gitignore"), []byte("ignored*file.txt\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ignoredName), []byte("secret\n"), 0o644))
+
+	dest := filepath.Join(t.TempDir(), "ignored.txt")
+	require.NoError(t, writeIgnoredList(context.Background(), allocation.Path, dest))
+
+	data, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	require.Len(t, lines, 1)
+	unquoted, err := strconv.Unquote(lines[0])
+	require.NoError(t, err)
+	assert.Equal(t, ignoredName, unquoted)
+}
+
 func rescueDirEntries(t *testing.T, agentDir string) []os.DirEntry {
 	t.Helper()
 	entries, err := os.ReadDir(filepath.Join(agentDir, rescuedDirName))

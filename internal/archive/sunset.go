@@ -998,7 +998,7 @@ func syncRegistryIndex(runsBase, registryPath string, entry contracts.RuleRegist
 		slog.Warn("archive: failed to inspect registry size for index sync", slog.String("error", err.Error()))
 		return nil
 	}
-	if count < 1500 {
+	if count < internalio.RegistryIndexSyncAt {
 		return nil
 	}
 	indexPath := filepath.Join(runsBase, "rules-idempotency-index.jsonl")
@@ -1009,38 +1009,8 @@ func syncRegistryIndex(runsBase, registryPath string, entry contracts.RuleRegist
 }
 
 func registryLookupLines(path string) ([]registryLine, error) {
-	lines, err := readRegistryLines(path)
-	if err != nil {
-		return nil, err
-	}
-	if len(lines) < 1800 {
-		start := 0
-		if len(lines) > internalio.RegistryTailScanN {
-			start = len(lines) - internalio.RegistryTailScanN
-		}
-		return lines[start:], nil
-	}
 	indexPath := filepath.Join(filepath.Dir(path), "rules-idempotency-index.jsonl")
-	indexEntries, _, err := internalio.EnsureVerifiedIdempotencyIndex(path, indexPath)
-	if err != nil {
-		slog.Warn("archive: idempotency index unavailable; falling back to tail scan", slog.String("error", err.Error()))
-		start := 0
-		if len(lines) > internalio.RegistryTailScanN {
-			start = len(lines) - internalio.RegistryTailScanN
-		}
-		return lines[start:], nil
-	}
-	allowed := make(map[int64]string, len(indexEntries))
-	for _, entry := range indexEntries {
-		allowed[entry.RegistryOffset] = entry.RegistrySha256
-	}
-	filtered := make([]registryLine, 0, len(lines))
-	for _, line := range lines {
-		if sha, ok := allowed[line.Offset]; ok && sha == line.Sha256 {
-			filtered = append(filtered, line)
-		}
-	}
-	return filtered, nil
+	return internalio.RegistryLookupLinesByIdempotencyIndex(path, indexPath)
 }
 
 func readRegistryLines(path string) ([]registryLine, error) {
@@ -1048,9 +1018,5 @@ func readRegistryLines(path string) ([]registryLine, error) {
 }
 
 func registryLineCount(path string) (int, error) {
-	lines, err := readRegistryLines(path)
-	if err != nil {
-		return 0, err
-	}
-	return len(lines), nil
+	return internalio.RegistryLineCount(path)
 }

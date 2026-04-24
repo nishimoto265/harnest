@@ -134,11 +134,11 @@ func SanitizeForNetworkExec(extra ...string) []string {
 	return sanitize(extra, networkAllowlist)
 }
 
-// SanitizeForAgentExec is the local subprocess profile plus an explicit Git
-// safety profile. Agents may invoke git themselves, so do not let them inherit
-// operator global/system git config or git extension-point env.
+// SanitizeForAgentExec is the local subprocess profile plus provider auth and
+// an explicit Git safety profile. Agents may invoke git themselves, so do not
+// let them inherit operator global/system git config or git extension-point env.
 func SanitizeForAgentExec(extra ...string) []string {
-	return appendSafeGitProfile(SanitizeForLocalExec(extra...))
+	return appendSafeGitProfile(sanitize(extra, agentAllowlist))
 }
 
 // GitLocalEnv returns the hardened env for local harness git plumbing.
@@ -218,6 +218,26 @@ func localAllowlist(key string) bool {
 		strings.HasPrefix(key, "PROMPT_"):
 		return true
 	case key == "REAL_GIT":
+		return true
+	default:
+		return false
+	}
+}
+
+func agentAllowlist(key string) bool {
+	if localAllowlist(key) {
+		return true
+	}
+	switch key {
+	case "ANTHROPIC_API_KEY",
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_BASE_URL",
+		"CLAUDE_CODE_OAUTH_TOKEN",
+		"OPENAI_API_KEY",
+		"OPENAI_BASE_URL",
+		"OPENAI_ORG_ID",
+		"OPENAI_ORGANIZATION",
+		"OPENAI_PROJECT":
 		return true
 	default:
 		return false

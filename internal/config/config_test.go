@@ -169,6 +169,23 @@ worktree:
 	assert.ErrorContains(t, err, "repo.default_branch is required")
 }
 
+func TestLoadConfig_RejectsMissingBestBranchWhenRepoGitHubSet(t *testing.T) {
+	path := writeConfigFixture(t, `
+repo:
+  github: "owner/repo"
+  root: "/tmp/auto-improve"
+  default_branch: "main"
+paths:
+  runs: "/tmp/auto-improve/runs"
+worktree:
+  base: "/tmp/auto-improve/worktrees"
+`)
+
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "repo.best_branch is required")
+}
+
 func TestLoadConfig_RejectsPolicyBranchMatchingDefaultOrBestBranch(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

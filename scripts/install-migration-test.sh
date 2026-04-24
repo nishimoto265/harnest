@@ -19,6 +19,26 @@ mkdir -p "$repo_root" "$install_dir" "$plist_dir" "$fake_bin"
 printf 'paths:\n  runs: "%s"\nworktree:\n  base: "%s"\n' "$TMP_ROOT/runs" "$TMP_ROOT/worktrees" >"$repo_root/config.yaml"
 printf 'legacy plist\n' >"$plist_dir/com.nishimoto265.auto-improve.plist"
 
+write_legacy_plist_for_repo() {
+  local path="$1"
+  local root="$2"
+  if [[ -d "$root" ]]; then
+    root="$(cd "$root" && pwd -P)"
+  fi
+  cat >"$path" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nishimoto265.auto-improve</string>
+  <key>WorkingDirectory</key>
+  <string>$root</string>
+</dict>
+</plist>
+EOF
+}
+
 cat >"$payload" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "preflight" ]]; then
@@ -179,7 +199,7 @@ if grep -F "com.nishimoto265.auto-improve.plist" "$standalone_log" >/dev/null 2>
   exit 1
 fi
 
-printf 'legacy plist\n' >"$legacy_plist"
+write_legacy_plist_for_repo "$legacy_plist" "$repo_root"
 set +e
 PATH="$fake_bin:$PATH" \
 INSTALL_DIR="$install_dir" \
@@ -203,13 +223,13 @@ if [[ "$status" -ne 4 ]]; then
   echo "expected install.sh legacy bootout failure to exit 4, got $status" >&2
   exit 1
 fi
-if [[ "$(cat "$legacy_plist")" != "legacy plist" ]]; then
+if [[ ! -f "$legacy_plist" ]]; then
   cat "$install_output_path" >&2
   echo "legacy plist was removed even though bootout failed and the job was still loaded" >&2
   exit 1
 fi
 
-printf 'legacy plist\n' >"$legacy_plist"
+write_legacy_plist_for_repo "$legacy_plist" "$repo_root"
 set +e
 PATH="$fake_bin:$PATH" \
 INSTALL_DIR="$install_dir" \
@@ -235,6 +255,40 @@ fi
 if [[ -f "$legacy_plist" ]]; then
   cat "$install_output_path" >&2
   echo "legacy plist was not removed after bootout failed with the label verified unloaded" >&2
+  exit 1
+fi
+
+foreign_log="$TMP_ROOT/foreign-legacy-launchctl.log"
+write_legacy_plist_for_repo "$legacy_plist" "$TMP_ROOT/foreign-repo"
+set +e
+PATH="$fake_bin:$PATH" \
+INSTALL_DIR="$install_dir" \
+REPO_ROOT="$repo_root" \
+AUTO_IMPROVE_RELEASE_URL="https://example.invalid/auto-improve" \
+AUTO_IMPROVE_EXPECTED_SHA256="$expected_sha" \
+AUTO_IMPROVE_LAUNCHD_USER="testuser" \
+AUTO_IMPROVE_LAUNCHD_HOME="$home_dir" \
+AUTO_IMPROVE_PLIST_DIR="$plist_dir" \
+AUTO_IMPROVE_INSTANCE="foreign-legacy" \
+AUTO_IMPROVE_TEST_PAYLOAD="$payload" \
+AUTO_IMPROVE_TEST_LAUNCHCTL_LOG="$foreign_log" \
+bash "$ROOT/scripts/install.sh" >"$install_output_path" 2>&1
+status=$?
+set -e
+
+if [[ "$status" -ne 0 ]]; then
+  cat "$install_output_path" >&2
+  echo "expected install.sh to keep foreign legacy plist and succeed, got $status" >&2
+  exit 1
+fi
+if [[ ! -f "$legacy_plist" ]]; then
+  cat "$install_output_path" >&2
+  echo "foreign legacy plist was removed" >&2
+  exit 1
+fi
+if grep -F "com.nishimoto265.auto-improve.plist" "$foreign_log" >/dev/null 2>&1; then
+  cat "$foreign_log" >&2
+  echo "foreign legacy launchd job was touched" >&2
   exit 1
 fi
 

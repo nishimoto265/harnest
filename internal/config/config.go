@@ -369,8 +369,11 @@ func (c Config) Validate() error {
 	if c.Paths.RulesRegistry != "" {
 		return errors.New("config: paths.rules_registry override is not supported")
 	}
-	if c.Repo.GitHub != "" && c.Repo.DefaultBranch == "" {
+	if strings.TrimSpace(c.Repo.GitHub) != "" && strings.TrimSpace(c.Repo.DefaultBranch) == "" {
 		return errors.New("config: repo.default_branch is required when repo.github is set")
+	}
+	if strings.TrimSpace(c.Repo.GitHub) != "" && strings.TrimSpace(c.Repo.BestBranch) == "" {
+		return errors.New("config: repo.best_branch is required when repo.github is set")
 	}
 	if policyBranch := strings.TrimSpace(c.Repo.PolicyBranch); policyBranch != "" {
 		if policyBranch == strings.TrimSpace(c.Repo.BestBranch) {

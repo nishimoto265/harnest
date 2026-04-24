@@ -51,10 +51,7 @@ const providerSmokeTimeout = 5 * time.Second
 
 func New() Checker {
 	return NewWithDependencies(Dependencies{
-		LookPath:      processenv.TrustedLookPath,
-		Run:           runSanitizedNetworkCommand,
-		RunGitLocal:   runSanitizedGitLocalCommand,
-		RunGitNetwork: runSanitizedGitNetworkCommand,
+		LookPath: processenv.TrustedLookPath,
 	})
 }
 
@@ -86,7 +83,7 @@ func NewWithDependencies(deps Dependencies) Checker {
 		if customRun {
 			deps.RunProviderSmoke = deps.Run
 		} else {
-			deps.RunProviderSmoke = runSanitizedLocalCommand
+			deps.RunProviderSmoke = runSanitizedAgentCommand
 		}
 	}
 	if deps.PrepareProviderBinary == nil {
@@ -119,6 +116,15 @@ func runSanitizedLocalCommand(ctx context.Context, name string, args ...string) 
 		return nil, err
 	}
 	cmd.Env = processenv.SanitizeForLocalExec()
+	return cmd.CombinedOutput()
+}
+
+func runSanitizedAgentCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = processenv.SanitizeForAgentExec()
 	return cmd.CombinedOutput()
 }
 

@@ -23,6 +23,10 @@ type Remover interface {
 	RemoveWorktree(ctx context.Context, path string) error
 }
 
+type BranchRemover interface {
+	DeleteBranch(ctx context.Context, branch string) error
+}
+
 type RepoGit struct {
 	RepoDir string
 }
@@ -39,9 +43,14 @@ func Cleanup(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.T
 			return err
 		}
 		path := filepath.Clean(wt.Path)
+		removedByGit := false
 		if remover != nil {
-			if err := remover.RemoveWorktree(ctx, path); err != nil && !os.IsNotExist(err) && !errors.Is(err, ErrUnregistered) {
-				return err
+			if err := remover.RemoveWorktree(ctx, path); err != nil {
+				if !os.IsNotExist(err) && !errors.Is(err, ErrUnregistered) {
+					return err
+				}
+			} else {
+				removedByGit = true
 			}
 		}
 		if _, err := os.Lstat(path); err == nil {
@@ -50,6 +59,11 @@ func Cleanup(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.T
 			}
 		} else if !os.IsNotExist(err) {
 			return err
+		}
+		if branchRemover, ok := remover.(BranchRemover); ok && removedByGit && cleanupOwnsBranch(runCtx.RunID, wt) {
+			if err := branchRemover.DeleteBranch(ctx, wt.Branch); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -85,6 +99,27 @@ func (g RepoGit) RemoveWorktree(ctx context.Context, path string) error {
 		return err
 	}
 	return nil
+}
+
+func (g RepoGit) DeleteBranch(ctx context.Context, branch string) error {
+	if strings.TrimSpace(g.RepoDir) == "" {
+		return fmt.Errorf("%w: empty repo root", ErrRepoUnverified)
+	}
+	if _, err := os.Stat(filepath.Join(g.RepoDir, ".git")); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%w: %s", ErrRepoUnverified, g.RepoDir)
+		}
+		return err
+	}
+	if err := g.run(ctx, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err != nil {
+		return nil
+	}
+	return g.run(ctx, "branch", "-D", branch)
+}
+
+func cleanupOwnsBranch(runID contracts.RunID, wt contracts.WorktreeAllocation) bool {
+	want := fmt.Sprintf("auto-improve/%s/pass%d/%s", runID, wt.Pass, wt.Agent)
+	return wt.Branch == want
 }
 
 func (g RepoGit) pruneMissing(ctx context.Context, path string) error {

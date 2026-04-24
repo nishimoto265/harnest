@@ -245,7 +245,7 @@ func synthesizeGoal(source TaskPromptSource, title, body string, issues []Linked
 	}
 	if includeIssues(source, issues) && len(issues) > 0 {
 		for _, issue := range issues {
-			if goal := firstMeaningfulLine(issue.Body); goal != "" {
+			if goal := firstMeaningfulBodyLine(issue.Body); goal != "" {
 				return goal
 			}
 			if trimmed := strings.TrimSpace(issue.Title); trimmed != "" {
@@ -268,17 +268,23 @@ func synthesizeDiffGoal(changedTests, changedNonTests []string) string {
 }
 
 func synthesizePRGoal(title, body string) string {
-	lines := strings.Split(body, "\n")
-	for _, line := range lines {
-		if goal := firstMeaningfulLine(line); goal != "" {
-			return goal
-		}
+	if goal := firstMeaningfulBodyLine(body); goal != "" {
+		return goal
 	}
 	title = strings.TrimSpace(title)
 	if title == "" {
 		return "Implement the requested repository change."
 	}
 	return title
+}
+
+func firstMeaningfulBodyLine(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		if goal := firstMeaningfulLine(line); goal != "" {
+			return goal
+		}
+	}
+	return ""
 }
 
 func firstMeaningfulLine(value string) string {

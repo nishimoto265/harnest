@@ -1,6 +1,7 @@
 package io
 
 import (
+	"errors"
 	"fmt"
 	stdio "io"
 	"os"
@@ -11,6 +12,13 @@ import (
 
 var idempotencyIndexBeforeAppendHook = func() error { return nil }
 var idempotencyIndexBeforeRewriteHook = func() error { return nil }
+
+const (
+	RegistryIndexSyncAt      = 1500
+	RegistryMandatoryIndexAt = 1800
+)
+
+var ErrRegistryIdempotencyIndexUnavailable = errors.New("io: registry idempotency index unavailable")
 
 // EnsureVerifiedIdempotencyIndex loads rules-idempotency-index.jsonl, verifies
 // every entry against the registry source of truth, and rebuilds the file when
@@ -97,6 +105,51 @@ func SyncIdempotencyIndex(registryPath, indexPath string, entry contracts.RuleRe
 		return err
 	}
 	return ensurePathMatchesIdentity(indexPath, identity)
+}
+
+func RegistryLookupLinesByIdempotencyIndex(registryPath, indexPath string) ([]RegistryLine, error) {
+	lines, err := readRegistryLines(registryPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(lines) < RegistryMandatoryIndexAt {
+		return registryTail(lines), nil
+	}
+	indexEntries, _, err := EnsureVerifiedIdempotencyIndex(registryPath, indexPath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRegistryIdempotencyIndexUnavailable, err)
+	}
+	return filterRegistryLinesByIndex(lines, indexEntries), nil
+}
+
+func RegistryLineCount(path string) (int, error) {
+	lines, err := readRegistryLines(path)
+	if err != nil {
+		return 0, err
+	}
+	return len(lines), nil
+}
+
+func registryTail(lines []RegistryLine) []RegistryLine {
+	start := 0
+	if len(lines) > RegistryTailScanN {
+		start = len(lines) - RegistryTailScanN
+	}
+	return lines[start:]
+}
+
+func filterRegistryLinesByIndex(lines []RegistryLine, indexEntries []contracts.RuleIdempotencyIndexEntry) []RegistryLine {
+	matches := make(map[int64]string, len(indexEntries))
+	for _, entry := range indexEntries {
+		matches[entry.RegistryOffset] = entry.RegistrySha256
+	}
+	filtered := make([]RegistryLine, 0, len(lines))
+	for _, line := range lines {
+		if sha, ok := matches[line.Offset]; ok && sha == line.Sha256 {
+			filtered = append(filtered, line)
+		}
+	}
+	return filtered
 }
 
 func ensureVerifiedIdempotencyIndexHandle(

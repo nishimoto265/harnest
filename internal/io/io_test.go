@@ -1173,6 +1173,85 @@ func TestSyncIdempotencyIndex_FailsClosedWhenIndexPathIdentityChanges(t *testing
 	assert.Empty(t, rows)
 }
 
+func TestRegistryLookupLinesByIdempotencyIndex_UsesTailScanBelowMandatoryThreshold(t *testing.T) {
+	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
+	writeRegistryChain(t, registryPath, RegistryMandatoryIndexAt-1)
+	indexPath := filepath.Join(filepath.Dir(registryPath), "rules-idempotency-index.jsonl")
+	require.NoError(t, os.Mkdir(indexPath, 0o755))
+
+	lines, err := RegistryLookupLinesByIdempotencyIndex(registryPath, indexPath)
+	require.NoError(t, err)
+	require.Len(t, lines, RegistryMandatoryIndexAt-1)
+}
+
+func TestRegistryLookupLinesByIdempotencyIndex_FailsClosedAtMandatoryThresholdWhenIndexUnavailable(t *testing.T) {
+	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
+	writeRegistryChain(t, registryPath, RegistryMandatoryIndexAt)
+	indexPath := filepath.Join(filepath.Dir(registryPath), "rules-idempotency-index.jsonl")
+	require.NoError(t, os.Mkdir(indexPath, 0o755))
+
+	_, err := RegistryLookupLinesByIdempotencyIndex(registryPath, indexPath)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRegistryIdempotencyIndexUnavailable)
+}
+
+func writeRegistryChain(t *testing.T, registryPath string, count int) {
+	t.Helper()
+
+	var builder strings.Builder
+	prevRegistryHash := ""
+	prevRuleSHA := ""
+	for i := 0; i < count; i++ {
+		ruleSHA := fmt.Sprintf("%064x", i+1)
+		idempotencyKey := fmt.Sprintf("%064x", i+10001)
+		var entry contracts.RuleRegistryEntry
+		if i == 0 {
+			entry = contracts.RuleRegistryEntry{
+				Kind: contracts.RegistryKindAdded,
+				Value: contracts.RuleRegistryAdded{
+					Kind:           contracts.RegistryKindAdded,
+					SchemaVersion:  "1",
+					RuleID:         "rule-1",
+					RulePath:       "rules/rule-1.md",
+					Sha256:         ruleSHA,
+					IdempotencyKey: idempotencyKey,
+					VersionSeq:     1,
+					PrevHash:       "",
+					ByRunID:        contracts.RunID(fmt.Sprintf("2026-04-21-PR1-%07x", i)),
+					At:             time.Unix(100+int64(i), 0).UTC(),
+				},
+			}
+		} else {
+			entry = contracts.RuleRegistryEntry{
+				Kind: contracts.RegistryKindUpdated,
+				Value: contracts.RuleRegistryUpdated{
+					Kind:           contracts.RegistryKindUpdated,
+					SchemaVersion:  "1",
+					RuleID:         "rule-1",
+					RulePath:       "rules/rule-1.md",
+					Sha256:         ruleSHA,
+					PrevSha256:     prevRuleSHA,
+					IdempotencyKey: idempotencyKey,
+					VersionSeq:     int64(i + 1),
+					PrevHash:       prevRegistryHash,
+					ByRunID:        contracts.RunID(fmt.Sprintf("2026-04-21-PR1-%07x", i)),
+					At:             time.Unix(100+int64(i), 0).UTC(),
+				},
+			}
+		}
+		_, err := contracts.MarshalStrict(entry)
+		require.NoError(t, err)
+		payload, err := contracts.CanonicalMarshal(entry)
+		require.NoError(t, err)
+		sum := sha256.Sum256(payload)
+		prevRegistryHash = hex.EncodeToString(sum[:])
+		prevRuleSHA = ruleSHA
+		builder.Write(payload)
+		builder.WriteByte('\n')
+	}
+	require.NoError(t, os.WriteFile(registryPath, []byte(builder.String()), defaultFilePerm))
+}
+
 func newTestRunContext(t *testing.T) RunContext {
 	t.Helper()
 

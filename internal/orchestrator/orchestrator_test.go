@@ -1942,6 +1942,28 @@ func TestRun_CanceledAfterStep70NoopAppendsInterruptedInsteadOfCompleted(t *test
 	assert.NotContains(t, eventKinds(events), contracts.StateKindCompleted)
 }
 
+func TestRun_CanceledAfterStep70TerminalDoesNotAppendInterrupted(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	cancelStep := &cancelAfterTerminalPromoteStep{}
+	orch.steps = stubPipelineSteps(nil, cancelStep)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelStep.cancel = cancel
+
+	runID := contracts.RunID("2026-04-21-PR104-abcdef0")
+	require.NoError(t, orch.Run(ctx, 104, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	assert.Equal(t, contracts.StateKindPromoted, events[len(events)-1].Kind)
+	assert.NotContains(t, eventKinds(events), contracts.StateKindInterrupted)
+}
+
 func TestRun_FreshSecondSentinelGatePreventsScaffoldWrites(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
@@ -2269,6 +2291,20 @@ type cancelAfterNoopStep struct {
 
 func (s *cancelAfterNoopStep) Run(ctx context.Context, run *StepRunContext) error {
 	if err := (stubStep70{}).Run(ctx, run); err != nil {
+		return err
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
+	return nil
+}
+
+type cancelAfterTerminalPromoteStep struct {
+	cancel context.CancelFunc
+}
+
+func (s *cancelAfterTerminalPromoteStep) Run(ctx context.Context, run *StepRunContext) error {
+	if err := (terminalPromoteStep{}).Run(ctx, run); err != nil {
 		return err
 	}
 	if s.cancel != nil {

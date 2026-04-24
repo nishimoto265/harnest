@@ -1311,6 +1311,24 @@ func TestSynthesizeTaskBrief_IssueSourceIncludesIssuesAndSkipsDiffContext(t *tes
 	assert.Contains(t, got, "- issue body")
 }
 
+func TestSynthesizeTaskBrief_IssueGoalUsesFirstMeaningfulBodyLine(t *testing.T) {
+	got := SynthesizeTaskBrief("issue", TaskBriefInput{
+		PR:    42,
+		Title: "supporting PR title",
+		Body:  "supporting PR body",
+		Issues: []LinkedIssue{
+			{
+				Number: 7,
+				Title:  "fallback issue title",
+				Body:   "\n# Background\n\nImplement the issue-level behavior.\n\nAdditional notes that should not become the goal.",
+			},
+		},
+	})
+	assert.Contains(t, got, "## Goal\n- Implement the issue-level behavior.")
+	assert.NotContains(t, got, "## Goal\n- # Background")
+	assert.NotContains(t, got, "## Goal\n- Implement the issue-level behavior. Additional notes")
+}
+
 func TestSynthesizeTaskBrief_AutoWithUsableIssuesAlsoKeepsDiffContext(t *testing.T) {
 	got := SynthesizeTaskBrief("auto", TaskBriefInput{
 		PR:    42,

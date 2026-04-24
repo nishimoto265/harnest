@@ -16,7 +16,6 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 	"github.com/nishimoto265/auto-improve/internal/steps/implementrescue"
@@ -146,12 +145,7 @@ func copyUntrackedFilesWithBudget(ctx context.Context, worktreePath, rescueDir s
 }
 
 func writeIgnoredList(ctx context.Context, worktreePath, target string) error {
-	list, err := gitOutputContext(ctx, identity, worktreePath, "ls-files", "--others", "-i", "--exclude-standard", "-z")
-	if err != nil {
-		return err
-	}
-	lines := strings.ReplaceAll(strings.Trim(list, "\x00"), "\x00", "\n")
-	return internalio.WriteAtomic(target, []byte(lines))
+	return implementrescue.WriteIgnoredList(ctx, worktreePath, target, gitOutputBytesContext)
 }
 
 func verifyRescueState(rescueDir string) error {

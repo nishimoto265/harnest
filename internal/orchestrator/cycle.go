@@ -285,15 +285,18 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 				}
 				return err
 			}
+			terminal, err := hasTerminalEvent(run.IO, run.IO.RunID)
+			if err != nil {
+				return err
+			}
 			if err := ctx.Err(); err != nil {
+				if terminal {
+					return nil
+				}
 				if appendErr := o.appendInterruptedIfContextDone(ctx, run, contracts.FailedStep70, err); appendErr != nil {
 					return appendErr
 				}
 				return nil
-			}
-			terminal, err := hasTerminalEvent(run.IO, run.IO.RunID)
-			if err != nil {
-				return err
 			}
 			if !terminal {
 				if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep70, time.Now().UTC())); err != nil {

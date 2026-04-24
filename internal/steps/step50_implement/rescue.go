@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,7 +17,6 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 	"github.com/nishimoto265/auto-improve/internal/steps/implementrescue"
@@ -214,19 +212,7 @@ func copyUntrackedFilesWithBudget(ctx context.Context, repoPath, rescueDir strin
 }
 
 func writeIgnoredList(ctx context.Context, repoPath, dest string) error {
-	output, err := gitOutputBytesContext(ctx, repoPath, "ls-files", "--others", "-i", "--exclude-standard", "-z")
-	if err != nil {
-		return err
-	}
-	entries := strings.Split(strings.Trim(string(output), "\x00"), "\x00")
-	lines := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry == "" {
-			continue
-		}
-		lines = append(lines, strconv.Quote(entry))
-	}
-	return internalio.WriteAtomic(dest, []byte(strings.Join(lines, "\n")))
+	return implementrescue.WriteIgnoredList(ctx, repoPath, dest, gitOutputBytesContext)
 }
 
 func fileDigest(path string) (string, error) {

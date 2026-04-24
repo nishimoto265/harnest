@@ -98,7 +98,21 @@ func newStep(cfg *config.Config, opts stepOptions) *Step {
 	}
 }
 
-func (s *Step) Run(ctx context.Context, run RunContext) error {
+func (s Step) Run(ctx context.Context, run RunContext) error {
+	step := s
+	if step.now == nil || step.heartbeatInterval <= 0 || step.staleAfter <= 0 || step.runner == nil {
+		impl := newStep(step.cfg, stepOptions{
+			now:               step.now,
+			heartbeatInterval: step.heartbeatInterval,
+			staleAfter:        step.staleAfter,
+			runner:            step.runner,
+		})
+		step = *impl
+	}
+	return step.run(ctx, run)
+}
+
+func (s *Step) run(ctx context.Context, run RunContext) error {
 	if run.Pass != 1 {
 		return fmt.Errorf("step20: unsupported pass: %d", run.Pass)
 	}

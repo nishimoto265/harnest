@@ -26,6 +26,10 @@ func setSanitizeTestEnv(t *testing.T) {
 	t.Setenv("GITHUB_ENTERPRISE_TOKEN", "enterprise-gh-pat")
 	t.Setenv("GH_HOST", "github.example.com")
 	t.Setenv("GH_REPO", "owner/repo")
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "claude-oauth")
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+	t.Setenv("OPENAI_PROJECT", "openai-project")
 	t.Setenv("GIT_ASKPASS", "/usr/local/bin/gh-askpass")
 	t.Setenv("GIT_DIR", "/tmp/other/.git")
 	t.Setenv("GIT_WORK_TREE", "/tmp/other")
@@ -65,6 +69,10 @@ func TestSanitizeForLocalExec_UsesStrictAllowlistForBaseAndExtraEnv(t *testing.T
 	assert.NotContains(t, env, "GITHUB_ENTERPRISE_TOKEN=enterprise-gh-pat")
 	assert.NotContains(t, env, "GH_HOST=github.example.com")
 	assert.NotContains(t, env, "GH_REPO=owner/repo")
+	assert.NotContains(t, env, "ANTHROPIC_API_KEY=anthropic-key")
+	assert.NotContains(t, env, "CLAUDE_CODE_OAUTH_TOKEN=claude-oauth")
+	assert.NotContains(t, env, "OPENAI_API_KEY=openai-key")
+	assert.NotContains(t, env, "OPENAI_PROJECT=openai-project")
 	assert.NotContains(t, env, "GIT_ASKPASS=/usr/local/bin/gh-askpass")
 	assert.NotContains(t, env, "GIT_DIR=/tmp/other/.git")
 	assert.NotContains(t, env, "GIT_WORK_TREE=/tmp/other")
@@ -117,6 +125,28 @@ func TestSanitizeForNetworkExec_PreservesAuthEnvButBlocksHooks(t *testing.T) {
 	assert.NotContains(t, env, "GIT_ASKPASS=/usr/local/bin/gh-askpass")
 	// GH_REPO is not in the allowlist — callers pass --repo explicitly.
 	assert.NotContains(t, env, "GH_REPO=owner/repo")
+}
+
+func TestSanitizeForAgentExec_PreservesProviderAuthButBlocksGitHooks(t *testing.T) {
+	setSanitizeTestEnv(t)
+
+	env := SanitizeForAgentExec("OPENAI_API_KEY=override")
+	falsePath := trustedFalsePath()
+
+	assert.Contains(t, env, "HOME=/tmp/home")
+	assert.Contains(t, env, "PATH="+defaultTrustedPATH)
+	assert.Contains(t, env, "ANTHROPIC_API_KEY=anthropic-key")
+	assert.Contains(t, env, "CLAUDE_CODE_OAUTH_TOKEN=claude-oauth")
+	assert.Contains(t, env, "OPENAI_API_KEY=override")
+	assert.Contains(t, env, "OPENAI_PROJECT=openai-project")
+	assert.NotContains(t, env, "OPENAI_API_KEY=openai-key")
+	assert.NotContains(t, env, "GH_TOKEN=token")
+	assert.NotContains(t, env, "SSH_AUTH_SOCK=/tmp/ssh.sock")
+	assert.NotContains(t, env, "BASH_ENV=/tmp/bash_env")
+	assert.NotContains(t, env, "GIT_CONFIG_GLOBAL=/tmp/gitconfig")
+	assert.Contains(t, env, "GIT_CONFIG_GLOBAL="+os.DevNull)
+	assert.Contains(t, env, "GIT_ASKPASS="+falsePath)
+	assert.NotContains(t, env, "GIT_ASKPASS=/usr/local/bin/gh-askpass")
 }
 
 func TestGitLocalEnv_AppendsSafeGitProfile(t *testing.T) {

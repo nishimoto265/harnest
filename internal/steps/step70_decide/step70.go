@@ -30,7 +30,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/worktreecleanup"
 )
 
-const registryMandatoryIndexAt = 1800
+const registryMandatoryIndexAt = internalio.RegistryMandatoryIndexAt
 
 var appendRegistryEntry = internalio.AppendRegistryEntry
 var promoteRuleSidecarFn = promoteRuleSidecar
@@ -1717,58 +1717,16 @@ func planningResumeNeedsRefresh(intention contracts.IntentionRecord, currentCand
 }
 
 func registryLookupLines(runCtx internalio.RunContext) ([]registryLine, error) {
-	lines, err := readRegistryLines(runCtx.RulesRegistryPath())
-	if err != nil {
-		return nil, err
-	}
-	if len(lines) < registryMandatoryIndexAt {
-		start := 0
-		if len(lines) > internalio.RegistryTailScanN {
-			start = len(lines) - internalio.RegistryTailScanN
-		}
-		return lines[start:], nil
-	}
-	indexEntries, err := ensureRegistryIndex(runCtx)
-	if err != nil {
-		slog.Warn("step70: idempotency index unavailable; falling back to tail scan", slog.String("error", err.Error()))
-		start := 0
-		if len(lines) > internalio.RegistryTailScanN {
-			start = len(lines) - internalio.RegistryTailScanN
-		}
-		return lines[start:], nil
-	}
-	matches := make(map[int64]string, len(indexEntries))
-	for _, entry := range indexEntries {
-		matches[entry.RegistryOffset] = entry.RegistrySha256
-	}
-	filtered := make([]registryLine, 0, len(lines))
-	for _, line := range lines {
-		if sha, ok := matches[line.Offset]; ok && sha == line.Sha256 {
-			filtered = append(filtered, line)
-		}
-	}
-	return filtered, nil
-}
-
-func ensureRegistryIndex(runCtx internalio.RunContext) ([]contracts.RuleIdempotencyIndexEntry, error) {
-	count, err := registryLineCount(runCtx.RulesRegistryPath())
-	if err != nil {
-		return nil, err
-	}
-	if count < 1500 {
-		return nil, nil
-	}
-	indexEntries, _, err := internalio.EnsureVerifiedIdempotencyIndex(runCtx.RulesRegistryPath(), runCtx.RulesIdempotencyIndexPath())
-	return indexEntries, err
+	return internalio.RegistryLookupLinesByIdempotencyIndex(runCtx.RulesRegistryPath(), runCtx.RulesIdempotencyIndexPath())
 }
 
 func syncRegistryIndex(runCtx internalio.RunContext, entry contracts.RuleRegistryEntry, result contracts.RegistryAppendResult) {
-	count, err := registryLineCount(runCtx.RulesRegistryPath())
+	count, err := internalio.RegistryLineCount(runCtx.RulesRegistryPath())
 	if err != nil {
 		slog.Warn("step70: failed to inspect registry size for index sync", slog.String("error", err.Error()))
 		return
 	}
-	if count < 1500 {
+	if count < internalio.RegistryIndexSyncAt {
 		return
 	}
 	if err := internalio.SyncIdempotencyIndex(runCtx.RulesRegistryPath(), runCtx.RulesIdempotencyIndexPath(), entry, result); err != nil {
@@ -1792,11 +1750,7 @@ func currentRegistryHead(path string) (string, error) {
 }
 
 func registryLineCount(path string) (int, error) {
-	lines, err := readRegistryLines(path)
-	if err != nil {
-		return 0, err
-	}
-	return len(lines), nil
+	return internalio.RegistryLineCount(path)
 }
 
 func emitRegistrySizeWarnings(runCtx internalio.RunContext, writer state.Writer, deps Deps, pr int) error {

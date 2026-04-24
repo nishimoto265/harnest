@@ -103,6 +103,37 @@ auto_improve_legacy_launchd_plist_path() {
   printf '%s/%s.plist\n' "$(auto_improve_launchd_plist_dir)" "$(auto_improve_legacy_launchd_label)"
 }
 
+auto_improve_legacy_launchd_plist_matches_repo_root() {
+  local plist="$1"
+  local repo_root_input="${REPO_ROOT:-}"
+  if [[ -z "$repo_root_input" ]]; then
+    return 1
+  fi
+
+  local repo_root
+  if ! repo_root="$(cd "$repo_root_input" 2>/dev/null && pwd -P)"; then
+    return 1
+  fi
+
+  local escaped_repo_root
+  escaped_repo_root="$(auto_improve_xml_escape "$repo_root")"
+  awk -v want="<string>${escaped_repo_root}</string>" '
+    /<key>WorkingDirectory<\/key>/ {
+      seen = 1
+      next
+    }
+    seen && /<string>/ {
+      if (index($0, want) > 0) {
+        found = 1
+      }
+      seen = 0
+    }
+    END {
+      exit(found ? 0 : 1)
+    }
+  ' "$plist"
+}
+
 auto_improve_launchd_path() {
   if [[ -n "${AUTO_IMPROVE_LAUNCHD_PATH:-}" ]]; then
     printf '%s\n' "$AUTO_IMPROVE_LAUNCHD_PATH"
@@ -136,6 +167,10 @@ auto_improve_migrate_legacy_launchd_plist() {
   local legacy_plist
   legacy_plist="$(auto_improve_legacy_launchd_plist_path)"
   if [[ "$legacy_plist" == "$current_plist" || ! -e "$legacy_plist" ]]; then
+    return 0
+  fi
+  if ! auto_improve_legacy_launchd_plist_matches_repo_root "$legacy_plist"; then
+    echo "legacy launchd plist does not target REPO_ROOT; keeping $legacy_plist" >&2
     return 0
   fi
   if ! auto_improve_launchctl_bootout_checked "$legacy_plist"; then
