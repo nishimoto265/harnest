@@ -595,10 +595,6 @@ func recoverRunPrereqs(runID string, requireSentinel bool) (context.Context, str
 }
 
 func recoverClearSentinelPrereqs(runID string) (string, internalio.RunContext, *internalio.FileLock, error) {
-	return recoverRunSentinelPrereqsWithOptions(runID, false)
-}
-
-func recoverRunSentinelPrereqsWithOptions(runID string, allowAborted bool) (string, internalio.RunContext, *internalio.FileLock, error) {
 	if runID == "" {
 		return "", internalio.RunContext{}, nil, commandExitError{code: 2, msg: "recover: --run <id> is required"}
 	}
@@ -616,7 +612,7 @@ func recoverRunSentinelPrereqsWithOptions(runID string, allowAborted bool) (stri
 		_ = lock.Unlock()
 		return "", internalio.RunContext{}, nil, err
 	}
-	if sentinelName == contracts.NeedsRecoverySentinelAbortedFilename(runCtx.RunID) && !allowAborted {
+	if sentinelName == contracts.NeedsRecoverySentinelAbortedFilename(runCtx.RunID) {
 		_ = lock.Unlock()
 		return "", internalio.RunContext{}, nil, commandExitError{code: 2, msg: fmt.Sprintf("recover: %s is an aborted sentinel; use --finalize-cleanup", sentinelName)}
 	}

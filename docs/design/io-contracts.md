@@ -91,10 +91,12 @@
 - `<runs_base>/sunset-running.marker` / `last-sunset-at` — rev11: sunset tick state(rev18: lock は `promotion.lock` を共有、`.sunset-lock` 廃止)
 
 `rescued/<rescue_id>/state.json` の `dirty_fingerprint` は、rescue capture 時点の
-tracked diff、staged diff、untracked files、ignored files の内容を sha256 で要約した
-採用ガードである。`git reset --hard` と `git clean -fdx` が破棄しうる file class
-すべてを対象にし、既存 rescue dir を再利用する場合は現在 worktree の fingerprint
-と一致しなければならない。空文字は旧形式/unknown と扱い、採用してはならない。
+tracked diff、staged diff、untracked files、ignored files を要約した採用ガードである。
+通常ファイルは内容 sha256、symlink / non-regular / size limit 超過ファイルは capture の
+skip 記録と同等の metadata を fingerprint に含める。`git reset --hard` と
+`git clean -fdx` が破棄しうる file class すべてを対象にし、既存 rescue dir を
+再利用する場合は現在 worktree の fingerprint と一致しなければならない。
+空文字は旧形式/unknown と扱い、採用してはならない。
 
 **worktree は runs/ の外**:
 `<worktree_base>/<runId>-pass{1,2}-a{1..N}/` に置く。コード上は `pass1WorktreePath(ctx, agent)` / `pass2WorktreePath(ctx, agent)` で取得。実際のメタデータ (`{agent, pass, path, branch, base_sha, head_sha}`) は **`task-package.json.worktrees[]` が正本**。step 70 の cleanup はそれを読む。
@@ -1197,7 +1199,8 @@ refuse cell はすべて stderr に safe matrix を print し operator が手動
 - `auto-improve recover --run <id> --inspect`: promotion.lock 取得後 read-only で全 state(intention / decision / sentinel / remote HEAD / registry head)を print、終了時 lock release、副作用無し
 - `auto-improve recover --run <id> --mark-manual-abort`: decision.json を `action: 'rollback', rollback_reason: 'manual_abort_pending_cleanup'` で書込 + sentinel を **`<runs_base>/needs-recovery/<run_id>.aborted.json` に rename**(block 継続) + processed `needs_manual_recovery { pr, run_id, step: '70', reason: 'manual_abort_pending_cleanup', failed_step: '70', at }` append。branch/registry 修復は operator 手動で、**sentinel は削除しない**(未修復 state で次 promotion が走るのを防止)。
 - `auto-improve recover --run <id> --finalize-cleanup --remote-head <sha> --registry-head <sha> [--policy-head <sha>]`: operator が branch/registry/policy を手動で整合させた後のみ使う。**remote / registry SHA は必須**(rev11、Codex rev10 R2 対応)。`repo.policy_branch` 設定時は **policy SHA も必須**。promotion.lock 下で remote HEAD / registry head / policy_branch HEAD を再確認、全て一致で `.aborted.json` 削除、pipeline 復旧。片方でも不一致なら refuse
-- `--clear-sentinel`: sentinel(`<run_id>.json` または `<run_id>.aborted.json`)削除(intention は手動で整合を取った後の最終手段、上記 `--finalize-cleanup` を推奨)
+- `--clear-sentinel`: 通常 sentinel(`<run_id>.json`)削除の最終手段。`.aborted.json` は
+  manual cleanup 未検証状態なので拒否し、上記 `--finalize-cleanup` のみで解除する
 
 **safe matrix refuse cell の contract** (rev10 明文化):
 - すべての refuse cell で output は `{stage, remote_head, registry_head, idempotency_hit, suggested_action}` JSON + human readable。
@@ -1212,7 +1215,7 @@ refuse cell はすべて stderr に safe matrix を print し operator が手動
 | `--adopt-anyway` | safe matrix allowed cell(HEAD==target_sha, idempotency hit) | `.json` 削除 | 削除(stage=decision_written 相当から resume 実行後) | `action: 'adopt'` 書込 | `promoted` append | block 解除、次 PR 進行可 |
 | `--mark-manual-abort` | 任意(inspect 後の最終手段) | `.json` → `.aborted.json` rename(**削除せず**) | 保持(stage=needs_manual_recovery、recovery_reason=`manual_abort_pending_cleanup`、failed_step=`70` 上書き) | `action: 'rollback', rollback_reason: 'manual_abort_pending_cleanup'` 書込 | `needs_manual_recovery { pr, run_id, step: '70', reason: 'manual_abort_pending_cleanup', failed_step: '70', at }` append | block 継続(operator が手動修復を行う状態) |
 | `--finalize-cleanup --remote-head <sha> --registry-head <sha> [--policy-head <sha>]` | `.aborted.json` 存在 AND operator が渡した SHA が現実と一致(`repo.policy_branch` 設定時は policy SHA も一致) | `.aborted.json` 削除 | 削除 | 不変(既に rollback) | `completed { pr, run_id, step: '70', detail: 'manual_cleanup_finalized', at }` append | block 解除、次 PR 進行可 |
-| `--clear-sentinel` | 最終手段、operator 全責任 | `.json` or `.aborted.json` 削除 | 不変 | 不変 | **条件付き append**: `processed.jsonl` の run_id 末尾 event が terminal (`needs_manual_recovery` 等) なら append しない(二重 terminal 禁止)。末尾が non-terminal なら `completed { pr, run_id, step, detail: 'sentinel_manually_cleared', at }` を append。いずれも resume は blocked(sentinel 削除で detect 再 queue もされない) | block 解除、整合性は operator 保証 |
+| `--clear-sentinel` | 最終手段、operator 全責任。`.aborted.json` は拒否し `--finalize-cleanup` を要求 | `.json` 削除 | 不変 | 不変 | **条件付き append**: `processed.jsonl` の run_id 末尾 event が terminal (`needs_manual_recovery` 等) なら append しない(二重 terminal 禁止)。末尾が non-terminal なら `completed { pr, run_id, step, detail: 'sentinel_manually_cleared', at }` を append。いずれも resume は blocked(sentinel 削除で detect 再 queue もされない) | block 解除、整合性は operator 保証 |
 
 refuse cell は全て「stderr に safe matrix + suggested_action を print、state 変更なし」で戻る。
 

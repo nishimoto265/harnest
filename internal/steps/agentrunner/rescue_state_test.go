@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,21 +53,27 @@ func TestComputeDirtyStateDetectsIgnoredContentDrift(t *testing.T) {
 	assert.NotEqual(t, first, second)
 }
 
-func TestComputeDirtyStateHandlesOversizedUntrackedWithoutHashingContent(t *testing.T) {
+func TestComputeDirtyStateDetectsOversizedUntrackedMetadataDrift(t *testing.T) {
 	repoDir := initDirtyStateTestRepo(t)
 	hugePath := filepath.Join(repoDir, "huge.bin")
 	file, err := os.Create(hugePath)
 	require.NoError(t, err)
 	require.NoError(t, file.Truncate(RescueDiffLimitBytes+1))
 	require.NoError(t, file.Close())
+	info, err := os.Stat(hugePath)
+	require.NoError(t, err)
+	originalModTime := info.ModTime()
 
 	first, _, err := ComputeDirtyState(context.Background(), repoDir)
 	require.NoError(t, err)
 
+	time.Sleep(time.Millisecond)
 	file, err = os.OpenFile(hugePath, os.O_WRONLY, 0)
 	require.NoError(t, err)
-	require.NoError(t, file.Truncate(RescueDiffLimitBytes+2))
+	_, err = file.WriteAt([]byte("changed"), RescueDiffLimitBytes/2)
+	require.NoError(t, err)
 	require.NoError(t, file.Close())
+	require.NoError(t, os.Chtimes(hugePath, originalModTime, originalModTime))
 	second, _, err := ComputeDirtyState(context.Background(), repoDir)
 	require.NoError(t, err)
 
