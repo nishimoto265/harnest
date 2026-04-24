@@ -181,6 +181,116 @@ func TestIntegrationRunFailsClosedOnBrokenPolicyBranch(t *testing.T) {
 	assert.Equal(t, localRule, string(ruleBytes))
 }
 
+func TestIntegrationFakeGitFixtureCreatesPlainDirectoriesNotWorktrees(t *testing.T) {
+	requireIntegrationEnv(t)
+
+	root := realTempDir(t)
+	binDir := filepath.Join(root, "bin")
+	stateDir := filepath.Join(root, "git-state")
+	worktreePath := filepath.Join(root, "worktrees", "fake-pass1-a1")
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(worktreePath), 0o755))
+	copyExecutable(t, filepath.Join(mustRepoRoot(t), "internal", "orchestrator", "testdata", "bin", "git"), filepath.Join(binDir, "git"))
+
+	cmd := exec.Command(filepath.Join(binDir, "git"), "-C", root, "worktree", "add", "-b", "auto-improve/fake/pass1/a1", worktreePath, strings.Repeat("a", 40))
+	cmd.Env = append(os.Environ(), "AUTO_IMPROVE_GIT_STATE_DIR="+stateDir)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	assert.DirExists(t, worktreePath)
+	assert.NoFileExists(t, filepath.Join(worktreePath, ".git"), "fake git records paths but does not create real git worktrees")
+
+	realGit := exec.Command("git", "-C", worktreePath, "rev-parse", "--is-inside-work-tree")
+	realOut, realErr := realGit.CombinedOutput()
+	require.Error(t, realErr, string(realOut))
+}
+
+func TestIntegrationRunUsesRealGitWorktreesWhenFakeGitIsAbsent(t *testing.T) {
+	requireIntegrationEnv(t)
+
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	repoRoot := filepath.Join(root, "repo")
+	binDir := filepath.Join(root, "bin")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	require.NoError(t, os.MkdirAll(repoRoot, 0o755))
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+
+	shas := seedRealGitIntegrationRepo(t, repoRoot)
+	writeIntegrationConfigForRepo(t, root, repoRoot, runsBase, worktreeBase)
+	copyExecutable(t, filepath.Join(mustRepoRoot(t), "internal", "orchestrator", "testdata", "bin", "gh"), filepath.Join(binDir, "gh"))
+	claudePath := filepath.Join(binDir, "claude")
+	writeExecutable(t, claudePath, fakeClaudeScript(0))
+	writeIntegrationAgentsConfig(t, root, claudePath)
+
+	bin := buildIntegrationBinary(t)
+	cmd := exec.Command(bin, "run", "--pr", "77")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		integrationTrustedPathEnvVar+"="+trustedPathWithFakeBin(binDir),
+		"AUTO_IMPROVE_TEST_BASE_SHA="+shas.base,
+		"AUTO_IMPROVE_TEST_TARGET_SHA="+shas.head,
+		"AUTO_IMPROVE_TEST_MERGE_SHA="+shas.merge,
+		"AUTO_IMPROVE_TEST_BEST_SHA="+shas.base,
+	)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Run(), "stdout=%s stderr=%s", stdout.String(), stderr.String())
+
+	runDirs := cliIntegrationEnv{runsBase: runsBase}.runDirs(t)
+	require.Len(t, runDirs, 1)
+	pkg, err := internalio.ReadJSON[contracts.TaskPackage](filepath.Join(runDirs[0], "task-package.json"))
+	require.NoError(t, err)
+	require.NotEmpty(t, pkg.Worktrees)
+	for _, worktree := range pkg.Worktrees {
+		assert.NoDirExists(t, worktree.Path, "step70 cleanup should remove real git worktrees")
+		if worktree.Pass != 1 {
+			continue
+		}
+		manifest := readIntegrationManifest(t, runDirs[0], worktree.Pass, worktree.Agent)
+		assert.Equal(t, shas.base, manifest.BaseSHA)
+		assert.Equal(t, "commit", strings.TrimSpace(runIntegrationGit(t, repoRoot, "cat-file", "-t", manifest.HeadSHA)))
+	}
+	worktreeList := runIntegrationGit(t, repoRoot, "worktree", "list", "--porcelain")
+	for _, worktree := range pkg.Worktrees {
+		assert.NotContains(t, worktreeList, worktree.Path)
+	}
+	assert.FileExists(t, filepath.Join(runDirs[0], "70", "decision.json"))
+}
+
+func TestIntegrationSunsetSubprocessArchivesDeprecatedRule(t *testing.T) {
+	requireIntegrationEnv(t)
+
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	writeTestConfig(t, root, runsBase, worktreeBase)
+	seedIntegrationDeprecatedRule(t, filepath.Join(runsBase, "rules-registry.jsonl"), "rule-1")
+
+	bin := buildIntegrationBinary(t)
+	cmd := exec.Command(bin, "sunset")
+	cmd.Dir = root
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Run(), "stdout=%s stderr=%s", stdout.String(), stderr.String())
+
+	lines, err := internalio.RegistryLines(filepath.Join(runsBase, "rules-registry.jsonl"))
+	require.NoError(t, err)
+	require.Len(t, lines, 3)
+	archived, ok := lines[2].Entry.Value.(contracts.RuleRegistryArchived)
+	require.True(t, ok)
+	assert.Equal(t, "rule-1", archived.RuleID)
+	assert.FileExists(t, filepath.Join(runsBase, "last-sunset-at"))
+}
+
 type cliIntegrationEnv struct {
 	root      string
 	runsBase  string
@@ -300,6 +410,140 @@ func writeIntegrationAgentsConfig(t *testing.T, root, claudePath string) {
 		return
 	}
 	require.NoError(t, os.WriteFile(configPath, append(data, []byte("agent_config_path: \"./agents.yaml\"\n")...), 0o644))
+}
+
+type realGitIntegrationSHAs struct {
+	base  string
+	head  string
+	merge string
+}
+
+func seedRealGitIntegrationRepo(t *testing.T, repoRoot string) realGitIntegrationSHAs {
+	t.Helper()
+	runIntegrationGit(t, repoRoot, "init", "-b", "main")
+	runIntegrationGit(t, repoRoot, "config", "user.name", "Test User")
+	runIntegrationGit(t, repoRoot, "config", "user.email", "test@example.com")
+	relativeRemote := filepath.Join("github.com", "owner", "repo")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, "github.com", "owner"), 0o755))
+	runIntegrationGit(t, repoRoot, "init", "--bare", relativeRemote)
+	runIntegrationGit(t, repoRoot, "remote", "add", "origin", relativeRemote)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, "app"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "app", "message.txt"), []byte("base\n"), 0o644))
+	runIntegrationGit(t, repoRoot, "add", "app/message.txt")
+	runIntegrationGit(t, repoRoot, "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(runIntegrationGit(t, repoRoot, "rev-parse", "HEAD"))
+	runIntegrationGit(t, repoRoot, "push", "origin", "HEAD:refs/heads/main")
+	runIntegrationGit(t, repoRoot, "push", "origin", baseSHA+":refs/heads/auto-improve/best")
+
+	runIntegrationGit(t, repoRoot, "checkout", "-b", "feature/pr-77")
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "app", "message.txt"), []byte("merged change\n"), 0o644))
+	runIntegrationGit(t, repoRoot, "commit", "-am", "change message")
+	headSHA := strings.TrimSpace(runIntegrationGit(t, repoRoot, "rev-parse", "HEAD"))
+
+	runIntegrationGit(t, repoRoot, "checkout", "main")
+	runIntegrationGit(t, repoRoot, "merge", "--no-ff", "feature/pr-77", "-m", "merge pr 77")
+	mergeSHA := strings.TrimSpace(runIntegrationGit(t, repoRoot, "rev-parse", "HEAD"))
+	runIntegrationGit(t, repoRoot, "push", "origin", "HEAD:refs/heads/main")
+
+	return realGitIntegrationSHAs{base: baseSHA, head: headSHA, merge: mergeSHA}
+}
+
+func writeIntegrationConfigForRepo(t *testing.T, root, repoRoot, runsBase, worktreeBase string) {
+	t.Helper()
+	content := "repo:\n" +
+		"  root: " + repoRoot + "\n" +
+		"  default_branch: main\n" +
+		"  best_branch: auto-improve/best\n" +
+		"paths:\n" +
+		"  runs: " + runsBase + "\n" +
+		"worktree:\n" +
+		"  base: " + worktreeBase + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(root, "config.yaml"), []byte(content), 0o644))
+}
+
+func seedIntegrationDeprecatedRule(t *testing.T, registryPath, ruleID string) {
+	t.Helper()
+	added := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         ruleID,
+			RulePath:       "rules/" + ruleID + ".md",
+			Sha256:         strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("a", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        "2026-04-21-PR1-abcdef0",
+			At:             time.Date(2026, 4, 21, 8, 0, 0, 0, time.UTC),
+		},
+	}
+	result, err := internalio.AppendRegistryEntry(registryPath, added)
+	require.NoError(t, err)
+	deprecated := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindStatusChanged,
+		Value: contracts.RuleRegistryStatusChanged{
+			Kind:          contracts.RegistryKindStatusChanged,
+			SchemaVersion: "1",
+			RuleID:        ruleID,
+			PrevStatus:    contracts.RuleStatusActive,
+			NewStatus:     contracts.RuleStatusDeprecated,
+			Transition:    contracts.SunsetTransitionDeprecate,
+			OpID:          strings.Repeat("b", 64),
+			VersionSeq:    2,
+			PrevHash:      result.Sha256,
+			BySunsetRunID: "seed-sunset",
+			At:            time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC),
+		},
+	}
+	_, err = internalio.AppendRegistryEntry(registryPath, deprecated)
+	require.NoError(t, err)
+}
+
+func readIntegrationManifest(t *testing.T, runDir string, pass int, agent contracts.AgentID) contracts.ManifestSuccess {
+	t.Helper()
+	prefix := fmt.Sprintf("20-pass%d", pass)
+	if pass == 2 {
+		prefix = "50-pass2"
+	}
+	manifest, err := internalio.ReadJSON[contracts.Manifest](filepath.Join(runDir, prefix, string(agent), "manifest.json"))
+	require.NoError(t, err, "run files:\n%s", listIntegrationRunFiles(t, runDir))
+	require.Equal(t, contracts.ManifestKindSuccess, manifest.Kind)
+	success, ok := manifest.Value.(contracts.ManifestSuccess)
+	require.True(t, ok)
+	return success
+}
+
+func listIntegrationRunFiles(t *testing.T, runDir string) string {
+	t.Helper()
+	var out strings.Builder
+	err := filepath.WalkDir(runDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(runDir, path)
+		if err != nil {
+			return err
+		}
+		out.WriteString(rel)
+		out.WriteByte('\n')
+		return nil
+	})
+	require.NoError(t, err)
+	return out.String()
+}
+
+func runIntegrationGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return string(out)
 }
 
 func yamlDoubleQuote(value string) string {
