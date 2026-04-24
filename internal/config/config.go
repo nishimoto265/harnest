@@ -53,6 +53,7 @@ type Config struct {
 	RunsBasePath              string         `yaml:"runs_base"`
 	WorktreeBasePath          string         `yaml:"worktree_base"`
 	AgentConfigPath           string         `yaml:"agent_config_path"`
+	AgentFileSnapshot         agents.File    `yaml:"agent_file_snapshot,omitempty"`
 	ClaudeCLIPath             string         `yaml:"claude_cli_path"`
 	CodexCLIPath              string         `yaml:"codex_cli_path"`
 	PreflightTimeoutSec       int            `yaml:"preflight_timeout_sec"`
@@ -308,7 +309,7 @@ func (c Config) CodexBinary() string {
 }
 
 func (c Config) AgentFile() agents.File {
-	if len(c.agentFile.Profiles) == 0 || len(c.agentFile.Roles) == 0 {
+	if len(c.agentFile.Profiles) == 0 && len(c.agentFile.Roles) == 0 {
 		return agents.Legacy(agents.LegacyDefaults{
 			ImplementerBinary:    c.legacyImplementerBinary(),
 			JudgePrimaryBinary:   c.legacyJudgePrimaryBinary(),
@@ -428,6 +429,10 @@ func (c *Config) loadAgentFile() error {
 		JudgePrimaryBinary:   c.legacyJudgePrimaryBinary(),
 		JudgeSecondaryBinary: c.legacyJudgeSecondaryBinary(),
 	})
+	if c.hasAgentFileSnapshot() {
+		c.agentFile = c.AgentFileSnapshot
+		return nil
+	}
 	path := c.AgentConfigPath
 	if path == "" {
 		if c.configPath == "" {
@@ -455,6 +460,10 @@ func (c *Config) loadAgentFile() error {
 	}
 	c.agentFile = file
 	return nil
+}
+
+func (c Config) hasAgentFileSnapshot() bool {
+	return len(c.AgentFileSnapshot.Profiles) > 0 || len(c.AgentFileSnapshot.Roles) > 0
 }
 
 func (c Config) legacyImplementerBinary() string {

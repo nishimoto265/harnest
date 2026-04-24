@@ -790,6 +790,7 @@ func writeConfigSnapshot(path string, cfg *config.Config) error {
 	snapshot.Worktree.Base = ""
 	snapshot.WorktreeBasePath = worktreeBase
 	snapshot.AgentConfigPath = agentConfigPath
+	snapshot.AgentFileSnapshot = cfg.AgentFile()
 	data, err := yaml.Marshal(snapshot)
 	if err != nil {
 		return err
