@@ -36,6 +36,15 @@ jobs:
       - name: Integration test
         run: AUTO_IMPROVE_INTEGRATION=1 go test ./cmd/auto-improve -count=1
 
+      - name: Vet
+        run: go vet ./...
+
+      - name: Contract sync check
+        run: bash scripts/check-contracts-sync.sh
+
+      - name: Script tests
+        run: make script-test
+
       - name: Smoke build
         run: |
           set -euo pipefail

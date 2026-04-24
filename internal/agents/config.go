@@ -45,9 +45,7 @@ type File struct {
 }
 
 type LegacyDefaults struct {
-	ImplementerBinary    string
-	JudgePrimaryBinary   string
-	JudgeSecondaryBinary string
+	ImplementerBinary string
 }
 
 func DefaultFileName() string {
@@ -92,12 +90,6 @@ func Load(path string) (File, error) {
 func Legacy(defaults LegacyDefaults) File {
 	if defaults.ImplementerBinary == "" {
 		defaults.ImplementerBinary = "claude"
-	}
-	if defaults.JudgePrimaryBinary == "" {
-		defaults.JudgePrimaryBinary = "claude"
-	}
-	if defaults.JudgeSecondaryBinary == "" {
-		defaults.JudgeSecondaryBinary = "codex"
 	}
 	implementerProvider := inferProviderFromBinary(defaults.ImplementerBinary, ProviderClaude)
 	return File{

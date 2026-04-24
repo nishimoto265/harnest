@@ -72,7 +72,7 @@ case "$subcmd" in
         else
           path="$2"
         fi
-        tmp="$state_dir/worktrees.list.tmp"
+        tmp="$state_dir/worktrees.list.$$.tmp"
         grep -Fvx "$path" "$state_dir/worktrees.list" > "$tmp" || true
         mv "$tmp" "$state_dir/worktrees.list"
         rm -rf "$path"

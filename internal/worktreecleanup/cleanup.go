@@ -14,7 +14,10 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 )
 
-var ErrUnregistered = errors.New("step70: git worktree path is not registered")
+var (
+	ErrUnregistered   = errors.New("worktreecleanup: git worktree path is not registered")
+	ErrRepoUnverified = errors.New("worktreecleanup: repo root could not be verified")
+)
 
 type Remover interface {
 	RemoveWorktree(ctx context.Context, path string) error
@@ -54,11 +57,11 @@ func Cleanup(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.T
 
 func (g RepoGit) RemoveWorktree(ctx context.Context, path string) error {
 	if strings.TrimSpace(g.RepoDir) == "" {
-		return fmt.Errorf("%w: %s", ErrUnregistered, path)
+		return fmt.Errorf("%w: empty repo root", ErrRepoUnverified)
 	}
 	if _, err := os.Stat(filepath.Join(g.RepoDir, ".git")); err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("%w: %s", ErrUnregistered, path)
+			return fmt.Errorf("%w: %s", ErrRepoUnverified, g.RepoDir)
 		}
 		return err
 	}
