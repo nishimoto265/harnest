@@ -1134,7 +1134,8 @@ func TestRun_PlanningResumeRemoteMatchesTargetWithOwnershipProofProceeds(t *test
 // of force-pushing the branch back to best_sha_before — another run may have
 // pushed the same SHA and promoted it.
 func TestRun_PrePushRollbackRefusesBranchRevertWithoutOwnershipProofWhenRegistryAdvanced(t *testing.T) {
-	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR4113")
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR4113")
+	store := newTrackingStore(intentionPath(t, runCtx))
 	// Seed registry with an unrelated promotion by another run.
 	_, _ = seedRegistryUniqueAdd(t, runCtx.RulesRegistryPath(), "other-run", fmt.Sprintf("%064x", 7113), "2026-04-21-PR80-abcdef0")
 
@@ -1152,6 +1153,11 @@ func TestRun_PrePushRollbackRefusesBranchRevertWithoutOwnershipProofWhenRegistry
 	// force-push to best_sha_before.
 	require.Len(t, git.pushCalls, 1)
 	assert.Equal(t, resolver.target.TargetSHA, git.pushCalls[0].target)
+	for _, saved := range store.saved {
+		assert.NotEqual(t, contracts.IntentionStageRollingBackBranchReverted, saved.Stage)
+	}
+	require.NotEmpty(t, store.saved)
+	assert.Equal(t, contracts.IntentionStageNeedsManualRecovery, store.saved[len(store.saved)-1].Stage)
 }
 
 // F9: even with no sentinel on disk, a run whose intention is parked at
@@ -1318,6 +1324,87 @@ func TestRun_ResumeFromDecisionWritten_RemoteMismatchNeedsManualRecovery(t *test
 	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
 	assert.Equal(t, contracts.RollbackReasonRemoteDivergence, recovery.Reason)
 	assert.Equal(t, "decision_written_remote_mismatch", recovery.Detail)
+}
+
+func TestRun_OrphanPersistedAdoptDecisionRemoteMismatchNeedsManualRecovery(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR502")
+	registryPath := runCtx.RulesRegistryPath()
+	appendResult, _ := seedRegistryAdd(t, registryPath, resolver, runCtx.RunID, candidates.CandidatesHash)
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	require.NoError(t, cleanupStagedRuleSidecars(runCtx))
+
+	decision := contracts.Decision{
+		Action: contracts.DecisionActionAdopt,
+		Value: contracts.DecisionAdopt{
+			Action:               contracts.DecisionActionAdopt,
+			SchemaVersion:        "1",
+			RunID:                runCtx.RunID,
+			IdempotencyKey:       intention.IdempotencyKey,
+			BestShaBefore:        intention.BestShaBefore,
+			TargetSha:            intention.TargetSha,
+			CandidatesHash:       intention.CandidatesHash,
+			RegistryAppendResult: appendResult,
+			DecidedAt:            fixedNow()(),
+		},
+	}
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, decision))
+
+	err = Run(context.Background(), 502, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: strings.Repeat("9", 40)},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	})
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
+
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
+	assert.Equal(t, contracts.RollbackReasonRemoteDivergence, recovery.Reason)
+	assert.Equal(t, "decision_written_remote_mismatch", recovery.Detail)
+	assert.NotContains(t, readStateKinds(t, runCtx), contracts.StateKindPromoted)
+}
+
+func TestRun_OrphanPersistedAdoptDecisionRegistryMismatchNeedsManualRecovery(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR503")
+	registryPath := runCtx.RulesRegistryPath()
+	appendResult, _ := seedRegistryAdd(t, registryPath, resolver, runCtx.RunID, candidates.CandidatesHash)
+	_, _ = seedRegistryUniqueAdd(t, registryPath, "other-rule", fmt.Sprintf("%064x", 7503), "2026-04-21-PR75-abcdef0")
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	require.NoError(t, cleanupStagedRuleSidecars(runCtx))
+
+	decision := contracts.Decision{
+		Action: contracts.DecisionActionAdopt,
+		Value: contracts.DecisionAdopt{
+			Action:               contracts.DecisionActionAdopt,
+			SchemaVersion:        "1",
+			RunID:                runCtx.RunID,
+			IdempotencyKey:       intention.IdempotencyKey,
+			BestShaBefore:        intention.BestShaBefore,
+			TargetSha:            intention.TargetSha,
+			CandidatesHash:       intention.CandidatesHash,
+			RegistryAppendResult: appendResult,
+			DecidedAt:            fixedNow()(),
+		},
+	}
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, decision))
+
+	err = Run(context.Background(), 503, runCtx, pkg, candidates, store, Deps{
+		Git:      &fakeGit{head: resolver.target.TargetSHA},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	})
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
+
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
+	assert.Equal(t, contracts.RollbackReasonRegistryDivergence, recovery.Reason)
+	assert.Equal(t, "decision_written_registry_mismatch", recovery.Detail)
+	assert.NotContains(t, readStateKinds(t, runCtx), contracts.StateKindPromoted)
 }
 
 func TestRun_RollbackOnPushFailure(t *testing.T) {
@@ -1502,6 +1589,7 @@ func TestRun_AdoptIdempotencyDuplicatePlanning(t *testing.T) {
 	git := &fakeGit{head: resolver.target.BestShaBefore}
 	deps := Deps{Git: git, Resolver: resolver, Now: fixedNow()}
 	require.NoError(t, Run(context.Background(), 9, runCtx, pkg, candidates, store, deps))
+	git.head = resolver.target.TargetSHA
 	require.NoError(t, Run(context.Background(), 9, runCtx, pkg, candidates, store, deps))
 
 	lines, err := readRegistryLines(runCtx.RulesRegistryPath())

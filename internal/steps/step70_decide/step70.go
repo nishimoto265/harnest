@@ -371,7 +371,7 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 	if err := store.Save(intention); err != nil {
 		return err
 	}
-	return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps, false)
+	return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps, nil)
 }
 
 func drivePolicyPublish(ctx context.Context, pr int, runCtx internalio.RunContext, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) (contracts.IntentionRecord, error) {
@@ -510,7 +510,7 @@ func drivePolicyPublish(ctx context.Context, pr int, runCtx internalio.RunContex
 	return intention, nil
 }
 
-func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, store IntentionWriter, writer state.Writer, deps Deps, verifyRemoteHead bool) error {
+func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, store IntentionWriter, writer state.Writer, deps Deps, adopt *contracts.DecisionAdopt) error {
 	if err := blockOnOtherRunSentinel(runCtx); err != nil {
 		return err
 	}
@@ -518,8 +518,8 @@ func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunCon
 	if err != nil {
 		return err
 	}
-	if verifyRemoteHead && intention != nil {
-		if err := verifyPersistedAdoptRemoteHead(ctx, pr, runCtx, pkg, *intention, store, writer, deps); err != nil {
+	if adopt != nil {
+		if err := verifyPersistedAdoptDecisionState(ctx, pr, runCtx, pkg, intention, *adopt, store, writer, deps); err != nil {
 			return err
 		}
 	}
@@ -535,10 +535,10 @@ func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunCon
 	if err := cleanupWorktrees(ctx, runCtx, pkg, deps.Git); err != nil {
 		return err
 	}
-	if err := store.Delete(); err != nil {
+	if err := appendStateOnce(runCtx, writer, contracts.StateKindPromoted, promotedEvent(pr, runCtx.RunID, deps.Now())); err != nil {
 		return err
 	}
-	return appendStateOnce(runCtx, writer, contracts.StateKindPromoted, promotedEvent(pr, runCtx.RunID, deps.Now()))
+	return store.Delete()
 }
 
 func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, decision contracts.Decision, store IntentionWriter, writer state.Writer, deps Deps) error {
@@ -547,12 +547,12 @@ func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.Ru
 	}
 	switch v := decision.Value.(type) {
 	case contracts.DecisionAdopt:
-		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps, true)
+		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps, &v)
 	case *contracts.DecisionAdopt:
 		if v == nil {
 			return nil
 		}
-		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps, true)
+		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps, v)
 	case contracts.DecisionRollback:
 		return finalizeRollbackTerminal(ctx, pr, runCtx, pkg, v.RollbackReason, v.FailedStep, store, writer, deps)
 	case *contracts.DecisionRollback:
@@ -565,22 +565,53 @@ func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.Ru
 	}
 }
 
-func verifyPersistedAdoptRemoteHead(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
-	target := targetFromIntention(pkg, intention)
-	if target.BestBranch == "" {
+func verifyPersistedAdoptDecisionState(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention *contracts.IntentionRecord, adopt contracts.DecisionAdopt, store IntentionWriter, writer state.Writer, deps Deps) error {
+	bestBranch := ""
+	if intention != nil {
+		bestBranch = targetFromIntention(pkg, *intention).BestBranch
+	}
+	if bestBranch == "" && pkg != nil {
+		bestBranch = pkg.BestBranch
+	}
+	if bestBranch == "" {
 		return errors.New("step70: decision_written adopt requires best_branch")
 	}
-	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
+	recoveryIntention := persistedAdoptRecoveryIntention(runCtx.RunID, intention, adopt)
+	remoteHead, err := deps.Git.RemoteHead(ctx, bestBranch)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "decision_written_remote_head_failure")
+		return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "decision_written_remote_head_failure")
 	}
-	if remoteHead != target.TargetSHA {
-		return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRemoteDivergence, "decision_written_remote_mismatch")
+	if remoteHead != adopt.TargetSha {
+		return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonRemoteDivergence, "decision_written_remote_mismatch")
+	}
+	registryHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
+	if err != nil {
+		return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "decision_written_registry_probe_failure")
+	}
+	if registryHead != adopt.RegistryAppendResult.Sha256 {
+		return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonRegistryDivergence, "decision_written_registry_mismatch")
 	}
 	return nil
+}
+
+func persistedAdoptRecoveryIntention(runID contracts.RunID, intention *contracts.IntentionRecord, adopt contracts.DecisionAdopt) contracts.IntentionRecord {
+	if intention != nil {
+		return *intention
+	}
+	return contracts.IntentionRecord{
+		SchemaVersion:        "1",
+		Stage:                contracts.IntentionStageDecisionWritten,
+		IdempotencyKey:       adopt.IdempotencyKey,
+		RunID:                runID,
+		BestShaBefore:        adopt.BestShaBefore,
+		TargetSha:            adopt.TargetSha,
+		CandidatesHash:       adopt.CandidatesHash,
+		RegistryAppendResult: &adopt.RegistryAppendResult,
+		StartedAt:            adopt.DecidedAt,
+	}
 }
 
 // ---- Rollback ----
@@ -598,12 +629,8 @@ const (
 )
 
 func handleRollback(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, reason contracts.RollbackReason, ownership pushOwnership) error {
-	intention.Stage = contracts.IntentionStageRollingBackBranchReverted
 	intention.RecoveryReason = reason
 	intention.FailedStep = contracts.FailedStep70
-	if err := store.Save(intention); err != nil {
-		return err
-	}
 
 	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
 	if err != nil {
@@ -645,6 +672,11 @@ func handleRollback(ctx context.Context, pr int, runCtx internalio.RunContext, p
 		// Push never landed; no branch mutation needed.
 	default:
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonRemoteDivergence)
+	}
+
+	intention.Stage = contracts.IntentionStageRollingBackBranchReverted
+	if err := store.Save(intention); err != nil {
+		return err
 	}
 
 	rollbackResult, err := appendRegistryRollbacks(runCtx, intention, reason, deps.Now())
@@ -1745,7 +1777,14 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 		contracts.IntentionStagePolicyPublished:
 		return driveDecision(ctx, pr, runCtx, pkg, *intention, store, writer, deps)
 	case contracts.IntentionStageDecisionWritten:
-		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps, true)
+		decision, ok, err := loadDecisionIfExists(runCtx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("step70: decision_written stage requires persisted decision.json")
+		}
+		return finalizePersistedDecision(ctx, pr, runCtx, pkg, candidates, decision, store, writer, deps)
 	case contracts.IntentionStageRollingBackBranchReverted,
 		contracts.IntentionStageRollingBackRegistryAppended,
 		contracts.IntentionStageRollingBackDecisionWritten:
