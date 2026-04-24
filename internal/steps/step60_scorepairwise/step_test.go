@@ -924,6 +924,87 @@ func TestRun_RerunWithoutMarker_ReusesDisputedOnlyArbiterCompliance(t *testing.T
 	assert.Equal(t, beforeCompliance, mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl"))
 }
 
+func TestRun_RerunWithoutMarker_RejectsFullCoverageArbiterRawReuse(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	writePass1Compliance(t, runIO, pkg.RunID, "a1", map[string]contracts.ComplianceVerdict{
+		"agreed":   contracts.ComplianceVerdictCompliant,
+		"disputed": contracts.ComplianceVerdictCompliant,
+	})
+	now := time.Date(2026, 4, 21, 11, 42, 0, 0, time.UTC)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary: scriptedJudge{
+			score:        80,
+			reasonPrefix: "primary",
+			compliance: map[string]contracts.ComplianceVerdict{
+				"agreed":   contracts.ComplianceVerdictCompliant,
+				"disputed": contracts.ComplianceVerdictViolated,
+			},
+		},
+		Secondary: scriptedJudge{
+			score:        80,
+			reasonPrefix: "secondary",
+			compliance: map[string]contracts.ComplianceVerdict{
+				"agreed":   contracts.ComplianceVerdictCompliant,
+				"disputed": contracts.ComplianceVerdictValidException,
+			},
+		},
+		Arbiter: scriptedJudge{
+			score:        80,
+			reasonPrefix: "arbiter",
+			compliance: map[string]contracts.ComplianceVerdict{
+				"disputed": contracts.ComplianceVerdictCompliant,
+			},
+		},
+		Now: func() time.Time { return now },
+	}))
+
+	rawRows := mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl")
+	var legacyFullCoverageRow contracts.RawComplianceEntry
+	var primaryAgreed, secondaryAgreed contracts.RawComplianceEntry
+	for _, row := range rawRows {
+		if row.JudgeRole == contracts.JudgeRoleArbiter && row.RuleID == "disputed" {
+			legacyFullCoverageRow = row
+		}
+		if row.JudgeRole == contracts.JudgeRolePrimary && row.RuleID == "agreed" {
+			primaryAgreed = row
+		}
+		if row.JudgeRole == contracts.JudgeRoleSecondary && row.RuleID == "agreed" {
+			secondaryAgreed = row
+		}
+	}
+	require.NotEmpty(t, legacyFullCoverageRow.OutputSha256)
+	primaryAgreedHash, err := rawComplianceEntryHash(primaryAgreed)
+	require.NoError(t, err)
+	secondaryAgreedHash, err := rawComplianceEntryHash(secondaryAgreed)
+	require.NoError(t, err)
+	legacyFullCoverageRow.RuleID = "agreed"
+	legacyFullCoverageRow.Verdict = contracts.ComplianceVerdictCompliant
+	legacyFullCoverageRow.Rationale = "legacy full-coverage arbiter row"
+	legacyFullCoverageRow.PrimaryRef = &contracts.RawJudgeRef{Role: contracts.JudgeRolePrimary, Sha256: primaryAgreedHash}
+	legacyFullCoverageRow.SecondaryRef = &contracts.RawJudgeRef{Role: contracts.JudgeRoleSecondary, Sha256: secondaryAgreedHash}
+	require.NoError(t, internalio.AppendJSONL(mustResolve(t, runIO, "60/compliance-B-raw.jsonl"), legacyFullCoverageRow))
+	require.NoError(t, os.Remove(mustResolve(t, runIO, "60/done.marker")))
+
+	var called bool
+	callTracker := unexpectedCallJudge{called: &called}
+	err = Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     callTracker,
+		Secondary:   callTracker,
+		Arbiter:     callTracker,
+		Now:         func() time.Time { return now.Add(time.Minute) },
+	})
+	require.Error(t, err)
+	assert.True(t, called, "full-coverage arbiter raw rows must not satisfy strict disputed-only reuse")
+}
+
 // TestExpectedComplianceRuleIDsForAgent_IgnoresRawRuleIDs is the F18
 // contract: raw rows may contain historical rule IDs that no longer appear
 // in pass1. They MUST NOT authorize themselves during reuse — the expected
