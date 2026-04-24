@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
+	"github.com/nishimoto265/auto-improve/internal/steps/rescuetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -102,7 +103,8 @@ func TestResumeIfNeeded_AdoptsExistingRescueAfterCrashBeforeResumeStateSave(t *t
 
 	rescueDir := filepath.Join(agentDir, rescuedDirName, "existing-rescue")
 	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
-	artifacts := writeIgnoredCoverageArtifacts(t, rescueDir)
+	artifacts, err := rescuetest.WriteIgnoredCoverageArtifacts(rescueDir, fileDigest)
+	require.NoError(t, err)
 	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
 		ExpectedBaseSHA:  env.run.TaskPackage.BaseSHA,
 		RescuedHeadSHA:   allocation.BaseSHA,
@@ -202,7 +204,8 @@ func TestResumeIfNeeded_SkipsRescueDirWithPartialIgnoredCoverage(t *testing.T) {
 
 	rescueDir := filepath.Join(agentDir, rescuedDirName, "partial-rescue")
 	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
-	artifacts := writePartialIgnoredCoverageArtifacts(t, rescueDir)
+	artifacts, err := rescuetest.WritePartialIgnoredCoverageArtifacts(rescueDir, fileDigest)
+	require.NoError(t, err)
 	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
 		ExpectedBaseSHA:  env.run.TaskPackage.BaseSHA,
 		RescuedHeadSHA:   allocation.BaseSHA,
@@ -305,27 +308,4 @@ func rescueDirEntries(t *testing.T, agentDir string) []os.DirEntry {
 	}
 	require.NoError(t, err)
 	return entries
-}
-
-func writeIgnoredCoverageArtifacts(t *testing.T, rescueDir string) []agentrunner.RescueArtifactDigest {
-	t.Helper()
-	paths := []string{"ignored-skipped.txt", "ignored.txt"}
-	artifacts := make([]agentrunner.RescueArtifactDigest, 0, len(paths))
-	for _, rel := range paths {
-		path := filepath.Join(rescueDir, rel)
-		require.NoError(t, os.WriteFile(path, nil, 0o644))
-		digest, err := fileDigest(path)
-		require.NoError(t, err)
-		artifacts = append(artifacts, agentrunner.RescueArtifactDigest{Path: rel, SHA256: digest})
-	}
-	return artifacts
-}
-
-func writePartialIgnoredCoverageArtifacts(t *testing.T, rescueDir string) []agentrunner.RescueArtifactDigest {
-	t.Helper()
-	path := filepath.Join(rescueDir, "ignored.txt")
-	require.NoError(t, os.WriteFile(path, nil, 0o644))
-	digest, err := fileDigest(path)
-	require.NoError(t, err)
-	return []agentrunner.RescueArtifactDigest{{Path: "ignored.txt", SHA256: digest}}
 }

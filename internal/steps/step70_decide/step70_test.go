@@ -2868,6 +2868,7 @@ type fakePushCall struct {
 
 type fakeGit struct {
 	head                string
+	remoteHeadErr       error
 	pushErr             error
 	removeWorktreeErr   error
 	pushCalls           []fakePushCall
@@ -2883,6 +2884,9 @@ type cancelOnPushGit struct {
 
 func (g *fakeGit) RemoteHead(_ context.Context, _ string) (string, error) {
 	g.remoteHeadCalls++
+	if g.remoteHeadErr != nil {
+		return "", g.remoteHeadErr
+	}
 	return g.head, nil
 }
 
