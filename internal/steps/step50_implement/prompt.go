@@ -6,6 +6,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/nishimoto265/auto-improve/internal/candidaterules"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/policyrepo"
@@ -21,7 +22,7 @@ type PromptData struct {
 	TaskPackage      contracts.TaskPackage
 	Agent            contracts.AgentID
 	CandidateRuleIDs []string
-	RulePayloads     []RulePayload
+	RulePayloads     []candidaterules.RulePayload
 	ActiveRules      []policyrepo.ActiveRule
 	WorktreePath     string
 	Pass             int
@@ -69,13 +70,13 @@ func sanitizeTaskPackage(pkg contracts.TaskPackage) contracts.TaskPackage {
 	return safe
 }
 
-func sanitizeRulePayloads(rulePayloads []RulePayload) []RulePayload {
+func sanitizeRulePayloads(rulePayloads []candidaterules.RulePayload) []candidaterules.RulePayload {
 	if len(rulePayloads) == 0 {
 		return nil
 	}
-	safe := make([]RulePayload, len(rulePayloads))
+	safe := make([]candidaterules.RulePayload, len(rulePayloads))
 	for i, rule := range rulePayloads {
-		safe[i] = RulePayload{
+		safe[i] = candidaterules.RulePayload{
 			ID:           internalio.SanitizeForPromptEmbedding(rule.ID),
 			Kind:         internalio.SanitizeForPromptEmbedding(rule.Kind),
 			TargetRuleID: internalio.SanitizeForPromptEmbedding(rule.TargetRuleID),
@@ -87,6 +88,17 @@ func sanitizeRulePayloads(rulePayloads []RulePayload) []RulePayload {
 		}
 	}
 	return safe
+}
+
+func rulePayloadIDs(payloads []candidaterules.RulePayload) []string {
+	if len(payloads) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(payloads))
+	for _, payload := range payloads {
+		ids = append(ids, payload.ID)
+	}
+	return ids
 }
 
 func sanitizeStrings(items []string) []string {

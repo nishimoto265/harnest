@@ -134,10 +134,6 @@ func AppendStateEntry(ctx internalio.RunContext, entry contracts.StateEntry) err
 	return Append(ctx, entry)
 }
 
-func AppendStateEntries(ctx internalio.RunContext, entries []contracts.StateEntry) error {
-	return NewWriter(ctx).AppendAll(entries)
-}
-
 func ScanEventsForRun(ctx internalio.RunContext, runID contracts.RunID) ([]contracts.StateEntry, error) {
 	entries, err := readProcessedEntriesPath(ctx.ProcessedPath())
 	if err != nil {

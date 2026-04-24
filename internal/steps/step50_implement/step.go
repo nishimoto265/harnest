@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/agents"
+	"github.com/nishimoto265/auto-improve/internal/candidaterules"
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
@@ -169,7 +170,7 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	if err != nil {
 		return err
 	}
-	rulePayloads, err := LoadRulePayloads(candidatesPath)
+	rulePayloads, err := candidaterules.LoadRulePayloads(candidatesPath)
 	if err != nil {
 		return fmt.Errorf("step50: load rule payloads: %w", err)
 	}

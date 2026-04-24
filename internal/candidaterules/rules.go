@@ -1,4 +1,4 @@
-package step50_implement
+package candidaterules
 
 import (
 	"crypto/sha256"
@@ -90,15 +90,4 @@ func verifyCandidateBodySHA(body []byte, want string) error {
 		return fmt.Errorf("sha256 mismatch: got=%s want=%s", got, want)
 	}
 	return nil
-}
-
-func rulePayloadIDs(payloads []RulePayload) []string {
-	if len(payloads) == 0 {
-		return nil
-	}
-	ids := make([]string, 0, len(payloads))
-	for _, payload := range payloads {
-		ids = append(ids, payload.ID)
-	}
-	return ids
 }
