@@ -1406,8 +1406,13 @@ func promoteRuleSidecar(stagedPath, dstPath, wantSHA, prevSHA string) error {
 		default:
 			return fmt.Errorf("%w: path=%s", errRulePublishDestinationType, dstPath)
 		}
-	} else if err != nil && !os.IsNotExist(err) {
-		return err
+	} else if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if prevSHA != "" {
+			return fmt.Errorf("%w: path=%s", errRulePublishConflict, dstPath)
+		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
