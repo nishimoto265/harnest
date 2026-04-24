@@ -63,9 +63,83 @@ func requireProcessInspection(t *testing.T) {
 	if err != nil || startTime == "" || isProcessInspectionUnavailableStartTime(startTime) {
 		t.Skipf("process inspection unavailable in this sandbox: %v", err)
 	}
-	if _, err := processDescendants(os.Getpid(), []int{os.Getpid()}); err != nil {
+	if _, err := processDescendants(os.Getpid(), []processIdentity{{pid: os.Getpid(), startTime: startTime}}); err != nil {
 		t.Skipf("process tree inspection unavailable in this sandbox: %v", err)
 	}
+}
+
+func TestDescendantTracker_SkipsReusedSeedDuringExpansion(t *testing.T) {
+	originalLookup := lookupProcessStartTime
+	originalParents := processParentList
+	t.Cleanup(func() {
+		lookupProcessStartTime = originalLookup
+		processParentList = originalParents
+	})
+
+	lookupProcessStartTime = func(pid int) (string, error) {
+		switch pid {
+		case 100:
+			return "root-start", nil
+		case 200:
+			return "reused-start", nil
+		case 201:
+			return "root-child-start", nil
+		case 300:
+			return "reused-child-start", nil
+		default:
+			return "", syscall.ESRCH
+		}
+	}
+	processParentList = func() ([]processParent, error) {
+		return []processParent{
+			{pid: 201, ppid: 100},
+			{pid: 300, ppid: 200},
+		}, nil
+	}
+
+	tracker := &DescendantTracker{
+		rootPID:       100,
+		rootStartTime: "root-start",
+		seen: map[int]string{
+			200: "old-start",
+		},
+	}
+	tracker.capture()
+
+	require.Contains(t, tracker.seen, 201)
+	require.NotContains(t, tracker.seen, 300)
+}
+
+func TestDescendantTracker_SkipsRootExpansionWhenIdentityUnavailable(t *testing.T) {
+	originalLookup := lookupProcessStartTime
+	originalParents := processParentList
+	t.Cleanup(func() {
+		lookupProcessStartTime = originalLookup
+		processParentList = originalParents
+	})
+
+	lookupProcessStartTime = func(pid int) (string, error) {
+		switch pid {
+		case 100:
+			return processInspectionUnavailableStartTime(pid), nil
+		case 201:
+			return "root-child-start", nil
+		default:
+			return "", syscall.ESRCH
+		}
+	}
+	processParentList = func() ([]processParent, error) {
+		return []processParent{{pid: 201, ppid: 100}}, nil
+	}
+
+	tracker := &DescendantTracker{
+		rootPID:       100,
+		rootStartTime: processInspectionUnavailableStartTime(100),
+		seen:          map[int]string{},
+	}
+	tracker.capture()
+
+	require.Empty(t, tracker.seen)
 }
 
 func TestKillTrackedPIDs_SkipsRecycledPIDWhenStartTimeDiffers(t *testing.T) {

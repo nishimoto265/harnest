@@ -34,7 +34,8 @@ type RescueLeaseQuiesceOptions struct {
 	// lease identity (pid + start time) on every signal attempt so a recycled
 	// PGID owned by an unrelated process group is never targeted. When nil a
 	// default implementation is supplied that validates identity via
-	// PIDAlive + LookupProcessStartTime before each SIGKILL.
+	// PIDAlive + LookupProcessStartTime and verifies the saved PGID is still
+	// owned by the saved PID before each SIGKILL.
 	KillLeasedProcessGroup func(context.Context, RescueLeaseState, RescueLeaseQuiesceOptions) error
 	WorktreeProcessIDs     func(context.Context, string) ([]int, error)
 	KillPID                func(int, syscall.Signal) error
@@ -42,6 +43,7 @@ type RescueLeaseQuiesceOptions struct {
 	Now                    func() time.Time
 	PIDAlive               func(int) bool
 	LookupProcessStartTime func(int) (string, error)
+	LookupProcessGroupID   func(int) (int, error)
 	MaxWait                time.Duration
 	Interval               time.Duration
 	SelfPID                int
@@ -92,6 +94,9 @@ func EnsureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state R
 	if opts.LookupProcessStartTime == nil {
 		opts.LookupProcessStartTime = LookupProcessStartTime
 	}
+	if opts.LookupProcessGroupID == nil {
+		opts.LookupProcessGroupID = syscall.Getpgid
+	}
 	if opts.MaxWait <= 0 {
 		opts.MaxWait = 750 * time.Millisecond
 	}
@@ -102,7 +107,11 @@ func EnsureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state R
 		opts.SelfPID = os.Getpid()
 	}
 
-	if ShouldKillSavedProcessGroup(state, opts.PIDAlive, opts.LookupProcessStartTime) {
+	shouldKill, err := shouldKillSavedProcessGroup(state, opts.PIDAlive, opts.LookupProcessStartTime)
+	if err != nil {
+		return err
+	}
+	if shouldKill {
 		if err := opts.KillLeasedProcessGroup(ctx, state, opts); err != nil {
 			if errors.Is(err, ErrCleanupTimeout) {
 				return fmt.Errorf("%w: %v", ErrRescueLeaseQuiesceTimedOut, err)
@@ -117,7 +126,13 @@ func EnsureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state R
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		pids, err := opts.WorktreeProcessIDs(ctx, worktreePath)
+		remaining := deadline.Sub(opts.Now())
+		if remaining <= 0 {
+			return ErrRescueLeaseQuiesceTimedOut
+		}
+		callCtx, cancel := context.WithTimeout(ctx, remaining)
+		pids, err := opts.WorktreeProcessIDs(callCtx, worktreePath)
+		cancel()
 		if err != nil {
 			return &RescueLeaseQuiesceEnumerateError{Err: err}
 		}
@@ -131,7 +146,11 @@ func EnsureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state R
 		if len(activePIDs) == 0 {
 			emptyChecks++
 			if emptyChecks >= 2 {
-				if savedLeaseOwnerAlive(state, opts.PIDAlive, opts.LookupProcessStartTime) {
+				ownerAlive, err := savedLeaseOwnerAlive(state, opts.PIDAlive, opts.LookupProcessStartTime)
+				if err != nil {
+					return err
+				}
+				if ownerAlive {
 					return ErrRescueLeaseQuiesceTimedOut
 				}
 				return nil
@@ -206,6 +225,10 @@ func defaultKillLeasedProcessGroup(ctx context.Context, state RescueLeaseState, 
 	if now == nil {
 		now = time.Now
 	}
+	lookupProcessGroupID := opts.LookupProcessGroupID
+	if lookupProcessGroupID == nil {
+		lookupProcessGroupID = syscall.Getpgid
+	}
 	interval := opts.Interval
 	if interval <= 0 {
 		interval = 25 * time.Millisecond
@@ -219,8 +242,15 @@ func defaultKillLeasedProcessGroup(ctx context.Context, state RescueLeaseState, 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !savedLeaseOwnerAlive(state, opts.PIDAlive, opts.LookupProcessStartTime) {
+		ownerAlive, err := savedLeaseOwnerAlive(state, opts.PIDAlive, opts.LookupProcessStartTime)
+		if err != nil {
+			return errors.Join(lastErr, err)
+		}
+		if !ownerAlive {
 			return lastErr
+		}
+		if err := verifySavedProcessGroupOwner(state, lookupProcessGroupID); err != nil {
+			return errors.Join(lastErr, err)
 		}
 		if err := killPID(-state.PGID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			lastErr = err
@@ -241,37 +271,89 @@ func defaultKillLeasedProcessGroup(ctx context.Context, state RescueLeaseState, 
 }
 
 func ShouldKillSavedProcessGroup(state RescueLeaseState, pidAlive func(int) bool, lookupProcessStartTime func(int) (string, error)) bool {
-	if state.PGID <= 0 || state.PID <= 0 || state.LeaderStartTime == "" {
-		return false
-	}
-	if pidAlive != nil && !pidAlive(state.PID) {
-		return false
-	}
-	if lookupProcessStartTime == nil {
-		lookupProcessStartTime = LookupProcessStartTime
-	}
-	startTime, err := lookupProcessStartTime(state.PID)
-	if err != nil {
-		return false
-	}
-	return startTime == state.LeaderStartTime
+	kill, err := shouldKillSavedProcessGroup(state, pidAlive, lookupProcessStartTime)
+	return err == nil && kill
 }
 
-func savedLeaseOwnerAlive(state RescueLeaseState, pidAlive func(int) bool, lookupProcessStartTime func(int) (string, error)) bool {
-	if state.PID <= 0 || state.LeaderStartTime == "" {
-		return false
+func shouldKillSavedProcessGroup(state RescueLeaseState, pidAlive func(int) bool, lookupProcessStartTime func(int) (string, error)) (bool, error) {
+	if state.PGID <= 0 || state.PID <= 0 || state.LeaderStartTime == "" {
+		return false, nil
 	}
 	if pidAlive != nil && !pidAlive(state.PID) {
-		return false
+		return false, nil
+	}
+	if isProcessInspectionUnavailableStartTime(state.LeaderStartTime) {
+		return false, fmt.Errorf("%w: saved lease pid=%d", ErrCleanupInspectionUnavailable, state.PID)
 	}
 	if lookupProcessStartTime == nil {
 		lookupProcessStartTime = LookupProcessStartTime
 	}
 	startTime, err := lookupProcessStartTime(state.PID)
 	if err != nil {
-		return false
+		if errors.Is(err, syscall.ESRCH) {
+			return false, nil
+		}
+		if isProcessInspectionUnavailable(err) {
+			return false, fmt.Errorf("%w: saved lease pid=%d", ErrCleanupInspectionUnavailable, state.PID)
+		}
+		return false, err
 	}
-	return startTime == state.LeaderStartTime
+	if isProcessInspectionUnavailableStartTime(startTime) {
+		return false, fmt.Errorf("%w: saved lease pid=%d", ErrCleanupInspectionUnavailable, state.PID)
+	}
+	return startTime == state.LeaderStartTime, nil
+}
+
+func savedLeaseOwnerAlive(state RescueLeaseState, pidAlive func(int) bool, lookupProcessStartTime func(int) (string, error)) (bool, error) {
+	if state.PID <= 0 || state.LeaderStartTime == "" {
+		return false, nil
+	}
+	if pidAlive != nil && !pidAlive(state.PID) {
+		return false, nil
+	}
+	if isProcessInspectionUnavailableStartTime(state.LeaderStartTime) {
+		return false, fmt.Errorf("%w: saved lease pid=%d", ErrCleanupInspectionUnavailable, state.PID)
+	}
+	if lookupProcessStartTime == nil {
+		lookupProcessStartTime = LookupProcessStartTime
+	}
+	startTime, err := lookupProcessStartTime(state.PID)
+	if err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return false, nil
+		}
+		if isProcessInspectionUnavailable(err) {
+			return false, fmt.Errorf("%w: saved lease pid=%d", ErrCleanupInspectionUnavailable, state.PID)
+		}
+		return false, err
+	}
+	if isProcessInspectionUnavailableStartTime(startTime) {
+		return false, fmt.Errorf("%w: saved lease pid=%d", ErrCleanupInspectionUnavailable, state.PID)
+	}
+	return startTime == state.LeaderStartTime, nil
+}
+
+func verifySavedProcessGroupOwner(state RescueLeaseState, lookupProcessGroupID func(int) (int, error)) error {
+	if state.PID <= 0 || state.PGID <= 0 {
+		return nil
+	}
+	if lookupProcessGroupID == nil {
+		lookupProcessGroupID = syscall.Getpgid
+	}
+	pgid, err := lookupProcessGroupID(state.PID)
+	if err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		if isProcessInspectionUnavailable(err) {
+			return fmt.Errorf("%w: saved lease pid=%d pgid=%d", ErrCleanupInspectionUnavailable, state.PID, state.PGID)
+		}
+		return err
+	}
+	if pgid != state.PGID {
+		return fmt.Errorf("%w: saved lease pid=%d pgid=%d actual_pgid=%d", ErrCleanupOwnershipUnverified, state.PID, state.PGID, pgid)
+	}
+	return nil
 }
 
 func isLsofNoMatches(stderr string) bool {

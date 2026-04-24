@@ -127,6 +127,48 @@ func TestEnsureRescueLeaseQuiesced_DoesNotKillUnverifiedWorktreePIDs(t *testing.
 	assert.Empty(t, killedTargets, "must not SIGKILL lsof worktree PIDs unless they belong to the verified saved lease")
 }
 
+func TestEnsureRescueLeaseQuiesced_AppliesDeadlineToWorktreeEnumeration(t *testing.T) {
+	calls := 0
+	err := EnsureRescueLeaseQuiesced(context.Background(), t.TempDir(), RescueLeaseState{}, RescueLeaseQuiesceOptions{
+		WorktreeProcessIDs: func(ctx context.Context, _ string) ([]int, error) {
+			_, ok := ctx.Deadline()
+			require.True(t, ok, "worktree enumeration must receive a per-call deadline")
+			calls++
+			if calls == 1 {
+				return []int{7777}, nil
+			}
+			return nil, nil
+		},
+		Sleep: func(time.Duration) {},
+		Now:   func() time.Time { return time.Unix(0, 0) },
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 3, calls)
+}
+
+func TestEnsureRescueLeaseQuiesced_FailsClosedOnUnavailableSavedLeaseIdentity(t *testing.T) {
+	var killedTargets []int
+	err := EnsureRescueLeaseQuiesced(context.Background(), t.TempDir(), RescueLeaseState{
+		PID:             4242,
+		PGID:            4242,
+		LeaderStartTime: processInspectionUnavailableStartTime(4242),
+	}, RescueLeaseQuiesceOptions{
+		WorktreeProcessIDs: func(context.Context, string) ([]int, error) { return nil, nil },
+		KillPID: func(pid int, _ syscall.Signal) error {
+			killedTargets = append(killedTargets, pid)
+			return nil
+		},
+		Sleep:                  func(time.Duration) {},
+		Now:                    func() time.Time { return time.Unix(0, 0) },
+		PIDAlive:               func(int) bool { return true },
+		LookupProcessStartTime: func(int) (string, error) { return processInspectionUnavailableStartTime(4242), nil },
+	})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCleanupInspectionUnavailable)
+	assert.Empty(t, killedTargets, "must not signal a saved PGID when lease identity was captured as inspection-unavailable")
+}
+
 func TestEnsureRescueLeaseQuiesced_RevalidatesIdentityBeforeEachKill(t *testing.T) {
 	// Owner is initially alive with saved-start, but exits (start time flips to
 	// recycled-start) after the first SIGKILL. The helper must NOT send a
@@ -174,11 +216,56 @@ func TestEnsureRescueLeaseQuiesced_RevalidatesIdentityBeforeEachKill(t *testing.
 		Now:                    func() time.Time { return time.Unix(0, 0) },
 		PIDAlive:               func(int) bool { return true },
 		LookupProcessStartTime: lookup,
+		LookupProcessGroupID:   func(int) (int, error) { return 4242, nil },
 	})
 	require.NoError(t, err)
 	mu.Lock()
 	defer mu.Unlock()
-	assert.LessOrEqual(t, killCalls, 1, "must stop killing once lease identity no longer matches")
+	assert.Equal(t, 1, killCalls, "must stop killing once lease identity no longer matches")
+}
+
+func TestEnsureRescueLeaseQuiesced_RevalidatesPGIDOwnerBeforeEachKill(t *testing.T) {
+	var mu sync.Mutex
+	killCalls := 0
+	pgidLookups := 0
+	origMembers := processGroupMembersUntilGoneList
+	t.Cleanup(func() { processGroupMembersUntilGoneList = origMembers })
+	processGroupMembersUntilGoneList = func(int) ([]int, error) {
+		return []int{4242, 4243}, nil
+	}
+
+	err := EnsureRescueLeaseQuiesced(context.Background(), t.TempDir(), RescueLeaseState{
+		PID:             4242,
+		PGID:            4242,
+		LeaderStartTime: "saved-start",
+	}, RescueLeaseQuiesceOptions{
+		KillLeasedProcessGroup: defaultKillLeasedProcessGroup,
+		WorktreeProcessIDs:     func(context.Context, string) ([]int, error) { return nil, nil },
+		KillPID: func(pid int, _ syscall.Signal) error {
+			mu.Lock()
+			defer mu.Unlock()
+			killCalls++
+			return nil
+		},
+		Sleep:                  func(time.Duration) {},
+		Now:                    func() time.Time { return time.Unix(0, 0) },
+		PIDAlive:               func(int) bool { return true },
+		LookupProcessStartTime: func(int) (string, error) { return "saved-start", nil },
+		LookupProcessGroupID: func(int) (int, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			pgidLookups++
+			if pgidLookups == 1 {
+				return 4242, nil
+			}
+			return 9000, nil
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCleanupOwnershipUnverified)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, killCalls, "must not signal saved PGID after live owner no longer belongs to it")
 }
 
 func TestEnsureRescueLeaseQuiesced_MapsCleanupTimeoutToQuiesceTimeout(t *testing.T) {

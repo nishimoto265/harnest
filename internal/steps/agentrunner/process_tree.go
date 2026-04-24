@@ -16,9 +16,10 @@ import (
 )
 
 type DescendantTracker struct {
-	rootPID int
-	stop    chan struct{}
-	done    chan struct{}
+	rootPID       int
+	rootStartTime string
+	stop          chan struct{}
+	done          chan struct{}
 
 	mu   sync.Mutex
 	seen map[int]string
@@ -35,6 +36,7 @@ var killPIDSignal = func(pid int, sig syscall.Signal) error {
 }
 var cleanupNow = time.Now
 var cleanupSleep = time.Sleep
+var processParentList = processParents
 var sessionProcessesUntilGoneList = sessionProcesses
 var processGroupMembersUntilGoneList = processGroupMembers
 var killProcessGroupUntilGoneSignal = KillProcessGroup
@@ -63,11 +65,20 @@ func StartDescendantTracker(rootPID int, interval time.Duration) *DescendantTrac
 	if interval <= 0 {
 		interval = 25 * time.Millisecond
 	}
+	rootStartTime, err := lookupProcessStartTime(rootPID)
+	if err != nil {
+		if isProcessInspectionUnavailable(err) {
+			rootStartTime = processInspectionUnavailableStartTime(rootPID)
+		} else {
+			rootStartTime = ""
+		}
+	}
 	tracker := &DescendantTracker{
-		rootPID: rootPID,
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
-		seen:    map[int]string{},
+		rootPID:       rootPID,
+		rootStartTime: rootStartTime,
+		stop:          make(chan struct{}),
+		done:          make(chan struct{}),
+		seen:          map[int]string{},
 	}
 	go tracker.run(interval)
 	return tracker
@@ -92,7 +103,7 @@ func (t *DescendantTracker) capture() {
 	if t == nil || t.rootPID <= 0 {
 		return
 	}
-	descendants, err := processDescendants(t.rootPID, t.snapshotSeeds())
+	descendants, err := processDescendants(t.rootPID, t.snapshotSeedIdentities())
 	if err != nil {
 		return
 	}
@@ -107,22 +118,34 @@ func (t *DescendantTracker) capture() {
 		}
 		startTime, err := lookupProcessStartTime(pid)
 		if err != nil {
-			startTime = ""
+			if isProcessInspectionUnavailable(err) {
+				startTime = processInspectionUnavailableStartTime(pid)
+			} else {
+				continue
+			}
+		}
+		if startTime == "" {
+			continue
 		}
 		t.seen[pid] = startTime
 	}
 }
 
-func (t *DescendantTracker) snapshotSeeds() []int {
+func (t *DescendantTracker) snapshotSeedIdentities() []processIdentity {
 	if t == nil {
 		return nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	seeds := make([]int, 0, len(t.seen)+1)
-	seeds = append(seeds, t.rootPID)
-	for pid := range t.seen {
-		seeds = append(seeds, pid)
+	seeds := make([]processIdentity, 0, len(t.seen)+1)
+	if t.rootPID > 0 && t.rootStartTime != "" {
+		seeds = append(seeds, processIdentity{pid: t.rootPID, startTime: t.rootStartTime})
+	}
+	for pid, startTime := range t.seen {
+		if startTime == "" {
+			continue
+		}
+		seeds = append(seeds, processIdentity{pid: pid, startTime: startTime})
 	}
 	return seeds
 }
@@ -412,47 +435,37 @@ func sessionProcesses(sessionID int) ([]int, error) {
 	return pids, nil
 }
 
-func processDescendants(rootPID int, seeds []int) ([]int, error) {
+func processDescendants(rootPID int, seeds []processIdentity) ([]int, error) {
 	if rootPID <= 0 {
 		return nil, nil
 	}
-	psOutput, err := exec.Command("ps", "-axo", "pid=,ppid=").Output()
+	processes, err := processParentList()
 	if err != nil {
 		return nil, err
 	}
 	children := map[int][]int{}
-	scanner := bufio.NewScanner(bytes.NewReader(psOutput))
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) != 2 {
+	for _, process := range processes {
+		if process.pid <= 0 || process.ppid <= 0 {
 			continue
 		}
-		pid, errPID := strconv.Atoi(fields[0])
-		ppid, errPPID := strconv.Atoi(fields[1])
-		if errPID != nil || errPPID != nil {
-			continue
-		}
-		children[ppid] = append(children[ppid], pid)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+		children[process.ppid] = append(children[process.ppid], process.pid)
 	}
 
 	visited := map[int]struct{}{}
 	queue := make([]int, 0, len(seeds)+1)
 	for _, seed := range seeds {
-		if seed <= 0 {
+		if seed.pid <= 0 {
 			continue
 		}
-		if _, ok := visited[seed]; ok {
+		if _, ok := visited[seed.pid]; ok {
 			continue
 		}
-		visited[seed] = struct{}{}
-		queue = append(queue, seed)
-	}
-	if _, ok := visited[rootPID]; !ok {
-		visited[rootPID] = struct{}{}
-		queue = append(queue, rootPID)
+		status, err := inspectProcessIdentity(seed.pid, seed.startTime)
+		if err != nil || status != processIdentityMatch {
+			continue
+		}
+		visited[seed.pid] = struct{}{}
+		queue = append(queue, seed.pid)
 	}
 	out := make([]int, 0, 8)
 	for len(queue) > 0 {
@@ -468,6 +481,36 @@ func processDescendants(rootPID int, seeds []int) ([]int, error) {
 		}
 	}
 	return out, nil
+}
+
+type processParent struct {
+	pid  int
+	ppid int
+}
+
+func processParents() ([]processParent, error) {
+	psOutput, err := exec.Command("ps", "-axo", "pid=,ppid=").Output()
+	if err != nil {
+		return nil, err
+	}
+	processes := make([]processParent, 0, 64)
+	scanner := bufio.NewScanner(bytes.NewReader(psOutput))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) != 2 {
+			continue
+		}
+		pid, errPID := strconv.Atoi(fields[0])
+		ppid, errPPID := strconv.Atoi(fields[1])
+		if errPID != nil || errPPID != nil {
+			continue
+		}
+		processes = append(processes, processParent{pid: pid, ppid: ppid})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return processes, nil
 }
 
 func processGroupMembers(pgid int) ([]int, error) {
