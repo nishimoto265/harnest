@@ -1276,7 +1276,7 @@ func TestPerformRescue_PreservesIgnoredFiles(t *testing.T) {
 	assert.FileExists(t, filepath.Join(fx.worktree, ".env.local"))
 }
 
-func TestPerformRescue_KillsDetachedWorktreeWriterBeforeCapture(t *testing.T) {
+func TestPerformRescue_RequiresManualRecoveryForUnverifiedDetachedWorktreeWriter(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	allocation, err := worktreeFor(fx.run.TaskPackage, 1, "a1")
 	require.NoError(t, err)
@@ -1296,6 +1296,11 @@ func TestPerformRescue_KillsDetachedWorktreeWriterBeforeCapture(t *testing.T) {
 	require.NoError(t, err)
 	childPID, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		if pidAlive(childPID) {
+			_ = syscall.Kill(childPID, syscall.SIGKILL)
+		}
+	})
 
 	originalWorktreePIDs := rescueWorktreeProcessIDs
 	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) {
@@ -1316,10 +1321,11 @@ func TestPerformRescue_KillsDetachedWorktreeWriterBeforeCapture(t *testing.T) {
 		RetryCount:      0,
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	})
-	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		return !pidAlive(childPID)
-	}, 2*time.Second, 20*time.Millisecond)
+	require.Error(t, err)
+	var manual *agentrunner.ManualRecoveryRequiredError
+	require.ErrorAs(t, err, &manual)
+	assert.Equal(t, contracts.RollbackReasonLeaseFailure, manual.Reason)
+	assert.True(t, pidAlive(childPID), "unverified lsof worktree PID must not be SIGKILLed")
 }
 
 func TestStepRun_FailsClosedOnFIFOChecklist(t *testing.T) {

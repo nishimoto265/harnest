@@ -96,6 +96,37 @@ func TestEnsureRescueLeaseQuiesced_SkipsPGIDKillWhenOwnerStartTimeDiffers(t *tes
 	assert.Empty(t, killedTargets, "must not SIGKILL a recycled PGID whose owner start time differs")
 }
 
+func TestEnsureRescueLeaseQuiesced_DoesNotKillUnverifiedWorktreePIDs(t *testing.T) {
+	currentTime := time.Unix(0, 0)
+	now := func() time.Time {
+		out := currentTime
+		currentTime = currentTime.Add(time.Millisecond)
+		return out
+	}
+	var killedTargets []int
+
+	err := EnsureRescueLeaseQuiesced(context.Background(), t.TempDir(), RescueLeaseState{
+		PID:             4242,
+		PGID:            4242,
+		LeaderStartTime: "saved-start",
+	}, RescueLeaseQuiesceOptions{
+		WorktreeProcessIDs: func(context.Context, string) ([]int, error) { return []int{7777}, nil },
+		KillPID: func(pid int, _ syscall.Signal) error {
+			killedTargets = append(killedTargets, pid)
+			return nil
+		},
+		Sleep:                  func(time.Duration) {},
+		Now:                    now,
+		PIDAlive:               func(int) bool { return true },
+		LookupProcessStartTime: func(int) (string, error) { return "recycled-start", nil },
+		MaxWait:                time.Millisecond,
+	})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRescueLeaseQuiesceTimedOut)
+	assert.Empty(t, killedTargets, "must not SIGKILL lsof worktree PIDs unless they belong to the verified saved lease")
+}
+
 func TestEnsureRescueLeaseQuiesced_RevalidatesIdentityBeforeEachKill(t *testing.T) {
 	// Owner is initially alive with saved-start, but exits (start time flips to
 	// recycled-start) after the first SIGKILL. The helper must NOT send a

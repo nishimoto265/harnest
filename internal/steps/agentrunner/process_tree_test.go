@@ -20,7 +20,7 @@ func TestCleanupProcessTree_KillsDetachedGrandchildSpawnedAfterRootExit(t *testi
 	helperPath := writeDetachedGrandchildHelper(t, t.TempDir())
 	pidPath := filepath.Join(t.TempDir(), "detached-grandchild.pid")
 
-	cmd := exec.Command(helperPath, pidPath, "60ms", "30ms")
+	cmd := exec.Command(helperPath, pidPath, "60ms", "200ms")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
 	require.NoError(t, cmd.Start())
 
@@ -28,7 +28,7 @@ func TestCleanupProcessTree_KillsDetachedGrandchildSpawnedAfterRootExit(t *testi
 	require.NoError(t, err)
 	tracker := StartDescendantTracker(lease.PID, 25*time.Millisecond)
 	if tracker != nil {
-		tracker.CaptureBurst(15 * time.Millisecond)
+		tracker.CaptureBurst(75 * time.Millisecond)
 	}
 
 	require.NoError(t, cmd.Wait())
@@ -62,6 +62,9 @@ func requireProcessInspection(t *testing.T) {
 	startTime, err := processStartTime(os.Getpid())
 	if err != nil || startTime == "" || isProcessInspectionUnavailableStartTime(startTime) {
 		t.Skipf("process inspection unavailable in this sandbox: %v", err)
+	}
+	if _, err := processDescendants(os.Getpid(), []int{os.Getpid()}); err != nil {
+		t.Skipf("process tree inspection unavailable in this sandbox: %v", err)
 	}
 }
 

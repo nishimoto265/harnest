@@ -138,9 +138,6 @@ func EnsureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state R
 			}
 		} else {
 			emptyChecks = 0
-			for _, pid := range activePIDs {
-				_ = opts.KillPID(pid, syscall.SIGKILL)
-			}
 		}
 		if !opts.Now().Before(deadline) {
 			return ErrRescueLeaseQuiesceTimedOut
