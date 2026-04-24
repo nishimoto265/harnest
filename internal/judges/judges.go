@@ -25,14 +25,15 @@ const (
 )
 
 var (
-	ErrDefaultRubricUnresolved        = errors.New("judges: default rubric path could not be resolved")
-	ErrUnknownJudgeRole               = errors.New("judges: unknown judge role")
-	ErrJudgeOutputMissingScores       = errors.New("judges: output must contain one score per dimension")
-	ErrJudgeOutputDuplicateScore      = errors.New("judges: output contains duplicate dimension score")
-	ErrJudgeOutputDuplicateCompliance = errors.New("judges: output contains duplicate compliance rule")
-	ErrJudgeOutputMissingCompliance   = errors.New("judges: output missing expected compliance rule")
-	ErrJudgeOutputIdentity            = errors.New("judges: output row identity mismatch")
-	ErrJudgeOutputMissingInput        = errors.New("judges: output does not match input")
+	ErrDefaultRubricUnresolved         = errors.New("judges: default rubric path could not be resolved")
+	ErrUnknownJudgeRole                = errors.New("judges: unknown judge role")
+	ErrJudgeOutputMissingScores        = errors.New("judges: output must contain one score per dimension")
+	ErrJudgeOutputDuplicateScore       = errors.New("judges: output contains duplicate dimension score")
+	ErrJudgeOutputDuplicateCompliance  = errors.New("judges: output contains duplicate compliance rule")
+	ErrJudgeOutputMissingCompliance    = errors.New("judges: output missing expected compliance rule")
+	ErrJudgeOutputUnexpectedCompliance = errors.New("judges: output contains unexpected compliance rule")
+	ErrJudgeOutputIdentity             = errors.New("judges: output row identity mismatch")
+	ErrJudgeOutputMissingInput         = errors.New("judges: output does not match input")
 )
 
 var (
@@ -174,6 +175,15 @@ func (out JudgeOutput) ValidateFor(input JudgeInput) error {
 		seen := make(map[string]struct{}, len(out.Compliance))
 		for _, compliance := range out.Compliance {
 			seen[compliance.RuleID] = struct{}{}
+		}
+		expected := make(map[string]struct{}, len(input.ExpectedComplianceRuleIDs))
+		for _, ruleID := range input.ExpectedComplianceRuleIDs {
+			expected[ruleID] = struct{}{}
+		}
+		for _, compliance := range out.Compliance {
+			if _, ok := expected[compliance.RuleID]; !ok {
+				return fmt.Errorf("%w: rule_id=%s", ErrJudgeOutputUnexpectedCompliance, compliance.RuleID)
+			}
 		}
 		for _, ruleID := range input.ExpectedComplianceRuleIDs {
 			if _, ok := seen[ruleID]; !ok {

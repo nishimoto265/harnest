@@ -256,6 +256,102 @@ func TestRun_IdempotentWhenDoneMarkerExists(t *testing.T) {
 	assert.Equal(t, beforeScores, afterScores)
 }
 
+func TestRun_RebuildsWhenPass1ScoresChangeWithDoneMarker(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+
+	firstNow := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return firstNow },
+	}))
+	beforeMarker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
+	require.Equal(t, "pass1_avg_tenths=820 pass2_avg_tenths=820", mustReadJSONL[contracts.PairwiseEntry](t, runIO, "60/pairwise.jsonl")[0].Justification)
+
+	appendPass1ScoresWithScore(t, runIO, pkg.RunID, []contracts.AgentID{"a1"}, 10)
+
+	later := firstNow.Add(2 * time.Hour)
+	var called bool
+	noJudge := unexpectedCallJudge{called: &called}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     noJudge,
+		Secondary:   noJudge,
+		Arbiter:     noJudge,
+		Now:         func() time.Time { return later },
+	}))
+
+	afterMarker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
+	pairwise := mustReadJSONL[contracts.PairwiseEntry](t, runIO, "60/pairwise.jsonl")
+	require.Len(t, pairwise, 1)
+	assert.False(t, called)
+	assert.NotEqual(t, beforeMarker.InputHashes.Pass1Scores, afterMarker.InputHashes.Pass1Scores)
+	assert.Equal(t, later, afterMarker.ResolvedAt)
+	assert.Equal(t, "pass1_avg_tenths=100 pass2_avg_tenths=820", pairwise[0].Justification)
+	assert.Equal(t, contracts.PairwiseWinnerB, pairwise[0].Winner)
+}
+
+func TestRun_RerunsJudgesWhenCandidateRulesChangeWithDoneMarker(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:        true,
+		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	candidateV1 := []judges.CandidateRule{{
+		ID:    "cand-1",
+		Kind:  "new",
+		Title: "Candidate rule",
+		Body:  "first body",
+	}}
+	firstNow := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:             runIO,
+		TaskPackage:    &pkg,
+		Primary:        scriptedJudge{score: 60, reasonPrefix: "primary-v1", compliance: map[string]contracts.ComplianceVerdict{"cand-1": contracts.ComplianceVerdictCompliant}},
+		Secondary:      scriptedJudge{score: 60, reasonPrefix: "secondary-v1", compliance: map[string]contracts.ComplianceVerdict{"cand-1": contracts.ComplianceVerdictCompliant}},
+		Arbiter:        judges.NewArbiterStub(),
+		CandidateRules: candidateV1,
+		Now:            func() time.Time { return firstNow },
+	}))
+	beforeMarker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
+
+	candidateV2 := []judges.CandidateRule{{
+		ID:    "cand-1",
+		Kind:  "new",
+		Title: "Candidate rule",
+		Body:  "second body",
+	}}
+	primary := &countingJudge{delegate: scriptedJudge{score: 90, reasonPrefix: "primary-v2", compliance: map[string]contracts.ComplianceVerdict{"cand-1": contracts.ComplianceVerdictCompliant}}}
+	secondary := &countingJudge{delegate: scriptedJudge{score: 90, reasonPrefix: "secondary-v2", compliance: map[string]contracts.ComplianceVerdict{"cand-1": contracts.ComplianceVerdictCompliant}}}
+	later := firstNow.Add(2 * time.Hour)
+	require.NoError(t, Run(context.Background(), Input{
+		IO:             runIO,
+		TaskPackage:    &pkg,
+		Primary:        primary,
+		Secondary:      secondary,
+		Arbiter:        judges.NewArbiterStub(),
+		CandidateRules: candidateV2,
+		Now:            func() time.Time { return later },
+	}))
+
+	afterMarker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
+	scores := mustReadJSONL[contracts.ScoreEntry](t, runIO, "60/scores-B.jsonl")
+	require.Len(t, scores, len(canonicalDimensions))
+	assert.Greater(t, primary.callCount(), int32(0))
+	assert.Greater(t, secondary.callCount(), int32(0))
+	assert.NotEqual(t, beforeMarker.InputHashes.CandidateRules, afterMarker.InputHashes.CandidateRules)
+	assert.Equal(t, later, afterMarker.ResolvedAt)
+	for _, score := range scores {
+		assert.Equal(t, 90, score.Score)
+	}
+}
+
 func TestRun_RebuildsWhenDoneMarkerVerificationFails(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		agents:          []contracts.AgentID{"a1", "a2", "a3"},
@@ -1278,6 +1374,7 @@ func TestRun_ComplianceSingleSideRuleKeepsRawProvenance(t *testing.T) {
 		writePass1Score:        true,
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
 	})
+	rubricPath := writeEmptyRubric(t)
 
 	primary := scriptedJudge{
 		score:        80,
@@ -1306,6 +1403,7 @@ func TestRun_ComplianceSingleSideRuleKeepsRawProvenance(t *testing.T) {
 	err := Run(context.Background(), Input{
 		IO:          runIO,
 		TaskPackage: &pkg,
+		RubricPath:  rubricPath,
 		Primary:     primary,
 		Secondary:   secondary,
 		Arbiter:     arbiter,
@@ -1319,6 +1417,10 @@ func TestRun_ComplianceArbiterMayCoverOnlyDisputedRules(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score:        true,
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
+	})
+	writePass1Compliance(t, runIO, pkg.RunID, "a1", map[string]contracts.ComplianceVerdict{
+		"agreed":   contracts.ComplianceVerdictCompliant,
+		"disputed": contracts.ComplianceVerdictCompliant,
 	})
 
 	primary := scriptedJudge{
@@ -1369,6 +1471,7 @@ func TestRun_ComplianceArbiterOnlyRuleFinalizesAsSingleSource(t *testing.T) {
 		writePass1Score:        true,
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
 	})
+	rubricPath := writeEmptyRubric(t)
 
 	primary := scriptedJudge{
 		score:        80,
@@ -1395,6 +1498,7 @@ func TestRun_ComplianceArbiterOnlyRuleFinalizesAsSingleSource(t *testing.T) {
 	err := Run(context.Background(), Input{
 		IO:          runIO,
 		TaskPackage: &pkg,
+		RubricPath:  rubricPath,
 		Primary:     primary,
 		Secondary:   secondary,
 		Arbiter:     arbiter,
@@ -1511,10 +1615,12 @@ func TestRun_FailsClosedOnComplianceRuleSetMismatch(t *testing.T) {
 		writePass1Score:        true,
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
 	})
+	rubricPath := writeEmptyRubric(t)
 
 	err := Run(context.Background(), Input{
 		IO:          runIO,
 		TaskPackage: &pkg,
+		RubricPath:  rubricPath,
 		Primary: scriptedJudge{
 			score:        80,
 			reasonPrefix: "primary",
@@ -2069,7 +2175,9 @@ func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput)
 	for ruleID := range j.compliance {
 		ruleIDs = append(ruleIDs, ruleID)
 	}
-	if !j.strictCompliance {
+	if !j.strictCompliance && len(input.ExpectedComplianceRuleIDs) > 0 {
+		ruleIDs = append([]string(nil), input.ExpectedComplianceRuleIDs...)
+	} else if !j.strictCompliance {
 		for _, ruleID := range input.ExpectedComplianceRuleIDs {
 			if _, ok := j.compliance[ruleID]; !ok {
 				ruleIDs = append(ruleIDs, ruleID)
@@ -2135,7 +2243,10 @@ func (overflowRefJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput
 			ResolvedAt:         time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
 		})
 	}
-	ruleIDs := append([]string{"shared"}, input.ExpectedComplianceRuleIDs...)
+	ruleIDs := append([]string(nil), input.ExpectedComplianceRuleIDs...)
+	if len(ruleIDs) == 0 {
+		ruleIDs = append(ruleIDs, "shared")
+	}
 	sort.Strings(ruleIDs)
 	compliance := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
 	for _, ruleID := range ruleIDs {
@@ -2396,6 +2507,19 @@ func writePass1ScoresAt(t *testing.T, runIO internalio.RunContext, runID contrac
 	}
 }
 
+func appendPass1ScoresWithScore(t *testing.T, runIO internalio.RunContext, runID contracts.RunID, agents []contracts.AgentID, score int) {
+	t.Helper()
+
+	path := mustResolve(t, runIO, "30/scores-A.jsonl")
+	for _, agent := range agents {
+		for _, entry := range primaryStubScores(runID, 1, agent) {
+			entry.Score = score
+			entry.Reasons = fmt.Sprintf("pass1 score changed to %d", score)
+			require.NoError(t, internalio.AppendJSONL(path, entry))
+		}
+	}
+}
+
 // rewritePass1ScoresAt clobbers the existing pass1 scores-A.jsonl with rows
 // stamped at the supplied version — used by tests that simulate step30 being
 // rerun after step60 picked a new rubric/prompt version.
@@ -2486,6 +2610,13 @@ func rewriteRawCompliance(t *testing.T, path string, rows []contracts.RawComplia
 	for _, row := range rows {
 		require.NoError(t, internalio.AppendJSONL(path, row))
 	}
+}
+
+func writeEmptyRubric(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "rubric.md")
+	require.NoError(t, os.WriteFile(path, []byte("# rubric\n"), 0o644))
+	return path
 }
 
 func writePass1Compliance(t *testing.T, runIO internalio.RunContext, runID contracts.RunID, agent contracts.AgentID, verdicts map[string]contracts.ComplianceVerdict) {

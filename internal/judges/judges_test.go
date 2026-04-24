@@ -91,3 +91,27 @@ func TestJudgeOutputValidateFor_RejectsMissingExpectedComplianceRule(t *testing.
 	assert.ErrorIs(t, err, ErrJudgeOutputMissingCompliance)
 	assert.ErrorContains(t, err, "candidate-rule")
 }
+
+func TestJudgeOutputValidateFor_RejectsUnexpectedExpectedComplianceRule(t *testing.T) {
+	input := JudgeInput{
+		RunID:                     "2026-04-21-PR1-deadbee",
+		Pass:                      1,
+		Agent:                     "a1",
+		OutputPath:                filepath.Join(t.TempDir(), "out.patch"),
+		RubricPath:                filepath.Join(t.TempDir(), "rubric.md"),
+		ExpectedComplianceRuleIDs: []string{"r1"},
+	}
+	require.NoError(t, os.WriteFile(input.OutputPath, []byte("diff"), 0o644))
+	require.NoError(t, os.WriteFile(input.RubricPath, []byte("# rubric"), 0o644))
+
+	output, err := NewPrimaryStub().ScoreOutput(context.Background(), input)
+	require.NoError(t, err)
+	require.Len(t, output.Compliance, 1)
+	extra := output.Compliance[0]
+	extra.RuleID = "r2"
+	output.Compliance = append(output.Compliance, extra)
+
+	err = output.ValidateFor(input)
+	assert.ErrorIs(t, err, ErrJudgeOutputUnexpectedCompliance)
+	assert.ErrorContains(t, err, "r2")
+}

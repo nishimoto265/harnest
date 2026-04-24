@@ -100,6 +100,21 @@ type finalMetadata struct {
 	ResolvedAt    time.Time
 }
 
+type pass1ComplianceState struct {
+	RuleIDs map[contracts.AgentID]map[string]struct{}
+	Rows    []contracts.ComplianceEntry
+}
+
+type expectedComplianceAgentState struct {
+	Agent   contracts.AgentID `json:"agent"`
+	RuleIDs []string          `json:"rule_ids"`
+}
+
+type pass2OutputHashState struct {
+	Agent        contracts.AgentID `json:"agent"`
+	OutputSha256 string            `json:"output_sha256"`
+}
+
 // Run scores pass2 outputs, derives pass1-vs-pass2 pairwise rows, and writes
 // the step60 done marker. It returns ErrNoScorablePass2Agents when no pass2
 // manifests are scorable.
@@ -125,9 +140,41 @@ func Run(ctx context.Context, in Input) error {
 		return err
 	}
 	expectedAgents := scorableAgentsFromRuns(scorableRuns)
+	pass1ScoresByAgent, err := loadPass1Scores(in.IO, in.RubricVersion, in.PromptVersion)
+	if err != nil {
+		return err
+	}
+	pass1Compliance, err := loadPass1ComplianceState(in.IO, in.RubricVersion, in.PromptVersion)
+	if err != nil {
+		return err
+	}
+	activeComplianceRuleIDs, err := judges.ActiveComplianceRuleIDs(in.RubricPath)
+	if err != nil {
+		return err
+	}
+	fallbackComplianceRuleIDs, err := judges.ExpectedComplianceRuleIDs(in.RubricPath)
+	if err != nil {
+		return err
+	}
+	expectedComplianceByAgent := expectedComplianceRuleIDsByAgent(
+		expectedAgents,
+		pass1Compliance.RuleIDs,
+		activeComplianceRuleIDs,
+		fallbackComplianceRuleIDs,
+		in.CandidateRules,
+	)
+	pass2OutputHashes, err := pass2OutputHashesByAgent(scorableRuns)
+	if err != nil {
+		return err
+	}
+	inputHashes, err := step60InputHashes(pass1ScoresByAgent, pass1Compliance.Rows, pass2OutputHashes, in.CandidateRules, expectedComplianceByAgent)
+	if err != nil {
+		return err
+	}
 	resetOutputs := false
+	allowRawReuse := true
 	if _, err := os.Stat(paths.Done); err == nil {
-		matches, err := doneMarkerMatchesCurrentState(in.IO, paths, expectedAgents)
+		matches, rawReuseSafe, err := doneMarkerMatchesCurrentState(in.IO, paths, expectedAgents, inputHashes)
 		if err != nil {
 			return err
 		}
@@ -138,6 +185,7 @@ func Run(ctx context.Context, in Input) error {
 		if matches && versionsMatch {
 			return nil
 		}
+		allowRawReuse = rawReuseSafe
 		if err := os.Remove(paths.Done); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("step60: remove stale done marker: %w", err)
 		}
@@ -165,22 +213,6 @@ func Run(ctx context.Context, in Input) error {
 	if err := request.Validate(); err != nil {
 		return err
 	}
-	pass1ScoresByAgent, err := loadPass1Scores(in.IO, in.RubricVersion, in.PromptVersion)
-	if err != nil {
-		return err
-	}
-	pass1ComplianceRuleIDs, err := loadPass1ComplianceRuleIDs(in.IO, in.RubricVersion, in.PromptVersion)
-	if err != nil {
-		return err
-	}
-	activeComplianceRuleIDs, err := judges.ActiveComplianceRuleIDs(in.RubricPath)
-	if err != nil {
-		return err
-	}
-	fallbackComplianceRuleIDs, err := judges.ExpectedComplianceRuleIDs(in.RubricPath)
-	if err != nil {
-		return err
-	}
 
 	resolvedAt := in.Now().UTC()
 	meta := finalMetadata{
@@ -197,36 +229,29 @@ func Run(ctx context.Context, in Input) error {
 	completedAgents := make([]contracts.AgentID, 0, len(scorableRuns))
 
 	for _, run := range scorableRuns {
-		outputHash, err := fileSHA256(run.JudgeInput.OutputPath)
-		if err != nil {
-			return fmt.Errorf("step60: hash pass2 output for agent=%s: %w", run.Agent, err)
-		}
+		outputHash := pass2OutputHashes[run.Agent]
 		// F18: derive the expected compliance coverage ONLY from current
 		// pass1 inputs and the rubric fallback. Previously we unioned in
 		// rule IDs observed in step60's own raw artifacts, which let a
 		// stale raw-only rule ID keep satisfying coverage on every resume
 		// — judges would be skipped and the stale evidence preserved.
-		expectedCompliance := expectedComplianceRuleIDsForAgent(
-			run.Agent,
-			pass1ComplianceRuleIDs,
-			activeComplianceRuleIDs,
-			fallbackComplianceRuleIDs,
-			in.CandidateRules,
-		)
+		expectedCompliance := expectedComplianceByAgent[run.Agent]
 		run.JudgeInput.ExpectedComplianceRuleIDs = sortedExpectedComplianceRuleIDs(expectedCompliance)
 		run.JudgeInput.CandidateRules = in.CandidateRules
-		if result, ok, err := tryReuseRawPanelResult(in.IO, rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion, expectedCompliance); err != nil {
-			return err
-		} else if ok {
-			agentScores, agentCompliance, err := appendPanelFinals(paths, meta, result)
-			if err != nil {
+		if allowRawReuse {
+			if result, ok, err := tryReuseRawPanelResult(in.IO, rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion, expectedCompliance); err != nil {
 				return err
+			} else if ok {
+				agentScores, agentCompliance, err := appendPanelFinals(paths, meta, result)
+				if err != nil {
+					return err
+				}
+				completedAgents = append(completedAgents, run.Agent)
+				finalScores = append(finalScores, agentScores...)
+				finalCompliance = append(finalCompliance, agentCompliance...)
+				pass2ScoresByAgent[run.Agent] = agentScores
+				continue
 			}
-			completedAgents = append(completedAgents, run.Agent)
-			finalScores = append(finalScores, agentScores...)
-			finalCompliance = append(finalCompliance, agentCompliance...)
-			pass2ScoresByAgent[run.Agent] = agentScores
-			continue
 		}
 
 		primaryOutput, err := scoreJudgeOutput(ctx, "primary", in.Primary, run.JudgeInput)
@@ -369,7 +394,8 @@ func Run(ctx context.Context, in Input) error {
 			ScoresRaw:     scoresRawHash,
 			ComplianceRaw: complianceRawHash,
 		},
-		ResolvedAt: resolvedAt,
+		InputHashes: inputHashes,
+		ResolvedAt:  resolvedAt,
 	}
 	if err := marker.Validate(); err != nil {
 		return err
@@ -857,67 +883,74 @@ func emitCompliance(
 	return finalEntries, nil
 }
 
-func doneMarkerMatchesCurrentState(runIO internalio.RunContext, paths step60Paths, expectedAgents []contracts.AgentID) (bool, error) {
+func doneMarkerMatchesCurrentState(runIO internalio.RunContext, paths step60Paths, expectedAgents []contracts.AgentID, inputHashes contracts.Step60DoneInputHashes) (bool, bool, error) {
 	marker, err := internalio.ReadJSON[contracts.Step60DoneMarker](paths.Done)
 	if err != nil {
-		return false, nil
+		return false, true, nil
 	}
 	if err := marker.Validate(); err != nil {
-		return false, nil
+		return false, false, nil
 	}
 	if !slices.Equal(marker.Dimensions, canonicalDimensions) {
-		return false, nil
+		return false, judgeInputHashesMatch(marker.InputHashes, inputHashes), nil
 	}
 	normalizedExpectedAgents := append([]contracts.AgentID(nil), expectedAgents...)
 	sort.Slice(normalizedExpectedAgents, func(i, j int) bool { return normalizedExpectedAgents[i] < normalizedExpectedAgents[j] })
 	if !slices.Equal(marker.CompletedAgents, normalizedExpectedAgents) {
-		return false, nil
+		return false, judgeInputHashesMatch(marker.InputHashes, inputHashes), nil
 	}
+	inputsMatch := marker.InputHashes == inputHashes
 
 	scoresFinalCount, scoresFinalHash, err := currentFinalScoresState(runIO, paths.ScoresFinal)
 	if err != nil {
 		if overflowValidationFailure(err) {
-			return false, nil
+			return false, inputsMatch, nil
 		}
-		return false, fmt.Errorf("step60: inspect scores final: %w", err)
+		return false, inputsMatch, fmt.Errorf("step60: inspect scores final: %w", err)
 	}
 	complianceFinalCount, complianceFinalHash, err := currentFinalComplianceState(runIO, paths.ComplianceFinal)
 	if err != nil {
 		if overflowValidationFailure(err) {
-			return false, nil
+			return false, inputsMatch, nil
 		}
-		return false, fmt.Errorf("step60: inspect compliance final: %w", err)
+		return false, inputsMatch, fmt.Errorf("step60: inspect compliance final: %w", err)
 	}
 	pairwiseCount, pairwiseHash, err := currentPairwiseState(paths.Pairwise)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return false, inputsMatch, nil
 		}
-		return false, fmt.Errorf("step60: inspect pairwise final: %w", err)
+		return false, inputsMatch, fmt.Errorf("step60: inspect pairwise final: %w", err)
 	}
 	scoresRawHash, err := hashReducedRawScoresFile(runIO, paths.ScoresRaw)
 	if err != nil {
 		if overflowValidationFailure(err) {
-			return false, nil
+			return false, inputsMatch, nil
 		}
-		return false, fmt.Errorf("step60: hash scores raw: %w", err)
+		return false, inputsMatch, fmt.Errorf("step60: hash scores raw: %w", err)
 	}
 	complianceRawHash, err := hashReducedRawComplianceFile(runIO, paths.ComplianceRaw)
 	if err != nil {
 		if overflowValidationFailure(err) {
-			return false, nil
+			return false, inputsMatch, nil
 		}
-		return false, fmt.Errorf("step60: hash compliance raw: %w", err)
+		return false, inputsMatch, fmt.Errorf("step60: hash compliance raw: %w", err)
 	}
 
 	return marker.ExpectedCounts.Scores == int64(scoresFinalCount) &&
 		marker.ExpectedCounts.Compliance == int64(complianceFinalCount) &&
 		marker.ExpectedCounts.Pairwise == int64(pairwiseCount) &&
+		inputsMatch &&
 		marker.ContentHashes.ScoresFinal == scoresFinalHash &&
 		marker.ContentHashes.ComplianceFinal == complianceFinalHash &&
 		marker.ContentHashes.PairwiseFinal == pairwiseHash &&
 		marker.RawHashes.ScoresRaw == scoresRawHash &&
-		marker.RawHashes.ComplianceRaw == complianceRawHash, nil
+		marker.RawHashes.ComplianceRaw == complianceRawHash, judgeInputHashesMatch(marker.InputHashes, inputHashes), nil
+}
+
+func judgeInputHashesMatch(left, right contracts.Step60DoneInputHashes) bool {
+	return left.Pass1Compliance == right.Pass1Compliance &&
+		left.CandidateRules == right.CandidateRules
 }
 
 func overflowValidationFailure(err error) bool {
@@ -1072,23 +1105,6 @@ func (s step60RawState) complianceRows(agent contracts.AgentID, role contracts.J
 		out = append(out, roleRows[ruleID])
 	}
 	return out
-}
-
-func (s step60RawState) observedComplianceRuleIDs(agent contracts.AgentID) map[string]struct{} {
-	rules := make(map[string]struct{})
-	for _, role := range []contracts.JudgeRole{
-		contracts.JudgeRolePrimary,
-		contracts.JudgeRoleSecondary,
-		contracts.JudgeRoleArbiter,
-	} {
-		for ruleID := range s.compliance[agent][role] {
-			rules[ruleID] = struct{}{}
-		}
-	}
-	if len(rules) == 0 {
-		return nil
-	}
-	return rules
 }
 
 func tryReuseRawPanelResult(
@@ -1567,17 +1583,17 @@ func loadPass1Scores(runIO internalio.RunContext, rubricVersion, promptVersion s
 	return byAgent, nil
 }
 
-func loadPass1ComplianceRuleIDs(runIO internalio.RunContext, rubricVersion, promptVersion string) (map[contracts.AgentID]map[string]struct{}, error) {
+func loadPass1ComplianceState(runIO internalio.RunContext, rubricVersion, promptVersion string) (pass1ComplianceState, error) {
 	path, err := runIO.ResolveRunRelative("30/compliance-A.jsonl")
 	if err != nil {
-		return nil, fmt.Errorf("step60: resolve pass1 compliance path: %w", err)
+		return pass1ComplianceState{}, fmt.Errorf("step60: resolve pass1 compliance path: %w", err)
 	}
 	rows, err := internalio.ReadJSONL[contracts.ComplianceEntry](path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[contracts.AgentID]map[string]struct{}{}, nil
+			return pass1ComplianceState{RuleIDs: map[contracts.AgentID]map[string]struct{}{}}, nil
 		}
-		return nil, fmt.Errorf("step60: read pass1 compliance: %w", err)
+		return pass1ComplianceState{}, fmt.Errorf("step60: read pass1 compliance: %w", err)
 	}
 	collapsed := scorecore.CollapseFinalCompliance(rows)
 	// F8 + r17 F1: verify parity on the collapsed (effective) rows only —
@@ -1586,7 +1602,7 @@ func loadPass1ComplianceRuleIDs(runIO internalio.RunContext, rubricVersion, prom
 	// output are authoritatively dropped.
 	for _, row := range collapsed {
 		if row.RubricVersion != rubricVersion || row.PromptVersion != promptVersion {
-			return nil, fmt.Errorf(
+			return pass1ComplianceState{}, fmt.Errorf(
 				"%w: path=%s agent=%s rule_id=%s pass1_rubric=%s pass1_prompt=%s step60_rubric=%s step60_prompt=%s",
 				ErrPass1VersionMismatch, path, row.Agent, row.RuleID,
 				row.RubricVersion, row.PromptVersion, rubricVersion, promptVersion,
@@ -1600,7 +1616,13 @@ func loadPass1ComplianceRuleIDs(runIO internalio.RunContext, rubricVersion, prom
 		}
 		byAgent[entry.Agent][entry.RuleID] = struct{}{}
 	}
-	return byAgent, nil
+	sort.Slice(collapsed, func(i, j int) bool {
+		if collapsed[i].Agent != collapsed[j].Agent {
+			return collapsed[i].Agent < collapsed[j].Agent
+		}
+		return collapsed[i].RuleID < collapsed[j].RuleID
+	})
+	return pass1ComplianceState{RuleIDs: byAgent, Rows: collapsed}, nil
 }
 
 // expectedComplianceRuleIDsForAgent computes the rule-id set that pass2 raw
@@ -1646,6 +1668,123 @@ func sortedExpectedComplianceRuleIDs(rules map[string]struct{}) []string {
 	}
 	sort.Strings(ruleIDs)
 	return ruleIDs
+}
+
+func expectedComplianceRuleIDsByAgent(
+	agents []contracts.AgentID,
+	pass1Rules map[contracts.AgentID]map[string]struct{},
+	activeRules []string,
+	fallbackRules []string,
+	candidateRules []judges.CandidateRule,
+) map[contracts.AgentID]map[string]struct{} {
+	byAgent := make(map[contracts.AgentID]map[string]struct{}, len(agents))
+	for _, agent := range agents {
+		byAgent[agent] = expectedComplianceRuleIDsForAgent(agent, pass1Rules, activeRules, fallbackRules, candidateRules)
+	}
+	return byAgent
+}
+
+func pass2OutputHashesByAgent(runs []scorableAgentRun) (map[contracts.AgentID]string, error) {
+	hashes := make(map[contracts.AgentID]string, len(runs))
+	for _, run := range runs {
+		outputHash, err := fileSHA256(run.JudgeInput.OutputPath)
+		if err != nil {
+			return nil, fmt.Errorf("step60: hash pass2 output for agent=%s: %w", run.Agent, err)
+		}
+		hashes[run.Agent] = outputHash
+	}
+	return hashes, nil
+}
+
+func step60InputHashes(
+	pass1ScoresByAgent map[contracts.AgentID][]contracts.ScoreEntry,
+	pass1ComplianceRows []contracts.ComplianceEntry,
+	pass2OutputHashes map[contracts.AgentID]string,
+	candidateRules []judges.CandidateRule,
+	expectedComplianceByAgent map[contracts.AgentID]map[string]struct{},
+) (contracts.Step60DoneInputHashes, error) {
+	pass1ScoresHash, err := hashPass1Scores(pass1ScoresByAgent)
+	if err != nil {
+		return contracts.Step60DoneInputHashes{}, err
+	}
+	pass1ComplianceHash, err := hashFinalCompliance(pass1ComplianceRows)
+	if err != nil {
+		return contracts.Step60DoneInputHashes{}, err
+	}
+	pass2OutputsHash, err := hashPass2OutputHashes(pass2OutputHashes)
+	if err != nil {
+		return contracts.Step60DoneInputHashes{}, err
+	}
+	candidateRulesHash, err := hashCandidateRules(candidateRules)
+	if err != nil {
+		return contracts.Step60DoneInputHashes{}, err
+	}
+	expectedComplianceHash, err := hashExpectedCompliance(expectedComplianceByAgent)
+	if err != nil {
+		return contracts.Step60DoneInputHashes{}, err
+	}
+	return contracts.Step60DoneInputHashes{
+		Pass1Scores:        pass1ScoresHash,
+		Pass1Compliance:    pass1ComplianceHash,
+		Pass2Outputs:       pass2OutputsHash,
+		CandidateRules:     candidateRulesHash,
+		ExpectedCompliance: expectedComplianceHash,
+	}, nil
+}
+
+func hashPass1Scores(byAgent map[contracts.AgentID][]contracts.ScoreEntry) (string, error) {
+	rows := make([]contracts.ScoreEntry, 0)
+	for _, scores := range byAgent {
+		rows = append(rows, scores...)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Agent != rows[j].Agent {
+			return rows[i].Agent < rows[j].Agent
+		}
+		return rows[i].Dimension < rows[j].Dimension
+	})
+	return hashCanonicalRows(rows)
+}
+
+func hashPass2OutputHashes(hashes map[contracts.AgentID]string) (string, error) {
+	rows := make([]pass2OutputHashState, 0, len(hashes))
+	for agent, outputHash := range hashes {
+		rows = append(rows, pass2OutputHashState{Agent: agent, OutputSha256: outputHash})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Agent < rows[j].Agent })
+	return hashCanonicalRows(rows)
+}
+
+func hashCandidateRules(rules []judges.CandidateRule) (string, error) {
+	copied := append([]judges.CandidateRule(nil), rules...)
+	sort.Slice(copied, func(i, j int) bool {
+		if copied[i].ID != copied[j].ID {
+			return copied[i].ID < copied[j].ID
+		}
+		if copied[i].Kind != copied[j].Kind {
+			return copied[i].Kind < copied[j].Kind
+		}
+		if copied[i].TargetRuleID != copied[j].TargetRuleID {
+			return copied[i].TargetRuleID < copied[j].TargetRuleID
+		}
+		if copied[i].Title != copied[j].Title {
+			return copied[i].Title < copied[j].Title
+		}
+		return copied[i].Body < copied[j].Body
+	})
+	return hashCanonicalRows(copied)
+}
+
+func hashExpectedCompliance(byAgent map[contracts.AgentID]map[string]struct{}) (string, error) {
+	rows := make([]expectedComplianceAgentState, 0, len(byAgent))
+	for agent, rules := range byAgent {
+		rows = append(rows, expectedComplianceAgentState{
+			Agent:   agent,
+			RuleIDs: sortedExpectedComplianceRuleIDs(rules),
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Agent < rows[j].Agent })
+	return hashCanonicalRows(rows)
 }
 
 func resolvePass1AverageTenths(runIO internalio.RunContext, agent contracts.AgentID, scores []contracts.ScoreEntry) (int, error) {
@@ -1707,33 +1846,6 @@ func makePairwiseEntry(in Input, agent contracts.AgentID, pass1AverageTenths, pa
 	}
 }
 
-func sameScoreDecision(left, right contracts.ScoreEntry) bool {
-	return left.Score == right.Score &&
-		left.Reasons == right.Reasons &&
-		overflowRefEqual(left.ReasonsOverflowRef, right.ReasonsOverflowRef)
-}
-
-func overflowRefEqual(left, right *contracts.OverflowRef) bool {
-	switch {
-	case left == nil && right == nil:
-		return true
-	case left == nil || right == nil:
-		return false
-	default:
-		return left.Path == right.Path && left.Sha256 == right.Sha256
-	}
-}
-
-func scoreVerdictPath(primary, secondary, arbiter contracts.ScoreEntry) contracts.VerdictPath {
-	if sameScoreDecision(primary, secondary) {
-		return contracts.VerdictPathAgreement
-	}
-	if sameScoreDecision(arbiter, primary) || sameScoreDecision(arbiter, secondary) {
-		return contracts.VerdictPathArbitrated
-	}
-	return contracts.VerdictPathArbiterOverruled
-}
-
 func complianceVerdictPath(primary, secondary, arbiter contracts.ComplianceEntry) contracts.VerdictPath {
 	if primary.Verdict == secondary.Verdict {
 		return contracts.VerdictPathAgreement
@@ -1784,14 +1896,6 @@ func sortedComplianceRuleIDs(entries map[string]contracts.ComplianceEntry) []str
 	}
 	sort.Strings(ruleIDs)
 	return ruleIDs
-}
-
-func scoreOutputHash(score contracts.ScoreEntry) (string, error) {
-	return canonicalSHA256(score)
-}
-
-func complianceOutputHash(entry contracts.ComplianceEntry) (string, error) {
-	return canonicalSHA256(entry)
 }
 
 func rawScoreEntryHash(entry contracts.RawScoreEntry) (string, error) {

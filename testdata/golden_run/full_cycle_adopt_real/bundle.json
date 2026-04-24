@@ -164,6 +164,13 @@
       "pairwise": 3,
       "scores": 15
     },
+    "input_hashes": {
+      "candidate_rules": "__HASH__",
+      "expected_compliance": "__HASH__",
+      "pass1_compliance": "__HASH__",
+      "pass1_scores": "__HASH__",
+      "pass2_outputs": "__HASH__"
+    },
     "raw_hashes": {
       "compliance_raw": "__HASH__",
       "scores_raw": "__HASH__"

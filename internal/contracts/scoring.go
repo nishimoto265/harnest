@@ -303,6 +303,7 @@ type Step60DoneMarker struct {
 	CompletedAgents []AgentID               `json:"completed_agents" validate:"required,unique,dive,agent_id_fmt"`
 	Dimensions      []Dimension             `json:"dimensions" validate:"required,unique,dive,oneof=fidelity correctness maintainability discipline communication"`
 	ExpectedCounts  Step60ExpectedCounts    `json:"expected_counts" validate:"required"`
+	InputHashes     Step60DoneInputHashes   `json:"input_hashes" validate:"required"`
 	ContentHashes   Step60DoneContentHashes `json:"content_hashes" validate:"required"`
 	RawHashes       StepDoneRawHashes       `json:"raw_hashes" validate:"required"`
 	ResolvedAt      time.Time               `json:"resolved_at" validate:"required"`
@@ -312,6 +313,14 @@ type Step60ExpectedCounts struct {
 	Scores     int64 `json:"scores" validate:"gte=0"`
 	Compliance int64 `json:"compliance" validate:"gte=0"`
 	Pairwise   int64 `json:"pairwise" validate:"gte=0"`
+}
+
+type Step60DoneInputHashes struct {
+	Pass1Scores        string `json:"pass1_scores" validate:"required,sha256_hex"`
+	Pass1Compliance    string `json:"pass1_compliance" validate:"required,sha256_hex"`
+	Pass2Outputs       string `json:"pass2_outputs" validate:"required,sha256_hex"`
+	CandidateRules     string `json:"candidate_rules" validate:"required,sha256_hex"`
+	ExpectedCompliance string `json:"expected_compliance" validate:"required,sha256_hex"`
 }
 
 type Step60DoneContentHashes struct {

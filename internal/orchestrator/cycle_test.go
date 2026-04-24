@@ -211,7 +211,8 @@ func isTimeKey(key string) bool {
 
 func isMarkerHashKey(key string) bool {
 	switch key {
-	case "scores_final", "compliance_final", "pairwise_final", "scores_raw", "compliance_raw":
+	case "scores_final", "compliance_final", "pairwise_final", "scores_raw", "compliance_raw",
+		"pass1_scores", "pass1_compliance", "pass2_outputs", "candidate_rules", "expected_compliance":
 		return true
 	default:
 		return false
