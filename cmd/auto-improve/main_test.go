@@ -643,30 +643,24 @@ func TestRecoverAdoptAnywayPromotesAndClearsSentinel(t *testing.T) {
 	require.NoError(t, err)
 	candidatesHash := candidatesDoc.CandidatesHash
 	intention := seedRecoverIntention(runID, contracts.IntentionStageDecisionWritten, strings.Repeat("a", 40), strings.Repeat("b", 40), candidatesHash)
-	intention.RegistryAppendResult = &contracts.RegistryAppendResult{
-		Offset: 0,
-		Sha256: strings.Repeat("d", 64),
-	}
+	appendResult := appendRecoverRegistryEntry(t, runsBase, runID, intention)
+	intention.RegistryAppendResult = &appendResult
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "70", "intention.json"), intention))
 	decision := contracts.Decision{
 		Action: contracts.DecisionActionAdopt,
 		Value: contracts.DecisionAdopt{
-			Action:         contracts.DecisionActionAdopt,
-			SchemaVersion:  "1",
-			RunID:          runID,
-			IdempotencyKey: intention.IdempotencyKey,
-			BestShaBefore:  intention.BestShaBefore,
-			TargetSha:      intention.TargetSha,
-			CandidatesHash: candidatesHash,
-			RegistryAppendResult: contracts.RegistryAppendResult{
-				Offset: 0,
-				Sha256: strings.Repeat("d", 64),
-			},
-			DecidedAt: time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+			Action:               contracts.DecisionActionAdopt,
+			SchemaVersion:        "1",
+			RunID:                runID,
+			IdempotencyKey:       intention.IdempotencyKey,
+			BestShaBefore:        intention.BestShaBefore,
+			TargetSha:            intention.TargetSha,
+			CandidatesHash:       candidatesHash,
+			RegistryAppendResult: appendResult,
+			DecidedAt:            time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
 		},
 	}
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "70", "decision.json"), decision))
-	appendRecoverRegistryEntry(t, runsBase, runID, intention)
 	seedRecoverPublishedRule(t, runsBase)
 
 	writeTestConfig(t, root, runsBase, worktreeBase)
@@ -704,14 +698,11 @@ func TestRecoverAdoptAnywayAllowsNeedsManualRecoveryStage(t *testing.T) {
 	require.NoError(t, err)
 	candidatesHash := candidatesDoc.CandidatesHash
 	intention := seedRecoverIntention(runID, contracts.IntentionStageNeedsManualRecovery, strings.Repeat("a", 40), strings.Repeat("b", 40), candidatesHash)
-	intention.RegistryAppendResult = &contracts.RegistryAppendResult{
-		Offset: 0,
-		Sha256: strings.Repeat("d", 64),
-	}
+	appendResult := appendRecoverRegistryEntry(t, runsBase, runID, intention)
+	intention.RegistryAppendResult = &appendResult
 	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
 	intention.FailedStep = contracts.FailedStep70
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "70", "intention.json"), intention))
-	appendRecoverRegistryEntry(t, runsBase, runID, intention)
 	seedRecoverPublishedRule(t, runsBase)
 
 	writeTestConfig(t, root, runsBase, worktreeBase)
@@ -754,7 +745,7 @@ func TestRecoverAdoptAnywayReconstructsMissingRegistryAppendResult(t *testing.T)
 	intention.FailedStep = contracts.FailedStep70
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "70", "intention.json"), intention))
 
-	appendRecoverRegistryEntry(t, runsBase, runID, intention)
+	_ = appendRecoverRegistryEntry(t, runsBase, runID, intention)
 	seedRecoverPublishedRule(t, runsBase)
 
 	writeTestConfig(t, root, runsBase, worktreeBase)
@@ -1359,7 +1350,7 @@ func seedRecoverIntention(runID contracts.RunID, stage contracts.IntentionStage,
 	}
 }
 
-func appendRecoverRegistryEntry(t *testing.T, runsBase string, runID contracts.RunID, intention contracts.IntentionRecord) {
+func appendRecoverRegistryEntry(t *testing.T, runsBase string, runID contracts.RunID, intention contracts.IntentionRecord) contracts.RegistryAppendResult {
 	t.Helper()
 	entry := contracts.RuleRegistryEntry{
 		Kind: contracts.RegistryKindAdded,
@@ -1376,8 +1367,9 @@ func appendRecoverRegistryEntry(t *testing.T, runsBase string, runID contracts.R
 			At:             time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
 		},
 	}
-	_, err := internalio.AppendRegistryEntry(filepath.Join(runsBase, "rules-registry.jsonl"), entry)
+	result, err := internalio.AppendRegistryEntry(filepath.Join(runsBase, "rules-registry.jsonl"), entry)
 	require.NoError(t, err)
+	return result
 }
 
 func seedRecoverPublishedRule(t *testing.T, runsBase string) {

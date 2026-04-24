@@ -87,7 +87,7 @@ func TestIntegrationRecoverAdoptAnywaySubprocess(t *testing.T) {
 	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
 	intention.FailedStep = contracts.FailedStep70
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "70", "intention.json"), intention))
-	appendRecoverRegistryEntry(t, runsBase, runID, intention)
+	_ = appendRecoverRegistryEntry(t, runsBase, runID, intention)
 	seedRecoverPublishedRule(t, runsBase)
 	writeTestConfig(t, root, runsBase, worktreeBase)
 
