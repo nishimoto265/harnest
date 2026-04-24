@@ -163,11 +163,8 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 		TaskPackage: run.TaskPackage,
 		Agent:       run.Agent,
 		OutputDir:   manifestPrefix(run.Pass, run.Agent),
-		TaskPrompt: internalio.SanitizeForPromptEmbedding(run.TaskPackage.ReconstructedTaskPrompt, internalio.SafeTextOptions{
-			Label: "task_brief",
-			Fence: true,
-		}),
-		ActiveRules: sanitizeActiveRules(activeRules),
+		TaskPrompt:  run.TaskPackage.ReconstructedTaskPrompt,
+		ActiveRules: activeRules,
 	})
 	if err != nil {
 		return err
@@ -658,10 +655,37 @@ func renderPrompt(cfg *config.Config, data promptData) (string, error) {
 		return "", err
 	}
 	var out strings.Builder
-	if err := tmpl.Execute(&out, data); err != nil {
+	if err := tmpl.Execute(&out, sanitizePromptData(data)); err != nil {
 		return "", err
 	}
 	return out.String(), nil
+}
+
+func sanitizePromptData(data promptData) promptData {
+	safe := data
+	if data.TaskPackage != nil {
+		pkg := *data.TaskPackage
+		pkg.Title = internalio.SanitizeForPromptEmbedding(pkg.Title)
+		pkg.BestBranch = internalio.SanitizeForPromptEmbedding(pkg.BestBranch)
+		pkg.ReconstructedTaskPrompt = internalio.SanitizeForPromptEmbedding(pkg.ReconstructedTaskPrompt, internalio.SafeTextOptions{
+			Label: "task_brief",
+			Fence: true,
+		})
+		pkg.Worktrees = make([]contracts.WorktreeAllocation, len(data.TaskPackage.Worktrees))
+		for i, worktree := range data.TaskPackage.Worktrees {
+			pkg.Worktrees[i] = worktree
+			pkg.Worktrees[i].Path = internalio.SanitizeForPromptEmbedding(worktree.Path)
+			pkg.Worktrees[i].Branch = internalio.SanitizeForPromptEmbedding(worktree.Branch)
+		}
+		safe.TaskPackage = &pkg
+	}
+	safe.OutputDir = internalio.SanitizeForPromptEmbedding(data.OutputDir)
+	safe.TaskPrompt = internalio.SanitizeForPromptEmbedding(data.TaskPrompt, internalio.SafeTextOptions{
+		Label: "task_brief",
+		Fence: true,
+	})
+	safe.ActiveRules = sanitizeActiveRules(data.ActiveRules)
+	return safe
 }
 
 func sanitizeActiveRules(rules []policyrepo.ActiveRule) []policyrepo.ActiveRule {

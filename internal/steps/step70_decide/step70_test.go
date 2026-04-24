@@ -155,7 +155,7 @@ func TestDrivePolicyPublish_PolicyPublishingEmptyAfterAdoptsMatchingRemoteSnapsh
 	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
 }
 
-func TestDrivePolicyPublish_PolicyPublishedMissingAfterRecoversMatchingRemoteSnapshot(t *testing.T) {
+func TestDrivePolicyPublish_PolicyPublishedMissingAfterRequiresManualRecovery(t *testing.T) {
 	runCtx, _, candidates, _, resolver := newFixtureWithResolver(t, "PR105")
 	store := newMemStore(intentionPath(t, runCtx))
 	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
@@ -166,10 +166,8 @@ func TestDrivePolicyPublish_PolicyPublishedMissingAfterRecoversMatchingRemoteSna
 
 	originalMatches := branchSnapshotMatchesLocal
 	branchSnapshotMatchesLocal = func(ctx context.Context, repoRoot, branch, runsBase string) (bool, error) {
-		assert.Equal(t, "repo-root", repoRoot)
-		assert.Equal(t, "auto-improve/policy", branch)
-		assert.Equal(t, runCtx.RunsBase, runsBase)
-		return true, nil
+		t.Fatal("policy_published without policy_head_after must not be recovered from snapshot parity alone")
+		return false, nil
 	}
 	t.Cleanup(func() {
 		branchSnapshotMatchesLocal = originalMatches
@@ -182,16 +180,22 @@ func TestDrivePolicyPublish_PolicyPublishedMissingAfterRecoversMatchingRemoteSna
 		RepoRoot:     "repo-root",
 		PolicyBranch: "auto-improve/policy",
 	})
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
 
 	assert.Equal(t, contracts.IntentionStagePolicyPublished, updated.Stage)
-	assert.Equal(t, publishedHead, updated.PolicyHeadAfter)
+	assert.Empty(t, updated.PolicyHeadAfter)
 	loaded, err := store.Load()
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
-	assert.Equal(t, contracts.IntentionStagePolicyPublished, loaded.Stage)
-	assert.Equal(t, publishedHead, loaded.PolicyHeadAfter)
-	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+	assert.Equal(t, contracts.IntentionStageNeedsManualRecovery, loaded.Stage)
+	assert.Empty(t, loaded.PolicyHeadAfter)
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
+	assert.Equal(t, contracts.RollbackReasonTransactionalFailure, recovery.Reason)
+	assert.Equal(t, "policy_head_after_missing", recovery.Detail)
 }
 
 func TestFilesystemResolver_LeaseFailureLeavesCanonicalRuleUntouched(t *testing.T) {

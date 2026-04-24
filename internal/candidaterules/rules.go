@@ -9,6 +9,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/judges"
 )
 
 // RulePayload is the prompt-ready candidate rule body loaded from the run's 40/
@@ -68,6 +69,23 @@ func LoadRulePayloads(candidatesPath string) ([]RulePayload, error) {
 		})
 	}
 	return payloads, nil
+}
+
+func ToJudgeRules(payloads []RulePayload) []judges.CandidateRule {
+	if len(payloads) == 0 {
+		return nil
+	}
+	rules := make([]judges.CandidateRule, 0, len(payloads))
+	for _, payload := range payloads {
+		rules = append(rules, judges.CandidateRule{
+			ID:           payload.ID,
+			Kind:         payload.Kind,
+			TargetRuleID: payload.TargetRuleID,
+			Title:        payload.Title,
+			Body:         payload.ProposedBody,
+		})
+	}
+	return rules
 }
 
 func validatePromptIdentifier(field, value string) error {

@@ -160,6 +160,23 @@ func TestValidatePromptIdentifier_RejectsNewlines(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestToJudgeRulesMapsPromptPayloadFields(t *testing.T) {
+	rules := ToJudgeRules([]RulePayload{{
+		ID:           "cand-1",
+		Kind:         "update",
+		TargetRuleID: "rule-v1",
+		Title:        "Improve rule",
+		ProposedBody: "body\n",
+	}})
+
+	require.Len(t, rules, 1)
+	assert.Equal(t, "cand-1", rules[0].ID)
+	assert.Equal(t, "update", rules[0].Kind)
+	assert.Equal(t, "rule-v1", rules[0].TargetRuleID)
+	assert.Equal(t, "Improve rule", rules[0].Title)
+	assert.Equal(t, "body\n", rules[0].Body)
+}
+
 func newTestRunContext(t *testing.T, runID string) internalio.RunContext {
 	t.Helper()
 	runsBase := filepath.Join(t.TempDir(), "runs")

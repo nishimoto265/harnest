@@ -437,28 +437,6 @@ func drivePolicyPublish(ctx context.Context, pr int, runCtx internalio.RunContex
 	}
 	if intention.Stage == contracts.IntentionStagePolicyPublished {
 		if intention.PolicyHeadAfter == "" {
-			currentHead, err := deps.Git.RemoteHead(ctx, configuredBranch)
-			if err != nil {
-				if ctx.Err() != nil {
-					return intention, ctx.Err()
-				}
-				return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_remote_head_failure")
-			}
-			matches, err := branchSnapshotMatchesLocal(ctx, deps.RepoRoot, configuredBranch, runCtx.RunsBase)
-			if err != nil {
-				if ctx.Err() != nil {
-					return intention, ctx.Err()
-				}
-				return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_publish_probe_failure")
-			}
-			if matches && currentHead != "" {
-				intention.PolicyBranch = configuredBranch
-				intention.PolicyHeadAfter = currentHead
-				if err := store.Save(intention); err != nil {
-					return intention, err
-				}
-				return intention, nil
-			}
 			return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_head_after_missing")
 		}
 		currentHead, err := deps.Git.RemoteHead(ctx, configuredBranch)

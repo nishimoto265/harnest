@@ -19,13 +19,12 @@ import (
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
+	"github.com/nishimoto265/auto-improve/internal/steps/implementrescue"
 )
 
 type RescueExhaustedError struct {
 	Rescue stepio.RescueExhausted
 }
-
-const maxRescueUntrackedBytes = 32 << 20
 
 func (e *RescueExhaustedError) Error() string {
 	return fmt.Sprintf("step20: rescue exhausted: agent=%s retry_count=%d", e.Rescue.Agent, e.Rescue.RetryCount)
@@ -35,263 +34,73 @@ func (e *RescueExhaustedError) Result() stepio.RescueExhausted {
 	return e.Rescue
 }
 
-func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, agentDir string) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
+func loadCommonResumeState(agentDir string) (implementrescue.State, bool, error) {
 	state, ok, err := loadResumeState(agentDir)
-	if err != nil || !ok {
-		return 0, err
-	}
-	if state.ExpectedBaseSHA != allocation.BaseSHA {
-		return 0, fmt.Errorf("step20: resume state base mismatch: expected=%s got=%s", state.ExpectedBaseSHA, allocation.BaseSHA)
-	}
-	if state.Pid == 0 {
-		if state.RetryCount >= rescueMaxRetries(run.Config, s.cfg) {
-			return 0, &RescueExhaustedError{
-				Rescue: stepio.RescueExhausted{
-					Agent:      run.Agent,
-					RetryCount: state.RetryCount,
-				},
-			}
-		}
-		return state.RetryCount, nil
-	}
+	return implementrescue.State(state), ok, err
+}
 
-	stale, _, err := heartbeatStale(agentDir, s.staleAfter, s.now().UTC())
-	if err != nil {
-		return 0, err
-	}
-	if !shouldAttemptRescue(stale, state.Pid, state.Pgid, state.LeaderStartTime) {
-		return 0, fmt.Errorf("%w: agent %s", ErrRescueAbortedLeaseActive, run.Agent)
-	}
-	if state.RetryCount >= rescueMaxRetries(run.Config, s.cfg) {
-		return 0, &RescueExhaustedError{
-			Rescue: stepio.RescueExhausted{
-				Agent:      run.Agent,
-				RetryCount: state.RetryCount,
-			},
-		}
-	}
-
-	if err := ensureAllocationWorktreeForRescue(ctx, run.Config, allocation); err != nil {
-		return 0, err
-	}
-	nextRetry, err := s.performRescue(ctx, run, allocation, agentDir, state)
-	if err != nil {
-		return 0, err
-	}
-	if nextRetry >= rescueMaxRetries(run.Config, s.cfg) {
-		return 0, &RescueExhaustedError{
-			Rescue: stepio.RescueExhausted{
-				Agent:      run.Agent,
-				RetryCount: nextRetry,
-			},
-		}
-	}
-	return nextRetry, nil
+func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, agentDir string) (int, error) {
+	return implementrescue.ResumeIfNeeded(ctx, implementrescue.ResumeOptions{
+		StepName:                "step20",
+		Agent:                   run.Agent,
+		AgentDir:                agentDir,
+		Allocation:              allocation,
+		RunConfig:               run.Config,
+		DefaultConfig:           s.cfg,
+		DefaultMaxRetries:       defaultRescueMaxRetries,
+		StaleAfter:              s.staleAfter,
+		Now:                     s.now,
+		LoadState:               loadCommonResumeState,
+		HeartbeatStale:          heartbeatStale,
+		ShouldAttemptRescue:     shouldAttemptRescue,
+		EnsureWorktreeForRescue: ensureAllocationWorktreeForRescue,
+		PerformRescue: func(ctx context.Context, allocation contracts.WorktreeAllocation, agentDir string, state implementrescue.State) (int, error) {
+			return s.performRescue(ctx, run, allocation, agentDir, resumeState(state))
+		},
+		LeaseActiveError: ErrRescueAbortedLeaseActive,
+		NewRescueExhaustedError: func(agent contracts.AgentID, retryCount int) error {
+			return &RescueExhaustedError{Rescue: implementrescue.ToExhaustedResult(agent, retryCount)}
+		},
+	})
 }
 
 func rescueMaxRetries(runCfg, defaultCfg *config.Config) int {
-	switch {
-	case runCfg != nil && runCfg.RescueMaxRetries > 0:
-		return runCfg.RescueMaxRetries
-	case defaultCfg != nil && defaultCfg.RescueMaxRetries > 0:
-		return defaultCfg.RescueMaxRetries
-	default:
-		return defaultRescueMaxRetries
-	}
+	return implementrescue.MaxRetries(runCfg, defaultCfg, defaultRescueMaxRetries)
 }
 
 func (s *Step) performRescue(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, agentDir string, state resumeState) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if err := run.IO.ValidateWorktreeAllocation(allocation); err != nil {
-		return 0, err
-	}
-	if err := ensureRescueLeaseQuiesced(ctx, allocation.Path, state); err != nil {
-		return 0, err
-	}
-	currentBranch, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "branch", "--show-current")
-	if err != nil {
-		return 0, err
-	}
-	if currentBranch == "" || currentBranch != allocation.Branch {
-		return 0, &agentrunner.ManualRecoveryRequiredError{
-			Reason: contracts.RollbackReasonLeaseFailure,
-			Detail: fmt.Sprintf("step20: rescue aborted because worktree branch drifted: got=%q want=%q", currentBranch, allocation.Branch),
-		}
-	}
-	nextRetry := state.RetryCount + 1
-	currentHead, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
-	if err != nil {
-		return 0, err
-	}
-	currentDirtyFingerprint, err := agentrunner.ComputeDirtyFingerprint(ctx, allocation.Path)
-	if err != nil {
-		return 0, err
-	}
-	rescueDir, adopted, err := findExistingRescueDir(agentDir, state.ExpectedBaseSHA, nextRetry, currentHead, currentDirtyFingerprint)
-	if err != nil {
-		return 0, err
-	}
-	if !adopted {
-		rescueID := fmt.Sprintf("%s-%s-rescue-%d-%d", run.IO.RunID, run.Agent, nextRetry, s.now().UTC().Unix())
-		rescueDir = filepath.Join(agentDir, rescuedDirName, rescueID)
-		if err := ensureDir(filepath.Join(rescueDir, "untracked")); err != nil {
-			return 0, err
-		}
-		rescueStateVerified := false
-		defer func() {
-			if !rescueStateVerified {
-				_ = os.RemoveAll(rescueDir)
-			}
-		}()
-		budget := agentrunner.NewRescueArtifactBudget()
-
-		headSHA := currentHead
-		artifacts := make([]rescueArtifactDigest, 0, 8)
-
-		commitCount, bundleMode, err := writeCommitBundle(ctx, allocation.Path, rescueDir, state.ExpectedBaseSHA)
-		if err != nil {
-			return 0, err
-		}
-		if digest, err := fileDigest(filepath.Join(rescueDir, "commits.bundle")); err == nil {
-			artifacts = append(artifacts, rescueArtifactDigest{Path: "commits.bundle", SHA256: digest})
-		} else {
-			return 0, err
-		}
-		if err := mapRescueCaptureError("step20", recordRescueArtifact(&budget, filepath.Join(rescueDir, "commits.bundle"), "commits.bundle")); err != nil {
-			return 0, err
-		}
-
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		if err := mapRescueCaptureError("step20", writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "tracked.patch"), "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv")); err != nil {
-			return 0, err
-		}
-		if digest, err := fileDigest(filepath.Join(rescueDir, "tracked.patch")); err == nil {
-			artifacts = append(artifacts, rescueArtifactDigest{Path: "tracked.patch", SHA256: digest})
-		} else {
-			return 0, err
-		}
-		if err := mapRescueCaptureError("step20", recordRescueArtifact(&budget, filepath.Join(rescueDir, "tracked.patch"), "tracked.patch")); err != nil {
-			return 0, err
-		}
-
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		if err := mapRescueCaptureError("step20", writeGitOutputContext(ctx, allocation.Path, filepath.Join(rescueDir, "staged.patch"), "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv")); err != nil {
-			return 0, err
-		}
-		if digest, err := fileDigest(filepath.Join(rescueDir, "staged.patch")); err == nil {
-			artifacts = append(artifacts, rescueArtifactDigest{Path: "staged.patch", SHA256: digest})
-		} else {
-			return 0, err
-		}
-		if err := mapRescueCaptureError("step20", recordRescueArtifact(&budget, filepath.Join(rescueDir, "staged.patch"), "staged.patch")); err != nil {
-			return 0, err
-		}
-
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		untrackedArtifacts, err := copyUntrackedFilesWithBudget(ctx, allocation.Path, rescueDir, &budget)
-		if err != nil {
-			return 0, mapRescueCaptureError("step20", err)
-		}
-		artifacts = append(artifacts, untrackedArtifacts...)
-
-		ignoredPath := filepath.Join(rescueDir, "ignored.txt")
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		if err := writeIgnoredList(ctx, allocation.Path, ignoredPath); err != nil {
-			return 0, err
-		}
-		if digest, err := fileDigest(ignoredPath); err == nil {
-			artifacts = append(artifacts, rescueArtifactDigest{Path: "ignored.txt", SHA256: digest})
-		} else {
-			return 0, err
-		}
-		if err := mapRescueCaptureError("step20", recordRescueArtifact(&budget, ignoredPath, "ignored.txt")); err != nil {
-			return 0, err
-		}
-
-		rescueState := rescueStateFile{
-			ExpectedBaseSHA:  state.ExpectedBaseSHA,
-			RescuedHeadSHA:   headSHA,
-			RetryCount:       nextRetry,
-			CommitCount:      commitCount,
-			BundleMode:       bundleMode,
-			CreatedAt:        s.now().UTC(),
-			Artifacts:        artifacts,
-			DirtyFingerprint: currentDirtyFingerprint,
-		}
-		if err := agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), rescueState); err != nil {
-			return 0, err
-		}
-		if err := verifyRescueState(rescueDir); err != nil {
-			return 0, err
-		}
-		rescueStateVerified = true
-	}
-
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if _, err := gitOutputContext(ctx, identity, allocation.Path, "reset", "--hard", state.ExpectedBaseSHA); err != nil {
-		return 0, err
-	}
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-fd"); err != nil {
-		return 0, err
-	}
-
-	return finishRescueState(agentDir, state, nextRetry)
+	return implementrescue.Perform(ctx, implementrescue.PerformOptions{
+		StepName:       "step20",
+		RunID:          string(run.IO.RunID),
+		Agent:          run.Agent,
+		RunIO:          run.IO,
+		Allocation:     allocation,
+		AgentDir:       agentDir,
+		RescuedDirName: rescuedDirName,
+		State:          implementrescue.State(state),
+		Now:            s.now,
+		EnsureDir:      ensureDir,
+		Quiesce: func(ctx context.Context, worktreePath string, state implementrescue.State) error {
+			return ensureRescueLeaseQuiesced(ctx, worktreePath, resumeState(state))
+		},
+		GitOutput:      gitOutputContext,
+		WriteGitOutput: writeGitOutputContext,
+		WriteBundle:    writeCommitBundle,
+		CopyUntracked:  copyUntrackedFilesWithBudget,
+		WriteIgnored:   writeIgnoredList,
+		FileDigest:     fileDigest,
+		VerifyState:    verifyRescueState,
+		FinishState: func(agentDir string, state implementrescue.State, nextRetry int) (int, error) {
+			return finishRescueState(agentDir, resumeState(state), nextRetry)
+		},
+	})
 }
 
-type rescueLock struct {
-	file *os.File
-}
+type rescueLock = implementrescue.Lock
 
 func tryAcquireRescueLock(path string) (*rescueLock, bool, error) {
-	if err := ensureDir(filepath.Dir(path)); err != nil {
-		return nil, false, err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, false, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	return &rescueLock{file: f}, true, nil
+	return implementrescue.TryAcquireLock(path, ensureDir)
 }
-
-func (l *rescueLock) Unlock() error {
-	if l == nil || l.file == nil {
-		return nil
-	}
-	if err := syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN); err != nil {
-		_ = l.file.Close()
-		return err
-	}
-	err := l.file.Close()
-	l.file = nil
-	return err
-}
-
-type rescueStateFile = agentrunner.RescueStateFile
 
 type rescueArtifactDigest = agentrunner.RescueArtifactDigest
 
@@ -307,37 +116,24 @@ var trustedGitCommandContext = processenv.TrustedCommandContext
 var streamGitOutputWithLimit = agentrunner.StreamGitOutputWithLimit
 
 func writeCommitBundle(ctx context.Context, worktreePath, rescueDir, baseSHA string) (int, string, error) {
-	bundlePath := filepath.Join(rescueDir, "commits.bundle")
-	revList, err := gitOutputContext(ctx, identity, worktreePath, "rev-list", baseSHA+"..HEAD")
+	return implementrescue.WriteCommitBundle(ctx, worktreePath, rescueDir, baseSHA, gitOutputBytesContext, runGitCommand)
+}
+
+func runGitCommand(ctx context.Context, worktreePath string, args ...string) error {
+	cmd, err := trustedGitCommandContext(ctx, "git", args...)
 	if err != nil {
-		if _, err := gitOutputContext(ctx, identity, worktreePath, "bundle", "create", bundlePath, "HEAD", "--objects"); err != nil {
-			return 0, "", err
-		}
-		commitCount, err := commitCountForRevision(ctx, worktreePath, "HEAD")
-		if err != nil {
-			return 0, "", err
-		}
-		return commitCount, agentrunner.RescueBundleModeFullHead, nil
+		return fmt.Errorf("step20: resolve git: %w", err)
 	}
-	trimmed := strings.TrimSpace(revList)
-	if trimmed == "" {
-		if err := internalio.WriteAtomic(bundlePath, nil); err != nil {
-			return 0, "", err
-		}
-		return 0, agentrunner.RescueBundleModeNone, nil
-	}
-	commitCount := len(strings.Split(trimmed, "\n"))
-	if _, err := gitOutputContext(ctx, identity, worktreePath, "bundle", "create", bundlePath, baseSHA+"..HEAD"); err == nil {
-		return commitCount, agentrunner.RescueBundleModeRange, nil
-	}
-	if _, err := gitOutputContext(ctx, identity, worktreePath, "bundle", "create", bundlePath, "HEAD", "--objects"); err != nil {
-		return 0, "", err
-	}
-	commitCount, err = commitCountForRevision(ctx, worktreePath, "HEAD")
+	cmd.Dir = worktreePath
+	cmd.Env = processenv.GitLocalEnv()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return 0, "", err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("step20: git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
-	return commitCount, agentrunner.RescueBundleModeFullHead, nil
+	return nil
 }
 
 func writeGitOutputContext(ctx context.Context, worktreePath, target string, args ...string) error {
@@ -346,81 +142,7 @@ func writeGitOutputContext(ctx context.Context, worktreePath, target string, arg
 }
 
 func copyUntrackedFilesWithBudget(ctx context.Context, worktreePath, rescueDir string, budget *agentrunner.RescueArtifactBudget) ([]rescueArtifactDigest, error) {
-	list, err := gitOutputContext(ctx, identity, worktreePath, "ls-files", "--others", "--exclude-standard", "-z")
-	if err != nil {
-		return nil, err
-	}
-	entries := strings.Split(list, "\x00")
-	rescueBase := filepath.Join(rescueDir, "untracked")
-	skipLog := make([]string, 0)
-	artifacts := make([]rescueArtifactDigest, 0, len(entries)+1)
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if entry == "" {
-			continue
-		}
-		cleaned := filepath.Clean(entry)
-		src := filepath.Join(worktreePath, cleaned)
-		dst := filepath.Join(rescueBase, cleaned)
-		if !strings.HasPrefix(dst, rescueBase+string(os.PathSeparator)) && dst != rescueBase {
-			return nil, fmt.Errorf("step20: untracked file escapes rescue dir: %s", entry)
-		}
-		info, err := os.Lstat(src)
-		if err != nil {
-			return nil, err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			skipLog = append(skipLog, "symlink:"+cleaned)
-			continue
-		}
-		file, perm, size, err := agentrunner.OpenValidatedRegularFile(src)
-		if err != nil {
-			if errors.Is(err, agentrunner.ErrArtifactNotRegular) {
-				skipLog = append(skipLog, "skipped_non_regular:"+cleaned)
-				continue
-			}
-			return nil, err
-		}
-		if size > maxRescueUntrackedBytes {
-			_ = file.Close()
-			skipLog = append(skipLog, fmt.Sprintf("skipped_too_large:%s:%d", cleaned, size))
-			continue
-		}
-		if err := budget.RecordFile(filepath.ToSlash(filepath.Join("untracked", cleaned)), size); err != nil {
-			_ = file.Close()
-			return nil, err
-		}
-		if err := ensureDir(filepath.Dir(dst)); err != nil {
-			_ = file.Close()
-			return nil, err
-		}
-		if err := copyOpenFileContext(ctx, file, dst, perm, maxRescueUntrackedBytes); err != nil {
-			return nil, err
-		}
-		digest, err := fileDigest(dst)
-		if err != nil {
-			return nil, err
-		}
-		artifacts = append(artifacts, rescueArtifactDigest{
-			Path:   filepath.ToSlash(filepath.Join("untracked", cleaned)),
-			SHA256: digest,
-		})
-	}
-	symlinkPath := filepath.Join(rescueDir, "untracked-symlinks.txt")
-	if err := internalio.WriteAtomic(symlinkPath, []byte(strings.Join(skipLog, "\n"))); err != nil {
-		return nil, err
-	}
-	if err := recordRescueArtifact(budget, symlinkPath, "untracked-symlinks.txt"); err != nil {
-		return nil, err
-	}
-	digest, err := fileDigest(symlinkPath)
-	if err != nil {
-		return nil, err
-	}
-	artifacts = append(artifacts, rescueArtifactDigest{Path: "untracked-symlinks.txt", SHA256: digest})
-	return artifacts, nil
+	return implementrescue.CopyUntrackedFilesWithBudget(ctx, "step20", worktreePath, rescueDir, budget, gitOutputBytesContext, ensureDir, copyOpenFileContext, fileDigest)
 }
 
 func writeIgnoredList(ctx context.Context, worktreePath, target string) error {
@@ -560,18 +282,6 @@ func syntheticCommitEnv() []string {
 	)
 }
 
-func commitCountForRevision(ctx context.Context, worktreePath, rev string) (int, error) {
-	revList, err := gitOutputContext(ctx, identity, worktreePath, "rev-list", rev)
-	if err != nil {
-		return 0, err
-	}
-	trimmed := strings.TrimSpace(revList)
-	if trimmed == "" {
-		return 0, nil
-	}
-	return len(strings.Split(trimmed, "\n")), nil
-}
-
 func identity(s string) string {
 	return s
 }
@@ -595,19 +305,9 @@ func restoreAllocationWorktree(ctx context.Context, allocation contracts.Worktre
 }
 
 func finishRescueState(agentDir string, state resumeState, nextRetry int) (int, error) {
-	state.RetryCount = nextRetry
-	state.StartedAt = time.Time{}
-	state.LastHeartbeat = time.Time{}
-	state.Pid = 0
-	state.Pgid = 0
-	state.LeaderStartTime = ""
-	if err := os.Remove(heartbeatPath(agentDir)); err != nil && !os.IsNotExist(err) {
-		return 0, err
-	}
-	if err := saveResumeState(agentDir, state); err != nil {
-		return 0, err
-	}
-	return nextRetry, nil
+	return implementrescue.FinishState(agentDir, implementrescue.State(state), nextRetry, heartbeatPath, func(agentDir string, state implementrescue.State) error {
+		return saveResumeState(agentDir, resumeState(state))
+	})
 }
 
 // findExistingRescueDir selects the newest verified rescue dir matching
@@ -621,59 +321,12 @@ func finishRescueState(agentDir string, state resumeState, nextRetry int) (int, 
 //
 // When no candidate qualifies we return false so performRescue recaptures.
 func findExistingRescueDir(agentDir, expectedBaseSHA string, nextRetry int, currentHead, currentDirtyFingerprint string) (string, bool, error) {
-	rescueRoot := filepath.Join(agentDir, rescuedDirName)
-	entries, err := os.ReadDir(rescueRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", false, nil
-		}
-		return "", false, err
-	}
-
-	var selectedDir string
-	var selectedState rescueStateFile
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		candidateDir := filepath.Join(rescueRoot, entry.Name())
-		state, err := agentrunner.ReadRescueState(filepath.Join(candidateDir, "state.json"))
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return "", false, err
-		}
-		if state.ExpectedBaseSHA != expectedBaseSHA || state.RetryCount != nextRetry {
-			continue
-		}
-		if state.RescuedHeadSHA != currentHead {
-			continue
-		}
-		if state.DirtyFingerprint == "" {
-			if currentDirtyFingerprint != emptyDirtyFingerprint {
-				continue
-			}
-		} else if state.DirtyFingerprint != currentDirtyFingerprint {
-			continue
-		}
-		if err := verifyRescueState(candidateDir); err != nil {
-			continue
-		}
-		if selectedDir == "" || state.CreatedAt.After(selectedState.CreatedAt) {
-			selectedDir = candidateDir
-			selectedState = state
-		}
-	}
-	if selectedDir == "" {
-		return "", false, nil
-	}
-	return selectedDir, true, nil
+	return implementrescue.FindExistingDir(agentDir, rescuedDirName, expectedBaseSHA, nextRetry, currentHead, currentDirtyFingerprint, verifyRescueState)
 }
 
 // emptyDirtyFingerprint is the digest ComputeDirtyFingerprint returns for a
 // clean worktree (zero porcelain entries). sha256 over empty input.
-const emptyDirtyFingerprint = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+const emptyDirtyFingerprint = implementrescue.EmptyDirtyFingerprint
 
 func ensureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state resumeState) error {
 	err := agentrunner.EnsureRescueLeaseQuiesced(ctx, worktreePath, agentrunner.RescueLeaseState{
@@ -728,28 +381,4 @@ func syncDir(path string) error {
 	}
 	defer dir.Close()
 	return dir.Sync()
-}
-
-func recordRescueArtifact(budget *agentrunner.RescueArtifactBudget, path, logicalPath string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	return budget.RecordFile(logicalPath, info.Size())
-}
-
-func mapRescueCaptureError(step string, err error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, agentrunner.ErrRescueDiffOverLimit) || errors.Is(err, agentrunner.ErrRescueStorageOverLimit) {
-		return errors.Join(
-			&agentrunner.ManualRecoveryRequiredError{
-				Reason: contracts.RollbackReasonLeaseFailure,
-				Detail: fmt.Sprintf("%s: rescue capture exceeded storage limits: %v", step, err),
-			},
-			err,
-		)
-	}
-	return err
 }

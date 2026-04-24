@@ -535,17 +535,7 @@ func step70LoadCandidateRules(runCtx internalio.RunContext) ([]judges.CandidateR
 	if err != nil {
 		return nil, fmt.Errorf("step70: load candidate rules: %w", err)
 	}
-	rules := make([]judges.CandidateRule, 0, len(payloads))
-	for _, payload := range payloads {
-		rules = append(rules, judges.CandidateRule{
-			ID:           payload.ID,
-			Kind:         payload.Kind,
-			TargetRuleID: payload.TargetRuleID,
-			Title:        payload.Title,
-			Body:         payload.ProposedBody,
-		})
-	}
-	return rules, nil
+	return candidaterules.ToJudgeRules(payloads), nil
 }
 
 func step70ComplianceRuleSources(runCtx internalio.RunContext) ([]string, []string, error) {
