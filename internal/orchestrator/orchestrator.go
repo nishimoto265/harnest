@@ -371,11 +371,13 @@ func loadRunContext(runID contracts.RunID, runsBase, worktreeBase string) (inter
 	if err != nil {
 		return internalio.RunContext{}, err
 	}
+	effectiveWorktreeBase := worktreeBase
 	if cfg, err := loadRunConfigSnapshot(runCtx); err == nil {
 		snapshotWorktreeBase, err := cfg.WorktreeBase()
 		if err != nil {
 			return internalio.RunContext{}, err
 		}
+		effectiveWorktreeBase = snapshotWorktreeBase
 		runCtx, err = internalio.NewRunContext(runID, runsBase, snapshotWorktreeBase)
 		if err != nil {
 			return internalio.RunContext{}, err
@@ -400,7 +402,7 @@ func loadRunContext(runID contracts.RunID, runsBase, worktreeBase string) (inter
 	if pkg.RunID != runID {
 		return internalio.RunContext{}, fmt.Errorf("orchestrator: task package run_id mismatch: selected=%s package=%s", runID, pkg.RunID)
 	}
-	runCtx, err = internalio.RunContextFromTaskPackage(pkg, runsBase, worktreeBase)
+	runCtx, err = internalio.RunContextFromTaskPackage(pkg, runsBase, effectiveWorktreeBase)
 	if err != nil {
 		return internalio.RunContext{}, err
 	}

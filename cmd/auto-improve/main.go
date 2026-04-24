@@ -223,11 +223,11 @@ func recoverRunsBaseAndInspectLock() (string, *internalio.FileLock, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	lock, acquired, err := internalio.TryAcquireFileLock(lockPath)
+	lock, exists, err := internalio.InspectFileLock(lockPath)
 	if err != nil {
 		return "", nil, err
 	}
-	if !acquired {
+	if exists && lock == nil {
 		return "", nil, commandExitError{code: 2, msg: "recover: promotion.lock is held by another process"}
 	}
 	return runsBase, lock, nil

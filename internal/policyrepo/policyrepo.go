@@ -37,6 +37,8 @@ var runGit = func(ctx context.Context, env []string, args ...string) ([]byte, er
 	return cmd.CombinedOutput()
 }
 
+var removePreparedPublishWorktree = removeWorktree
+
 type snapshot struct {
 	registry []byte
 	rules    map[string][]byte
@@ -217,14 +219,14 @@ func (p *PreparedPublish) Cleanup() error {
 	if p == nil || p.cleaned || p.worktreeDir == "" {
 		return nil
 	}
-	p.cleaned = true
-	if err := removeWorktree(p.RepoRoot, p.worktreeDir); err != nil {
+	if err := removePreparedPublishWorktree(p.RepoRoot, p.worktreeDir); err != nil {
 		removeErr := os.RemoveAll(p.worktreeDir)
 		if removeErr != nil {
 			return fmt.Errorf("policyrepo: remove policy worktree after publish: %w; remove temp dir: %v", err, removeErr)
 		}
 		return fmt.Errorf("policyrepo: remove policy worktree after publish: %w", err)
 	}
+	p.cleaned = true
 	return nil
 }
 
