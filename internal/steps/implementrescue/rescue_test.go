@@ -2,6 +2,9 @@ package implementrescue
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -96,4 +99,48 @@ func TestFindExistingDir_RequiresIgnoredCoverage(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, adopted)
 	assert.Equal(t, rescueDir, selected)
+}
+
+func TestFindExistingDir_SkipsCorruptRescueState(t *testing.T) {
+	agentDir := t.TempDir()
+	rescueRoot := filepath.Join(agentDir, "rescued")
+	rescueDir := filepath.Join(rescueRoot, "candidate")
+	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(rescueDir, "ignored.txt"), nil, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(rescueDir, "ignored-skipped.txt"), nil, 0o644))
+
+	state := agentrunner.RescueStateFile{
+		ExpectedBaseSHA:  "1111111111111111111111111111111111111111",
+		RescuedHeadSHA:   "2222222222222222222222222222222222222222",
+		RetryCount:       1,
+		CommitCount:      0,
+		BundleMode:       agentrunner.RescueBundleModeNone,
+		CreatedAt:        time.Now().UTC(),
+		DirtyFingerprint: "dirty-fingerprint",
+		Artifacts: []agentrunner.RescueArtifactDigest{
+			{Path: "ignored.txt", SHA256: strings.Repeat("0", 64)},
+			{Path: "ignored-skipped.txt", SHA256: strings.Repeat("0", 64)},
+		},
+	}
+	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), state))
+
+	selected, adopted, err := FindExistingDir(agentDir, "rescued", state.ExpectedBaseSHA, 1, state.RescuedHeadSHA, state.DirtyFingerprint, func(candidateDir string) error {
+		return agentrunner.VerifyRescueState(candidateDir, testFileDigest, "test")
+	})
+	require.NoError(t, err)
+	assert.False(t, adopted)
+	assert.Empty(t, selected)
+}
+
+func testFileDigest(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }

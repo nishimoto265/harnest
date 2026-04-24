@@ -10,7 +10,36 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/state"
 )
 
-var preparePolicyPublish = policyrepo.PrepareSnapshotPublish
+type policyPublishPlan interface {
+	HeadSHA() string
+	Push(context.Context) error
+	Cleanup() error
+}
+
+type policyPublishPlanAdapter struct {
+	plan *policyrepo.PreparedPublish
+}
+
+func (p policyPublishPlanAdapter) HeadSHA() string {
+	return p.plan.Head
+}
+
+func (p policyPublishPlanAdapter) Push(ctx context.Context) error {
+	return p.plan.Push(ctx)
+}
+
+func (p policyPublishPlanAdapter) Cleanup() error {
+	return p.plan.Cleanup()
+}
+
+var preparePolicyPublish = func(ctx context.Context, repoRoot, branch, expectedHead, runsBase, runID string) (policyPublishPlan, error) {
+	plan, err := policyrepo.PrepareSnapshotPublish(ctx, repoRoot, branch, expectedHead, runsBase, runID)
+	if err != nil {
+		return nil, err
+	}
+	return policyPublishPlanAdapter{plan: plan}, nil
+}
+
 var branchSnapshotMatchesLocal = policyrepo.BranchSnapshotMatchesLocal
 
 func drivePolicyPublish(ctx context.Context, pr int, runCtx internalio.RunContext, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) (contracts.IntentionRecord, error) {
@@ -86,7 +115,7 @@ func drivePolicyPublish(ctx context.Context, pr int, runCtx internalio.RunContex
 			defer func() {
 				_ = plan.Cleanup()
 			}()
-			if plan.Head != intention.PolicyHeadAfter {
+			if plan.HeadSHA() != intention.PolicyHeadAfter {
 				return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_publish_plan_mismatch")
 			}
 			if err := plan.Push(ctx); err != nil {
@@ -132,7 +161,7 @@ func drivePolicyPublish(ctx context.Context, pr int, runCtx internalio.RunContex
 	defer func() {
 		_ = plan.Cleanup()
 	}()
-	intention.PolicyHeadAfter = plan.Head
+	intention.PolicyHeadAfter = plan.HeadSHA()
 	if err := store.Save(intention); err != nil {
 		return intention, err
 	}
