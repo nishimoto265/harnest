@@ -322,6 +322,30 @@ func (c Config) AgentProfile(role agents.Role) (agents.Profile, error) {
 	return c.AgentFile().ProfileForRole(role)
 }
 
+func (c Config) AgentConfigSnapshotPath() (string, error) {
+	path := c.AgentConfigPath
+	if path == "" {
+		if c.configPath == "" {
+			return "", nil
+		}
+		path = filepath.Join(filepath.Dir(c.configPath), agents.DefaultFileName())
+	}
+	if !filepath.IsAbs(path) && c.configPath != "" {
+		path = filepath.Join(filepath.Dir(c.configPath), path)
+	}
+	path = filepath.Clean(path)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func (c Config) Validate() error {
 	if c.Paths.Runs == "" && c.RunsBasePath == "" {
 		return errors.New("config: RunsBase is required")

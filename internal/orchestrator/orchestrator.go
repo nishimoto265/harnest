@@ -784,11 +784,16 @@ func writeConfigSnapshot(path string, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	agentConfigPath, err := cfg.AgentConfigSnapshotPath()
+	if err != nil {
+		return err
+	}
 	snapshot.Repo.Root = repoRoot
 	snapshot.Paths.Runs = ""
 	snapshot.RunsBasePath = runsBase
 	snapshot.Worktree.Base = ""
 	snapshot.WorktreeBasePath = worktreeBase
+	snapshot.AgentConfigPath = agentConfigPath
 	data, err := yaml.Marshal(snapshot)
 	if err != nil {
 		return err

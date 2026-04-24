@@ -28,8 +28,12 @@ checksums_path=""
 
 cleanup() {
   rm -f "$STAGE"
-  [[ -n "$archive_path" ]] && rm -f "$archive_path"
-  [[ -n "$checksums_path" ]] && rm -f "$checksums_path"
+  if [[ -n "$archive_path" ]]; then
+    rm -f "$archive_path"
+  fi
+  if [[ -n "$checksums_path" ]]; then
+    rm -f "$checksums_path"
+  fi
 }
 trap cleanup EXIT
 
@@ -226,9 +230,6 @@ if [[ "$asset_os" == "darwin" ]]; then
     [[ -f "$BACKUP" ]] && mv "$BACKUP" "$TARGET"
     exit 4
   fi
-  if [[ "$PLIST_OVERRIDE_SET" -eq 0 ]]; then
-    auto_improve_migrate_legacy_launchd_plist "$PLIST"
-  fi
 
   auto_improve_launchctl_bootout "$PLIST"
   if ! auto_improve_launchctl_bootstrap "$PLIST"; then
@@ -236,6 +237,9 @@ if [[ "$asset_os" == "darwin" ]]; then
     [[ -f "$BACKUP" ]] && mv "$BACKUP" "$TARGET"
     restore_backup_launchd || true
     exit 4
+  fi
+  if [[ "$PLIST_OVERRIDE_SET" -eq 0 ]]; then
+    auto_improve_migrate_legacy_launchd_plist "$PLIST"
   fi
 fi
 
