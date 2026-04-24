@@ -136,6 +136,39 @@ func TestRunCommand_IgnoresParentPathShadow(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr), "parent PATH shadow binary was executed")
 }
 
+func TestRunCommand_AppliesSafeGitProfileToAgentEnv(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/tmp/malicious-gitconfig")
+	t.Setenv("GIT_SSH_COMMAND", "ssh -F /tmp/malicious-ssh-config")
+	t.Setenv("GIT_ASKPASS", "/tmp/malicious-askpass")
+
+	sessionPath := filepath.Join(t.TempDir(), "session.log")
+	result, err := RunCommand(context.Background(), CommandRequest{
+		Binary: "sh",
+		Args: []string{"-c", `printf '%s
+%s
+%s
+%s
+' "$GIT_CONFIG_GLOBAL" "$GIT_CONFIG_NOSYSTEM" "$GIT_SSH_COMMAND" "$GIT_ASKPASS"`},
+		Workdir:     t.TempDir(),
+		SessionPath: sessionPath,
+		Timeout:     time.Second,
+		ErrPrefix:   "test",
+	})
+
+	require.NoError(t, err)
+	require.False(t, result.TimedOut)
+	data, err := os.ReadFile(sessionPath)
+	require.NoError(t, err)
+	output := string(data)
+	require.Contains(t, output, os.DevNull)
+	require.Contains(t, output, "\n1\n")
+	require.Contains(t, output, "\nssh -F "+os.DevNull+"\n")
+	require.Contains(t, output, "\n/bin/false\n")
+	require.NotContains(t, output, "/tmp/malicious-gitconfig")
+	require.NotContains(t, output, "ssh -F /tmp/malicious-ssh-config")
+	require.NotContains(t, output, "/tmp/malicious-askpass")
+}
+
 func assertFileContains(t *testing.T, path, want string) {
 	t.Helper()
 	data, err := os.ReadFile(path)

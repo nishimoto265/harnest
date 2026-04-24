@@ -80,7 +80,7 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 	cmd.Dir = req.Workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin = strings.NewReader(req.Prompt)
-	cmd.Env = processenv.Sanitize(req.Env...)
+	cmd.Env = processenv.SanitizeForAgentExec(req.Env...)
 
 	stdoutTail := newTailBuffer(8 << 10)
 	stderrTail := newTailBuffer(8 << 10)

@@ -212,7 +212,7 @@ func PrepareSnapshotPublish(ctx context.Context, repoRoot, branch, expectedHead,
 		return plan, nil
 	}
 
-	env := processenv.Sanitize()
+	env := processenv.GitLocalEnv()
 	env = append(env,
 		"GIT_AUTHOR_NAME=auto-improve",
 		"GIT_AUTHOR_EMAIL=auto-improve@local",
@@ -242,7 +242,7 @@ func (p *PreparedPublish) Push(ctx context.Context) error {
 	if !p.needsPush {
 		return nil
 	}
-	if _, err := runGit(ctx, processenv.SanitizeForNetworkExec(), "-C", p.RepoRoot, "push", "origin", fmt.Sprintf("%s:%s", p.Head, p.Branch), fmt.Sprintf("--force-with-lease=%s:%s", p.Branch, p.ExpectedHead)); err != nil {
+	if _, err := runGit(ctx, processenv.GitNetworkEnv(), "-C", p.RepoRoot, "push", "origin", fmt.Sprintf("%s:%s", p.Head, p.Branch), fmt.Sprintf("--force-with-lease=%s:%s", p.Branch, p.ExpectedHead)); err != nil {
 		return fmt.Errorf("policyrepo: push policy snapshot: %w", err)
 	}
 	return nil
@@ -704,7 +704,7 @@ func moveSnapshotIntoPlace(runsBase, stageDir string, snap snapshot) error {
 }
 
 func fetchBranch(ctx context.Context, repoRoot, branch string) error {
-	_, err := runGit(ctx, processenv.SanitizeForNetworkExec(), "-C", repoRoot, "fetch", "--no-tags", "origin", branch)
+	_, err := runGit(ctx, processenv.GitNetworkEnv(), "-C", repoRoot, "fetch", "--no-tags", "origin", branch)
 	if err != nil {
 		return fmt.Errorf("policyrepo: fetch branch %s: %w", branch, err)
 	}
@@ -720,7 +720,7 @@ func branchHead(ctx context.Context, repoRoot, branch string) (string, error) {
 }
 
 func gitRaw(ctx context.Context, repoRoot string, args ...string) ([]byte, error) {
-	out, err := runGit(ctx, processenv.Sanitize(), append([]string{"-C", repoRoot}, args...)...)
+	out, err := runGit(ctx, processenv.GitLocalEnv(), append([]string{"-C", repoRoot}, args...)...)
 	if err != nil {
 		return nil, fmt.Errorf("policyrepo: git %s: %w", strings.Join(args, " "), err)
 	}
@@ -736,7 +736,7 @@ func gitText(ctx context.Context, repoRoot string, args ...string) ([]byte, erro
 }
 
 func hasStagedDiff(ctx context.Context, repoRoot string) (bool, error) {
-	_, err := runGit(ctx, processenv.Sanitize(), "-C", repoRoot, "diff", "--cached", "--quiet", "--", RepoDirName)
+	_, err := runGit(ctx, processenv.GitLocalEnv(), "-C", repoRoot, "diff", "--cached", "--quiet", "--", RepoDirName)
 	if err == nil {
 		return false, nil
 	}
@@ -753,7 +753,7 @@ func sha256Hex(data []byte) string {
 }
 
 func removeWorktree(repoRoot, path string) error {
-	out, err := runGit(context.Background(), processenv.Sanitize(), "-C", repoRoot, "worktree", "remove", "--force", path)
+	out, err := runGit(context.Background(), processenv.GitLocalEnv(), "-C", repoRoot, "worktree", "remove", "--force", path)
 	if err != nil {
 		return fmt.Errorf("policyrepo: remove worktree %s: %w: %s", path, err, strings.TrimSpace(string(out)))
 	}

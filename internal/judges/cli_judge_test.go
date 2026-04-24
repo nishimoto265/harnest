@@ -67,8 +67,8 @@ EOF
 	assert.Len(t, output.Compliance, 1)
 }
 
-func TestCodexJudgeExecArgsAreReadOnlyAndKeepProfileArgs(t *testing.T) {
-	args, err := codexJudgeExecArgs([]string{"--profile", "judge-ci", "--model", "gpt-5"}, "/tmp/worktree", "/tmp/output.json")
+func TestCodexJudgeExecArgsAreReadOnlyAndKeepSafeProfileArgs(t *testing.T) {
+	args, err := codexJudgeExecArgs([]string{"--model", "gpt-5"}, "/tmp/worktree", "/tmp/output.json")
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{
@@ -77,7 +77,6 @@ func TestCodexJudgeExecArgsAreReadOnlyAndKeepProfileArgs(t *testing.T) {
 		"--skip-git-repo-check",
 		"--ephemeral",
 		"-C", "/tmp/worktree",
-		"--profile", "judge-ci",
 		"--model", "gpt-5",
 		"-o", "/tmp/output.json",
 		"-",
@@ -99,6 +98,18 @@ func TestCodexJudgeExecArgsRejectUnsafeProfileArgs(t *testing.T) {
 		{name: "sandbox config", args: []string{"-c", `sandbox_mode="danger-full-access"`}},
 		{name: "approval config", args: []string{"--config=approval_policy=\"never\""}},
 		{name: "shell env config", args: []string{"-c", "shell_environment_policy.inherit=all"}},
+		{name: "profile config", args: []string{"-c", "profile=\"judge-ci\""}},
+		{name: "mcp config override", args: []string{"-c", "mcp_servers.local.command=\"writer\""}},
+		{name: "profile", args: []string{"--profile", "judge-ci"}},
+		{name: "profile equals", args: []string{"--profile=judge-ci"}},
+		{name: "cwd", args: []string{"-C", "/tmp/other"}},
+		{name: "cd", args: []string{"--cd", "/tmp/other"}},
+		{name: "cd equals", args: []string{"--cd=/tmp/other"}},
+		{name: "add dir", args: []string{"--add-dir", "/tmp/other"}},
+		{name: "output", args: []string{"-o", "/tmp/other.json"}},
+		{name: "output equals", args: []string{"-o=/tmp/other.json"}},
+		{name: "last message output", args: []string{"--output-last-message", "/tmp/other.json"}},
+		{name: "last message output equals", args: []string{"--output-last-message=/tmp/other.json"}},
 	}
 
 	for _, tt := range tests {
@@ -138,6 +149,57 @@ EOF
 	assert.Len(t, output.Scores, 5)
 	assert.Len(t, output.Compliance, 1)
 	assert.Equal(t, nodePath, mustNodePath(t, claudePath))
+}
+
+func TestClaudeJudgeExecArgsUseReadOnlyToolsAndKeepSafeProfileArgs(t *testing.T) {
+	args, err := claudeJudgeExecArgs([]string{"--model", "claude-3-5-sonnet"}, "/tmp/worktree")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{
+		"-p",
+		"--output-format", "json",
+		"--allowedTools", "Read",
+		"--cwd", "/tmp/worktree",
+		"--model", "claude-3-5-sonnet",
+	}, args)
+}
+
+func TestClaudeJudgeExecArgsRejectUnsafeProfileArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "allowed tools", args: []string{"--allowedTools", "Read,Bash"}},
+		{name: "allowed tools equals", args: []string{"--allowedTools=Read,Bash"}},
+		{name: "kebab allowed tools", args: []string{"--allowed-tools", "Bash"}},
+		{name: "disallowed tools override", args: []string{"--disallowedTools", ""}},
+		{name: "cwd", args: []string{"--cwd", "/tmp/other"}},
+		{name: "cwd equals", args: []string{"--cwd=/tmp/other"}},
+		{name: "add dir", args: []string{"--add-dir", "/tmp/other"}},
+		{name: "permission mode", args: []string{"--permission-mode", "bypassPermissions"}},
+		{name: "permission mode equals", args: []string{"--permission-mode=bypassPermissions"}},
+		{name: "danger bypass", args: []string{"--dangerously-skip-permissions"}},
+		{name: "permission prompt tool", args: []string{"--permission-prompt-tool", "mcp__grant"}},
+		{name: "mcp config", args: []string{"--mcp-config", "/tmp/mcp.json"}},
+		{name: "settings", args: []string{"--settings", "/tmp/settings.json"}},
+		{name: "profile", args: []string{"--profile", "judge-ci"}},
+		{name: "profile equals", args: []string{"--profile=judge-ci"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args, err := claudeJudgeExecArgs(tt.args, "/tmp/worktree")
+			require.Error(t, err)
+			assert.Nil(t, args)
+		})
+	}
+}
+
+func TestClaudeJudgeExecArgsRejectSafeArgMissingValue(t *testing.T) {
+	args, err := claudeJudgeExecArgs([]string{"--model"}, "/tmp/worktree")
+
+	require.Error(t, err)
+	assert.Nil(t, args)
 }
 
 func TestRenderCLIJudgePromptPass2IncludesCandidateRuleBodies(t *testing.T) {

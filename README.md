@@ -59,8 +59,10 @@ still keeps changed tests/files and a diff excerpt as supporting context.
 `agents.yaml` controls which runtime provider each role uses. Implementer roles
 can use `claude` or `codex`; judge roles can stay `stub` or use CLI-backed
 `claude` / `codex` profiles. Provider-specific `args` are appended to the
-built-in invocation. The example Claude profile includes `-p` so runs are
-non-interactive. Codex implementers default to
+built-in invocation, but judge args reject overrides for cwd, output paths,
+profiles, permission modes, MCP/settings, and unsafe sandbox/config changes.
+The example Claude profile includes `-p` so runs are non-interactive. Codex
+implementers default to
 `codex exec --full-auto --skip-git-repo-check -C <worktree>`, while Codex judges
 run with `codex exec --sandbox read-only --skip-git-repo-check --ephemeral`.
 The dangerous `--dangerously-bypass-approvals-and-sandbox` mode is never

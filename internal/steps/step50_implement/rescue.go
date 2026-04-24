@@ -429,7 +429,7 @@ func runGitCommand(ctx context.Context, dir string, args ...string) error {
 	if err != nil {
 		return fmt.Errorf("step50: resolve git: %w", err)
 	}
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -445,7 +445,7 @@ func gitOutputBytesContext(ctx context.Context, dir string, args ...string) ([]b
 	if err != nil {
 		return nil, fmt.Errorf("step50: resolve git: %w", err)
 	}
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()

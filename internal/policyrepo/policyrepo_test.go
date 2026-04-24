@@ -59,6 +59,42 @@ func TestHydrateFromBranchFetchesAndLoadsWhilePromotionLockHeld(t *testing.T) {
 	assert.GreaterOrEqual(t, checked, 3)
 }
 
+func TestHydrateFromBranchUsesSafeGitProfiles(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/test-ssh.sock")
+	t.Setenv("GH_TOKEN", "test-token")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/tmp/malicious-gitconfig")
+	t.Setenv("GIT_SSH_COMMAND", "ssh -F /tmp/malicious-ssh-config")
+	t.Setenv("GIT_ASKPASS", "/tmp/malicious-askpass")
+
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	originalRunGit := runGit
+	networkChecked := 0
+	localChecked := 0
+	runGit = func(ctx context.Context, env []string, args ...string) ([]byte, error) {
+		switch {
+		case slicesContains(args, "fetch"):
+			networkChecked++
+			assertSafeGitEnv(t, env)
+			assert.Contains(t, env, "SSH_AUTH_SOCK=/tmp/test-ssh.sock")
+			assert.Contains(t, env, "GH_TOKEN=test-token")
+		case slicesContains(args, "ls-tree") || slicesContains(args, "show"):
+			localChecked++
+			assertSafeGitEnv(t, env)
+			assert.NotContains(t, env, "SSH_AUTH_SOCK=/tmp/test-ssh.sock")
+			assert.NotContains(t, env, "GH_TOKEN=test-token")
+		}
+		return originalRunGit(ctx, env, args...)
+	}
+	t.Cleanup(func() {
+		runGit = originalRunGit
+	})
+
+	require.NoError(t, HydrateFromBranch(context.Background(), repoRoot, "policy", runsBase))
+	assert.GreaterOrEqual(t, networkChecked, 1)
+	assert.GreaterOrEqual(t, localChecked, 2)
+}
+
 func TestHydrateAndSnapshotFromBranchCopiesPolicyFilesToRunDir(t *testing.T) {
 	repoRoot := newClonedRepoWithPolicyBranch(t)
 	runsBase := filepath.Join(t.TempDir(), "runs")
@@ -282,6 +318,38 @@ func newClonedRepoWithPolicyBranch(t *testing.T) string {
 	mustGit(t, work, "push", "-u", "origin", "policy")
 	mustGit(t, work, "fetch", "--no-tags", "origin", "policy")
 	return work
+}
+
+func assertSafeGitEnv(t *testing.T, env []string) {
+	t.Helper()
+	assert.Contains(t, env, "GIT_CONFIG_NOSYSTEM=1")
+	assert.Contains(t, env, "GIT_CONFIG_GLOBAL="+os.DevNull)
+	assert.Contains(t, env, "GIT_CONFIG_KEY_0=credential.helper")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_0=")
+	assert.Contains(t, env, "GIT_CONFIG_KEY_1=core.hooksPath")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_1="+os.DevNull)
+	assert.Contains(t, env, "GIT_CONFIG_KEY_2=core.fsmonitor")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_2=false")
+	assert.Contains(t, env, "GIT_CONFIG_KEY_3=core.sshCommand")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_3=ssh -F "+os.DevNull)
+	assert.Contains(t, env, "GIT_CONFIG_KEY_4=diff.external")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_4=")
+	assert.Contains(t, env, "GIT_SSH_COMMAND=ssh -F "+os.DevNull)
+	assert.Contains(t, env, "GIT_ASKPASS=/bin/false")
+	assert.Contains(t, env, "SSH_ASKPASS=/bin/false")
+	assert.Contains(t, env, "GIT_TERMINAL_PROMPT=0")
+	assert.NotContains(t, env, "GIT_CONFIG_GLOBAL=/tmp/malicious-gitconfig")
+	assert.NotContains(t, env, "GIT_SSH_COMMAND=ssh -F /tmp/malicious-ssh-config")
+	assert.NotContains(t, env, "GIT_ASKPASS=/tmp/malicious-askpass")
+}
+
+func slicesContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func mustGit(t *testing.T, dir string, args ...string) {
