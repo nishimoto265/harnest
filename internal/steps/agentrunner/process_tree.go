@@ -215,6 +215,9 @@ func CleanupProcessTree(lease ProcessLease, sessionID int, tracker *DescendantTr
 	if err := killSessionProcessesUntilGoneOwned(lease, sessionID, 500*time.Millisecond, 25*time.Millisecond); err != nil {
 		errs = append(errs, err)
 	}
+	if cleanupInspectionUnavailable(errs) {
+		return errors.Join(errs...)
+	}
 	if tracker != nil {
 		tracker.CaptureBurst(250 * time.Millisecond)
 		tracker.CaptureUntilStable(500*time.Millisecond, 25*time.Millisecond)
@@ -223,6 +226,15 @@ func CleanupProcessTree(lease ProcessLease, sessionID int, tracker *DescendantTr
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+func cleanupInspectionUnavailable(errs []error) bool {
+	for _, err := range errs {
+		if errors.Is(err, ErrCleanupInspectionUnavailable) {
+			return true
+		}
+	}
+	return false
 }
 
 func killProcessGroupUntilGoneOwned(lease ProcessLease, maxWait, interval time.Duration) error {
@@ -501,28 +513,28 @@ func killTrackedPIDs(ids []processIdentity) error {
 			continue
 		}
 		seen[id.pid] = struct{}{}
-		if id.startTime != "" {
-			if isProcessInspectionUnavailableStartTime(id.startTime) {
-				if err := killPIDSignal(id.pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-					errs = append(errs, err)
-				}
+		if id.startTime == "" || isProcessInspectionUnavailableStartTime(id.startTime) {
+			if err := killPIDSignal(id.pid, 0); errors.Is(err, syscall.ESRCH) {
 				continue
-			}
-			currentStartTime, err := lookupProcessStartTime(id.pid)
-			switch {
-			case errors.Is(err, syscall.ESRCH):
-				continue
-			case isProcessInspectionUnavailable(err):
-				if err := killPIDSignal(id.pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-					errs = append(errs, err)
-				}
-				continue
-			case err != nil:
+			} else if err != nil {
 				errs = append(errs, err)
 				continue
-			case currentStartTime != id.startTime:
-				continue
 			}
+			errs = append(errs, fmt.Errorf("%w: tracked pid=%d", ErrCleanupInspectionUnavailable, id.pid))
+			continue
+		}
+		currentStartTime, err := lookupProcessStartTime(id.pid)
+		switch {
+		case errors.Is(err, syscall.ESRCH):
+			continue
+		case isProcessInspectionUnavailable(err):
+			errs = append(errs, fmt.Errorf("%w: tracked pid=%d", ErrCleanupInspectionUnavailable, id.pid))
+			continue
+		case err != nil:
+			errs = append(errs, err)
+			continue
+		case currentStartTime != id.startTime:
+			continue
 		}
 		if err := killPIDSignal(id.pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			errs = append(errs, err)

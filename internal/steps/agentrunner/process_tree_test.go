@@ -90,6 +90,48 @@ func TestKillTrackedPIDs_SkipsRecycledPIDWhenStartTimeDiffers(t *testing.T) {
 	require.Empty(t, killed)
 }
 
+func TestKillTrackedPIDs_FailsClosedForInspectionUnavailableMarker(t *testing.T) {
+	originalKill := killPIDSignal
+	t.Cleanup(func() {
+		killPIDSignal = originalKill
+	})
+
+	var signals []syscall.Signal
+	killPIDSignal = func(pid int, sig syscall.Signal) error {
+		require.Equal(t, 4242, pid)
+		signals = append(signals, sig)
+		return nil
+	}
+
+	err := killTrackedPIDs([]processIdentity{{pid: 4242, startTime: processInspectionUnavailableStartTime(4242)}})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCleanupInspectionUnavailable)
+	require.Equal(t, []syscall.Signal{0}, signals)
+}
+
+func TestKillTrackedPIDs_FailsClosedWhenLookupInspectionUnavailable(t *testing.T) {
+	originalLookup := lookupProcessStartTime
+	originalKill := killPIDSignal
+	t.Cleanup(func() {
+		lookupProcessStartTime = originalLookup
+		killPIDSignal = originalKill
+	})
+
+	lookupProcessStartTime = func(int) (string, error) {
+		return "", exec.ErrNotFound
+	}
+	killed := false
+	killPIDSignal = func(int, syscall.Signal) error {
+		killed = true
+		return nil
+	}
+
+	err := killTrackedPIDs([]processIdentity{{pid: 4242, startTime: "Tue Apr 22 10:00:00 2026"}})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCleanupInspectionUnavailable)
+	require.False(t, killed)
+}
+
 func TestCleanupProcessTree_SkipsRecycledGroupAndSessionButKillsTrackedDescendants(t *testing.T) {
 	originalLookup := lookupProcessStartTime
 	originalGroupKill := killProcessGroupUntilGoneSignal
@@ -159,12 +201,14 @@ func TestCleanupProcessTree_FailsClosedWhenProcessInspectionUnavailableForActive
 	originalGroupKill := killProcessGroupUntilGoneSignal
 	originalGroupMembers := processGroupMembersUntilGoneList
 	originalSessionList := sessionProcessesUntilGoneList
+	originalSessionKill := killSessionProcessesUntilGoneKill
 	originalPIDKill := killPIDSignal
 	t.Cleanup(func() {
 		lookupProcessStartTime = originalLookup
 		killProcessGroupUntilGoneSignal = originalGroupKill
 		processGroupMembersUntilGoneList = originalGroupMembers
 		sessionProcessesUntilGoneList = originalSessionList
+		killSessionProcessesUntilGoneKill = originalSessionKill
 		killPIDSignal = originalPIDKill
 	})
 
@@ -198,7 +242,7 @@ func TestCleanupProcessTree_FailsClosedWhenProcessInspectionUnavailableForActive
 	}, 4242, tracker)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrCleanupInspectionUnavailable)
-	require.True(t, killed)
+	require.False(t, killed)
 }
 
 func TestCleanupProcessTree_JoinsGroupKillErrorWithTimeout(t *testing.T) {
