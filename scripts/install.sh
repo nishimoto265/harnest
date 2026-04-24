@@ -228,6 +228,7 @@ if [[ "$asset_os" == "darwin" ]]; then
   if ! INSTALL_DIR="$INSTALL_DIR" TARGET="$TARGET" REPO_ROOT="$REPO_ROOT" PLIST="$PLIST" "$INSTALL_LAUNCHD_SCRIPT"; then
     rm -f "$TARGET"
     [[ -f "$BACKUP" ]] && mv "$BACKUP" "$TARGET"
+    restore_backup_launchd || true
     exit 4
   fi
 

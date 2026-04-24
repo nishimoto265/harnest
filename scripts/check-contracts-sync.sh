@@ -15,6 +15,46 @@ while IFS= read -r variant; do
   fi
 done < <(rg -o 'RuleRegistry[A-Za-z]+' "$docs_file" | sort -u)
 
+go_registry_variants="$(awk '
+  /^func[[:space:]]*\(RuleRegistry[A-Za-z0-9_]+\)[[:space:]]+ruleRegistryVariant\(\)/ {
+    variant = $0
+    sub(/^func[[:space:]]*\(/, "", variant)
+    sub(/\).*/, "", variant)
+    if (variant != "") print variant
+  }
+' "$registry_go" | sort -u)"
+
+if [[ -z "$go_registry_variants" ]]; then
+  mismatches+=("no registry variants extracted from code")
+fi
+
+while IFS= read -r variant; do
+  [[ -z "$variant" ]] && continue
+  if ! rg -q "\b${variant}\b" "$docs_file"; then
+    mismatches+=("registry variant missing in docs: ${variant}")
+  fi
+done <<<"$go_registry_variants"
+
+go_registry_kinds="$(awk '
+  /^[[:space:]]*RegistryKind[A-Za-z0-9_]+[[:space:]]+RegistryKind[[:space:]]*=/ {
+    kind = $0
+    sub(/.*=[[:space:]]*"/, "", kind)
+    sub(/".*/, "", kind)
+    if (kind != "") print kind
+  }
+' "$registry_go" | sort -u)"
+
+if [[ -z "$go_registry_kinds" ]]; then
+  mismatches+=("no registry kinds extracted from code")
+fi
+
+while IFS= read -r kind; do
+  [[ -z "$kind" ]] && continue
+  if ! rg -q "(^|[^[:alnum:]_])${kind}([^[:alnum:]_]|$)" "$docs_file"; then
+    mismatches+=("registry kind missing in docs: ${kind}")
+  fi
+done <<<"$go_registry_kinds"
+
 recovery_section="$(awk '
   /^\*\*Recovery state machine\*\*/ { in_section=1; next }
   /^\*\*planning recovery decision tree\*\*/ { in_section=0 }

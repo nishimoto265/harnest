@@ -218,6 +218,23 @@ func TestRun_AdoptHappyPath(t *testing.T) {
 	assert.Equal(t, resolver.target.TargetSHA, git.pushCalls[0].target)
 }
 
+func TestRun_RollbackTerminalCleansGitWorktrees(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR201")
+	git := &fakeGit{head: resolver.target.BestShaBefore, pushErr: ErrLeaseFailure}
+
+	require.NoError(t, Run(context.Background(), 201, runCtx, pkg, candidates, store, Deps{
+		Git:      git,
+		Resolver: resolver,
+		Now:      fixedNow(),
+	}))
+
+	assert.Equal(t, contracts.DecisionActionRollback, readDecision(t, runCtx).Action)
+	require.Len(t, git.removeWorktreeCalls, len(pkg.Worktrees))
+	for i, wt := range pkg.Worktrees {
+		assert.Equal(t, wt.Path, git.removeWorktreeCalls[i])
+	}
+}
+
 func TestRun_SentinelBlocksExecution(t *testing.T) {
 	runCtx, pkg, candidates, store, _ := newFixture(t, "PR3")
 	require.NoError(t, os.MkdirAll(filepath.Join(runCtx.RunsBase, "needs-recovery"), 0o755))
@@ -1974,6 +1991,34 @@ func TestRun_RejectsPersistedDecisionThatFailsRequestBoundValidation(t *testing.
 	assert.ErrorIs(t, err, stepio.ErrStep70AdoptCandidatesHashMismatch)
 }
 
+func TestRun_PersistedRollbackDecisionCleansGitWorktrees(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR202")
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, contracts.Decision{
+		Action: contracts.DecisionActionRollback,
+		Value: contracts.DecisionRollback{
+			Action:         contracts.DecisionActionRollback,
+			SchemaVersion:  "1",
+			RunID:          runCtx.RunID,
+			IdempotencyKey: contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), resolver.target.TargetSHA, resolver.target.BestShaBefore, candidates.CandidatesHash),
+			RollbackReason: contracts.RollbackReasonLeaseFailure,
+			FailedStep:     contracts.FailedStep70,
+			BestShaBefore:  resolver.target.BestShaBefore,
+			TargetSha:      resolver.target.TargetSHA,
+			DecidedAt:      fixedNow()(),
+		},
+	}))
+	git := &fakeGit{head: resolver.target.BestShaBefore}
+
+	require.NoError(t, Run(context.Background(), 202, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: unexpectedResolver{t: t}, Now: fixedNow()}))
+
+	require.Len(t, git.removeWorktreeCalls, len(pkg.Worktrees))
+	for i, wt := range pkg.Worktrees {
+		assert.Equal(t, wt.Path, git.removeWorktreeCalls[i])
+	}
+}
+
 func TestCleanupWorktrees_RejectsPathOutsideWorktreeBase(t *testing.T) {
 	runCtx, err := internalio.NewRunContext("2026-04-21-PR999-abcdef0", realTempDir(t), realTempDir(t))
 	require.NoError(t, err)
@@ -2051,11 +2096,12 @@ type fakePushCall struct {
 }
 
 type fakeGit struct {
-	head            string
-	pushErr         error
-	pushCalls       []fakePushCall
-	onPush          func(fakePushCall)
-	remoteHeadCalls int
+	head                string
+	pushErr             error
+	pushCalls           []fakePushCall
+	onPush              func(fakePushCall)
+	remoteHeadCalls     int
+	removeWorktreeCalls []string
 }
 
 type cancelOnPushGit struct {
@@ -2082,7 +2128,8 @@ func (g *fakeGit) PushForceWithLease(_ context.Context, branch, target, expected
 	return nil
 }
 
-func (g *fakeGit) RemoveWorktree(_ context.Context, _ string) error {
+func (g *fakeGit) RemoveWorktree(_ context.Context, path string) error {
+	g.removeWorktreeCalls = append(g.removeWorktreeCalls, path)
 	return nil
 }
 
