@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: all build test lint tidy check-sync script-test
+.PHONY: all build test integration-test lint tidy check-sync script-test
 
 all: build test lint check-sync script-test
 
@@ -9,6 +9,9 @@ build:
 
 test:
 	go test ./...
+
+integration-test:
+	AUTO_IMPROVE_INTEGRATION=1 go test ./cmd/auto-improve -count=1
 
 lint:
 	go vet ./...

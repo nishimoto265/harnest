@@ -53,6 +53,12 @@ func TestWorkflowRenderConfigSeparatesClaudeImplementerAndJudgeProfiles(t *testi
 	assert.Empty(t, generatedAgents.Profiles["claude-judge"].Args)
 	assert.Equal(t, "codex-judge", generatedAgents.Roles[agents.RoleJudgeSecondary])
 	assert.Equal(t, "claude-judge", generatedAgents.Roles[agents.RoleJudgeArbiter])
+	assert.Equal(t, "owner/repo", generatedConfig.Repo.GitHub)
+	assert.Equal(t, repoRoot, generatedConfig.Repo.Root)
+	assert.Equal(t, "main", generatedConfig.Repo.DefaultBranch)
+	assert.Equal(t, "auto-improve/best", generatedConfig.Repo.BestBranch)
+	assert.Equal(t, runsBase, generatedConfig.Paths.Runs)
+	assert.Equal(t, worktreeBase, generatedConfig.Worktree.Base)
 
 	primary, err := generatedConfig.AgentProfile(agents.RoleJudgePrimary)
 	require.NoError(t, err)
