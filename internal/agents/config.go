@@ -162,6 +162,10 @@ func (f File) Validate() error {
 			return fmt.Errorf("agents: role %q references unknown profile %q", role, profileName)
 		}
 	}
+	implementer := f.Profiles[f.Roles[RoleImplementer]]
+	if implementer.Provider != ProviderClaude && implementer.Provider != ProviderCodex {
+		return fmt.Errorf("agents: role %q must use provider %q or %q, got %q", RoleImplementer, ProviderClaude, ProviderCodex, implementer.Provider)
+	}
 	return nil
 }
 

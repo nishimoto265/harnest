@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/config"
@@ -30,6 +31,7 @@ type Dependencies struct {
 	Run                   func(context.Context, string, ...string) ([]byte, error)
 	RunGitLocal           func(context.Context, string, ...string) ([]byte, error)
 	RunGitNetwork         func(context.Context, string, string, ...string) ([]byte, error)
+	RunProviderSmoke      func(context.Context, string, ...string) ([]byte, error)
 	PrepareProviderBinary func(agents.Provider, string) (string, []string, error)
 }
 
@@ -44,6 +46,8 @@ type version struct {
 }
 
 var versionPattern = regexp.MustCompile(`(\d+)\.(\d+)(?:\.(\d+))?`)
+
+const providerSmokeTimeout = 5 * time.Second
 
 func New() Checker {
 	return NewWithDependencies(Dependencies{
@@ -78,6 +82,13 @@ func NewWithDependencies(deps Dependencies) Checker {
 			deps.RunGitNetwork = runSanitizedGitNetworkCommand
 		}
 	}
+	if deps.RunProviderSmoke == nil {
+		if customRun {
+			deps.RunProviderSmoke = deps.Run
+		} else {
+			deps.RunProviderSmoke = runSanitizedLocalCommand
+		}
+	}
 	if deps.PrepareProviderBinary == nil {
 		deps.PrepareProviderBinary = agentrunner.PrepareProviderBinary
 	}
@@ -99,6 +110,15 @@ func runSanitizedGitLocalCommand(ctx context.Context, name string, args ...strin
 		return nil, err
 	}
 	cmd.Env = processenv.GitLocalEnv()
+	return cmd.CombinedOutput()
+}
+
+func runSanitizedLocalCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = processenv.SanitizeForLocalExec()
 	return cmd.CombinedOutput()
 }
 
@@ -133,7 +153,7 @@ func (c Checker) Check(ctx context.Context, cfg config.Config) PreflightResult {
 	failures = appendFailure(failures, c.checkVersion(ctx, "jq", "jq", version{major: 1, minor: 6}, "--version"))
 	failures = appendFailure(failures, c.checkVersion(ctx, "yq", "yq", version{major: 4, minor: 0}, "--version"))
 	failures = appendFailure(failures, c.checkBinary("lsof", "lsof"))
-	failures = append(failures, c.checkAgentBinaries(cfg)...)
+	failures = append(failures, c.checkAgentBinaries(ctx, cfg)...)
 	failures = appendFailure(failures, c.checkGHAuth(ctx))
 
 	if runsBase != "" {
@@ -166,11 +186,11 @@ func (c Checker) Check(ctx context.Context, cfg config.Config) PreflightResult {
 	if err != nil {
 		failures = append(failures, Failure{Name: "repo.root", Detail: err.Error()})
 	} else if cfg.Repo.BestBranch != "" {
-		remoteURL, failure := c.originRemoteURL(ctx, repoRoot)
+		remoteURL, failure := c.originConfiguredURL(ctx, repoRoot)
 		failures = appendFailure(failures, failure)
 		if failure == nil {
 			failures = appendFailure(failures, c.checkRepoSlugMatches(remoteURL, cfg.Repo.GitHub))
-			pushURLs, pushFailure := c.originPushURLs(ctx, repoRoot)
+			pushURLs, pushFailure := c.originConfiguredPushURLs(ctx, repoRoot, remoteURL)
 			failures = appendFailure(failures, pushFailure)
 			if pushFailure == nil {
 				failures = append(failures, c.checkOriginPushURLs(remoteURL, pushURLs, cfg.Repo.GitHub)...)
@@ -221,7 +241,7 @@ func (c Checker) checkBinary(binary string, failureName string) *Failure {
 	return nil
 }
 
-func (c Checker) checkAgentBinaries(cfg config.Config) []Failure {
+func (c Checker) checkAgentBinaries(ctx context.Context, cfg config.Config) []Failure {
 	failures := make([]Failure, 0, 4)
 	seen := make(map[string]struct{})
 	for _, role := range []agents.Role{
@@ -252,11 +272,35 @@ func (c Checker) checkAgentBinaries(cfg config.Config) []Failure {
 			continue
 		}
 		seen[key] = struct{}{}
-		if _, _, err := c.deps.PrepareProviderBinary(profile.Provider, profile.Binary); err != nil {
+		binary, prefixArgs, err := c.deps.PrepareProviderBinary(profile.Provider, profile.Binary)
+		if err != nil {
 			failures = append(failures, Failure{Name: profile.Binary, Detail: err.Error()})
+			continue
+		}
+		if failure := c.smokeProviderVersion(ctx, profile.Binary, binary, prefixArgs); failure != nil {
+			failures = append(failures, *failure)
 		}
 	}
 	return failures
+}
+
+func (c Checker) smokeProviderVersion(ctx context.Context, failureName, binary string, prefixArgs []string) *Failure {
+	smokeCtx, cancel := context.WithTimeout(ctx, providerSmokeTimeout)
+	defer cancel()
+	args := append([]string{}, prefixArgs...)
+	args = append(args, "--version")
+	output, err := c.deps.RunProviderSmoke(smokeCtx, binary, args...)
+	if err == nil {
+		return nil
+	}
+	detail := strings.TrimSpace(string(output))
+	if detail == "" {
+		detail = err.Error()
+	}
+	if smokeCtx.Err() == context.DeadlineExceeded {
+		detail = fmt.Sprintf("provider smoke timed out after %s", providerSmokeTimeout)
+	}
+	return &Failure{Name: failureName, Detail: detail}
 }
 
 func (c Checker) checkGHAuth(ctx context.Context) *Failure {
@@ -275,12 +319,12 @@ func (c Checker) checkGHAuth(ctx context.Context) *Failure {
 	return nil
 }
 
-func (c Checker) originRemoteURL(ctx context.Context, repoRoot string) (string, *Failure) {
+func (c Checker) originConfiguredURL(ctx context.Context, repoRoot string) (string, *Failure) {
 	resolved, err := c.deps.LookPath("git")
 	if err != nil {
 		return "", &Failure{Name: "repo.github", Detail: err.Error()}
 	}
-	output, err := c.deps.RunGitLocal(ctx, resolved, "-C", repoRoot, "remote", "get-url", "origin")
+	output, err := c.deps.RunGitLocal(ctx, resolved, "-C", repoRoot, "config", "--get", "remote.origin.url")
 	if err != nil {
 		detail := strings.TrimSpace(string(output))
 		if detail == "" {
@@ -291,16 +335,16 @@ func (c Checker) originRemoteURL(ctx context.Context, repoRoot string) (string, 
 	return strings.TrimSpace(string(output)), nil
 }
 
-func (c Checker) originPushURLs(ctx context.Context, repoRoot string) ([]string, *Failure) {
+func (c Checker) originConfiguredPushURLs(ctx context.Context, repoRoot, originURL string) ([]string, *Failure) {
 	resolved, err := c.deps.LookPath("git")
 	if err != nil {
 		return nil, &Failure{Name: "repo.github", Detail: err.Error()}
 	}
-	output, err := c.deps.RunGitLocal(ctx, resolved, "-C", repoRoot, "remote", "get-url", "--push", "--all", "origin")
+	output, err := c.deps.RunGitLocal(ctx, resolved, "-C", repoRoot, "config", "--get-all", "remote.origin.pushurl")
 	if err != nil {
 		detail := strings.TrimSpace(string(output))
 		if detail == "" {
-			detail = err.Error()
+			return []string{originURL}, nil
 		}
 		return nil, &Failure{Name: "repo.github", Detail: detail}
 	}
@@ -314,7 +358,7 @@ func (c Checker) originPushURLs(ctx context.Context, repoRoot string) ([]string,
 		pushURLs = append(pushURLs, line)
 	}
 	if len(pushURLs) == 0 {
-		return nil, &Failure{Name: "repo.github", Detail: "origin push url is empty"}
+		return []string{originURL}, nil
 	}
 	return pushURLs, nil
 }

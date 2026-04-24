@@ -63,6 +63,24 @@ func TestCheckAcceptsGatedTestStubProvidersWithEnvGate(t *testing.T) {
 	}
 }
 
+func TestCheckReportsProviderSmokeFailure(t *testing.T) {
+	cfg := testConfig(t)
+	deps := fakeDependencies(t, "")
+	deps.RunProviderSmoke = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if strings.HasSuffix(name, "/claude") {
+			return []byte("bad version"), fmt.Errorf("exit status 1")
+		}
+		return []byte("provider version"), nil
+	}
+
+	result := NewWithDependencies(deps).Check(context.Background(), cfg)
+
+	require.False(t, result.OK)
+	failure, ok := failureByName(result.Failures, "claude")
+	require.True(t, ok)
+	assert.Contains(t, failure.Detail, "bad version")
+}
+
 func TestDefaultRunnerUsesSanitizedNetworkEnv(t *testing.T) {
 	toolsDir := t.TempDir()
 	envPath := filepath.Join(t.TempDir(), "preflight-env.txt")
@@ -74,7 +92,7 @@ if [ "$name" = "git" ] && [ "$1" = "--version" ]; then
   printf "git version 2.35.1\n"
   exit 0
 fi
-if [ "$name" = "git" ] && [ "$1" = "-C" ] && [ "$3" = "remote" ]; then
+if [ "$name" = "git" ] && [ "$1" = "-C" ] && [ "$3" = "config" ] && [ "$4" = "--get" ] && [ "$5" = "remote.origin.url" ]; then
   printf "https://github.com/owner/repo.git\n"
   exit 0
 fi
@@ -219,12 +237,11 @@ func fakeDependencies(t *testing.T, missing string) Dependencies {
 		"codex":  "/usr/local/bin/codex",
 	}
 	outputs := map[string]string{
-		"/usr/local/bin/git --version":                                         "git version 2.35.1",
-		"/usr/local/bin/gh --version":                                          "gh version 2.40.1 (2024-01-01)",
-		"/usr/local/bin/jq --version":                                          "jq-1.6",
-		"/usr/local/bin/yq --version":                                          "yq (https://github.com/mikefarah/yq/) version v4.40.5",
-		"/usr/local/bin/git -C " + toolPaths["git"] + " remote get-url origin": "",
-		"/usr/local/bin/gh auth status":                                        "github.com\n  Logged in to github.com as test-user",
+		"/usr/local/bin/git --version":  "git version 2.35.1",
+		"/usr/local/bin/gh --version":   "gh version 2.40.1 (2024-01-01)",
+		"/usr/local/bin/jq --version":   "jq-1.6",
+		"/usr/local/bin/yq --version":   "yq (https://github.com/mikefarah/yq/) version v4.40.5",
+		"/usr/local/bin/gh auth status": "github.com\n  Logged in to github.com as test-user",
 	}
 
 	return Dependencies{
@@ -242,8 +259,11 @@ func fakeDependencies(t *testing.T, missing string) Dependencies {
 			if name == toolPaths["git"] && len(args) >= 5 && args[0] == "-C" && args[2] == "ls-remote" {
 				return []byte(strings.Repeat("a", 40) + "\trefs/heads/auto-improve/best"), nil
 			}
-			if name == toolPaths["git"] && len(args) >= 4 && args[0] == "-C" && args[2] == "remote" && args[3] == "get-url" {
+			if name == toolPaths["git"] && len(args) == 5 && args[0] == "-C" && args[2] == "config" && args[3] == "--get" && args[4] == "remote.origin.url" {
 				return []byte("https://github.com/owner/repo.git"), nil
+			}
+			if name == toolPaths["git"] && len(args) == 5 && args[0] == "-C" && args[2] == "config" && args[3] == "--get-all" && args[4] == "remote.origin.pushurl" {
+				return []byte{}, fmt.Errorf("exit status 1")
 			}
 			key := name
 			for _, arg := range args {
@@ -264,6 +284,9 @@ func fakeDependencies(t *testing.T, missing string) Dependencies {
 				return "", nil, fmt.Errorf("unexpected provider binary: %s", binary)
 			}
 			return path, nil, nil
+		},
+		RunProviderSmoke: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			return []byte("provider version"), nil
 		},
 	}
 }
@@ -295,12 +318,40 @@ func TestCheckReportsRepoGitHubMismatch(t *testing.T) {
 	assert.Contains(t, failureNames(result.Failures), "repo.github")
 }
 
+func TestCheckUsesConfiguredOriginURLForValidationAndNetworkAuth(t *testing.T) {
+	cfg := testConfig(t)
+	deps := fakeDependencies(t, "")
+	originalRun := deps.Run
+	var networkRemoteURLs []string
+	deps.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) == 5 && args[0] == "-C" && args[2] == "config" && args[3] == "--get" && args[4] == "remote.origin.url" {
+			return []byte("https://github.com/owner/repo.git\n"), nil
+		}
+		if len(args) >= 4 && args[0] == "-C" && args[2] == "remote" && args[3] == "get-url" {
+			return []byte("file:///tmp/mirror.git\n"), nil
+		}
+		return originalRun(ctx, name, args...)
+	}
+	deps.RunGitNetwork = func(ctx context.Context, remoteURL, name string, args ...string) ([]byte, error) {
+		networkRemoteURLs = append(networkRemoteURLs, remoteURL)
+		if len(args) >= 5 && args[0] == "-C" && args[2] == "ls-remote" && args[4] == "origin" {
+			return []byte(strings.Repeat("a", 40) + "\trefs/heads/auto-improve/best"), nil
+		}
+		return nil, fmt.Errorf("unexpected git network command: %s %v", name, args)
+	}
+
+	result := NewWithDependencies(deps).Check(context.Background(), cfg)
+
+	require.True(t, result.OK, "failures: %+v", result.Failures)
+	assert.Equal(t, []string{"https://github.com/owner/repo.git"}, networkRemoteURLs)
+}
+
 func TestCheckRejectsOriginPushURLRepoMismatch(t *testing.T) {
 	cfg := testConfig(t)
 	deps := fakeDependencies(t, "")
 	originalRun := deps.Run
 	deps.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if len(args) >= 7 && args[0] == "-C" && args[2] == "remote" && args[3] == "get-url" && args[4] == "--push" && args[5] == "--all" {
+		if len(args) == 5 && args[0] == "-C" && args[2] == "config" && args[3] == "--get-all" && args[4] == "remote.origin.pushurl" {
 			return []byte("https://github.com/owner/other.git\n"), nil
 		}
 		return originalRun(ctx, name, args...)
@@ -319,7 +370,7 @@ func TestCheckRejectsOriginPushURLHostMismatch(t *testing.T) {
 	deps := fakeDependencies(t, "")
 	originalRun := deps.Run
 	deps.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if len(args) >= 7 && args[0] == "-C" && args[2] == "remote" && args[3] == "get-url" && args[4] == "--push" && args[5] == "--all" {
+		if len(args) == 5 && args[0] == "-C" && args[2] == "config" && args[3] == "--get-all" && args[4] == "remote.origin.pushurl" {
 			return []byte("https://github.example.com/owner/repo.git\n"), nil
 		}
 		return originalRun(ctx, name, args...)
@@ -339,7 +390,7 @@ func TestCheckRejectsOriginPushURLLocalPathStyleRemote(t *testing.T) {
 	deps := fakeDependencies(t, "")
 	originalRun := deps.Run
 	deps.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if len(args) >= 7 && args[0] == "-C" && args[2] == "remote" && args[3] == "get-url" && args[4] == "--push" && args[5] == "--all" {
+		if len(args) == 5 && args[0] == "-C" && args[2] == "config" && args[3] == "--get-all" && args[4] == "remote.origin.pushurl" {
 			return []byte("github.com/owner/repo\n"), nil
 		}
 		return originalRun(ctx, name, args...)
@@ -371,7 +422,7 @@ func TestCheckRejectsSameSlugOriginOnWrongHost(t *testing.T) {
 	deps := fakeDependencies(t, "")
 	originalRun := deps.Run
 	deps.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if len(args) >= 5 && args[0] == "-C" && args[2] == "remote" && args[3] == "get-url" {
+		if len(args) == 5 && args[0] == "-C" && args[2] == "config" && args[3] == "--get" && args[4] == "remote.origin.url" {
 			return []byte("https://evil.example.com/owner/repo.git"), nil
 		}
 		return originalRun(ctx, name, args...)
