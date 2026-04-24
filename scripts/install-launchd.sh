@@ -14,15 +14,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 TARGET="${TARGET:-$INSTALL_DIR/auto-improve}"
 REPO_ROOT_INPUT="${REPO_ROOT:-$(pwd -P)}"
-PLIST_DIR="$(auto_improve_launchd_plist_dir)"
-PLIST="$(auto_improve_launchd_plist_path)"
-LAUNCHD_PATH="$(auto_improve_launchd_path)"
-LAUNCHD_USER="$(auto_improve_launchd_user)"
 
 if ! REPO_ROOT="$(cd "$REPO_ROOT_INPUT" 2>/dev/null && pwd -P)"; then
   echo "REPO_ROOT=$REPO_ROOT_INPUT does not exist" >&2
   exit 1
 fi
+
+PLIST_DIR="$(auto_improve_launchd_plist_dir)"
+PLIST="$(auto_improve_launchd_plist_path)"
+LAUNCHD_LABEL="$(auto_improve_launchd_label)"
+LAUNCHD_PATH="$(auto_improve_launchd_path)"
+LAUNCHD_USER="$(auto_improve_launchd_user)"
 
 if [[ ! -f "$REPO_ROOT/config.yaml" ]]; then
   echo "config.yaml not found in REPO_ROOT=$REPO_ROOT" >&2
@@ -30,7 +32,7 @@ if [[ ! -f "$REPO_ROOT/config.yaml" ]]; then
 fi
 
 mkdir -p "$PLIST_DIR"
-tmp_plist="$(mktemp "$PLIST_DIR/.com.nishimoto265.auto-improve.plist.tmp.XXXXXX")"
+tmp_plist="$(mktemp "$PLIST_DIR/.${LAUNCHD_LABEL}.plist.tmp.XXXXXX")"
 
 cleanup() {
   rm -f "$tmp_plist"
@@ -40,6 +42,7 @@ trap cleanup EXIT
 escaped_target="$(auto_improve_xml_escape "$TARGET")"
 escaped_repo_root="$(auto_improve_xml_escape "$REPO_ROOT")"
 escaped_path="$(auto_improve_xml_escape "$LAUNCHD_PATH")"
+escaped_label="$(auto_improve_xml_escape "$LAUNCHD_LABEL")"
 
 cat >"$tmp_plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -47,7 +50,7 @@ cat >"$tmp_plist" <<EOF
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.nishimoto265.auto-improve</string>
+  <string>$escaped_label</string>
   <key>ProgramArguments</key>
   <array>
     <string>$escaped_target</string>

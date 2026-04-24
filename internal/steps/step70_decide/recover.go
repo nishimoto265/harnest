@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -38,6 +39,9 @@ func RecoverRollback(ctx context.Context, pr int, runCtx internalio.RunContext, 
 	}
 	registryHead, idempotencyHit, err := recoverRegistryStatus(runCtx, *intention)
 	if err != nil {
+		return err
+	}
+	if err := recoverPolicyRollbackSafe(ctx, *intention, deps); err != nil {
 		return err
 	}
 	reason := intention.RecoveryReason
@@ -111,7 +115,10 @@ func RecoverAdoptAnyway(ctx context.Context, pr int, runCtx internalio.RunContex
 		}
 	}
 	switch intention.Stage {
-	case contracts.IntentionStageBranchPushed, contracts.IntentionStageRegistryAppended:
+	case contracts.IntentionStageBranchPushed,
+		contracts.IntentionStageRegistryAppended,
+		contracts.IntentionStagePolicyPublishing,
+		contracts.IntentionStagePolicyPublished:
 		if err := resume(ctx, pr, runCtx, pkg, candidates, intention, store, writer, deps); err != nil {
 			return err
 		}
@@ -136,6 +143,31 @@ func RecoverAdoptAnyway(ctx context.Context, pr int, runCtx internalio.RunContex
 		}
 	}
 	return removeNeedsRecoverySentinels(runCtx)
+}
+
+func recoverPolicyRollbackSafe(ctx context.Context, intention contracts.IntentionRecord, deps Deps) error {
+	branch := strings.TrimSpace(intention.PolicyBranch)
+	if branch == "" {
+		branch = strings.TrimSpace(deps.PolicyBranch)
+	}
+	if branch == "" || intention.PolicyHeadBefore == "" {
+		return nil
+	}
+	current, err := deps.Git.RemoteHead(ctx, branch)
+	if err != nil {
+		return err
+	}
+	if intention.PolicyHeadAfter != "" && current == intention.PolicyHeadAfter {
+		return &RecoverRefusalError{
+			Message: fmt.Sprintf("rollback refused: policy_branch already published: branch=%s head=%s", branch, current),
+		}
+	}
+	if current != intention.PolicyHeadBefore {
+		return &RecoverRefusalError{
+			Message: fmt.Sprintf("rollback refused: policy_branch head mismatch: branch=%s have=%s want=%s", branch, current, intention.PolicyHeadBefore),
+		}
+	}
+	return nil
 }
 
 func RecoverMarkManualAbort(runCtx internalio.RunContext, pr int, store IntentionWriter, at time.Time) error {

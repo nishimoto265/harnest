@@ -3,7 +3,10 @@ package detect
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,4 +120,47 @@ func TestDetectMergedPRsIncludesLateLowerNumberAndPaginates(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, prs, 2)
 	assert.Equal(t, []int{199, 205}, []int{prs[0].Number, prs[1].Number})
+}
+
+func TestDefaultRunnerUsesSanitizedNetworkEnv(t *testing.T) {
+	t.Setenv("AUTO_IMPROVE_DETECT_HELPER", "1")
+	t.Setenv("GH_TOKEN", "gh-secret")
+	t.Setenv("BASH_ENV", "/tmp/evil")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/tmp/gitconfig")
+
+	originalCommandContext := detectCommandContext
+	detectCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, os.Args[0], "-test.run=TestDetectDefaultRunnerHelper", "--")
+	}
+	t.Cleanup(func() {
+		detectCommandContext = originalCommandContext
+	})
+
+	prs, err := New("").DetectMergedPRs(context.Background(), "owner/repo", "main")
+	require.NoError(t, err)
+	assert.Empty(t, prs)
+}
+
+func TestDetectDefaultRunnerHelper(t *testing.T) {
+	if os.Getenv("AUTO_IMPROVE_DETECT_HELPER") != "1" {
+		return
+	}
+	if os.Getenv("BASH_ENV") != "" {
+		fmt.Fprintln(os.Stderr, "BASH_ENV leaked")
+		os.Exit(2)
+	}
+	if os.Getenv("GIT_CONFIG_GLOBAL") != "" {
+		fmt.Fprintln(os.Stderr, "GIT_CONFIG_GLOBAL leaked")
+		os.Exit(3)
+	}
+	if os.Getenv("GH_TOKEN") != "gh-secret" {
+		fmt.Fprintln(os.Stderr, "GH_TOKEN missing")
+		os.Exit(4)
+	}
+	if !strings.Contains(os.Getenv("PATH"), "/usr/bin:/bin") {
+		fmt.Fprintln(os.Stderr, "PATH not sanitized")
+		os.Exit(5)
+	}
+	fmt.Print(`[[]]`)
+	os.Exit(0)
 }

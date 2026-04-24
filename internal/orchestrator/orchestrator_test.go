@@ -531,7 +531,7 @@ func TestRun_DuplicateOnlyCandidatesSkipPass2AndStep60(t *testing.T) {
 	assert.NotContains(t, recorder.snapshot(), "60")
 }
 
-func TestRun_RescueExhaustedDoesNotWriteGlobalSentinel(t *testing.T) {
+func TestRun_RescueExhaustedWritesGlobalSentinel(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
 	require.NoError(t, err)
@@ -548,7 +548,7 @@ func TestRun_RescueExhaustedDoesNotWriteGlobalSentinel(t *testing.T) {
 
 	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
 	require.NoError(t, err)
-	assert.NoFileExists(t, filepath.Join(cfg.Paths.Runs, "needs-recovery", string(runID)+".json"))
+	assert.FileExists(t, filepath.Join(cfg.Paths.Runs, "needs-recovery", string(runID)+".json"))
 
 	events, err := state.ScanEventsForRun(runCtx, runID)
 	require.NoError(t, err)
@@ -569,7 +569,7 @@ func TestRun_RescueExhaustedDoesNotWriteGlobalSentinel(t *testing.T) {
 	assert.Less(t, manualIndex, warningIndex)
 }
 
-func TestRun_RescueExhaustedDoesNotBlockOtherPRs(t *testing.T) {
+func TestRun_RescueExhaustedBlocksOtherPRs(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
 	require.NoError(t, err)
@@ -588,7 +588,11 @@ func TestRun_RescueExhaustedDoesNotBlockOtherPRs(t *testing.T) {
 	other.steps.Step10 = stubStep10{}
 	other.steps.Step20 = stubAgentSteps()
 	other.steps.Step70 = stubStep70{}
-	require.NoError(t, other.Run(context.Background(), 78, RunOptions{RunID: "2026-04-21-PR78-abcdef0"}))
+	err = other.Run(context.Background(), 78, RunOptions{RunID: "2026-04-21-PR78-abcdef0"})
+	require.Error(t, err)
+	var blocked *GlobalNeedsRecoveryError
+	require.ErrorAs(t, err, &blocked)
+	assert.Equal(t, contracts.RunID("2026-04-21-PR77-abcdef0"), blocked.Sentinel.RunID)
 }
 
 func TestRun_ResumeStep30WithNoScorableAgentsFailsImmediately(t *testing.T) {
@@ -979,6 +983,34 @@ func TestFirstNeedsRecoverySentinel_RecreatesMissingSentinelFromProcessedState(t
 	require.NoError(t, err)
 	assert.True(t, blocked)
 	assert.Equal(t, runCtx.RunID, sentinel.RunID)
+	assert.FileExists(t, filepath.Join(runsBase, "needs-recovery", string(runCtx.RunID)+".json"))
+}
+
+func TestFirstNeedsRecoverySentinel_RecreatesWorktreeRescueLoopSentinel(t *testing.T) {
+	runsBase := t.TempDir()
+	worktreeBase := t.TempDir()
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR98-deadbee", runsBase, worktreeBase)
+	require.NoError(t, err)
+
+	require.NoError(t, state.Append(runCtx, contracts.StateEntry{
+		Kind: contracts.StateKindNeedsManualRecovery,
+		Value: contracts.StateEntryNeedsManualRecovery{
+			Kind:       contracts.StateKindNeedsManualRecovery,
+			PR:         98,
+			RunID:      runCtx.RunID,
+			Step:       contracts.FailedStep20,
+			Reason:     contracts.RollbackReasonWorktreeRescueLoop,
+			FailedStep: contracts.FailedStep20,
+			At:         time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+		},
+	}))
+
+	sentinel, blocked, err := firstNeedsRecoverySentinel(runsBase)
+	require.NoError(t, err)
+	assert.True(t, blocked)
+	assert.Equal(t, runCtx.RunID, sentinel.RunID)
+	assert.Equal(t, contracts.RollbackReasonWorktreeRescueLoop, sentinel.Reason)
+	assert.Equal(t, contracts.FailedStep20, sentinel.FailedStep)
 	assert.FileExists(t, filepath.Join(runsBase, "needs-recovery", string(runCtx.RunID)+".json"))
 }
 
@@ -1804,21 +1836,29 @@ func (j orchestratorJudge) ScoreOutput(ctx context.Context, input judges.JudgeIn
 			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
 		})
 	}
-	output := judges.JudgeOutput{
-		Scores: scores,
-		Compliance: []contracts.ComplianceEntry{{
+	ruleIDs := input.ExpectedComplianceRuleIDs
+	if len(ruleIDs) == 0 {
+		ruleIDs = []string{"shared"}
+	}
+	compliance := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
+	for _, ruleID := range ruleIDs {
+		compliance = append(compliance, contracts.ComplianceEntry{
 			SchemaVersion: "1",
 			RunID:         input.RunID,
 			Pass:          input.Pass,
 			Agent:         input.Agent,
-			RuleID:        "shared",
+			RuleID:        ruleID,
 			Verdict:       contracts.ComplianceVerdictCompliant,
 			Rationale:     "scripted adopt compliance",
 			VerdictPath:   contracts.VerdictPathSingle,
 			RubricVersion: "default",
 			PromptVersion: "phase0-stub",
 			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
-		}},
+		})
+	}
+	output := judges.JudgeOutput{
+		Scores:     scores,
+		Compliance: compliance,
 	}
 	return output, output.ValidateFor(input)
 }

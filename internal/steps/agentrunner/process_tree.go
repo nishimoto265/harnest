@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"sort"
@@ -41,6 +42,8 @@ var killProcessGroupUntilGoneSignal = KillProcessGroup
 var killSessionProcessesUntilGoneKill = killPIDs
 
 var ErrCleanupTimeout = errors.New("agentrunner: process cleanup timed out")
+
+const processInspectionUnavailableStartTimePrefix = "process-inspection-unavailable:"
 
 func StartDescendantTracker(rootPID int, interval time.Duration) *DescendantTracker {
 	if rootPID <= 0 {
@@ -237,6 +240,9 @@ func killProcessGroupUntilGoneOwned(lease ProcessLease, maxWait, interval time.D
 	for {
 		matches, err := processIdentityMatches(lease.PID, lease.StartTime)
 		if err != nil {
+			if isProcessInspectionUnavailable(err) {
+				return lastErr
+			}
 			return errors.Join(lastErr, err)
 		}
 		if !matches {
@@ -247,6 +253,9 @@ func killProcessGroupUntilGoneOwned(lease ProcessLease, maxWait, interval time.D
 		}
 		members, err := processGroupMembersUntilGoneList(lease.PGID)
 		if err != nil {
+			if isProcessInspectionUnavailable(err) {
+				return lastErr
+			}
 			return errors.Join(lastErr, err)
 		}
 		if len(members) == 0 {
@@ -278,6 +287,9 @@ func killSessionProcessesUntilGoneOwned(lease ProcessLease, sessionID int, maxWa
 	for {
 		matches, err := processIdentityMatches(lease.PID, lease.StartTime)
 		if err != nil {
+			if isProcessInspectionUnavailable(err) {
+				return lastErr
+			}
 			return errors.Join(lastErr, err)
 		}
 		if !matches {
@@ -285,6 +297,9 @@ func killSessionProcessesUntilGoneOwned(lease ProcessLease, sessionID int, maxWa
 		}
 		pids, err := sessionProcessesUntilGoneList(sessionID)
 		if err != nil {
+			if isProcessInspectionUnavailable(err) {
+				return lastErr
+			}
 			return errors.Join(lastErr, err)
 		}
 		if len(pids) == 0 {
@@ -305,6 +320,9 @@ func processIdentityMatches(pid int, expectedStartTime string) (bool, error) {
 	if pid <= 0 || expectedStartTime == "" {
 		return false, nil
 	}
+	if isProcessInspectionUnavailableStartTime(expectedStartTime) {
+		return false, nil
+	}
 	currentStartTime, err := lookupProcessStartTime(pid)
 	switch {
 	case errors.Is(err, syscall.ESRCH):
@@ -319,6 +337,9 @@ func processIdentityMatches(pid int, expectedStartTime string) (bool, error) {
 func KillSessionProcesses(sessionID int) error {
 	pids, err := sessionProcesses(sessionID)
 	if err != nil {
+		if isProcessInspectionUnavailable(err) {
+			return nil
+		}
 		return err
 	}
 	return killPIDs(pids)
@@ -339,6 +360,9 @@ func KillSessionProcessesUntilGone(sessionID int, maxWait, interval time.Duratio
 	for {
 		pids, err := sessionProcessesUntilGoneList(sessionID)
 		if err != nil {
+			if isProcessInspectionUnavailable(err) {
+				return lastErr
+			}
 			return errors.Join(lastErr, err)
 		}
 		if len(pids) == 0 {
@@ -461,6 +485,9 @@ func KillProcessGroupUntilGone(pgid int, maxWait, interval time.Duration) error 
 		}
 		members, err := processGroupMembersUntilGoneList(pgid)
 		if err != nil {
+			if isProcessInspectionUnavailable(err) {
+				return lastErr
+			}
 			return errors.Join(lastErr, err)
 		}
 		if len(members) == 0 {
@@ -546,9 +573,20 @@ func killTrackedPIDs(ids []processIdentity) error {
 		}
 		seen[id.pid] = struct{}{}
 		if id.startTime != "" {
+			if isProcessInspectionUnavailableStartTime(id.startTime) {
+				if err := killPIDSignal(id.pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+					errs = append(errs, err)
+				}
+				continue
+			}
 			currentStartTime, err := lookupProcessStartTime(id.pid)
 			switch {
 			case errors.Is(err, syscall.ESRCH):
+				continue
+			case isProcessInspectionUnavailable(err):
+				if err := killPIDSignal(id.pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+					errs = append(errs, err)
+				}
 				continue
 			case err != nil:
 				errs = append(errs, err)
@@ -574,6 +612,9 @@ func processStartTime(pid int) (string, error) {
 		if errors.As(err, &exitErr) {
 			return "", syscall.ESRCH
 		}
+		if isProcessInspectionUnavailable(err) {
+			return processInspectionUnavailableStartTime(pid), nil
+		}
 		return "", err
 	}
 	startTime := strings.TrimSpace(string(output))
@@ -581,6 +622,20 @@ func processStartTime(pid int) (string, error) {
 		return "", syscall.ESRCH
 	}
 	return startTime, nil
+}
+
+func isProcessInspectionUnavailable(err error) bool {
+	return errors.Is(err, exec.ErrNotFound) ||
+		errors.Is(err, os.ErrNotExist) ||
+		errors.Is(err, os.ErrPermission)
+}
+
+func processInspectionUnavailableStartTime(pid int) string {
+	return processInspectionUnavailableStartTimePrefix + strconv.Itoa(pid)
+}
+
+func isProcessInspectionUnavailableStartTime(startTime string) bool {
+	return strings.HasPrefix(startTime, processInspectionUnavailableStartTimePrefix)
 }
 
 func LookupProcessStartTime(pid int) (string, error) {

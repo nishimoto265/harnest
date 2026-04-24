@@ -108,6 +108,32 @@ func (e *GlobalNeedsRecoveryError) RestartStep() contracts.FailedStep {
 	return contracts.FailedStep10
 }
 
+type GlobalSunsetSentinelError struct {
+	Path string
+}
+
+func (e *GlobalSunsetSentinelError) Error() string {
+	return fmt.Sprintf("orchestrator: global sunset block: sentinel=%s", e.Path)
+}
+
+func CheckGlobalRecoveryGate(runsBase string) error {
+	sentinel, blocked, err := firstNeedsRecoverySentinel(runsBase)
+	if err != nil {
+		return err
+	}
+	if blocked {
+		return &GlobalNeedsRecoveryError{Sentinel: sentinel}
+	}
+	path, blocked, err := firstSunsetSentinel(runsBase)
+	if err != nil {
+		return err
+	}
+	if blocked {
+		return &GlobalSunsetSentinelError{Path: path}
+	}
+	return nil
+}
+
 func NewOrchestrator(cfg *config.Config) (*Orchestrator, error) {
 	if cfg == nil {
 		return nil, errors.New("orchestrator: config is required")
@@ -727,7 +753,25 @@ func writeConfigSnapshot(path string, cfg *config.Config) error {
 	if fileExists(path) {
 		return nil
 	}
-	data, err := yaml.Marshal(cfg)
+	snapshot := *cfg
+	repoRoot, err := cfg.RepoRoot()
+	if err != nil {
+		return err
+	}
+	runsBase, err := cfg.RunsBase()
+	if err != nil {
+		return err
+	}
+	worktreeBase, err := cfg.WorktreeBase()
+	if err != nil {
+		return err
+	}
+	snapshot.Repo.Root = repoRoot
+	snapshot.Paths.Runs = ""
+	snapshot.RunsBasePath = runsBase
+	snapshot.Worktree.Base = ""
+	snapshot.WorktreeBasePath = worktreeBase
+	data, err := yaml.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
@@ -1114,6 +1158,9 @@ func (o *Orchestrator) handleRescueExhausted(run *StepRunContext, step contracts
 		FailedStep: step,
 		At:         now,
 	}
+	if err := ensureNeedsRecoverySentinel(run.IO, run.PR, run.IO.RunID, manual.Reason, manual.FailedStep); err != nil {
+		return err
+	}
 	if err := o.appendState(contracts.StateEntry{Kind: manual.Kind, Value: manual}); err != nil {
 		return err
 	}
@@ -1150,7 +1197,7 @@ func (o *Orchestrator) handleManualRecovery(
 	}
 	for _, entry := range entries {
 		if entry.Kind == contracts.StateKindNeedsManualRecovery {
-			return nil
+			return ensureNeedsRecoverySentinelFromState(run.IO, &entry)
 		}
 	}
 	if detail != "" {
@@ -1168,18 +1215,17 @@ func (o *Orchestrator) handleManualRecovery(
 		FailedStep: step,
 		At:         time.Now().UTC(),
 	}
-	return o.appendState(contracts.StateEntry{Kind: value.Kind, Value: value})
+	if err := ensureNeedsRecoverySentinel(run.IO, run.PR, run.IO.RunID, value.Reason, value.FailedStep); err != nil {
+		return err
+	}
+	if err := o.appendState(contracts.StateEntry{Kind: value.Kind, Value: value}); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (o *Orchestrator) ensureNoGlobalSentinel(runCtx internalio.RunContext) error {
-	sentinel, blocked, err := firstNeedsRecoverySentinel(runCtx.RunsBase)
-	if err != nil {
-		return err
-	}
-	if !blocked {
-		return nil
-	}
-	return &GlobalNeedsRecoveryError{Sentinel: sentinel}
+	return CheckGlobalRecoveryGate(runCtx.RunsBase)
 }
 
 func (o *Orchestrator) ensureStep70NeedsManualRecoveryState(run *StepRunContext) error {
@@ -1235,15 +1281,9 @@ func ensureNeedsRecoverySentinelFromState(runCtx internalio.RunContext, entry *c
 	}
 	switch value := entry.Value.(type) {
 	case contracts.StateEntryNeedsManualRecovery:
-		if value.Step != contracts.FailedStep70 || value.Reason == contracts.RollbackReasonWorktreeRescueLoop {
-			return nil
-		}
 		return ensureNeedsRecoverySentinel(runCtx, value.PR, value.RunID, value.Reason, value.FailedStep)
 	case *contracts.StateEntryNeedsManualRecovery:
 		if value == nil {
-			return nil
-		}
-		if value.Step != contracts.FailedStep70 || value.Reason == contracts.RollbackReasonWorktreeRescueLoop {
 			return nil
 		}
 		return ensureNeedsRecoverySentinel(runCtx, value.PR, value.RunID, value.Reason, value.FailedStep)
@@ -1324,9 +1364,6 @@ func ensureNeedsRecoverySentinelFromLatestRun(runsBase string, latest state.Late
 	var sentinel contracts.NeedsRecoverySentinel
 	switch value := latest.LastEvent.Value.(type) {
 	case contracts.StateEntryNeedsManualRecovery:
-		if value.Step != contracts.FailedStep70 || value.Reason == contracts.RollbackReasonWorktreeRescueLoop {
-			return contracts.NeedsRecoverySentinel{}, false, nil
-		}
 		sentinel = contracts.NeedsRecoverySentinel{
 			RunID:      value.RunID,
 			PR:         value.PR,
@@ -1336,9 +1373,6 @@ func ensureNeedsRecoverySentinelFromLatestRun(runsBase string, latest state.Late
 		}
 	case *contracts.StateEntryNeedsManualRecovery:
 		if value == nil {
-			return contracts.NeedsRecoverySentinel{}, false, nil
-		}
-		if value.Step != contracts.FailedStep70 || value.Reason == contracts.RollbackReasonWorktreeRescueLoop {
 			return contracts.NeedsRecoverySentinel{}, false, nil
 		}
 		sentinel = contracts.NeedsRecoverySentinel{
@@ -1373,6 +1407,18 @@ func ensureNeedsRecoverySentinelFromLatestRun(runsBase string, latest state.Late
 		}
 	}
 	return sentinel, true, nil
+}
+
+func firstSunsetSentinel(runsBase string) (string, bool, error) {
+	for _, name := range []string{"sunset-running.marker.diverged", "sunset-running.marker"} {
+		path := filepath.Join(runsBase, name)
+		if _, err := os.Stat(path); err == nil {
+			return name, true, nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", false, err
+		}
+	}
+	return "", false, nil
 }
 
 func hasTerminalEvent(runCtx internalio.RunContext, runID contracts.RunID) (bool, error) {

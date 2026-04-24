@@ -44,7 +44,7 @@ func PrepareProviderBinary(provider agents.Provider, binary string) (string, []s
 func CodexExecArgs(workdir string) []string {
 	return []string{
 		"exec",
-		"--dangerously-bypass-approvals-and-sandbox",
+		"--full-auto",
 		"--skip-git-repo-check",
 		"-C", workdir,
 	}

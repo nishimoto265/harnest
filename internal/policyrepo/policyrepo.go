@@ -65,11 +65,6 @@ func HydrateAndSnapshotFromBranch(ctx context.Context, repoRoot, branch, runsBas
 }
 
 func hydrateSnapshotFromBranch(ctx context.Context, repoRoot, branch, runsBase, runDir string) (snapshot, error) {
-	lock, err := internalio.AcquireFileLockContext(ctx, filepath.Join(runsBase, "promotion.lock"))
-	if err != nil {
-		return snapshot{}, err
-	}
-	defer func() { _ = lock.Unlock() }()
 	if err := fetchBranch(ctx, repoRoot, branch); err != nil {
 		return snapshot{}, err
 	}
@@ -81,6 +76,11 @@ func hydrateSnapshotFromBranch(ctx context.Context, repoRoot, branch, runsBase, 
 	if err != nil {
 		return snapshot{}, err
 	}
+	lock, err := internalio.AcquireFileLockContext(ctx, filepath.Join(runsBase, "promotion.lock"))
+	if err != nil {
+		return snapshot{}, err
+	}
+	defer func() { _ = lock.Unlock() }()
 	if strings.TrimSpace(runDir) != "" {
 		if err := applySnapshotToRunDir(runDir, snap); err != nil {
 			return snapshot{}, err

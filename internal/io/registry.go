@@ -83,13 +83,7 @@ func AppendRegistryEntry(path string, entry contracts.RuleRegistryEntry) (contra
 	if err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
-	if _, err := f.Write(payload); err != nil {
-		return contracts.RegistryAppendResult{}, err
-	}
-	if _, err := f.Write([]byte{'\n'}); err != nil {
-		return contracts.RegistryAppendResult{}, err
-	}
-	if err := f.Sync(); err != nil {
+	if err := appendRegistryPayload(path, f, payload); err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
 	if err := ensurePathMatchesIdentity(path, identity); err != nil {
@@ -185,6 +179,9 @@ func readRegistryLinesHandle(f *os.File) ([]RegistryLine, error) {
 			}
 			return nil, err
 		}
+		if isEOF(err) && !hasJSONLTerminator(line) {
+			return nil, fmt.Errorf("registry line %d at offset %d: unterminated final line", lineNo+1, offset)
+		}
 		lineNo++
 		line = trimJSONLLine(line)
 		if len(line) == 0 {
@@ -212,6 +209,28 @@ func readRegistryLinesHandle(f *os.File) ([]RegistryLine, error) {
 		}
 	}
 	return lines, nil
+}
+
+func appendRegistryPayload(path string, f appendJSONLFile, payload []byte) error {
+	originalSize, err := f.Seek(0, stdio.SeekEnd)
+	if err != nil {
+		return err
+	}
+	record := append(append([]byte(nil), payload...), '\n')
+	n, err := f.Write(record)
+	if err != nil {
+		rollbackAppendJSONL(path, f, originalSize)
+		return err
+	}
+	if n != len(record) {
+		rollbackAppendJSONL(path, f, originalSize)
+		return stdio.ErrShortWrite
+	}
+	if err := f.Sync(); err != nil {
+		rollbackAppendJSONL(path, f, originalSize)
+		return err
+	}
+	return nil
 }
 
 func registryPrevHash(entry contracts.RuleRegistryEntry) (string, error) {

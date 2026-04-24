@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/state"
 )
 
@@ -27,24 +28,26 @@ type Detector struct {
 	run           commandRunner
 }
 
+var detectCommandContext = exec.CommandContext
+
 func New(processedPath string) Detector {
-	return NewWithRunner(processedPath, func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, name, args...)
-		return cmd.CombinedOutput()
-	})
+	return NewWithRunner(processedPath, defaultCommandRunner)
 }
 
 func NewWithRunner(processedPath string, runner commandRunner) Detector {
 	if runner == nil {
-		runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			cmd := exec.CommandContext(ctx, name, args...)
-			return cmd.CombinedOutput()
-		}
+		runner = defaultCommandRunner
 	}
 	return Detector{
 		processedPath: processedPath,
 		run:           runner,
 	}
+}
+
+func defaultCommandRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := detectCommandContext(ctx, name, args...)
+	cmd.Env = processenv.SanitizeForNetworkExec()
+	return cmd.CombinedOutput()
 }
 
 func (d Detector) DetectMergedPRs(ctx context.Context, repo string, defaultBranch string) ([]MergedPR, error) {

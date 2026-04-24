@@ -78,15 +78,21 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 	if err != nil {
 		return commandExitError{code: 2, msg: err.Error()}
 	}
+	runsBase, err := cfg.RunsBase()
+	if err != nil {
+		return commandExitError{code: 2, msg: err.Error()}
+	}
+	if err := checkDetectLoopRecoveryGate(runsBase); err != nil {
+		return err
+	}
 	resumeTargets, err := state.ResumeTargetPath(processedPath)
 	if err != nil {
 		return err
 	}
 	for _, item := range resumeTargets {
 		if err := runner.Run(ctx, item.PR, orchestrator.RunOptions{RunID: item.RunID}); err != nil {
-			var blocked *orchestrator.GlobalNeedsRecoveryError
-			if errors.As(err, &blocked) {
-				return commandExitError{code: 10, msg: err.Error()}
+			if commandErr := detectLoopBlockExitError(err); commandErr != nil {
+				return commandErr
 			}
 			return err
 		}
@@ -95,14 +101,37 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 	if err != nil {
 		return err
 	}
+	if len(resumeTargets) == 0 && len(prs) == 0 {
+		if err := checkDetectLoopRecoveryGate(runsBase); err != nil {
+			return err
+		}
+	}
 	for _, pr := range prs {
 		if err := runner.Run(ctx, pr.Number, orchestrator.RunOptions{}); err != nil {
-			var blocked *orchestrator.GlobalNeedsRecoveryError
-			if errors.As(err, &blocked) {
-				return commandExitError{code: 10, msg: err.Error()}
+			if commandErr := detectLoopBlockExitError(err); commandErr != nil {
+				return commandErr
 			}
 			return err
 		}
+	}
+	return nil
+}
+
+func checkDetectLoopRecoveryGate(runsBase string) error {
+	if err := orchestrator.CheckGlobalRecoveryGate(runsBase); err != nil {
+		if commandErr := detectLoopBlockExitError(err); commandErr != nil {
+			return commandErr
+		}
+		return err
+	}
+	return nil
+}
+
+func detectLoopBlockExitError(err error) error {
+	var needsRecovery *orchestrator.GlobalNeedsRecoveryError
+	var sunset *orchestrator.GlobalSunsetSentinelError
+	if errors.As(err, &needsRecovery) || errors.As(err, &sunset) {
+		return commandExitError{code: 10, msg: err.Error()}
 	}
 	return nil
 }

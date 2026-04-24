@@ -160,7 +160,7 @@
       "communication"
     ],
     "expected_counts": {
-      "compliance": 3,
+      "compliance": 6,
       "pairwise": 3,
       "scores": 15
     },

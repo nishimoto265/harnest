@@ -24,6 +24,7 @@ Rules:
 - Use concise reasons and rationales.
 - If a compliance rule list is provided below, emit one row for each rule_id in that list.
 - When compliance rule_ids are listed, use the matching `## Active Rules` section in the rubric to decide each verdict.
+- Candidate rule IDs below refer to proposed rules from step40. Judge them against the pass2 output using the embedded candidate body.
 
 Required dimensions:
 {{- range .Dimensions }}
@@ -37,4 +38,20 @@ Required compliance rule_ids:
 {{- end }}
 {{- else }}
 No fixed compliance rule list was supplied. Read the rubric and emit compliance rows for the rules you can identify.
+{{- end }}
+
+{{- if .CandidateRules }}
+
+Candidate rule bodies to judge:
+{{- range .CandidateRules }}
+
+### {{ .ID }}
+- kind: {{ .Kind }}
+{{- if .TargetRuleID }}
+- target_rule_id: {{ .TargetRuleID }}
+{{- end }}
+- title: {{ .Title }}
+
+{{ .Body }}
+{{- end }}
 {{- end }}

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -14,6 +15,14 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/registryview"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 )
+
+const minimumPromotionDeltaTenths = 30
+
+var promotionCriticalDimensions = map[contracts.Dimension]struct{}{
+	contracts.DimensionFidelity:    {},
+	contracts.DimensionCorrectness: {},
+	contracts.DimensionDiscipline:  {},
+}
 
 // FilesystemResolver is the production TargetResolver used by the orchestrator.
 // It reads step40/50/60 artifacts to choose the pass2 candidate that cleared
@@ -40,6 +49,11 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 		return Target{}, false, err
 	}
 	if !ok {
+		return Target{}, false, nil
+	}
+	if ok, err := promotionGatePassed(runCtx, winningAgent, candidates); err != nil {
+		return Target{}, false, err
+	} else if !ok {
 		return Target{}, false, nil
 	}
 
@@ -142,6 +156,126 @@ func resolveWinningAgent(runCtx internalio.RunContext) (contracts.AgentID, bool,
 		return "", false, nil
 	}
 	return best.agent, true, nil
+}
+
+func promotionGatePassed(runCtx internalio.RunContext, agent contracts.AgentID, candidates *contracts.Candidates) (bool, error) {
+	if ok, err := hasCompliantCandidateEvidence(runCtx, agent, candidates); err != nil || !ok {
+		return ok, err
+	}
+	pass1Scores, err := loadCollapsedScores(runCtx, "30/scores-A.jsonl")
+	if err != nil {
+		return false, err
+	}
+	pass2Scores, err := loadCollapsedScores(runCtx, "60/scores-B.jsonl")
+	if err != nil {
+		return false, err
+	}
+	pass1 := pass1Scores[agent]
+	pass2 := pass2Scores[agent]
+	if !completeScoreSet(pass1) || !completeScoreSet(pass2) {
+		return false, nil
+	}
+	if averageTenths(pass2)-averageTenths(pass1) < minimumPromotionDeltaTenths {
+		return false, nil
+	}
+	for dimension := range promotionCriticalDimensions {
+		if pass2[dimension].Score < pass1[dimension].Score {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func hasCompliantCandidateEvidence(runCtx internalio.RunContext, agent contracts.AgentID, candidates *contracts.Candidates) (bool, error) {
+	required := requiredCandidateComplianceRuleIDs(candidates)
+	if len(required) == 0 {
+		return true, nil
+	}
+	path, err := runCtx.ResolveRunRelative("60/compliance-B.jsonl")
+	if err != nil {
+		return false, err
+	}
+	rows, err := internalio.ReadJSONL[contracts.ComplianceEntry](path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	collapsed := scorecore.CollapseFinalCompliance(rows)
+	byRule := make(map[string]contracts.ComplianceEntry, len(collapsed))
+	for _, row := range collapsed {
+		if row.Agent == agent {
+			byRule[row.RuleID] = row
+		}
+	}
+	for _, ruleID := range required {
+		row, ok := byRule[ruleID]
+		if !ok || row.Verdict != contracts.ComplianceVerdictCompliant {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func requiredCandidateComplianceRuleIDs(candidates *contracts.Candidates) []string {
+	if candidates == nil {
+		return nil
+	}
+	ruleIDs := make([]string, 0, len(candidates.Candidates))
+	for _, candidate := range candidates.Candidates {
+		switch candidate.Kind {
+		case contracts.CandidateKindNew, contracts.CandidateKindUpdate:
+			ruleIDs = append(ruleIDs, candidate.CandidateID)
+		}
+	}
+	return ruleIDs
+}
+
+func loadCollapsedScores(runCtx internalio.RunContext, rel string) (map[contracts.AgentID]map[contracts.Dimension]contracts.ScoreEntry, error) {
+	path, err := runCtx.ResolveRunRelative(rel)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := internalio.ReadJSONL[contracts.ScoreEntry](path)
+	if err != nil {
+		return nil, err
+	}
+	collapsed := scorecore.CollapseFinalScores(rows)
+	byAgent := make(map[contracts.AgentID]map[contracts.Dimension]contracts.ScoreEntry)
+	for _, row := range collapsed {
+		if _, ok := byAgent[row.Agent]; !ok {
+			byAgent[row.Agent] = make(map[contracts.Dimension]contracts.ScoreEntry)
+		}
+		byAgent[row.Agent][row.Dimension] = row
+	}
+	return byAgent, nil
+}
+
+func completeScoreSet(scores map[contracts.Dimension]contracts.ScoreEntry) bool {
+	if len(scores) != 5 {
+		return false
+	}
+	for _, dimension := range []contracts.Dimension{
+		contracts.DimensionFidelity,
+		contracts.DimensionCorrectness,
+		contracts.DimensionMaintainability,
+		contracts.DimensionDiscipline,
+		contracts.DimensionCommunication,
+	} {
+		if _, ok := scores[dimension]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func averageTenths(scores map[contracts.Dimension]contracts.ScoreEntry) int {
+	total := 0
+	for _, score := range scores {
+		total += score.Score
+	}
+	return total * 10 / len(scores)
 }
 
 func (r FilesystemResolver) buildRegistryEntry(runCtx internalio.RunContext, candidate contracts.Candidate, registryLines []registryLine, idempotencyKey string, at time.Time) (contracts.RuleRegistryEntry, error) {

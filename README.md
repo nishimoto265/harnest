@@ -55,6 +55,12 @@ still keeps changed tests/files and a diff excerpt as supporting context.
 `agents.yaml` controls which runtime provider each role uses. Today the
 implementer role is provider-aware (`claude` or `codex`), while judge roles are
 reserved for future non-stub judge wiring and can safely stay `stub`.
+Provider-specific `args` are appended to the built-in invocation. The example
+Claude profile includes `-p` so runs are non-interactive. Codex defaults to
+`codex exec --full-auto --skip-git-repo-check -C <worktree>`; the dangerous
+`--dangerously-bypass-approvals-and-sandbox` mode is never injected by default
+and must be an explicit profile `args` opt-in if an externally sandboxed
+environment requires it.
 
 ## Commands
 
@@ -94,6 +100,13 @@ generated plist uses the repository root as `WorkingDirectory` so the default
 `config.yaml` lookup continues to work. On Linux, the installer only installs
 the binary; scheduling remains manual or via GitHub Actions.
 
+launchd labels and plist names are per instance:
+`com.nishimoto265.auto-improve.<instance>`. Set
+`AUTO_IMPROVE_INSTANCE=owner/repo` when installing or uninstalling multiple
+repositories on the same machine. If omitted, the scripts derive a sanitized
+instance from `REPO_ROOT` or the current directory so separate repository roots
+do not share the same LaunchAgent.
+
 The installer downloads from GitHub Releases `latest`. Until the first release
 exists, `make install` needs either a published release or explicit overrides
 such as `AUTO_IMPROVE_RELEASE_URL` and `AUTO_IMPROVE_EXPECTED_SHA256`.
@@ -115,7 +128,7 @@ invocations.
 launchd は `StartInterval: 3600` で hourly tick のため、operator が sentinel を `recover` した後 **最大 1 時間** pipeline 停止することがある。即時復旧したい場合は以下いずれか:
 - `auto-improve run --pr <n>` で該当 PR を手動 trigger
 - `auto-improve run --detect-loop --with-preflight` で detect ループを手動起動
-- `launchctl start com.nishimoto265.auto-improve` で launchd の次 tick を前倒し
+- `launchctl start com.nishimoto265.auto-improve.<instance>` で launchd の次 tick を前倒し
 
 `auto-improve recover --inspect --run <id>` は read-only で state を confirm でき、副作用なしに診断可能。
 

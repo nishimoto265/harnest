@@ -342,33 +342,10 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 		}
 		return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, classifyRulePublishFailureDetail(err))
 	}
-	if strings.TrimSpace(deps.PolicyBranch) != "" {
-		if strings.TrimSpace(deps.RepoRoot) == "" {
-			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_repo_root_missing")
-		}
-		meta, ok, err := policySnapshotMetadataForBranch(runCtx, deps.PolicyBranch)
-		if err != nil {
-			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_snapshot_metadata_failure")
-		}
-		if !ok {
-			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_snapshot_missing")
-		}
-		policyHeadBefore, err := deps.Git.RemoteHead(ctx, deps.PolicyBranch)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_remote_head_failure")
-		}
-		if policyHeadBefore != meta.PolicyHead {
-			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_branch_stale")
-		}
-		if _, err := policyrepo.PublishSnapshot(ctx, deps.RepoRoot, deps.PolicyBranch, meta.PolicyHead, runCtx.RunsBase, string(runCtx.RunID)); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_publish_failure")
-		}
+	var err error
+	intention, err = drivePolicyPublish(ctx, pr, runCtx, intention, store, writer, deps)
+	if err != nil {
+		return err
 	}
 	now := deps.Now()
 	decision := contracts.Decision{
@@ -393,6 +370,88 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 		return err
 	}
 	return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps)
+}
+
+func drivePolicyPublish(ctx context.Context, pr int, runCtx internalio.RunContext, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) (contracts.IntentionRecord, error) {
+	configuredBranch := strings.TrimSpace(deps.PolicyBranch)
+	if configuredBranch == "" {
+		if intention.Stage == contracts.IntentionStagePolicyPublishing || intention.Stage == contracts.IntentionStagePolicyPublished {
+			return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_branch_config_missing")
+		}
+		return intention, nil
+	}
+	if strings.TrimSpace(deps.RepoRoot) == "" {
+		return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_repo_root_missing")
+	}
+	if strings.TrimSpace(intention.PolicyBranch) != "" && strings.TrimSpace(intention.PolicyBranch) != configuredBranch {
+		return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_branch_config_mismatch")
+	}
+	if intention.Stage == contracts.IntentionStagePolicyPublished {
+		if intention.PolicyHeadAfter == "" {
+			return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_head_after_missing")
+		}
+		currentHead, err := deps.Git.RemoteHead(ctx, configuredBranch)
+		if err != nil {
+			if ctx.Err() != nil {
+				return intention, ctx.Err()
+			}
+			return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_remote_head_failure")
+		}
+		if currentHead != intention.PolicyHeadAfter {
+			return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_branch_post_publish_stale")
+		}
+		return intention, nil
+	}
+	if intention.PolicyHeadBefore == "" {
+		meta, ok, err := policySnapshotMetadataForBranch(runCtx, configuredBranch)
+		if err != nil {
+			return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_snapshot_metadata_failure")
+		}
+		if !ok {
+			return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_snapshot_missing")
+		}
+		intention.PolicyBranch = configuredBranch
+		intention.PolicyHeadBefore = meta.PolicyHead
+	}
+	if intention.Stage != contracts.IntentionStagePolicyPublishing {
+		intention.Stage = contracts.IntentionStagePolicyPublishing
+		if err := store.Save(intention); err != nil {
+			return intention, err
+		}
+	}
+	policyHeadBefore, err := deps.Git.RemoteHead(ctx, configuredBranch)
+	if err != nil {
+		if ctx.Err() != nil {
+			return intention, ctx.Err()
+		}
+		return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_remote_head_failure")
+	}
+	if intention.PolicyHeadAfter != "" {
+		if policyHeadBefore != intention.PolicyHeadAfter {
+			return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_branch_post_publish_stale")
+		}
+		intention.Stage = contracts.IntentionStagePolicyPublished
+		if err := store.Save(intention); err != nil {
+			return intention, err
+		}
+		return intention, nil
+	}
+	if policyHeadBefore != intention.PolicyHeadBefore {
+		return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_branch_stale_or_untracked_publish")
+	}
+	newHead, err := policyrepo.PublishSnapshot(ctx, deps.RepoRoot, configuredBranch, intention.PolicyHeadBefore, runCtx.RunsBase, string(runCtx.RunID))
+	if err != nil {
+		if ctx.Err() != nil {
+			return intention, ctx.Err()
+		}
+		return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_publish_failure")
+	}
+	intention.PolicyHeadAfter = newHead
+	intention.Stage = contracts.IntentionStagePolicyPublished
+	if err := store.Save(intention); err != nil {
+		return intention, err
+	}
+	return intention, nil
 }
 
 func finalizeAfterDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, store IntentionWriter, writer state.Writer, deps Deps) error {
@@ -1584,7 +1643,9 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 		return planningDecision(ctx, pr, runCtx, pkg, candidates, persistedTarget, *intention, store, writer, deps)
 	case contracts.IntentionStageBranchPushed:
 		return resumeBranchPushed(ctx, pr, runCtx, pkg, *intention, store, writer, deps)
-	case contracts.IntentionStageRegistryAppended:
+	case contracts.IntentionStageRegistryAppended,
+		contracts.IntentionStagePolicyPublishing,
+		contracts.IntentionStagePolicyPublished:
 		return driveDecision(ctx, pr, runCtx, pkg, *intention, store, writer, deps)
 	case contracts.IntentionStageDecisionWritten:
 		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps)
@@ -1892,6 +1953,9 @@ func resolveBestShaBefore(ctx context.Context, pkg *contracts.TaskPackage, targe
 	if err != nil {
 		return Target{}, err
 	}
+	if bestShaBefore == "" {
+		return Target{}, fmt.Errorf("step70: best_branch %q has no remote HEAD", target.BestBranch)
+	}
 	target.BestShaBefore = bestShaBefore
 	return target, nil
 }
@@ -1903,6 +1967,8 @@ func remoteHeadMatchesRollbackBase(remoteHead, bestShaBefore string) bool {
 func persistedDecisionCanOverride(stage contracts.IntentionStage) bool {
 	switch stage {
 	case contracts.IntentionStageRegistryAppended,
+		contracts.IntentionStagePolicyPublishing,
+		contracts.IntentionStagePolicyPublished,
 		contracts.IntentionStageDecisionWritten,
 		contracts.IntentionStageRollingBackBranchReverted,
 		contracts.IntentionStageRollingBackRegistryAppended,

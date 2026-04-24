@@ -14,6 +14,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/state"
 	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 	"github.com/spf13/cobra"
@@ -119,16 +120,19 @@ func newRecoverCmd() *cobra.Command {
 }
 
 type recoverInspectSnapshot struct {
-	Event        string                     `json:"event"`
-	RunsBase     string                     `json:"runs_base"`
-	RunID        string                     `json:"run_id,omitempty"`
-	RemoteHead   string                     `json:"remote_head,omitempty"`
-	RegistryHead string                     `json:"registry_head,omitempty"`
-	Intention    *contracts.IntentionRecord `json:"intention,omitempty"`
-	Decision     *contracts.Decision        `json:"decision,omitempty"`
-	Sentinel     any                        `json:"sentinel,omitempty"`
-	Processed    []contracts.StateEntry     `json:"processed,omitempty"`
-	At           time.Time                  `json:"at"`
+	Event            string                       `json:"event"`
+	RunsBase         string                       `json:"runs_base"`
+	RunID            string                       `json:"run_id,omitempty"`
+	RemoteHead       string                       `json:"remote_head,omitempty"`
+	RegistryHead     string                       `json:"registry_head,omitempty"`
+	PolicyBranch     string                       `json:"policy_branch,omitempty"`
+	PolicySnapshot   *policyrepo.SnapshotMetadata `json:"policy_snapshot,omitempty"`
+	PolicyRemoteHead string                       `json:"policy_remote_head,omitempty"`
+	Intention        *contracts.IntentionRecord   `json:"intention,omitempty"`
+	Decision         *contracts.Decision          `json:"decision,omitempty"`
+	Sentinel         any                          `json:"sentinel,omitempty"`
+	Processed        []contracts.StateEntry       `json:"processed,omitempty"`
+	At               time.Time                    `json:"at"`
 }
 
 func runRecoverInspect(cmd *cobra.Command, runID string) error {
@@ -298,7 +302,7 @@ func runRecoverFinalizeCleanup(cmd *cobra.Command, runID, expectedRemoteHead, ex
 	if err != nil {
 		return err
 	}
-	cfg, err := config.LoadDefault()
+	cfg, err := recoverConfigForRun(runCtx)
 	if err != nil {
 		return commandExitError{code: 2, msg: err.Error()}
 	}
@@ -323,11 +327,15 @@ func runRecoverFinalizeCleanup(cmd *cobra.Command, runID, expectedRemoteHead, ex
 		return commandExitError{code: 2, msg: fmt.Sprintf("recover: registry HEAD mismatch: have=%s want=%s", actualRegistryHead, expectedRegistryHead)}
 	}
 	actualPolicyHead := ""
-	if strings.TrimSpace(cfg.Repo.PolicyBranch) != "" {
+	policyBranch, _, err := recoverPolicyBranch(runCtx, cfg)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(policyBranch) != "" {
 		if !cmd.Flags().Changed("policy-head") {
 			return commandExitError{code: 2, msg: "recover: --finalize-cleanup requires --policy-head when repo.policy_branch is configured"}
 		}
-		actualPolicyHead, err = recoverRemoteHead(remoteHeadCtx, repoRoot, cfg.Repo.PolicyBranch)
+		actualPolicyHead, err = recoverRemoteHead(remoteHeadCtx, repoRoot, policyBranch)
 		if err != nil {
 			return commandExitError{code: 2, msg: fmt.Sprintf("recover: policy_branch HEAD check failed: %v", err)}
 		}
@@ -356,7 +364,7 @@ func runRecoverRollback(cmd *cobra.Command, runID string) error {
 	defer func() { _ = lock.Unlock() }()
 	ctx, cancel := context.WithTimeout(context.Background(), recoverMutationTimeout)
 	defer cancel()
-	cfg, err := config.LoadDefault()
+	cfg, err := recoverConfigForRun(runCtx)
 	if err != nil {
 		return commandExitError{code: 2, msg: err.Error()}
 	}
@@ -368,7 +376,7 @@ func runRecoverRollback(cmd *cobra.Command, runID string) error {
 		Git:          recoverGitOpsForRepo(repoRoot),
 		Now:          func() time.Time { return time.Now().UTC() },
 		RepoRoot:     repoRoot,
-		PolicyBranch: cfg.Repo.PolicyBranch,
+		PolicyBranch: recoverPolicyBranchString(runCtx, cfg),
 	}); err != nil {
 		var refused *step70_decide.RecoverRefusalError
 		if errors.As(err, &refused) {
@@ -391,7 +399,7 @@ func runRecoverAdoptAnyway(cmd *cobra.Command, runID string) error {
 	defer func() { _ = lock.Unlock() }()
 	ctx, cancel := context.WithTimeout(context.Background(), recoverMutationTimeout)
 	defer cancel()
-	cfg, err := config.LoadDefault()
+	cfg, err := recoverConfigForRun(runCtx)
 	if err != nil {
 		return commandExitError{code: 2, msg: err.Error()}
 	}
@@ -403,7 +411,7 @@ func runRecoverAdoptAnyway(cmd *cobra.Command, runID string) error {
 		Git:          recoverGitOpsForRepo(repoRoot),
 		Now:          func() time.Time { return time.Now().UTC() },
 		RepoRoot:     repoRoot,
-		PolicyBranch: cfg.Repo.PolicyBranch,
+		PolicyBranch: recoverPolicyBranchString(runCtx, cfg),
 	}); err != nil {
 		var refused *step70_decide.RecoverRefusalError
 		if errors.As(err, &refused) {
@@ -496,7 +504,7 @@ func buildRecoverInspectSnapshot(runsBase, runID string) (recoverInspectSnapshot
 	if err != nil {
 		return recoverInspectSnapshot{}, err
 	}
-	cfg, err := config.LoadDefault()
+	cfg, err := recoverConfigForRun(runCtx)
 	if err != nil {
 		return recoverInspectSnapshot{}, err
 	}
@@ -511,6 +519,21 @@ func buildRecoverInspectSnapshot(runsBase, runID string) (recoverInspectSnapshot
 		return recoverInspectSnapshot{}, err
 	}
 	snapshot.RemoteHead = remoteHead
+	policyBranch, policySnapshot, err := recoverPolicyBranch(runCtx, cfg)
+	if err != nil {
+		return recoverInspectSnapshot{}, err
+	}
+	if policySnapshot != nil {
+		snapshot.PolicySnapshot = policySnapshot
+	}
+	if strings.TrimSpace(policyBranch) != "" {
+		snapshot.PolicyBranch = policyBranch
+		policyRemoteHead, err := recoverRemoteHead(remoteHeadCtx, repoRoot, policyBranch)
+		if err != nil {
+			return recoverInspectSnapshot{}, err
+		}
+		snapshot.PolicyRemoteHead = policyRemoteHead
+	}
 	intentionPath, err := runCtx.ResolveRunRelative("70/intention.json")
 	if err != nil {
 		return recoverInspectSnapshot{}, err
@@ -613,7 +636,17 @@ func recoverRunSentinelPrereqs(runID string) (string, internalio.RunContext, *in
 }
 
 func newRecoverRunContext(runsBase, runID string) (internalio.RunContext, error) {
-	cfg, err := config.LoadDefault()
+	cfg, err := recoverConfigFromSnapshotPath(runsBase, runID)
+	if err == nil {
+		worktreeBase, err := cfg.WorktreeBase()
+		if err != nil {
+			return internalio.RunContext{}, err
+		}
+		return internalio.NewRunContext(contracts.RunID(runID), runsBase, worktreeBase)
+	} else if !os.IsNotExist(err) {
+		return internalio.RunContext{}, err
+	}
+	cfg, err = config.LoadDefault()
 	if err != nil {
 		return internalio.RunContext{}, err
 	}
@@ -622,6 +655,40 @@ func newRecoverRunContext(runsBase, runID string) (internalio.RunContext, error)
 		return internalio.RunContext{}, err
 	}
 	return internalio.NewRunContext(contracts.RunID(runID), runsBase, worktreeBase)
+}
+
+func recoverConfigForRun(runCtx internalio.RunContext) (config.Config, error) {
+	cfg, err := config.Load(filepath.Join(runCtx.RunDir(), "config.snapshot.yaml"))
+	if err == nil {
+		return cfg, nil
+	}
+	if os.IsNotExist(err) {
+		return config.LoadDefault()
+	}
+	return config.Config{}, err
+}
+
+func recoverConfigFromSnapshotPath(runsBase, runID string) (config.Config, error) {
+	return config.Load(filepath.Join(runsBase, runID, "config.snapshot.yaml"))
+}
+
+func recoverPolicyBranchString(runCtx internalio.RunContext, cfg config.Config) string {
+	branch, _, err := recoverPolicyBranch(runCtx, cfg)
+	if err != nil {
+		return cfg.Repo.PolicyBranch
+	}
+	return branch
+}
+
+func recoverPolicyBranch(runCtx internalio.RunContext, cfg config.Config) (string, *policyrepo.SnapshotMetadata, error) {
+	meta, ok, err := policyrepo.LoadSnapshotMetadata(runCtx)
+	if err != nil {
+		return "", nil, err
+	}
+	if ok {
+		return meta.PolicyBranch, &meta, nil
+	}
+	return cfg.Repo.PolicyBranch, nil, nil
 }
 
 func loadRecoverTaskPackage(runCtx internalio.RunContext) (contracts.TaskPackage, error) {

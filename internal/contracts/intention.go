@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,8 @@ const (
 	IntentionStagePlanning         IntentionStage = "planning"
 	IntentionStageBranchPushed     IntentionStage = "branch_pushed"
 	IntentionStageRegistryAppended IntentionStage = "registry_appended"
+	IntentionStagePolicyPublishing IntentionStage = "policy_publishing"
+	IntentionStagePolicyPublished  IntentionStage = "policy_published"
 	IntentionStageDecisionWritten  IntentionStage = "decision_written"
 
 	// Rolling back stages (rev19, Codex rev18 R1 critical 対応).
@@ -34,7 +37,7 @@ const (
 // R1 #3).
 type IntentionRecord struct {
 	SchemaVersion string         `json:"schema_version" validate:"required,oneof=1"`
-	Stage         IntentionStage `json:"stage" validate:"required,oneof=planning branch_pushed registry_appended decision_written rolling_back_branch_reverted rolling_back_registry_appended rolling_back_decision_written needs_manual_recovery"`
+	Stage         IntentionStage `json:"stage" validate:"required,oneof=planning branch_pushed registry_appended policy_publishing policy_published decision_written rolling_back_branch_reverted rolling_back_registry_appended rolling_back_decision_written needs_manual_recovery"`
 
 	// IdempotencyKey: sha256(run_id || target_sha || best_sha_before || candidates_hash).
 	IdempotencyKey string `json:"idempotency_key" validate:"required,sha256_hex"`
@@ -59,6 +62,15 @@ type IntentionRecord struct {
 
 	// RegistryAppendResult: stage=registry_appended 以降に populate される.
 	RegistryAppendResult *RegistryAppendResult `json:"registry_append_result,omitempty" validate:"omitempty"`
+
+	// PolicyBranch / PolicyHeadBefore / PolicyHeadAfter track the optional
+	// policy_branch publish that happens after registry append and before
+	// decision.json. They let recovery distinguish "not pushed yet" from
+	// "pushed but decision write crashed" without rolling back local state while
+	// leaving remote policy adopted.
+	PolicyBranch     string `json:"policy_branch,omitempty" validate:"omitempty"`
+	PolicyHeadBefore string `json:"policy_head_before,omitempty" validate:"omitempty,sha1_hex"`
+	PolicyHeadAfter  string `json:"policy_head_after,omitempty" validate:"omitempty,sha1_hex"`
 
 	// AppendedEntryOpIDs: stage4 multi-entry append 中に成功済み row の per-entry
 	// idempotency key を逐次保存する。branch_pushed のままでも rollback /
@@ -89,6 +101,9 @@ var (
 	ErrIntentionMissingFailedStep            = errors.New("contracts: intention: failed_step is required for this stage")
 	ErrIntentionMissingRegistryHeadBefore    = errors.New("contracts: intention: registry_head_before field is required")
 	ErrIntentionMissingPlannedAdoption       = errors.New("contracts: intention: planned_adoption is required for this stage")
+	ErrIntentionMissingPolicyBranch          = errors.New("contracts: intention: policy_branch is required for this stage")
+	ErrIntentionMissingPolicyHeadBefore      = errors.New("contracts: intention: policy_head_before is required for this stage")
+	ErrIntentionMissingPolicyHeadAfter       = errors.New("contracts: intention: policy_head_after is required for this stage")
 	ErrIntentionIdempotencyKeyMismatch       = errors.New("contracts: intention: idempotency_key does not match derived value")
 	ErrPlannedAdoptionEmpty                  = errors.New("contracts: intention: planned_adoption.entries must contain at least one entry")
 	ErrPlannedAdoptionIdempotencyMismatch    = errors.New("contracts: intention: planned_adoption.idempotency_key must match intention.idempotency_key")
@@ -238,6 +253,8 @@ func (r IntentionRecord) Validate() error {
 	case IntentionStagePlanning,
 		IntentionStageBranchPushed,
 		IntentionStageRegistryAppended,
+		IntentionStagePolicyPublishing,
+		IntentionStagePolicyPublished,
 		IntentionStageDecisionWritten,
 		IntentionStageRollingBackBranchReverted,
 		IntentionStageRollingBackRegistryAppended,
@@ -248,11 +265,26 @@ func (r IntentionRecord) Validate() error {
 	}
 	switch r.Stage {
 	case IntentionStageRegistryAppended,
+		IntentionStagePolicyPublishing,
+		IntentionStagePolicyPublished,
 		IntentionStageDecisionWritten,
 		IntentionStageRollingBackRegistryAppended:
 		if r.RegistryAppendResult == nil {
 			return ErrIntentionMissingRegistryAppendResult
 		}
+	}
+	switch r.Stage {
+	case IntentionStagePolicyPublishing,
+		IntentionStagePolicyPublished:
+		if strings.TrimSpace(r.PolicyBranch) == "" {
+			return ErrIntentionMissingPolicyBranch
+		}
+		if r.PolicyHeadBefore == "" {
+			return ErrIntentionMissingPolicyHeadBefore
+		}
+	}
+	if r.Stage == IntentionStagePolicyPublished && r.PolicyHeadAfter == "" {
+		return ErrIntentionMissingPolicyHeadAfter
 	}
 	switch r.Stage {
 	case IntentionStageNeedsManualRecovery,

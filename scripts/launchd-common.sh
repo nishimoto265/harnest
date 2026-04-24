@@ -43,6 +43,36 @@ auto_improve_default_cli_path() {
   printf '%s/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n' "$home"
 }
 
+auto_improve_sanitize_launchd_instance() {
+  local raw="$1"
+  local sanitized
+  sanitized="$(
+    printf '%s' "$raw" \
+      | tr '[:upper:]' '[:lower:]' \
+      | sed -E 's/[^a-z0-9._-]+/-/g; s/^[._-]+//; s/[._-]+$//; s/[._-][._-]+/-/g'
+  )"
+  if [[ -z "$sanitized" ]]; then
+    sanitized="default"
+  fi
+  printf '%s\n' "$sanitized"
+}
+
+auto_improve_launchd_instance() {
+  if [[ -n "${AUTO_IMPROVE_INSTANCE:-}" ]]; then
+    auto_improve_sanitize_launchd_instance "$AUTO_IMPROVE_INSTANCE"
+    return 0
+  fi
+  if [[ -n "${REPO_ROOT:-}" ]]; then
+    auto_improve_sanitize_launchd_instance "$REPO_ROOT"
+    return 0
+  fi
+  auto_improve_sanitize_launchd_instance "$(pwd -P)"
+}
+
+auto_improve_launchd_label() {
+  printf 'com.nishimoto265.auto-improve.%s\n' "$(auto_improve_launchd_instance)"
+}
+
 auto_improve_launchd_domain() {
   local user
   user="$(auto_improve_launchd_user)"
@@ -62,7 +92,7 @@ auto_improve_launchd_plist_path() {
     printf '%s\n' "$PLIST"
     return 0
   fi
-  printf '%s/com.nishimoto265.auto-improve.plist\n' "$(auto_improve_launchd_plist_dir)"
+  printf '%s/%s.plist\n' "$(auto_improve_launchd_plist_dir)" "$(auto_improve_launchd_label)"
 }
 
 auto_improve_launchd_path() {

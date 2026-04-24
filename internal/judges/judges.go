@@ -52,11 +52,21 @@ type Judge interface {
 }
 
 type JudgeInput struct {
-	RunID      contracts.RunID `json:"run_id"`
-	Pass       int             `json:"pass"`
-	Agent      contracts.AgentID
-	OutputPath string `json:"output_path"`
-	RubricPath string `json:"rubric_path"`
+	RunID                     contracts.RunID `json:"run_id"`
+	Pass                      int             `json:"pass"`
+	Agent                     contracts.AgentID
+	OutputPath                string          `json:"output_path"`
+	RubricPath                string          `json:"rubric_path"`
+	ExpectedComplianceRuleIDs []string        `json:"expected_compliance_rule_ids,omitempty"`
+	CandidateRules            []CandidateRule `json:"candidate_rules,omitempty"`
+}
+
+type CandidateRule struct {
+	ID           string `json:"id"`
+	Kind         string `json:"kind"`
+	TargetRuleID string `json:"target_rule_id,omitempty"`
+	Title        string `json:"title"`
+	Body         string `json:"body"`
 }
 
 func (in JudgeInput) Validate() error {
@@ -72,7 +82,20 @@ func (in JudgeInput) Validate() error {
 	if err := contracts.EnsureCleanAbsolutePath(in.OutputPath); err != nil {
 		return err
 	}
-	return contracts.EnsureCleanAbsolutePath(in.RubricPath)
+	if err := contracts.EnsureCleanAbsolutePath(in.RubricPath); err != nil {
+		return err
+	}
+	for _, ruleID := range in.ExpectedComplianceRuleIDs {
+		if ruleID == "" {
+			return errors.New("judges: expected compliance rule_id is empty")
+		}
+	}
+	for _, rule := range in.CandidateRules {
+		if rule.ID == "" {
+			return errors.New("judges: candidate rule id is empty")
+		}
+	}
+	return nil
 }
 
 type JudgeOutput struct {
@@ -236,28 +259,38 @@ func (j stubJudge) ScoreOutput(ctx context.Context, input JudgeInput) (JudgeOutp
 	}
 
 	output := JudgeOutput{
-		Scores: scores,
-		Compliance: []contracts.ComplianceEntry{
-			{
-				SchemaVersion: "1",
-				RunID:         input.RunID,
-				Pass:          input.Pass,
-				Agent:         input.Agent,
-				RuleID:        stubRuleID,
-				Verdict:       contracts.ComplianceVerdictCompliant,
-				Rationale:     fmt.Sprintf("stub %s fixture marks the output compliant.", j.role),
-				VerdictPath:   verdictPath,
-				RubricVersion: stubRubricVersion,
-				PromptVersion: stubPromptVersion,
-				ResolvedAt:    stubResolvedAt,
-			},
-		},
-		Arbiter: j.role == RoleArbiter,
+		Scores:     scores,
+		Compliance: makeStubComplianceEntries(input, verdictPath, contracts.ComplianceVerdictCompliant, fmt.Sprintf("stub %s fixture marks the output compliant.", j.role), stubRuleID),
+		Arbiter:    j.role == RoleArbiter,
 	}
 	if err := output.ValidateFor(input); err != nil {
 		return JudgeOutput{}, err
 	}
 	return output, nil
+}
+
+func makeStubComplianceEntries(input JudgeInput, verdictPath contracts.VerdictPath, verdict contracts.ComplianceVerdict, rationale string, fallbackRuleID string) []contracts.ComplianceEntry {
+	ruleIDs := input.ExpectedComplianceRuleIDs
+	if len(ruleIDs) == 0 {
+		ruleIDs = []string{fallbackRuleID}
+	}
+	entries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
+	for _, ruleID := range ruleIDs {
+		entries = append(entries, contracts.ComplianceEntry{
+			SchemaVersion: "1",
+			RunID:         input.RunID,
+			Pass:          input.Pass,
+			Agent:         input.Agent,
+			RuleID:        ruleID,
+			Verdict:       verdict,
+			Rationale:     rationale,
+			VerdictPath:   verdictPath,
+			RubricVersion: stubRubricVersion,
+			PromptVersion: stubPromptVersion,
+			ResolvedAt:    stubResolvedAt,
+		})
+	}
+	return entries
 }
 
 func (j stubViolationJudge) ScoreOutput(ctx context.Context, input JudgeInput) (JudgeOutput, error) {
@@ -293,23 +326,9 @@ func (j stubViolationJudge) ScoreOutput(ctx context.Context, input JudgeInput) (
 	}
 
 	output := JudgeOutput{
-		Scores: scores,
-		Compliance: []contracts.ComplianceEntry{
-			{
-				SchemaVersion: "1",
-				RunID:         input.RunID,
-				Pass:          input.Pass,
-				Agent:         input.Agent,
-				RuleID:        "e2e-violation-rule",
-				Verdict:       contracts.ComplianceVerdictViolated,
-				Rationale:     fmt.Sprintf("stub violation fixture for %s requires explicit remediation", j.role),
-				VerdictPath:   verdictPath,
-				RubricVersion: stubRubricVersion,
-				PromptVersion: stubPromptVersion,
-				ResolvedAt:    stubResolvedAt,
-			},
-		},
-		Arbiter: j.role == RoleArbiter,
+		Scores:     scores,
+		Compliance: makeStubComplianceEntries(input, verdictPath, contracts.ComplianceVerdictViolated, fmt.Sprintf("stub violation fixture for %s requires explicit remediation", j.role), "e2e-violation-rule"),
+		Arbiter:    j.role == RoleArbiter,
 	}
 	if err := output.ValidateFor(input); err != nil {
 		return JudgeOutput{}, err
@@ -355,23 +374,9 @@ func (j stubAdoptJudge) ScoreOutput(ctx context.Context, input JudgeInput) (Judg
 		})
 	}
 	output := JudgeOutput{
-		Scores: scores,
-		Compliance: []contracts.ComplianceEntry{
-			{
-				SchemaVersion: "1",
-				RunID:         input.RunID,
-				Pass:          input.Pass,
-				Agent:         input.Agent,
-				RuleID:        "adopt-stub-rule",
-				Verdict:       verdict,
-				Rationale:     rationale,
-				VerdictPath:   verdictPath,
-				RubricVersion: stubRubricVersion,
-				PromptVersion: stubPromptVersion,
-				ResolvedAt:    stubResolvedAt,
-			},
-		},
-		Arbiter: j.role == RoleArbiter,
+		Scores:     scores,
+		Compliance: makeStubComplianceEntries(input, verdictPath, verdict, rationale, "adopt-stub-rule"),
+		Arbiter:    j.role == RoleArbiter,
 	}
 	if err := output.ValidateFor(input); err != nil {
 		return JudgeOutput{}, err

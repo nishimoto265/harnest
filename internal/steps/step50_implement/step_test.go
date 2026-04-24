@@ -897,6 +897,21 @@ func TestWriteCommitBundle_ZeroCommitProducesEmptyBundle(t *testing.T) {
 	assert.EqualValues(t, 0, info.Size())
 }
 
+func TestWriteCommitBundle_FallsBackToFullHeadWhenBaseInvalid(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	worktree := env.run.TaskPackage.Worktrees[3].Path
+	rescueDir := t.TempDir()
+
+	commitCount, bundleMode, err := writeCommitBundle(context.Background(), worktree, rescueDir, strings.Repeat("f", 40))
+	require.NoError(t, err)
+	assert.Greater(t, commitCount, 0)
+	assert.Equal(t, agentrunner.RescueBundleModeFullHead, bundleMode)
+
+	bundlePath := filepath.Join(rescueDir, "commits.bundle")
+	verifyOutput := runCommand(t, worktree, "git", "bundle", "verify", bundlePath)
+	assert.Contains(t, verifyOutput, "is okay")
+}
+
 func TestStepRun_RejectsDetachedForeignHead(t *testing.T) {
 	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
 	t.Setenv("FAKE_AGENT", "a1")
@@ -1006,6 +1021,7 @@ func TestPerformRescue_PreservesIgnoredFiles(t *testing.T) {
 }
 
 func TestStepRun_KillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
+	requireProcessInspection(t)
 	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
 	t.Setenv("FAKE_AGENT", "a1")
 
@@ -1051,6 +1067,7 @@ func TestStepRun_KillsFastDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 	if raceBuild {
 		t.Skip("timing-sensitive detached-child regression is covered in non-race mode")
 	}
+	requireProcessInspection(t)
 	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
 	t.Setenv("FAKE_AGENT", "a1")
 
@@ -1090,6 +1107,53 @@ func TestStepRun_KillsFastDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return processDead(pid)
 	}, 10*time.Second, 20*time.Millisecond)
+}
+
+func requireProcessInspection(t *testing.T) {
+	t.Helper()
+	startTime, err := agentrunner.LookupProcessStartTime(os.Getpid())
+	if err != nil || startTime == "" || strings.HasPrefix(startTime, "unavailable:") {
+		t.Skipf("process inspection unavailable in this sandbox: %v", err)
+	}
+	requireProcessDescendantVisibility(t)
+}
+
+func requireProcessDescendantVisibility(t *testing.T) {
+	t.Helper()
+	cmd := exec.Command("sleep", "5")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
+	if !psShowsChildOfCurrentProcess(t, cmd.Process.Pid) {
+		t.Skip("process descendant listing unavailable in this sandbox")
+	}
+	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
+}
+
+func psShowsChildOfCurrentProcess(t *testing.T, childPID int) bool {
+	t.Helper()
+	out, err := exec.Command("ps", "-axo", "pid=,ppid=").Output()
+	if err != nil {
+		return false
+	}
+	parentPID := os.Getpid()
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		ppid, ppidErr := strconv.Atoi(fields[1])
+		if pidErr == nil && ppidErr == nil && pid == childPID && ppid == parentPID {
+			return true
+		}
+	}
+	return false
 }
 
 type failBeforeStartRunner struct{}

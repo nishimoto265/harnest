@@ -2136,19 +2136,36 @@ func seedFilesystemResolverFixture(t *testing.T) (internalio.RunContext, *contra
 	}))
 	scorePath, err := runCtx.ResolveRunRelative("60/scores-B.jsonl")
 	require.NoError(t, err)
-	require.NoError(t, internalio.AppendJSONL(scorePath, contracts.ScoreEntry{
-		SchemaVersion: "1",
-		RunID:         runID,
-		Pass:          2,
-		Agent:         "a1",
-		Dimension:     contracts.DimensionFidelity,
-		Score:         90,
-		Reasons:       "resolver fixture",
-		VerdictPath:   contracts.VerdictPathAgreement,
-		RubricVersion: "default",
-		PromptVersion: "phase0-stub",
-		ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
-	}))
+	pass1ScorePath, err := runCtx.ResolveRunRelative("30/scores-A.jsonl")
+	require.NoError(t, err)
+	for _, dimension := range resolverScoreDimensions() {
+		require.NoError(t, internalio.AppendJSONL(pass1ScorePath, contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         runID,
+			Pass:          1,
+			Agent:         "a1",
+			Dimension:     dimension,
+			Score:         80,
+			Reasons:       "resolver fixture pass1",
+			VerdictPath:   contracts.VerdictPathAgreement,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+		}))
+		require.NoError(t, internalio.AppendJSONL(scorePath, contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         runID,
+			Pass:          2,
+			Agent:         "a1",
+			Dimension:     dimension,
+			Score:         90,
+			Reasons:       "resolver fixture pass2",
+			VerdictPath:   contracts.VerdictPathAgreement,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+		}))
+	}
 
 	body := "# Candidate body\n- exact bytes only\n"
 	candidate := contracts.Candidate{
@@ -2171,7 +2188,32 @@ func seedFilesystemResolverFixture(t *testing.T) (internalio.RunContext, *contra
 		CandidatesHash: contracts.CanonicalCandidatesHash([]contracts.Candidate{candidate}),
 		CreatedAt:      time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
 	}
+	compliancePath, err := runCtx.ResolveRunRelative("60/compliance-B.jsonl")
+	require.NoError(t, err)
+	require.NoError(t, internalio.AppendJSONL(compliancePath, contracts.ComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         runID,
+		Pass:          2,
+		Agent:         "a1",
+		RuleID:        candidate.CandidateID,
+		Verdict:       contracts.ComplianceVerdictCompliant,
+		Rationale:     "candidate judged compliant",
+		VerdictPath:   contracts.VerdictPathAgreement,
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+	}))
 	return runCtx, pkg, candidates
+}
+
+func resolverScoreDimensions() []contracts.Dimension {
+	return []contracts.Dimension{
+		contracts.DimensionFidelity,
+		contracts.DimensionCorrectness,
+		contracts.DimensionMaintainability,
+		contracts.DimensionDiscipline,
+		contracts.DimensionCommunication,
+	}
 }
 
 func mustStagedRulePath(t *testing.T, runCtx internalio.RunContext, rulePath string) string {

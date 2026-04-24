@@ -89,6 +89,46 @@ func TestRun_HappyPath(t *testing.T) {
 	assert.Equal(t, marker.RawHashes.ComplianceRaw, mustHashReducedRawCompliance(t, runIO))
 }
 
+func TestRun_Pass2JudgeInputIncludesCandidateRules(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+
+	candidateRules := []judges.CandidateRule{{
+		ID:    "cand-1",
+		Kind:  "new",
+		Title: "Candidate rule",
+		Body:  "When message changes, details must change too.",
+	}}
+	primary := &echoExpectedComplianceJudge{score: 90}
+	secondary := &echoExpectedComplianceJudge{score: 90}
+	require.NoError(t, Run(context.Background(), Input{
+		IO:             runIO,
+		TaskPackage:    &pkg,
+		Primary:        primary,
+		Secondary:      secondary,
+		Arbiter:        judges.NewArbiterStub(),
+		CandidateRules: candidateRules,
+		Now:            func() time.Time { return time.Date(2026, 4, 21, 15, 4, 5, 0, time.UTC) },
+	}))
+
+	require.NotEmpty(t, primary.inputs)
+	require.NotEmpty(t, secondary.inputs)
+	assert.Equal(t, candidateRules, primary.inputs[0].CandidateRules)
+	assert.Contains(t, primary.inputs[0].ExpectedComplianceRuleIDs, "cand-1")
+	assert.Contains(t, secondary.inputs[0].ExpectedComplianceRuleIDs, "cand-1")
+
+	finalCompliance := mustReadJSONL[contracts.ComplianceEntry](t, runIO, "60/compliance-B.jsonl")
+	var found bool
+	for _, row := range finalCompliance {
+		if row.RuleID == "cand-1" {
+			found = true
+			assert.Equal(t, contracts.ComplianceVerdictCompliant, row.Verdict)
+		}
+	}
+	assert.True(t, found)
+}
+
 func TestRun_RejectsTaskPackageRunIDMismatch(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score: true,
@@ -676,6 +716,7 @@ func TestExpectedComplianceRuleIDsForAgent_IgnoresRawRuleIDs(t *testing.T) {
 				"a1": {"pass1-rule": {}},
 			},
 			[]string{"fallback-rule"},
+			nil,
 		)
 		assert.Equal(t, map[string]struct{}{"pass1-rule": {}}, got)
 	})
@@ -685,6 +726,7 @@ func TestExpectedComplianceRuleIDsForAgent_IgnoresRawRuleIDs(t *testing.T) {
 			"a1",
 			map[contracts.AgentID]map[string]struct{}{},
 			[]string{"fallback-rule"},
+			nil,
 		)
 		assert.Equal(t, map[string]struct{}{"fallback-rule": {}}, got)
 	})
@@ -694,8 +736,21 @@ func TestExpectedComplianceRuleIDsForAgent_IgnoresRawRuleIDs(t *testing.T) {
 			"a1",
 			map[contracts.AgentID]map[string]struct{}{},
 			nil,
+			nil,
 		)
 		assert.Nil(t, got)
+	})
+
+	t.Run("candidate rules are always included", func(t *testing.T) {
+		got := expectedComplianceRuleIDsForAgent(
+			"a1",
+			map[contracts.AgentID]map[string]struct{}{
+				"a1": {"pass1-rule": {}},
+			},
+			[]string{"fallback-rule"},
+			[]judges.CandidateRule{{ID: "cand-1"}},
+		)
+		assert.Equal(t, map[string]struct{}{"pass1-rule": {}, "cand-1": {}}, got)
 	})
 }
 
@@ -1804,8 +1859,60 @@ type scriptedJudge struct {
 	resolvedAt   time.Time
 }
 
+type echoExpectedComplianceJudge struct {
+	score  int
+	inputs []judges.JudgeInput
+}
+
 type overflowRefJudge struct{}
 type duplicateComplianceJudge struct{}
+
+func (j *echoExpectedComplianceJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	j.inputs = append(j.inputs, input)
+	if err := input.Validate(); err != nil {
+		return judges.JudgeOutput{}, err
+	}
+	select {
+	case <-ctx.Done():
+		return judges.JudgeOutput{}, ctx.Err()
+	default:
+	}
+
+	scores := make([]contracts.ScoreEntry, 0, len(canonicalDimensions))
+	for _, dimension := range canonicalDimensions {
+		scores = append(scores, contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         input.RunID,
+			Pass:          input.Pass,
+			Agent:         input.Agent,
+			Dimension:     dimension,
+			Score:         j.score,
+			Reasons:       fmt.Sprintf("echo-%s", dimension),
+			VerdictPath:   contracts.VerdictPathSingle,
+			RubricVersion: "echo-rubric",
+			PromptVersion: "echo-prompt",
+			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+		})
+	}
+	compliance := make([]contracts.ComplianceEntry, 0, len(input.ExpectedComplianceRuleIDs))
+	for _, ruleID := range input.ExpectedComplianceRuleIDs {
+		compliance = append(compliance, contracts.ComplianceEntry{
+			SchemaVersion: "1",
+			RunID:         input.RunID,
+			Pass:          input.Pass,
+			Agent:         input.Agent,
+			RuleID:        ruleID,
+			Verdict:       contracts.ComplianceVerdictCompliant,
+			Rationale:     "echo compliant",
+			VerdictPath:   contracts.VerdictPathSingle,
+			RubricVersion: "echo-rubric",
+			PromptVersion: "echo-prompt",
+			ResolvedAt:    time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+		})
+	}
+	output := judges.JudgeOutput{Scores: scores, Compliance: compliance}
+	return output, output.ValidateFor(input)
+}
 
 func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
 	if err := input.Validate(); err != nil {

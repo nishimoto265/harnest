@@ -4,6 +4,7 @@ profiles:
   claude:
     provider: claude
     binary: claude
+    args: ["-p"]
   codex:
     provider: codex
     binary: codex

@@ -97,6 +97,34 @@ EOF
 	assert.Equal(t, nodePath, mustNodePath(t, claudePath))
 }
 
+func TestRenderCLIJudgePromptPass2IncludesCandidateRuleBodies(t *testing.T) {
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "output.patch")
+	rubricPath := filepath.Join(dir, "rubric.md")
+	require.NoError(t, os.WriteFile(outputPath, []byte("diff --git a/app/message.txt b/app/message.txt\n"), 0o644))
+	require.NoError(t, os.WriteFile(rubricPath, []byte("# rubric\n"), 0o644))
+
+	prompt, err := renderCLIJudgePrompt(RolePrimary, JudgeInput{
+		RunID:                     "2026-04-23-PR1-abcdef0",
+		Pass:                      2,
+		Agent:                     "a1",
+		OutputPath:                outputPath,
+		RubricPath:                rubricPath,
+		ExpectedComplianceRuleIDs: []string{"active-rule", "cand-1"},
+		CandidateRules: []CandidateRule{{
+			ID:    "cand-1",
+			Kind:  "new",
+			Title: "Message details",
+			Body:  "When app/message.txt changes, app/details.txt must also change.",
+		}},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "- active-rule")
+	assert.Contains(t, prompt, "- cand-1")
+	assert.Contains(t, prompt, "### cand-1")
+	assert.Contains(t, prompt, "When app/message.txt changes")
+}
+
 func mustNodePath(t *testing.T, binary string) string {
 	t.Helper()
 	path, _, err := agentrunner.PrepareProviderBinary(agents.ProviderClaude, binary)

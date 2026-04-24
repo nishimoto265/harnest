@@ -1032,6 +1032,79 @@ func TestRunDetectLoopDrainsResumeQueueBeforeFreshDetection(t *testing.T) {
 	assert.Empty(t, stub.opts[1].RunID)
 }
 
+func TestRunDetectLoopBlocksOnNeedsRecoveryWhenNoWork(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, "needs-recovery"), 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	runID := contracts.RunID("2026-04-21-PR52-abcdef0")
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelFilename(runID)), []byte(`{"run_id":"2026-04-21-PR52-abcdef0","pr":52,"reason":"transactional_failure","failed_step":"70","created_at":"2026-04-21T12:00:00Z"}`), 0o644))
+	writeTestConfig(t, root, runsBase, worktreeBase)
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	stub := &stubPipelineRunner{}
+	originalNewPipelineRunner := newPipelineRunner
+	originalDetectMergedPRs := detectMergedPRs
+	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
+		return stub, nil
+	}
+	detectMergedPRs = func(context.Context, config.Config, string) ([]detect.MergedPR, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		newPipelineRunner = originalNewPipelineRunner
+		detectMergedPRs = originalDetectMergedPRs
+	})
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--detect-loop"})
+	err = cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "global needs_manual_recovery block")
+	assert.Empty(t, stub.prs)
+}
+
+func TestRunDetectLoopBlocksOnSunsetSentinelWhenNoWork(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "sunset-running.marker.diverged"), []byte("diverged\n"), 0o644))
+	writeTestConfig(t, root, runsBase, worktreeBase)
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	stub := &stubPipelineRunner{}
+	originalNewPipelineRunner := newPipelineRunner
+	originalDetectMergedPRs := detectMergedPRs
+	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
+		return stub, nil
+	}
+	detectMergedPRs = func(context.Context, config.Config, string) ([]detect.MergedPR, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		newPipelineRunner = originalNewPipelineRunner
+		detectMergedPRs = originalDetectMergedPRs
+	})
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--detect-loop"})
+	err = cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "global sunset block")
+	assert.Empty(t, stub.prs)
+}
+
 func TestSunsetCommandInvokesRunner(t *testing.T) {
 	originalRunSunsetTick := runSunsetTick
 	called := false

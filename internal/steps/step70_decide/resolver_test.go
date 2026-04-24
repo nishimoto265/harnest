@@ -224,6 +224,55 @@ func TestGeneratedRuleID_IsValidAndDeterministic(t *testing.T) {
 	assert.True(t, strings.HasPrefix(id1, "r-"))
 }
 
+func TestPromotionGatePassed_RequiresCandidateComplianceEvidence(t *testing.T) {
+	runCtx := newResolverRunContext(t)
+	candidates := resolverGateCandidates(runCtx.RunID)
+	seedResolverGateScores(t, runCtx, 80, map[contracts.Dimension]int{})
+	seedResolverGateScoresPass2(t, runCtx, 90, map[contracts.Dimension]int{})
+
+	ok, err := promotionGatePassed(runCtx, "a1", candidates)
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	seedResolverGateCompliance(t, runCtx, "cand-1", contracts.ComplianceVerdictViolated)
+	ok, err = promotionGatePassed(runCtx, "a1", candidates)
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	seedResolverGateCompliance(t, runCtx, "cand-1", contracts.ComplianceVerdictCompliant)
+	ok, err = promotionGatePassed(runCtx, "a1", candidates)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestPromotionGatePassed_RejectsTinyDelta(t *testing.T) {
+	runCtx := newResolverRunContext(t)
+	candidates := resolverGateCandidates(runCtx.RunID)
+	seedResolverGateScores(t, runCtx, 80, map[contracts.Dimension]int{})
+	seedResolverGateScoresPass2(t, runCtx, 82, map[contracts.Dimension]int{})
+	seedResolverGateCompliance(t, runCtx, "cand-1", contracts.ComplianceVerdictCompliant)
+
+	ok, err := promotionGatePassed(runCtx, "a1", candidates)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+func TestPromotionGatePassed_RejectsCriticalRegression(t *testing.T) {
+	runCtx := newResolverRunContext(t)
+	candidates := resolverGateCandidates(runCtx.RunID)
+	seedResolverGateScores(t, runCtx, 80, map[contracts.Dimension]int{
+		contracts.DimensionCorrectness: 95,
+	})
+	seedResolverGateScoresPass2(t, runCtx, 92, map[contracts.Dimension]int{
+		contracts.DimensionCorrectness: 94,
+	})
+	seedResolverGateCompliance(t, runCtx, "cand-1", contracts.ComplianceVerdictCompliant)
+
+	ok, err := promotionGatePassed(runCtx, "a1", candidates)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
 func newResolverRunContext(t *testing.T) internalio.RunContext {
 	t.Helper()
 	runsBase := filepath.Join(realTempDir(t), "runs")
@@ -239,4 +288,79 @@ func mustResolveResolverPath(t *testing.T, runCtx internalio.RunContext, rel str
 	path, err := runCtx.ResolveRunRelative(rel)
 	require.NoError(t, err)
 	return path
+}
+
+func resolverGateCandidates(runID contracts.RunID) *contracts.Candidates {
+	candidate := contracts.Candidate{
+		CandidateID:        "cand-1",
+		Kind:               contracts.CandidateKindNew,
+		Title:              "Candidate",
+		ProposedBodyPath:   "40/candidates/cand-1.md",
+		ProposedBodySha256: strings.Repeat("a", 64),
+	}
+	return &contracts.Candidates{
+		SchemaVersion:  "1",
+		RunID:          runID,
+		Candidates:     []contracts.Candidate{candidate},
+		CandidatesHash: contracts.CanonicalCandidatesHash([]contracts.Candidate{candidate}),
+		CreatedAt:      time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+	}
+}
+
+func seedResolverGateScores(t *testing.T, runCtx internalio.RunContext, score int, overrides map[contracts.Dimension]int) {
+	t.Helper()
+	seedResolverGateScoreRows(t, runCtx, "30/scores-A.jsonl", 1, score, overrides)
+}
+
+func seedResolverGateScoresPass2(t *testing.T, runCtx internalio.RunContext, score int, overrides map[contracts.Dimension]int) {
+	t.Helper()
+	seedResolverGateScoreRows(t, runCtx, "60/scores-B.jsonl", 2, score, overrides)
+}
+
+func seedResolverGateScoreRows(t *testing.T, runCtx internalio.RunContext, rel string, pass int, score int, overrides map[contracts.Dimension]int) {
+	t.Helper()
+	path := mustResolveResolverPath(t, runCtx, rel)
+	for _, dimension := range []contracts.Dimension{
+		contracts.DimensionFidelity,
+		contracts.DimensionCorrectness,
+		contracts.DimensionMaintainability,
+		contracts.DimensionDiscipline,
+		contracts.DimensionCommunication,
+	} {
+		rowScore := score
+		if override, ok := overrides[dimension]; ok {
+			rowScore = override
+		}
+		require.NoError(t, internalio.AppendJSONL(path, contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         runCtx.RunID,
+			Pass:          pass,
+			Agent:         "a1",
+			Dimension:     dimension,
+			Score:         rowScore,
+			Reasons:       "resolver gate fixture",
+			VerdictPath:   contracts.VerdictPathAgreement,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+		}))
+	}
+}
+
+func seedResolverGateCompliance(t *testing.T, runCtx internalio.RunContext, ruleID string, verdict contracts.ComplianceVerdict) {
+	t.Helper()
+	path := mustResolveResolverPath(t, runCtx, "60/compliance-B.jsonl")
+	require.NoError(t, internalio.AppendJSONL(path, contracts.ComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         runCtx.RunID,
+		Pass:          2,
+		Agent:         "a1",
+		RuleID:        ruleID,
+		Verdict:       verdict,
+		Rationale:     "resolver gate fixture",
+		VerdictPath:   contracts.VerdictPathAgreement,
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+	}))
 }

@@ -698,6 +698,55 @@ func TestAppendRegistryEntryCASAndIndexRebuild(t *testing.T) {
 	assert.Equal(t, indexEntries, loadedIndex)
 }
 
+func TestReadRegistryLinesRejectsUnterminatedFinalLine(t *testing.T) {
+	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
+	entry := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("2", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        "2026-04-21-PR1-abcdef0",
+			At:             time.Unix(100, 0).UTC(),
+		},
+	}
+	payload, err := marshalJSONLRecord(entry)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(registryPath, payload, 0o644))
+
+	_, err = readRegistryLines(registryPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unterminated final line")
+}
+
+func TestAppendRegistryPayloadRollsBackPartialRecordWrite(t *testing.T) {
+	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
+	original := []byte("{\"existing\":true}\n")
+	require.NoError(t, os.WriteFile(registryPath, original, 0o644))
+
+	file, err := os.OpenFile(registryPath, os.O_RDWR|os.O_APPEND, defaultFilePerm)
+	require.NoError(t, err)
+	failFile := &failingAppendFile{
+		File:      file,
+		remaining: len(`{"new":true}`),
+		err:       errors.New("injected write failure"),
+	}
+	err = appendRegistryPayload(registryPath, failFile, []byte(`{"new":true}`))
+	require.Error(t, err)
+	require.NoError(t, failFile.Close())
+
+	data, readErr := os.ReadFile(registryPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, original, data)
+	assert.Equal(t, 1, failFile.truncateCalls)
+	assert.Equal(t, 1, failFile.syncCalls)
+}
+
 func TestEnsureVerifiedIdempotencyIndex_RebuildsCorruptIndex(t *testing.T) {
 	registryPath := filepath.Join(realTempDir(t), "rules-registry.jsonl")
 	indexPath := filepath.Join(filepath.Dir(registryPath), "rules-idempotency-index.jsonl")

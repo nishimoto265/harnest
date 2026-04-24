@@ -185,6 +185,10 @@ func trimJSONLLine(line []byte) []byte {
 	return line
 }
 
+func hasJSONLTerminator(line []byte) bool {
+	return len(line) > 0 && line[len(line)-1] == '\n'
+}
+
 func isEOF(err error) bool {
 	return errors.Is(err, stdio.EOF)
 }

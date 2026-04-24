@@ -54,7 +54,8 @@ func TestCleanupProcessTree_KillsDetachedGrandchildSpawnedAfterRootExit(t *testi
 
 func requireProcessInspection(t *testing.T) {
 	t.Helper()
-	if _, err := processStartTime(os.Getpid()); err != nil {
+	startTime, err := processStartTime(os.Getpid())
+	if err != nil || startTime == "" || isProcessInspectionUnavailableStartTime(startTime) {
 		t.Skipf("process inspection unavailable in this sandbox: %v", err)
 	}
 }
@@ -146,6 +147,52 @@ func TestCleanupProcessTree_SkipsRecycledGroupAndSessionButKillsTrackedDescendan
 	require.Zero(t, groupKillCount)
 	require.Zero(t, sessionKillCount)
 	require.Equal(t, []int{777}, killed)
+}
+
+func TestCleanupProcessTree_DegradesWhenProcessInspectionUnavailable(t *testing.T) {
+	originalLookup := lookupProcessStartTime
+	originalGroupKill := killProcessGroupUntilGoneSignal
+	originalGroupMembers := processGroupMembersUntilGoneList
+	originalSessionList := sessionProcessesUntilGoneList
+	originalPIDKill := killPIDSignal
+	t.Cleanup(func() {
+		lookupProcessStartTime = originalLookup
+		killProcessGroupUntilGoneSignal = originalGroupKill
+		processGroupMembersUntilGoneList = originalGroupMembers
+		sessionProcessesUntilGoneList = originalSessionList
+		killPIDSignal = originalPIDKill
+	})
+
+	lookupProcessStartTime = func(int) (string, error) {
+		return "", exec.ErrNotFound
+	}
+	killProcessGroupUntilGoneSignal = func(int) error {
+		return nil
+	}
+	processGroupMembersUntilGoneList = func(int) ([]int, error) {
+		return nil, exec.ErrNotFound
+	}
+	sessionProcessesUntilGoneList = func(int) ([]int, error) {
+		return nil, exec.ErrNotFound
+	}
+	killed := false
+	killPIDSignal = func(int, syscall.Signal) error {
+		killed = true
+		return nil
+	}
+
+	tracker := &DescendantTracker{
+		seen: map[int]string{
+			777: "Tue Apr 22 09:59:59 2026",
+		},
+	}
+	err := CleanupProcessTree(ProcessLease{
+		PID:       4242,
+		PGID:      4242,
+		StartTime: "Tue Apr 22 10:00:00 2026",
+	}, 4242, tracker)
+	require.NoError(t, err)
+	require.True(t, killed)
 }
 
 func TestKillSessionProcessesUntilGone_ReturnsTimeoutWhenSurvivorsRemain(t *testing.T) {

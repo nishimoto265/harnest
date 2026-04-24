@@ -14,6 +14,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
@@ -51,6 +52,7 @@ type cliJudgePromptData struct {
 	Input             JudgeInput
 	Dimensions        []string
 	ComplianceRuleIDs []string
+	CandidateRules    []CandidateRule
 }
 
 func NewCLIJudge(profile agents.Profile, role Role) Judge {
@@ -99,9 +101,13 @@ func renderCLIJudgePrompt(role Role, input JudgeInput) (string, error) {
 	for _, dimension := range allDimensions {
 		dimensions = append(dimensions, string(dimension))
 	}
-	complianceRuleIDs, err := ExpectedComplianceRuleIDs(input.RubricPath)
-	if err != nil {
-		return "", err
+	complianceRuleIDs := input.ExpectedComplianceRuleIDs
+	if len(complianceRuleIDs) == 0 {
+		var err error
+		complianceRuleIDs, err = ExpectedComplianceRuleIDs(input.RubricPath)
+		if err != nil {
+			return "", err
+		}
 	}
 	var out strings.Builder
 	if err := tmpl.Execute(&out, cliJudgePromptData{
@@ -109,10 +115,31 @@ func renderCLIJudgePrompt(role Role, input JudgeInput) (string, error) {
 		Input:             input,
 		Dimensions:        dimensions,
 		ComplianceRuleIDs: complianceRuleIDs,
+		CandidateRules:    sanitizeCandidateRules(input.CandidateRules),
 	}); err != nil {
 		return "", err
 	}
 	return out.String(), nil
+}
+
+func sanitizeCandidateRules(rules []CandidateRule) []CandidateRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]CandidateRule, len(rules))
+	for i, rule := range rules {
+		out[i] = CandidateRule{
+			ID:           internalio.SanitizeForPromptEmbedding(rule.ID),
+			Kind:         internalio.SanitizeForPromptEmbedding(rule.Kind),
+			TargetRuleID: internalio.SanitizeForPromptEmbedding(rule.TargetRuleID),
+			Title:        internalio.SanitizeForPromptEmbedding(rule.Title),
+			Body: internalio.SanitizeForPromptEmbedding(rule.Body, internalio.SafeTextOptions{
+				Label: "candidate_rule",
+				Fence: true,
+			}),
+		}
+	}
+	return out
 }
 
 func runCLIJudge(ctx context.Context, binary string, prefixArgs []string, profile agents.Profile, workdir, promptText string, timeout time.Duration) (string, error) {

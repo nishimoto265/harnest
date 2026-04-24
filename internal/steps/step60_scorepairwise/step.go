@@ -16,6 +16,7 @@ import (
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
+	step50 "github.com/nishimoto265/auto-improve/internal/steps/step50_implement"
 )
 
 type Input struct {
@@ -28,6 +29,7 @@ type Input struct {
 	Primary        judges.Judge
 	Secondary      judges.Judge
 	Arbiter        judges.Judge
+	CandidateRules []judges.CandidateRule
 	Now            func() time.Time
 }
 
@@ -204,7 +206,10 @@ func Run(ctx context.Context, in Input) error {
 			run.Agent,
 			pass1ComplianceRuleIDs,
 			fallbackComplianceRuleIDs,
+			in.CandidateRules,
 		)
+		run.JudgeInput.ExpectedComplianceRuleIDs = sortedExpectedComplianceRuleIDs(expectedCompliance)
+		run.JudgeInput.CandidateRules = in.CandidateRules
 		if result, ok, err := tryReuseRawPanelResult(in.IO, rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion, expectedCompliance); err != nil {
 			return err
 		} else if ok {
@@ -397,6 +402,13 @@ func applyDefaults(in Input) (Input, error) {
 	if err := contracts.EnsureCleanAbsolutePath(in.RubricPath); err != nil {
 		return Input{}, err
 	}
+	if in.CandidateRules == nil {
+		candidateRules, err := loadCandidateRules(in.IO)
+		if err != nil {
+			return Input{}, err
+		}
+		in.CandidateRules = candidateRules
+	}
 	if in.Primary == nil {
 		in.Primary = judges.NewPrimaryStub()
 	}
@@ -472,6 +484,34 @@ func scorableAgentsFromRuns(runs []scorableAgentRun) []contracts.AgentID {
 		agents = append(agents, run.Agent)
 	}
 	return agents
+}
+
+func loadCandidateRules(runIO internalio.RunContext) ([]judges.CandidateRule, error) {
+	candidatesPath, err := runIO.ResolveRunRelative("40/candidates.json")
+	if err != nil {
+		return nil, fmt.Errorf("step60: resolve candidates path: %w", err)
+	}
+	if _, err := os.Stat(candidatesPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("step60: stat candidates: %w", err)
+	}
+	payloads, err := step50.LoadRulePayloads(candidatesPath)
+	if err != nil {
+		return nil, fmt.Errorf("step60: load candidate rules: %w", err)
+	}
+	rules := make([]judges.CandidateRule, 0, len(payloads))
+	for _, payload := range payloads {
+		rules = append(rules, judges.CandidateRule{
+			ID:           payload.ID,
+			Kind:         payload.Kind,
+			TargetRuleID: payload.TargetRuleID,
+			Title:        payload.Title,
+			Body:         payload.ProposedBody,
+		})
+	}
+	return rules, nil
 }
 
 func shouldSkipAgent(err error) bool {
@@ -1565,6 +1605,7 @@ func expectedComplianceRuleIDsForAgent(
 	agent contracts.AgentID,
 	pass1Rules map[contracts.AgentID]map[string]struct{},
 	fallbackRules []string,
+	candidateRules []judges.CandidateRule,
 ) map[string]struct{} {
 	rules := make(map[string]struct{})
 	for ruleID := range pass1Rules[agent] {
@@ -1575,10 +1616,25 @@ func expectedComplianceRuleIDsForAgent(
 			rules[ruleID] = struct{}{}
 		}
 	}
+	for _, rule := range candidateRules {
+		rules[rule.ID] = struct{}{}
+	}
 	if len(rules) == 0 {
 		return nil
 	}
 	return rules
+}
+
+func sortedExpectedComplianceRuleIDs(rules map[string]struct{}) []string {
+	if len(rules) == 0 {
+		return nil
+	}
+	ruleIDs := make([]string, 0, len(rules))
+	for ruleID := range rules {
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	sort.Strings(ruleIDs)
+	return ruleIDs
 }
 
 func resolvePass1AverageTenths(runIO internalio.RunContext, agent contracts.AgentID, scores []contracts.ScoreEntry) (int, error) {

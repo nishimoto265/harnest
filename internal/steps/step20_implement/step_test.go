@@ -1129,6 +1129,7 @@ func TestStepRunSweepsGrandchildrenAfterSuccessfulExit(t *testing.T) {
 }
 
 func TestStepRunKillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
+	requireProcessInspection(t)
 	fx := newTestFixture(t, 5)
 	helperPath := writeDetachedSleepHelper(t, t.TempDir())
 	pidPath := filepath.Join(t.TempDir(), "detached-child.pid")
@@ -1147,6 +1148,53 @@ func TestStepRunKillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return !pidAlive(pid)
 	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func requireProcessInspection(t *testing.T) {
+	t.Helper()
+	startTime, err := agentrunner.LookupProcessStartTime(os.Getpid())
+	if err != nil || startTime == "" || strings.HasPrefix(startTime, "unavailable:") {
+		t.Skipf("process inspection unavailable in this sandbox: %v", err)
+	}
+	requireProcessDescendantVisibility(t)
+}
+
+func requireProcessDescendantVisibility(t *testing.T) {
+	t.Helper()
+	cmd := exec.Command("sleep", "5")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
+	if !psShowsChildOfCurrentProcess(t, cmd.Process.Pid) {
+		t.Skip("process descendant listing unavailable in this sandbox")
+	}
+	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
+}
+
+func psShowsChildOfCurrentProcess(t *testing.T, childPID int) bool {
+	t.Helper()
+	out, err := exec.Command("ps", "-axo", "pid=,ppid=").Output()
+	if err != nil {
+		return false
+	}
+	parentPID := os.Getpid()
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		ppid, ppidErr := strconv.Atoi(fields[1])
+		if pidErr == nil && ppidErr == nil && pid == childPID && ppid == parentPID {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCopyUntrackedFiles_SkipsFIFOWithinBoundedTime(t *testing.T) {

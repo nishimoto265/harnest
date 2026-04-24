@@ -384,32 +384,41 @@ func verifyRescueState(rescueDir string) error {
 }
 
 func writeCommitBundle(ctx context.Context, repoPath, rescueDir, expectedBaseSHA string) (int, string, error) {
+	bundlePath := filepath.Join(rescueDir, "commits.bundle")
 	revListOutput, err := gitOutputBytesContext(ctx, repoPath, "rev-list", expectedBaseSHA+"..HEAD")
-	if err == nil {
-		commits := strings.Fields(string(revListOutput))
-		if len(commits) == 0 {
-			bundlePath := filepath.Join(rescueDir, "commits.bundle")
-			if err := internalio.WriteAtomic(bundlePath, nil); err != nil {
-				return 0, "", err
-			}
-			return 0, agentrunner.RescueBundleModeNone, nil
-		}
-		bundlePath := filepath.Join(rescueDir, "commits.bundle")
-		if err := runGitCommand(ctx, repoPath, "bundle", "create", bundlePath, expectedBaseSHA+"..HEAD"); err != nil {
+	if err != nil {
+		commitCount, err := writeFullHeadBundle(ctx, repoPath, bundlePath)
+		if err != nil {
 			return 0, "", err
 		}
+		return commitCount, agentrunner.RescueBundleModeFullHead, nil
+	}
+	commits := strings.Fields(string(revListOutput))
+	if len(commits) == 0 {
+		if err := internalio.WriteAtomic(bundlePath, nil); err != nil {
+			return 0, "", err
+		}
+		return 0, agentrunner.RescueBundleModeNone, nil
+	}
+	if err := runGitCommand(ctx, repoPath, "bundle", "create", bundlePath, expectedBaseSHA+"..HEAD"); err == nil {
 		return len(commits), agentrunner.RescueBundleModeRange, nil
 	}
-
-	headOutput, err := gitOutputBytesContext(ctx, repoPath, "rev-list", "HEAD")
+	commitCount, err := writeFullHeadBundle(ctx, repoPath, bundlePath)
 	if err != nil {
 		return 0, "", err
 	}
-	bundlePath := filepath.Join(rescueDir, "commits.bundle")
-	if err := runGitCommand(ctx, repoPath, "bundle", "create", bundlePath, "HEAD"); err != nil {
-		return 0, "", err
+	return commitCount, agentrunner.RescueBundleModeFullHead, nil
+}
+
+func writeFullHeadBundle(ctx context.Context, repoPath, bundlePath string) (int, error) {
+	headOutput, err := gitOutputBytesContext(ctx, repoPath, "rev-list", "HEAD")
+	if err != nil {
+		return 0, err
 	}
-	return len(strings.Fields(string(headOutput))), agentrunner.RescueBundleModeFullHead, nil
+	if err := runGitCommand(ctx, repoPath, "bundle", "create", bundlePath, "HEAD", "--objects"); err != nil {
+		return 0, err
+	}
+	return len(strings.Fields(string(headOutput))), nil
 }
 
 func runGitCommand(ctx context.Context, dir string, args ...string) error {
