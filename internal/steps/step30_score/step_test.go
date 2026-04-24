@@ -103,6 +103,7 @@ func TestStep30Score_AllowsMultipleComplianceRowsPerAgent(t *testing.T) {
 	}
 
 	step := New(WithPanelProvider(provider))
+	setStepRubric(t, step, "rule-a", "rule-b")
 	err := step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg})
 	require.NoError(t, err)
 
@@ -132,6 +133,7 @@ func TestStep30Score_ResumeWithoutMarkerDoesNotRejudgeOrAppend(t *testing.T) {
 	}
 
 	step := New(WithPanelProvider(provider))
+	setStepRubric(t, step, "rule-a")
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
@@ -168,6 +170,7 @@ func TestStep30Score_ResumeRerunsRolesWhenOutputSHAChanges(t *testing.T) {
 	}
 
 	step := New(WithPanelProvider(provider))
+	setStepRubric(t, step, "rule-a")
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	manifest, err := internalio.LoadScorableManifest(runCtx, 1, contracts.AgentID("a1"))
@@ -224,10 +227,12 @@ func TestStep30Score_ResumeRerunsWhenPromptVersionChanges(t *testing.T) {
 	}
 
 	first := New(WithPanelProvider(provider), WithPromptVersion("prompt-v1"))
+	setStepRubric(t, first, "rule-a")
 	require.NoError(t, first.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	provider.reset()
 	second := New(WithPanelProvider(provider), WithPromptVersion("prompt-v2"))
+	setStepRubric(t, second, "rule-a")
 	require.NoError(t, second.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
@@ -250,16 +255,19 @@ func TestStep30Score_IgnoresHistoricalOldVersionsAfterAppendOnlyRerun(t *testing
 	}
 
 	first := New(WithPanelProvider(provider), WithPromptVersion("prompt-v1"))
+	setStepRubric(t, first, "rule-a")
 	require.NoError(t, first.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	provider.reset()
 	second := New(WithPanelProvider(provider), WithPromptVersion("prompt-v2"))
+	setStepRubric(t, second, "rule-a")
 	require.NoError(t, second.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
 
 	provider.reset()
 	third := New(WithPanelProvider(provider), WithPromptVersion("prompt-v2"))
+	setStepRubric(t, third, "rule-a")
 	require.NoError(t, third.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	assert.Zero(t, provider.calls[contracts.JudgeRolePrimary])
@@ -291,6 +299,7 @@ func TestStep30Score_ResumeRerunsWhenRawComplianceIsMissing(t *testing.T) {
 	}
 
 	step := New(WithPanelProvider(provider))
+	setStepRubric(t, step, "rule-a")
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	complianceRawPath, err := runCtx.ResolveRunRelative("30/compliance-A-raw.jsonl")
@@ -306,6 +315,8 @@ func TestStep30Score_ResumeRerunsWhenRawComplianceIsMissing(t *testing.T) {
 
 func TestStep30Score_AllowsEmptyComplianceAcrossPanel(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	rubricPath := filepath.Join(t.TempDir(), "rubric.md")
+	require.NoError(t, os.WriteFile(rubricPath, []byte("# custom rubric without compliance rules\n"), 0o644))
 	provider := &fakePanelProvider{
 		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
 			score := 80
@@ -320,6 +331,9 @@ func TestStep30Score_AllowsEmptyComplianceAcrossPanel(t *testing.T) {
 	}
 
 	step := New(WithPanelProvider(provider))
+	step.rubricPathFn = func(internalio.RunContext) (string, error) {
+		return rubricPath, nil
+	}
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
@@ -357,6 +371,26 @@ func TestStep30Score_RejectsMissingExpectedActiveComplianceRule(t *testing.T) {
 	assert.ErrorContains(t, err, "active-rule")
 }
 
+func TestStep30Score_EnforcesDefaultFallbackComplianceRule(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	var seenExpected []string
+	var seenStrict bool
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			if role == contracts.JudgeRolePrimary && input.Agent == "a1" {
+				seenExpected = append([]string(nil), input.ExpectedComplianceRuleIDs...)
+				seenStrict = input.EnforceExpectedCompliance
+			}
+			return makeJudgeOutput(input, role, 80, nil)
+		},
+	}
+
+	err := New(WithPanelProvider(provider)).Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg})
+	require.ErrorIs(t, err, judges.ErrJudgeOutputMissingCompliance)
+	assert.Equal(t, []string{"stub-rubric-rule"}, seenExpected)
+	assert.True(t, seenStrict)
+}
+
 // F16 regression: the judge must see the exact bytes that output_sha256
 // was computed over. We verify that (a) JudgeInput.OutputPath is not the
 // live manifest diff, and (b) rewriting the original diff after step30 has
@@ -387,7 +421,9 @@ func TestStep30Score_JudgeSeesPinnedSnapshotBytes(t *testing.T) {
 	liveBefore, err := os.ReadFile(liveDiff)
 	require.NoError(t, err)
 
-	require.NoError(t, New(WithPanelProvider(provider)).Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+	step := New(WithPanelProvider(provider))
+	setStepRubric(t, step, "rule-a")
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	assert.NotEqual(t, liveDiff, seenPath, "judge must not be handed the live manifest diff")
 	assert.Contains(t, seenPath, "30/snapshots/", "OutputPath must live under the pinned snapshot dir")
@@ -432,6 +468,7 @@ func TestStep30Score_DoesNotWriteDoneMarkerOnIncompleteArbiterComplianceCoverage
 	}
 
 	step := New(WithPanelProvider(provider))
+	setStepRubric(t, step, "rule-a", "rule-b")
 	err := step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg})
 	require.ErrorIs(t, err, judges.ErrJudgeOutputMissingCompliance)
 
@@ -470,6 +507,7 @@ func TestStep30Score_PassesOnlyDisputedComplianceRulesToArbiter(t *testing.T) {
 	}
 
 	step := New(WithPanelProvider(provider))
+	setStepRubric(t, step, "rule-a", "rule-b")
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	assert.Equal(t, []string{"rule-b"}, arbiterExpected)
@@ -504,6 +542,7 @@ func TestStep30Score_AcceptsArbiterCoveringOnlyDisputedRules(t *testing.T) {
 	}
 
 	step := New(WithPanelProvider(provider))
+	setStepRubric(t, step, "rule-a", "rule-b")
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
@@ -514,6 +553,8 @@ func TestStep30Score_AcceptsArbiterCoveringOnlyDisputedRules(t *testing.T) {
 
 func TestStep30Score_DiscardsStaleArbiterComplianceWhenRebuildIsStrictEmpty(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	rubricPath := filepath.Join(t.TempDir(), "rubric.md")
+	require.NoError(t, os.WriteFile(rubricPath, []byte("## Active Rule IDs\n- rule-a\n"), 0o644))
 	mode := "disputed"
 	provider := &fakePanelProvider{
 		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
@@ -536,13 +577,22 @@ func TestStep30Score_DiscardsStaleArbiterComplianceWhenRebuildIsStrictEmpty(t *t
 	}
 
 	step := New(WithPanelProvider(provider))
+	step.rubricPathFn = func(internalio.RunContext) (string, error) {
+		return rubricPath, nil
+	}
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(markerPath, []byte("stale marker\n"), 0o644))
+	complianceRawPath, err := runCtx.ResolveRunRelative("30/compliance-A-raw.jsonl")
+	require.NoError(t, err)
+	complianceRawBefore, err := internalio.ReadJSONL[contracts.RawComplianceEntry](complianceRawPath)
+	require.NoError(t, err)
+	require.NotEmpty(t, complianceRawBefore)
 
 	mode = "empty"
+	require.NoError(t, os.WriteFile(rubricPath, []byte("# custom rubric without compliance rules\n"), 0o644))
 	for _, agent := range []contracts.AgentID{"a1", "a2", "a3"} {
 		manifest, manifestErr := internalio.LoadScorableManifest(runCtx, 1, agent)
 		require.NoError(t, manifestErr)
@@ -561,11 +611,9 @@ func TestStep30Score_DiscardsStaleArbiterComplianceWhenRebuildIsStrictEmpty(t *t
 	require.NoError(t, err)
 	assert.Empty(t, complianceFinal)
 
-	complianceRawPath, err := runCtx.ResolveRunRelative("30/compliance-A-raw.jsonl")
-	require.NoError(t, err)
 	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](complianceRawPath)
 	require.NoError(t, err)
-	assert.Empty(t, complianceRaw)
+	assert.Equal(t, complianceRawBefore, complianceRaw)
 
 	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
 	require.NoError(t, err)
@@ -576,6 +624,33 @@ func TestStep30Score_DiscardsStaleArbiterComplianceWhenRebuildIsStrictEmpty(t *t
 	assert.Zero(t, provider.calls[contracts.JudgeRolePrimary])
 	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
 	assert.Zero(t, provider.calls[contracts.JudgeRoleArbiter])
+}
+
+func TestStep30Score_RerunsWhenRubricContentChanges(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	rubricPath := filepath.Join(t.TempDir(), "rubric.md")
+	require.NoError(t, os.WriteFile(rubricPath, []byte("# rubric v1\n"), 0o644))
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			if role == contracts.JudgeRoleSecondary {
+				score = 79
+			}
+			return makeJudgeOutput(input, role, score, nil)
+		},
+	}
+	step := New(WithPanelProvider(provider))
+	step.rubricPathFn = func(internalio.RunContext) (string, error) {
+		return rubricPath, nil
+	}
+
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+	provider.reset()
+	require.NoError(t, os.WriteFile(rubricPath, []byte("# rubric v2\n"), 0o644))
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
 }
 
 func TestStep30Score_DiscardsStaleFinalComplianceAfterInvalidMarkerRuleShrink(t *testing.T) {
@@ -636,10 +711,12 @@ func TestStep30Score_DiscardsStaleFinalComplianceAfterInvalidMarkerRuleShrink(t 
 	require.NoError(t, err)
 	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](complianceRawPath)
 	require.NoError(t, err)
-	require.Len(t, complianceRaw, 6)
+	require.Len(t, complianceRaw, 18)
+	rawRuleCounts := map[string]int{}
 	for _, row := range complianceRaw {
-		assert.Equal(t, "rule-a", row.RuleID)
+		rawRuleCounts[row.RuleID]++
 	}
+	assert.Equal(t, map[string]int{"rule-a": 12, "rule-b": 6}, rawRuleCounts)
 
 	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
 	require.NoError(t, err)
@@ -678,6 +755,7 @@ func TestStep30Score_RunSerializesConcurrentWriters(t *testing.T) {
 	}
 
 	step := New(WithPanelProvider(provider))
+	setStepRubric(t, step, "rule-a")
 	errCh := make(chan error, 2)
 
 	go func() {
@@ -731,7 +809,11 @@ func TestStep30Score_UsesBundledRubricPathWithoutTouchingLegacySymlink(t *testin
 			if role == contracts.JudgeRoleSecondary {
 				score = 79
 			}
-			return makeJudgeOutput(input, role, score, []ruleVerdict{{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant}})
+			verdicts := make([]ruleVerdict, 0, len(input.ExpectedComplianceRuleIDs))
+			for _, ruleID := range input.ExpectedComplianceRuleIDs {
+				verdicts = append(verdicts, ruleVerdict{ruleID: ruleID, verdict: contracts.ComplianceVerdictCompliant})
+			}
+			return makeJudgeOutput(input, role, score, verdicts)
 		},
 	}
 
@@ -829,6 +911,25 @@ func writeRel(t *testing.T, runCtx internalio.RunContext, rel, content string) {
 	abs, err := runCtx.ResolveRunRelative(rel)
 	require.NoError(t, err)
 	require.NoError(t, internalio.WriteAtomic(abs, []byte(content)))
+}
+
+func setStepRubric(t *testing.T, step *Step, ruleIDs ...string) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("# test rubric\n")
+	if len(ruleIDs) > 0 {
+		b.WriteString("\n## Active Rule IDs\n")
+		for _, ruleID := range ruleIDs {
+			b.WriteString("- ")
+			b.WriteString(ruleID)
+			b.WriteByte('\n')
+		}
+	}
+	rubricPath := filepath.Join(t.TempDir(), "rubric.md")
+	require.NoError(t, os.WriteFile(rubricPath, []byte(b.String()), 0o644))
+	step.rubricPathFn = func(internalio.RunContext) (string, error) {
+		return rubricPath, nil
+	}
 }
 
 func itoa(i int) string {

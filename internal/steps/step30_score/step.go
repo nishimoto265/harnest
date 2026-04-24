@@ -135,6 +135,20 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		return err
 	}
 
+	rubricPath, err := s.resolveRubricPath(req.RunContext)
+	if err != nil {
+		return err
+	}
+	rubricVersion, err := effectiveRubricVersion(s.rubricVersion, rubricPath)
+	if err != nil {
+		return err
+	}
+	expectedComplianceRuleIDs, err := expectedStep30ComplianceRuleIDs(rubricPath)
+	if err != nil {
+		return err
+	}
+	expectedComplianceRules := expectedComplianceRuleSet(expectedComplianceRuleIDs)
+
 	// Short-circuit on a pre-existing valid marker (resume path).
 	markerExists, err := fileExists(paths.MarkerPath)
 	if err != nil {
@@ -149,7 +163,7 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		if versioned, ok := s.panel.(PanelVersionProvider); ok {
 			promptVersion = versioned.PanelPromptVersion(s.promptVersion)
 		}
-		versionsMatch, err := step30VersionsMatch(paths, s.rubricVersion, promptVersion)
+		versionsMatch, err := step30VersionsMatch(paths, rubricVersion, promptVersion, expectedComplianceRules)
 		if err != nil {
 			return err
 		}
@@ -172,16 +186,7 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		return ErrNoScorableAgents
 	}
 
-	rubricPath, err := s.resolveRubricPath(req.RunContext)
-	if err != nil {
-		return err
-	}
-	expectedComplianceRuleIDs, err := judges.ActiveComplianceRuleIDs(rubricPath)
-	if err != nil {
-		return err
-	}
-
-	state, err := loadResumeState(paths)
+	state, err := loadResumeState(paths, expectedComplianceRules)
 	if err != nil {
 		return err
 	}
@@ -226,6 +231,7 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 			OutputPath:                snapshotPath,
 			RubricPath:                rubricPath,
 			ExpectedComplianceRuleIDs: expectedComplianceRuleIDs,
+			EnforceExpectedCompliance: true,
 		}
 		primary, secondary, arbiter, err := s.panel.Judges(judgeInput)
 		if err != nil {
@@ -239,7 +245,7 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 			Arbiter:               arbiter,
 			JudgeInput:            judgeInput,
 			OutputSha256:          outputSha,
-			RubricVersion:         s.rubricVersion,
+			RubricVersion:         rubricVersion,
 			PromptVersion:         promptVersion,
 			DisagreementThreshold: s.threshold,
 			RunContext:            req.RunContext,
@@ -247,11 +253,11 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		}
 		agentState := state.agent(agent.agent)
 
-		if err := s.ensureRole(ctx, paths, panelInput, agentState, contracts.JudgeRolePrimary, primary, s.rubricVersion, promptVersion, expectedComplianceRuleIDs); err != nil {
+		if err := s.ensureRole(ctx, paths, panelInput, agentState, contracts.JudgeRolePrimary, primary, rubricVersion, promptVersion, expectedComplianceRules); err != nil {
 			return fmt.Errorf("step30_score: resolve primary agent=%s: %w", agent.agent, err)
 		}
 		if secondary != nil {
-			if err := s.ensureRole(ctx, paths, panelInput, agentState, contracts.JudgeRoleSecondary, secondary, s.rubricVersion, promptVersion, expectedComplianceRuleIDs); err != nil {
+			if err := s.ensureRole(ctx, paths, panelInput, agentState, contracts.JudgeRoleSecondary, secondary, rubricVersion, promptVersion, expectedComplianceRules); err != nil {
 				return fmt.Errorf("step30_score: resolve secondary agent=%s: %w", agent.agent, err)
 			}
 			if err := s.refreshPrimarySecondaryIfNeeded(ctx, paths, panelInput, agentState, primary, secondary); err != nil {
@@ -276,7 +282,7 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 			arbiterInput := panelInput
 			arbiterInput.JudgeInput.ExpectedComplianceRuleIDs = arbiterExpectedRuleIDs
 			arbiterInput.JudgeInput.EnforceExpectedCompliance = true
-			if !agentState.arbiterCompleteFor(arbiterExpectedRuleIDs, panelInput.OutputSha256, s.rubricVersion, promptVersion) {
+			if !agentState.arbiterCompleteFor(expectedComplianceRuleSet(arbiterExpectedRuleIDs), panelInput.OutputSha256, rubricVersion, promptVersion) {
 				if err := s.runRole(ctx, paths, arbiterInput, agentState, contracts.JudgeRoleArbiter, arbiter); err != nil {
 					return fmt.Errorf("step30_score: resolve arbiter agent=%s: %w", agent.agent, err)
 				}
@@ -315,12 +321,6 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		agentIDs = append(agentIDs, a.agent)
 	}
 
-	if forcedRebuild {
-		if err := rewriteCurrentRawFiles(paths, state, agentIDs); err != nil {
-			return err
-		}
-	}
-
 	marker, err := scorecore.BuildStep30DoneMarker(scorecore.Step30MarkerInputs{
 		Agents:     agentIDs,
 		Paths:      paths.MarkerPaths,
@@ -352,9 +352,9 @@ func (s *Step) ensureRole(
 	judge judges.Judge,
 	rubricVersion string,
 	promptVersion string,
-	expectedRuleIDs []string,
+	expectedRules map[string]struct{},
 ) error {
-	if agentState.roleComplete(role, panelInput.OutputSha256, rubricVersion, promptVersion, expectedRuleIDs) {
+	if agentState.roleComplete(role, panelInput.OutputSha256, rubricVersion, promptVersion, expectedRules) {
 		return nil
 	}
 	return s.runRole(ctx, paths, panelInput, agentState, role, judge)
@@ -536,7 +536,7 @@ type resumeAgentState struct {
 	finalCompliance map[string]contracts.ComplianceEntry
 }
 
-func loadResumeState(paths stepPathsResult) (*resumeState, error) {
+func loadResumeState(paths stepPathsResult, expectedComplianceRules map[string]struct{}) (*resumeState, error) {
 	scoreRaw, err := internalio.ReadJSONL[contracts.RawScoreEntry](paths.ScoreRaw)
 	if err != nil {
 		return nil, err
@@ -559,12 +559,18 @@ func loadResumeState(paths stepPathsResult) (*resumeState, error) {
 		state.agent(row.Agent).upsertRawScores([]contracts.RawScoreEntry{row})
 	}
 	for _, row := range scorecore.CollapseRawCompliance(complianceRaw) {
+		if !complianceRuleExpected(row.RuleID, expectedComplianceRules) {
+			continue
+		}
 		state.agent(row.Agent).upsertRawCompliance([]contracts.RawComplianceEntry{row})
 	}
 	for _, row := range scorecore.CollapseFinalScores(scoreFinal) {
 		state.agent(row.Agent).upsertFinalScores([]contracts.ScoreEntry{row})
 	}
 	for _, row := range scorecore.CollapseFinalCompliance(complianceFinal) {
+		if !complianceRuleExpected(row.RuleID, expectedComplianceRules) {
+			continue
+		}
 		state.agent(row.Agent).upsertFinalCompliance([]contracts.ComplianceEntry{row})
 	}
 	return state, nil
@@ -636,18 +642,14 @@ func (s *resumeAgentState) clearFinal() {
 	s.finalCompliance = make(map[string]contracts.ComplianceEntry)
 }
 
-func (s *resumeAgentState) roleComplete(role contracts.JudgeRole, outputSha, rubricVersion, promptVersion string, expectedRuleIDs []string) bool {
+func (s *resumeAgentState) roleComplete(role contracts.JudgeRole, outputSha, rubricVersion, promptVersion string, expectedRules map[string]struct{}) bool {
 	if !hasAllDimensions(s.rawScores[role]) {
 		return false
 	}
 	if !s.roleOutputShaMatches(role, outputSha) || !s.roleVersionMatches(role, rubricVersion, promptVersion) {
 		return false
 	}
-	expected := s.expectedComplianceRuleIDs()
-	if len(expectedRuleIDs) > 0 {
-		expected = expectedComplianceRuleSet(expectedRuleIDs)
-	}
-	return s.roleComplianceCoverage(role, expected)
+	return s.roleComplianceCoverage(role, expectedRules)
 }
 
 func (s *resumeAgentState) rawScoreSlice(role contracts.JudgeRole) []contracts.RawScoreEntry {
@@ -674,30 +676,8 @@ func (s *resumeAgentState) rawComplianceSlice(role contracts.JudgeRole) []contra
 	return out
 }
 
-func (s *resumeAgentState) currentComplianceRuleIDs() map[string]struct{} {
-	rules := make(map[string]struct{})
-	for _, role := range []contracts.JudgeRole{
-		contracts.JudgeRolePrimary,
-		contracts.JudgeRoleSecondary,
-		contracts.JudgeRoleArbiter,
-	} {
-		for ruleID := range s.rawCompliance[role] {
-			rules[ruleID] = struct{}{}
-		}
-	}
-	return rules
-}
-
-func (s *resumeAgentState) expectedComplianceRuleIDs() map[string]struct{} {
-	rules := s.currentComplianceRuleIDs()
-	for ruleID := range s.finalCompliance {
-		rules[ruleID] = struct{}{}
-	}
-	return rules
-}
-
 func (s *resumeAgentState) arbiterCompleteFor(
-	expectedRuleIDs []string,
+	expectedRules map[string]struct{},
 	outputSha, rubricVersion, promptVersion string,
 ) bool {
 	if !hasAllDimensions(s.rawScores[contracts.JudgeRoleArbiter]) {
@@ -709,7 +689,7 @@ func (s *resumeAgentState) arbiterCompleteFor(
 	if !s.roleVersionMatches(contracts.JudgeRoleArbiter, rubricVersion, promptVersion) {
 		return false
 	}
-	return s.roleComplianceCoverage(contracts.JudgeRoleArbiter, expectedComplianceRuleSet(expectedRuleIDs))
+	return s.roleComplianceCoverage(contracts.JudgeRoleArbiter, expectedRules)
 }
 
 func (s *resumeAgentState) roleVersionMatches(role contracts.JudgeRole, rubricVersion, promptVersion string) bool {
@@ -764,6 +744,45 @@ func expectedComplianceRuleSet(ruleIDs []string) map[string]struct{} {
 		rules[ruleID] = struct{}{}
 	}
 	return rules
+}
+
+func expectedStep30ComplianceRuleIDs(rubricPath string) ([]string, error) {
+	activeRuleIDs, err := judges.ActiveComplianceRuleIDs(rubricPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(activeRuleIDs) > 0 {
+		return activeRuleIDs, nil
+	}
+	return judges.ExpectedComplianceRuleIDs(rubricPath)
+}
+
+func complianceRuleExpected(ruleID string, expected map[string]struct{}) bool {
+	if len(expected) == 0 {
+		return false
+	}
+	_, ok := expected[ruleID]
+	return ok
+}
+
+func filterRawComplianceRows(rows []contracts.RawComplianceEntry, expected map[string]struct{}) []contracts.RawComplianceEntry {
+	out := make([]contracts.RawComplianceEntry, 0, len(rows))
+	for _, row := range rows {
+		if complianceRuleExpected(row.RuleID, expected) {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func filterFinalComplianceRows(rows []contracts.ComplianceEntry, expected map[string]struct{}) []contracts.ComplianceEntry {
+	out := make([]contracts.ComplianceEntry, 0, len(rows))
+	for _, row := range rows {
+		if complianceRuleExpected(row.RuleID, expected) {
+			out = append(out, row)
+		}
+	}
+	return out
 }
 
 func disputedComplianceRuleIDs(primary, secondary []contracts.RawComplianceEntry) []string {
@@ -842,26 +861,6 @@ func resetStep30FinalFiles(paths stepPathsResult) error {
 	return rewriteJSONL[contracts.ComplianceEntry](paths.ComplianceFinal, nil)
 }
 
-func rewriteCurrentRawFiles(paths stepPathsResult, state *resumeState, agents []contracts.AgentID) error {
-	scoreRows := make([]contracts.RawScoreEntry, 0, len(agents)*15)
-	complianceRows := make([]contracts.RawComplianceEntry, 0)
-	for _, agent := range sortedUniqueAgentIDs(agents) {
-		agentState := state.agent(agent)
-		for _, role := range []contracts.JudgeRole{
-			contracts.JudgeRolePrimary,
-			contracts.JudgeRoleSecondary,
-			contracts.JudgeRoleArbiter,
-		} {
-			scoreRows = append(scoreRows, agentState.rawScoreSlice(role)...)
-			complianceRows = append(complianceRows, agentState.rawComplianceSlice(role)...)
-		}
-	}
-	if err := rewriteJSONL(paths.ScoreRaw, scoreRows); err != nil {
-		return err
-	}
-	return rewriteJSONL(paths.ComplianceRaw, complianceRows)
-}
-
 func rewriteJSONL[T any](path string, rows []T) error {
 	var buf bytes.Buffer
 	for _, row := range rows {
@@ -879,25 +878,6 @@ func rewriteJSONL[T any](path string, rows []T) error {
 		buf.WriteByte('\n')
 	}
 	return internalio.WriteAtomic(path, buf.Bytes())
-}
-
-func sortedUniqueAgentIDs(agents []contracts.AgentID) []contracts.AgentID {
-	if len(agents) == 0 {
-		return nil
-	}
-	seen := make(map[contracts.AgentID]struct{}, len(agents))
-	out := make([]contracts.AgentID, 0, len(agents))
-	for _, agent := range agents {
-		if _, ok := seen[agent]; ok {
-			continue
-		}
-		seen[agent] = struct{}{}
-		out = append(out, agent)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i] < out[j]
-	})
-	return out
 }
 
 func fileExists(path string) (bool, error) {
@@ -942,7 +922,7 @@ func allDimensions() []contracts.Dimension {
 	}
 }
 
-func step30VersionsMatch(paths stepPathsResult, rubricVersion, promptVersion string) (bool, error) {
+func step30VersionsMatch(paths stepPathsResult, rubricVersion, promptVersion string, expectedComplianceRules map[string]struct{}) (bool, error) {
 	scoreRaw, err := internalio.ReadJSONL[contracts.RawScoreEntry](paths.ScoreRaw)
 	if err != nil {
 		return false, err
@@ -959,16 +939,18 @@ func step30VersionsMatch(paths stepPathsResult, rubricVersion, promptVersion str
 	if err != nil {
 		return false, err
 	}
+	rawComplianceRows := filterRawComplianceRows(scorecore.CollapseRawCompliance(complianceRaw), expectedComplianceRules)
+	finalComplianceRows := filterFinalComplianceRows(scorecore.CollapseFinalCompliance(complianceFinal), expectedComplianceRules)
 	return scorecore.RowsMatchVersion(scorecore.CollapseRawScores(scoreRaw), func(row contracts.RawScoreEntry) (string, string) {
 		return row.RubricVersion, row.PromptVersion
 	}, rubricVersion, promptVersion) &&
-		scorecore.RowsMatchVersion(scorecore.CollapseRawCompliance(complianceRaw), func(row contracts.RawComplianceEntry) (string, string) {
+		scorecore.RowsMatchVersion(rawComplianceRows, func(row contracts.RawComplianceEntry) (string, string) {
 			return row.RubricVersion, row.PromptVersion
 		}, rubricVersion, promptVersion) &&
 		scorecore.RowsMatchVersion(scorecore.CollapseFinalScores(scoreFinal), func(row contracts.ScoreEntry) (string, string) {
 			return row.RubricVersion, row.PromptVersion
 		}, rubricVersion, promptVersion) &&
-		scorecore.RowsMatchVersion(scorecore.CollapseFinalCompliance(complianceFinal), func(row contracts.ComplianceEntry) (string, string) {
+		scorecore.RowsMatchVersion(finalComplianceRows, func(row contracts.ComplianceEntry) (string, string) {
 			return row.RubricVersion, row.PromptVersion
 		}, rubricVersion, promptVersion), nil
 }
@@ -982,6 +964,18 @@ func (s *Step) resolveRubricPath(runCtx internalio.RunContext) (string, error) {
 		return "", fmt.Errorf("%w: %v", ErrRubricPathUnresolved, err)
 	}
 	return path, nil
+}
+
+func effectiveRubricVersion(baseVersion, rubricPath string) (string, error) {
+	hash, err := fileSha256(rubricPath)
+	if err != nil {
+		return "", fmt.Errorf("step30_score: hash rubric: %w", err)
+	}
+	base := strings.TrimSpace(baseVersion)
+	if base == "" {
+		base = defaultRubricVersion
+	}
+	return fmt.Sprintf("%s+sha256:%s", base, hash[:12]), nil
 }
 
 func fileSha256(path string) (string, error) {
