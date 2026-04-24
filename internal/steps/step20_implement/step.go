@@ -640,9 +640,9 @@ func verifyExistingAllocationWorktree(ctx context.Context, allocation contracts.
 			return fmt.Errorf("step20: allocation HEAD mismatch: path=%s want=%s", allocation.Path, allocation.HeadSHA)
 		}
 	}
-	status, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "status", "--porcelain")
+	status, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "status", "--porcelain", "--ignored")
 	if err != nil {
-		return fmt.Errorf("step20: status --porcelain for allocation %s: %w", allocation.Path, err)
+		return fmt.Errorf("step20: status --porcelain --ignored for allocation %s: %w", allocation.Path, err)
 	}
 	if status != "" {
 		return fmt.Errorf("step20: existing worktree is dirty: path=%s", allocation.Path)
@@ -650,10 +650,7 @@ func verifyExistingAllocationWorktree(ctx context.Context, allocation contracts.
 	return nil
 }
 
-func manifestPrefix(pass int, agent contracts.AgentID) string {
-	if pass == 2 {
-		return filepath.Join("50-pass2", string(agent))
-	}
+func manifestPrefix(_ int, agent contracts.AgentID) string {
 	return filepath.Join("20-pass1", string(agent))
 }
 

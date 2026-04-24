@@ -576,6 +576,45 @@ func TestRun_AllTimeoutPass1RecordsTimeout(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(cfg.Paths.Runs, string(runID), "30", "done.marker"))
 }
 
+func TestRun_ResumeAllTimeoutPass1RecordsTimeout(t *testing.T) {
+	cfg := testConfig(t)
+	runID := contracts.RunID("2026-04-21-PR454-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, seedResumeRun(t, runCtx, 454))
+	require.NoError(t, os.RemoveAll(filepath.Join(runCtx.RunDir(), "30")))
+	require.NoError(t, os.RemoveAll(filepath.Join(runCtx.RunDir(), "40")))
+	require.NoError(t, os.RemoveAll(filepath.Join(runCtx.RunDir(), "50-pass2")))
+	require.NoError(t, os.RemoveAll(filepath.Join(runCtx.RunDir(), "60")))
+	overwriteTimeoutManifests(t, runCtx, 1)
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	recorder := &callRecorder{}
+	orch.steps = Steps{
+		Step10:  recordingStep{label: "10", recorder: recorder},
+		Step20:  recordingAgentSteps("20", recorder),
+		Step30:  recordingStep{label: "30", recorder: recorder},
+		Step40:  recordingStep{label: "40", recorder: recorder},
+		Step50:  recordingAgentSteps("50", recorder),
+		Step60:  recordingStep{label: "60", recorder: recorder},
+		Step70:  recordingStep{label: "70", recorder: recorder},
+		Archive: recordingStep{label: "archive", recorder: recorder},
+	}
+
+	require.NoError(t, orch.Run(context.Background(), 454, RunOptions{RunID: runID}))
+
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindTimeout, last.Kind)
+	timeout, ok := last.Value.(contracts.StateEntryTimeout)
+	require.True(t, ok)
+	assert.Equal(t, contracts.FailedStep20, timeout.Step)
+	assert.Empty(t, recorder.snapshot())
+}
+
 func TestRun_AllNonScorablePass2StopsBeforeStep70(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
@@ -631,6 +670,42 @@ func TestRun_AllTimeoutPass2RecordsTimeout(t *testing.T) {
 
 	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
 	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindTimeout, last.Kind)
+	timeout, ok := last.Value.(contracts.StateEntryTimeout)
+	require.True(t, ok)
+	assert.Equal(t, contracts.FailedStep50, timeout.Step)
+	assert.Empty(t, recorder.snapshot())
+}
+
+func TestRun_ResumeAllTimeoutPass2RecordsTimeout(t *testing.T) {
+	cfg := testConfig(t)
+	runID := contracts.RunID("2026-04-21-PR455-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, seedResumeRun(t, runCtx, 455))
+	require.NoError(t, os.RemoveAll(filepath.Join(runCtx.RunDir(), "60")))
+	overwriteTimeoutManifests(t, runCtx, 2)
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	recorder := &callRecorder{}
+	orch.steps = Steps{
+		Step10:  recordingStep{label: "10", recorder: recorder},
+		Step20:  recordingAgentSteps("20", recorder),
+		Step30:  recordingStep{label: "30", recorder: recorder},
+		Step40:  recordingStep{label: "40", recorder: recorder},
+		Step50:  recordingAgentSteps("50", recorder),
+		Step60:  recordingStep{label: "60", recorder: recorder},
+		Step70:  recordingStep{label: "70", recorder: recorder},
+		Archive: recordingStep{label: "archive", recorder: recorder},
+	}
+
+	require.NoError(t, orch.Run(context.Background(), 455, RunOptions{RunID: runID}))
+
 	events, err := state.ScanEventsForRun(runCtx, runID)
 	require.NoError(t, err)
 	require.NotEmpty(t, events)
@@ -852,9 +927,6 @@ func TestRun_FromScratchSupersedesNonTerminalRunAndPrunesWorktrees(t *testing.T)
 	), 0o644))
 	pkg := stubTaskPackageForRun(oldRunCtx, 455)
 	require.NoError(t, internalio.WriteJSONAtomic(oldRunCtx.TaskPackagePath(), pkg))
-	for _, wt := range pkg.Worktrees {
-		require.NoError(t, os.MkdirAll(wt.Path, 0o755))
-	}
 	require.NoError(t, state.NewWriter(oldRunCtx).Append(startedEntry(455, oldRunID, time.Now().UTC())))
 	require.NoError(t, state.NewWriter(oldRunCtx).Append(contracts.StateEntry{
 		Kind: contracts.StateKindInterrupted,
@@ -3872,6 +3944,29 @@ func seedResumeRun(t *testing.T, runCtx internalio.RunContext, pr int) error {
 		return err
 	}
 	return state.Append(runCtx, startedEntry(pr, runCtx.RunID, time.Now().UTC()))
+}
+
+func overwriteTimeoutManifests(t *testing.T, runCtx internalio.RunContext, pass int) {
+	t.Helper()
+	for _, agent := range defaultAgents {
+		manifestPath, err := runCtx.ManifestPath(pass, agent)
+		require.NoError(t, err)
+		now := time.Now().UTC()
+		manifest := contracts.Manifest{
+			Kind: contracts.ManifestKindTimeout,
+			Value: contracts.ManifestTimeout{
+				Kind:           contracts.ManifestKindTimeout,
+				SchemaVersion:  "1",
+				RunID:          runCtx.RunID,
+				Pass:           pass,
+				Agent:          agent,
+				TimeoutSeconds: 1,
+				StartedAt:      now.Add(-time.Second),
+				FinishedAt:     now,
+			},
+		}
+		require.NoError(t, internalio.WriteJSONAtomic(manifestPath, manifest))
+	}
 }
 
 func validPlanningIntention(runID contracts.RunID) contracts.IntentionRecord {

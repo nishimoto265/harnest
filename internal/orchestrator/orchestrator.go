@@ -84,7 +84,11 @@ type StepRunContext struct {
 }
 
 var errStopPipeline = errors.New("orchestrator: stop pipeline")
-var errNoScorableAgentsResume = errors.New("orchestrator: resume selected step30 but pass1 has no scorable agents")
+var (
+	errNoScorableAgentsResume = errors.New("orchestrator: resume selected step30 but pass1 has no scorable agents")
+	errAllPass1TimedOutResume = errors.New("orchestrator: resume selected step30 but all pass1 agents timed out")
+	errAllPass2TimedOutResume = errors.New("orchestrator: resume selected step60 but all pass2 agents timed out")
+)
 var errConcurrentRun = errors.New("orchestrator: concurrent Run() on the same instance is not allowed")
 var errConcurrentPRRun = errors.New("orchestrator: another process is already running this PR")
 
@@ -652,6 +656,13 @@ func (o *Orchestrator) resolveStartStep(run *StepRunContext) (contracts.FailedSt
 	if done, err := taskPackageHasAllManifests(run.IO, 2, run.TaskPackage); err != nil {
 		return "", err
 	} else if done {
+		timedOut, err := allFinalizedManifestsTimedOut(run, 2)
+		if err != nil {
+			return "", err
+		}
+		if timedOut {
+			return "", errAllPass2TimedOutResume
+		}
 		return contracts.FailedStep60, nil
 	}
 	if ok, err := hasRunRelative(run.IO, "40/candidates.json"); err != nil {
@@ -674,6 +685,13 @@ func (o *Orchestrator) resolveStartStep(run *StepRunContext) (contracts.FailedSt
 	if done, err := taskPackageHasAllManifests(run.IO, 1, run.TaskPackage); err != nil {
 		return "", err
 	} else if done {
+		timedOut, err := allFinalizedManifestsTimedOut(run, 1)
+		if err != nil {
+			return "", err
+		}
+		if timedOut {
+			return "", errAllPass1TimedOutResume
+		}
 		scorableAgents, err := scorableAgentsForPass(run.IO, run.TaskPackage, 1)
 		if err != nil {
 			return "", err

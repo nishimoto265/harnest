@@ -269,7 +269,7 @@ func Perform(ctx context.Context, opts PerformOptions) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if _, err := opts.GitOutput(ctx, identity, opts.Allocation.Path, "clean", "-fd"); err != nil {
+	if _, err := opts.GitOutput(ctx, identity, opts.Allocation.Path, "clean", "-fdx"); err != nil {
 		return 0, err
 	}
 

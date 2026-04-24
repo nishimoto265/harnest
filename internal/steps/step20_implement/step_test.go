@@ -1346,7 +1346,7 @@ func TestPerformRescue_BranchDriftRequiresManualRecoveryInsteadOfResettingMain(t
 	assert.Equal(t, foreignSHA, strings.TrimSpace(runGit(t, fx.worktree, "rev-parse", "main")))
 }
 
-func TestPerformRescue_PreservesIgnoredFiles(t *testing.T) {
+func TestPerformRescue_RemovesIgnoredFiles(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	stubQuiescentRescueWorktree(t)
 	allocation, err := worktreeFor(fx.run.TaskPackage, 1, "a1")
@@ -1363,7 +1363,7 @@ func TestPerformRescue_PreservesIgnoredFiles(t *testing.T) {
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	})
 	require.NoError(t, err)
-	assert.FileExists(t, filepath.Join(fx.worktree, ".env.local"))
+	assert.NoFileExists(t, filepath.Join(fx.worktree, ".env.local"))
 }
 
 func TestPerformRescue_RequiresManualRecoveryForUnverifiedDetachedWorktreeWriter(t *testing.T) {

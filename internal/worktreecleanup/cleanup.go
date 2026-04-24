@@ -27,6 +27,10 @@ type BranchRemover interface {
 	DeleteBranch(ctx context.Context, branch string) error
 }
 
+type UnregisteredWorktreeVerifier interface {
+	VerifyUnregisteredWorktreeRemoval(ctx context.Context, allocation contracts.WorktreeAllocation) error
+}
+
 type RepoGit struct {
 	RepoDir string
 }
@@ -44,9 +48,14 @@ func Cleanup(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.T
 		}
 		path := filepath.Clean(wt.Path)
 		cleanedWorktree := false
+		branchCleanupAllowed := true
+		var unregisteredErr error
 		if remover != nil {
 			if err := remover.RemoveWorktree(ctx, path); err != nil {
-				if !os.IsNotExist(err) && !errors.Is(err, ErrUnregistered) {
+				if errors.Is(err, ErrUnregistered) {
+					unregisteredErr = err
+					branchCleanupAllowed = false
+				} else if !os.IsNotExist(err) {
 					return err
 				}
 			} else {
@@ -54,6 +63,16 @@ func Cleanup(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.T
 			}
 		}
 		if _, err := os.Lstat(path); err == nil {
+			if unregisteredErr != nil {
+				verifier, ok := remover.(UnregisteredWorktreeVerifier)
+				if !ok {
+					return unregisteredErr
+				}
+				if err := verifier.VerifyUnregisteredWorktreeRemoval(ctx, wt); err != nil {
+					return err
+				}
+				branchCleanupAllowed = true
+			}
 			if err := os.RemoveAll(path); err != nil {
 				return err
 			}
@@ -63,7 +82,7 @@ func Cleanup(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.T
 		} else {
 			cleanedWorktree = true
 		}
-		if branchRemover, ok := remover.(BranchRemover); ok && cleanedWorktree && cleanupOwnsBranch(runCtx.RunID, wt) {
+		if branchRemover, ok := remover.(BranchRemover); ok && cleanedWorktree && branchCleanupAllowed && cleanupOwnsBranch(runCtx.RunID, wt) {
 			if err := branchRemover.DeleteBranch(ctx, wt.Branch); err != nil {
 				return err
 			}
@@ -120,6 +139,35 @@ func (g RepoGit) DeleteBranch(ctx context.Context, branch string) error {
 	return g.run(ctx, "branch", "-D", branch)
 }
 
+func (g RepoGit) VerifyUnregisteredWorktreeRemoval(ctx context.Context, allocation contracts.WorktreeAllocation) error {
+	if strings.TrimSpace(g.RepoDir) == "" {
+		return fmt.Errorf("%w: empty repo root", ErrRepoUnverified)
+	}
+	if err := allocation.Validate(); err != nil {
+		return err
+	}
+	path := filepath.Clean(allocation.Path)
+	commonDir, err := g.commonGitDir(ctx, path)
+	if err != nil {
+		return fmt.Errorf("%w: unregistered path is not a valid git worktree for cleanup: %s: %v", ErrUnregistered, path, err)
+	}
+	repoCommonDir, err := g.commonGitDir(ctx, g.RepoDir)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrRepoUnverified, g.RepoDir, err)
+	}
+	if !sameCanonicalPath(commonDir, repoCommonDir) {
+		return fmt.Errorf("%w: unregistered path belongs to different repo: %s", ErrUnregistered, path)
+	}
+	branch, err := g.outputInDir(ctx, path, "branch", "--show-current")
+	if err != nil {
+		return fmt.Errorf("%w: unregistered path branch could not be verified: %s: %v", ErrUnregistered, path, err)
+	}
+	if strings.TrimSpace(string(branch)) != allocation.Branch {
+		return fmt.Errorf("%w: unregistered path branch mismatch: path=%s want=%s", ErrUnregistered, path, allocation.Branch)
+	}
+	return nil
+}
+
 func cleanupOwnsBranch(runID contracts.RunID, wt contracts.WorktreeAllocation) bool {
 	want := fmt.Sprintf("auto-improve/%s/pass%d/%s", runID, wt.Pass, wt.Agent)
 	return wt.Branch == want
@@ -174,7 +222,11 @@ func (g RepoGit) run(ctx context.Context, args ...string) error {
 }
 
 func (g RepoGit) output(ctx context.Context, args ...string) ([]byte, error) {
-	cmdArgs := append([]string{"-C", g.RepoDir}, args...)
+	return g.outputInDir(ctx, g.RepoDir, args...)
+}
+
+func (g RepoGit) outputInDir(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmdArgs := append([]string{"-C", dir}, args...)
 	cmd, err := processenv.TrustedCommandContext(ctx, "git", cmdArgs...)
 	if err != nil {
 		return nil, err
@@ -201,4 +253,28 @@ func (g RepoGit) output(ctx context.Context, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("worktreecleanup: git %s: %w: %s", strings.Join(cmdArgs, " "), err, strings.Join(msgs, "; "))
 	}
 	return stdout.Bytes(), nil
+}
+
+func (g RepoGit) commonGitDir(ctx context.Context, dir string) (string, error) {
+	out, err := g.outputInDir(ctx, dir, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	gitDir := strings.TrimSpace(string(out))
+	if gitDir == "" {
+		return "", errors.New("empty git common dir")
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(dir, gitDir)
+	}
+	return filepath.Clean(gitDir), nil
+}
+
+func sameCanonicalPath(a, b string) bool {
+	aKey, aErr := contracts.CanonicalizePathForUniqueness(filepath.Clean(a))
+	bKey, bErr := contracts.CanonicalizePathForUniqueness(filepath.Clean(b))
+	if aErr != nil || bErr != nil {
+		return false
+	}
+	return aKey == bKey
 }

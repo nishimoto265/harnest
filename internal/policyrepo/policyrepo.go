@@ -716,7 +716,8 @@ func fetchBranch(ctx context.Context, repoRoot, branch string) error {
 	if err != nil {
 		return err
 	}
-	_, err = runGit(ctx, processenv.GitNetworkEnvForRemoteURL(remoteURL), "-C", repoRoot, "fetch", "--no-tags", "origin", branch)
+	refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch)
+	_, err = runGit(ctx, processenv.GitNetworkEnvForRemoteURL(remoteURL), "-C", repoRoot, "fetch", "--no-tags", "origin", refspec)
 	if err != nil {
 		return fmt.Errorf("policyrepo: fetch branch %s: %w", branch, err)
 	}

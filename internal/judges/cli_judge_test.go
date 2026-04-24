@@ -2,6 +2,7 @@ package judges
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,6 +179,57 @@ exit 42
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "exited with code 42")
 	assert.ErrorContains(t, err, "judge failed")
+}
+
+func TestValidateCLIJudgeCommandResultFailsClosed(t *testing.T) {
+	cleanupErr := errors.New("cleanup failed")
+	tests := []struct {
+		name    string
+		result  agentrunner.CommandResult
+		wantErr string
+	}{
+		{
+			name: "timeout",
+			result: agentrunner.CommandResult{
+				TimedOut:      true,
+				StdoutSnippet: []byte("partial stdout\n"),
+				StderrSnippet: []byte("partial stderr\n"),
+			},
+			wantErr: "timed out",
+		},
+		{
+			name: "nonzero",
+			result: agentrunner.CommandResult{
+				ExitCode:      7,
+				StdoutSnippet: []byte("valid-looking output\n"),
+				StderrSnippet: []byte("failed\n"),
+			},
+			wantErr: "exited with code 7",
+		},
+		{
+			name: "cleanup",
+			result: agentrunner.CommandResult{
+				CleanupErr: cleanupErr,
+			},
+			wantErr: "cleanup failed",
+		},
+		{
+			name:   "success",
+			result: agentrunner.CommandResult{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateCLIJudgeCommandResult(tt.result)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
 }
 
 func TestCodexJudgeExecArgsAreReadOnlyAndKeepSafeProfileArgs(t *testing.T) {

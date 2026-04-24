@@ -2729,7 +2729,7 @@ func TestCleanupWorktrees_UnregisteredMissingPathIsNoop(t *testing.T) {
 	}
 }
 
-func TestCleanupWorktrees_UnregisteredExistingPathRemovedUnderBase(t *testing.T) {
+func TestCleanupWorktrees_UnregisteredExistingPathRequiresVerification(t *testing.T) {
 	runCtx, pkg, _, _, _ := newFixture(t, "PR204")
 	for _, wt := range pkg.Worktrees {
 		require.NoError(t, os.MkdirAll(wt.Path, 0o755))
@@ -2737,11 +2737,13 @@ func TestCleanupWorktrees_UnregisteredExistingPathRemovedUnderBase(t *testing.T)
 	}
 	git := &fakeGit{removeWorktreeErr: ErrWorktreeUnregistered}
 
-	require.NoError(t, cleanupWorktrees(context.Background(), runCtx, pkg, git))
+	err := cleanupWorktrees(context.Background(), runCtx, pkg, git)
 
-	require.Len(t, git.removeWorktreeCalls, len(pkg.Worktrees))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWorktreeUnregistered)
+	require.Len(t, git.removeWorktreeCalls, 1)
 	for _, wt := range pkg.Worktrees {
-		assert.NoDirExists(t, wt.Path)
+		assert.DirExists(t, wt.Path)
 	}
 }
 

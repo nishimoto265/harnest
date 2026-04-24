@@ -571,9 +571,9 @@ func verifyExistingAllocationWorktree(ctx context.Context, allocation contracts.
 			return fmt.Errorf("step50: allocation HEAD mismatch: path=%s want=%s", allocation.Path, allocation.HeadSHA)
 		}
 	}
-	status, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "status", "--porcelain")
+	status, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "status", "--porcelain", "--ignored")
 	if err != nil {
-		return fmt.Errorf("step50: status --porcelain for allocation %s: %w", allocation.Path, err)
+		return fmt.Errorf("step50: status --porcelain --ignored for allocation %s: %w", allocation.Path, err)
 	}
 	if status != "" {
 		return fmt.Errorf("step50: existing worktree is dirty: path=%s", allocation.Path)
@@ -593,7 +593,7 @@ func restoreAllocationWorktree(ctx context.Context, allocation contracts.Worktre
 	if err := runGitCommand(ctx, allocation.Path, "reset", "--hard", targetRef); err != nil {
 		return err
 	}
-	if err := runGitCommand(ctx, allocation.Path, "clean", "-fd"); err != nil {
+	if err := runGitCommand(ctx, allocation.Path, "clean", "-fdx"); err != nil {
 		return err
 	}
 	return nil

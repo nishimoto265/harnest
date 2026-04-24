@@ -264,7 +264,7 @@ func restoreAllocationWorktree(ctx context.Context, allocation contracts.Worktre
 	if _, err := gitOutputContext(ctx, identity, allocation.Path, "reset", "--hard", targetRef); err != nil {
 		return err
 	}
-	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-fd"); err != nil {
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-fdx"); err != nil {
 		return err
 	}
 	return nil

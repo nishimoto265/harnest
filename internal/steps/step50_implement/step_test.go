@@ -955,7 +955,7 @@ func TestStepRun_RescueStartFailureLeavesNoPhantomLease(t *testing.T) {
 	require.NoError(t, (Step{}).Run(context.Background(), env.run))
 }
 
-func TestPerformRescue_PreservesIgnoredFiles(t *testing.T) {
+func TestPerformRescue_RemovesIgnoredFiles(t *testing.T) {
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
 	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
 	require.NoError(t, err)
@@ -984,7 +984,7 @@ func TestPerformRescue_PreservesIgnoredFiles(t *testing.T) {
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	})
 	require.NoError(t, err)
-	assert.FileExists(t, filepath.Join(allocation.Path, ".env.local"))
+	assert.NoFileExists(t, filepath.Join(allocation.Path, ".env.local"))
 }
 
 func TestStepRun_KillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {

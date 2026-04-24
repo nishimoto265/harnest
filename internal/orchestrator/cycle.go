@@ -95,6 +95,12 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 
 	start, err := o.resolveStartStep(run)
 	if err != nil {
+		if errors.Is(err, errAllPass1TimedOutResume) {
+			return o.appendState(timeoutEntry(pr, run.IO.RunID, contracts.FailedStep20, time.Now().UTC()))
+		}
+		if errors.Is(err, errAllPass2TimedOutResume) {
+			return o.appendState(timeoutEntry(pr, run.IO.RunID, contracts.FailedStep50, time.Now().UTC()))
+		}
 		if errors.Is(err, errNoScorableAgentsResume) {
 			if reason, detail, ok, classifyErr := providerInterruptionFromNonScorableManifests(run, 1); classifyErr != nil {
 				return classifyErr

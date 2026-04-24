@@ -112,6 +112,24 @@ func TestHydrateFromBranchUsesSafeGitProfiles(t *testing.T) {
 	assert.GreaterOrEqual(t, localChecked, 2)
 }
 
+func TestFetchBranchUpdatesRemoteTrackingRef(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	originalRunGit := runGit
+	var fetchArgs []string
+	runGit = func(ctx context.Context, env []string, args ...string) ([]byte, error) {
+		if slicesContains(args, "fetch") {
+			fetchArgs = append([]string(nil), args...)
+		}
+		return originalRunGit(ctx, env, args...)
+	}
+	t.Cleanup(func() {
+		runGit = originalRunGit
+	})
+
+	require.NoError(t, fetchBranch(context.Background(), repoRoot, "policy"))
+	assert.Contains(t, fetchArgs, "+refs/heads/policy:refs/remotes/origin/policy")
+}
+
 func TestBranchSnapshotMatchesLocalUsesScopedHTTPSTokenAuthForFetch(t *testing.T) {
 	t.Setenv("GH_TOKEN", "test-token")
 	repoRoot := newClonedRepoWithPolicyBranch(t)
