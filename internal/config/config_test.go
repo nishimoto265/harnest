@@ -212,6 +212,44 @@ roles:
 	assert.Equal(t, "codex", profile.Binary)
 }
 
+func TestLoadConfig_AgentFileSnapshotOverridesAgentConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.snapshot.yaml")
+	agentsPath := filepath.Join(dir, "agents.yaml")
+	require.NoError(t, os.WriteFile(agentsPath, []byte("not: agents\n"), 0o644))
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+repo:
+  github: "owner/repo"
+  root: "/tmp/auto-improve"
+  default_branch: "main"
+  best_branch: "auto-improve/best"
+paths:
+  runs: "/tmp/auto-improve/runs"
+worktree:
+  base: "/tmp/auto-improve/worktrees"
+agent_config_path: "./agents.yaml"
+agent_file_snapshot:
+  profiles:
+    codex_impl:
+      provider: codex
+      binary: codex
+    stub:
+      provider: stub
+  roles:
+    implementer: codex_impl
+    judge_primary: stub
+    judge_secondary: stub
+    judge_arbiter: stub
+`), 0o644))
+
+	cfg, err := LoadConfig(configPath)
+	require.NoError(t, err)
+	profile, err := cfg.AgentProfile(agents.RoleImplementer)
+	require.NoError(t, err)
+	assert.Equal(t, agents.ProviderCodex, profile.Provider)
+	assert.Equal(t, "codex", profile.Binary)
+}
+
 func TestLoadConfig_DefaultsTaskPromptSourceToAuto(t *testing.T) {
 	path := writeConfigFixture(t, `
 repo:

@@ -150,13 +150,37 @@ func TestRun_ResumeUsesConfigSnapshotPolicyBranch(t *testing.T) {
 	require.NoError(t, orch.Run(context.Background(), 56, RunOptions{}))
 }
 
-func TestRun_ResumeKeepsRelativeAgentConfigProviderFromSnapshot(t *testing.T) {
-	root := t.TempDir()
-	repoRoot := filepath.Join(root, "repo")
-	runsBase := filepath.Join(root, "runs")
-	worktreeBase := filepath.Join(root, "worktrees")
-	require.NoError(t, os.MkdirAll(repoRoot, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "config.yaml"), []byte(fmt.Sprintf(`
+func TestRun_ResumeKeepsAgentProfileFromSnapshotWhenLiveAgentsFileChanges(t *testing.T) {
+	for name, mutateAgentsFile := range map[string]func(t *testing.T, path string){
+		"modified": func(t *testing.T, path string) {
+			t.Helper()
+			require.NoError(t, os.WriteFile(path, []byte(`
+profiles:
+  claude_impl:
+    provider: claude
+    binary: claude
+  stub:
+    provider: stub
+roles:
+  implementer: claude_impl
+  judge_primary: stub
+  judge_secondary: stub
+  judge_arbiter: stub
+`), 0o644))
+		},
+		"deleted": func(t *testing.T, path string) {
+			t.Helper()
+			require.NoError(t, os.Remove(path))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			repoRoot := filepath.Join(root, "repo")
+			runsBase := filepath.Join(root, "runs")
+			worktreeBase := filepath.Join(root, "worktrees")
+			agentsPath := filepath.Join(repoRoot, "agents.yaml")
+			require.NoError(t, os.MkdirAll(repoRoot, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "config.yaml"), []byte(fmt.Sprintf(`
 repo:
   root: %q
   default_branch: "main"
@@ -167,7 +191,7 @@ worktree:
   base: %q
 agent_config_path: "./agents.yaml"
 `, repoRoot, runsBase, worktreeBase)), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "agents.yaml"), []byte(`
+			require.NoError(t, os.WriteFile(agentsPath, []byte(`
 profiles:
   codex_impl:
     provider: codex
@@ -180,25 +204,28 @@ roles:
   judge_secondary: stub
   judge_arbiter: stub
 `), 0o644))
-	cfg, err := config.LoadConfig(filepath.Join(repoRoot, "config.yaml"))
-	require.NoError(t, err)
+			cfg, err := config.LoadConfig(filepath.Join(repoRoot, "config.yaml"))
+			require.NoError(t, err)
 
-	runID := contracts.RunID("2026-04-21-PR57-abcdef0")
-	runCtx, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
-	require.NoError(t, err)
-	require.NoError(t, seedResumeRun(t, runCtx, 57))
-	snapshotPath := filepath.Join(runCtx.RunDir(), "config.snapshot.yaml")
-	require.NoError(t, os.Remove(snapshotPath))
-	require.NoError(t, writeConfigSnapshot(snapshotPath, cfg))
+			runID := contracts.RunID("2026-04-21-PR57-abcdef0")
+			runCtx, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
+			require.NoError(t, err)
+			require.NoError(t, seedResumeRun(t, runCtx, 57))
+			snapshotPath := filepath.Join(runCtx.RunDir(), "config.snapshot.yaml")
+			require.NoError(t, os.Remove(snapshotPath))
+			require.NoError(t, writeConfigSnapshot(snapshotPath, cfg))
+			mutateAgentsFile(t, agentsPath)
 
-	orch, err := NewOrchestrator(cfg)
-	require.NoError(t, err)
-	orch.steps = stubPipelineSteps(nil, assertImplementerProviderStep{
-		t:    t,
-		want: agents.ProviderCodex,
-	})
+			orch, err := NewOrchestrator(cfg)
+			require.NoError(t, err)
+			orch.steps = stubPipelineSteps(nil, assertImplementerProviderStep{
+				t:    t,
+				want: agents.ProviderCodex,
+			})
 
-	require.NoError(t, orch.Run(context.Background(), 57, RunOptions{}))
+			require.NoError(t, orch.Run(context.Background(), 57, RunOptions{}))
+		})
+	}
 }
 
 func TestRun_DefaultStub_EndToEnd(t *testing.T) {
