@@ -82,6 +82,24 @@ exit 0
 EOF
 chmod +x "$fake_bin/launchctl"
 
+cat >"$fake_bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" ]]; then
+  shift 2
+fi
+exec "$@"
+EOF
+chmod +x "$fake_bin/sudo"
+
+cat >"$fake_bin/chown" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${AUTO_IMPROVE_TEST_CHOWN_FAIL:-0}" == "1" ]]; then
+  exit 42
+fi
+/usr/sbin/chown "$@"
+EOF
+chmod +x "$fake_bin/chown"
+
 set +e
 PATH="$fake_bin:$PATH" \
 INSTALL_DIR="$install_dir" \
@@ -116,6 +134,37 @@ fi
 
 if grep -F "com.nishimoto265.auto-improve.plist" "$launchctl_log" >/dev/null 2>&1; then
   echo "legacy launchd job was migrated before new bootstrap succeeded" >&2
+  exit 1
+fi
+
+chown_plist="$plist_dir/com.nishimoto265.auto-improve.chownfail.plist"
+printf 'old chown plist\n' >"$chown_plist"
+
+set +e
+PATH="$fake_bin:$PATH" \
+INSTALL_DIR="$install_dir" \
+REPO_ROOT="$repo_root" \
+AUTO_IMPROVE_RELEASE_URL="https://example.invalid/auto-improve" \
+AUTO_IMPROVE_EXPECTED_SHA256="$expected_sha" \
+AUTO_IMPROVE_LAUNCHD_USER="otheruser" \
+AUTO_IMPROVE_LAUNCHD_HOME="$home_dir" \
+AUTO_IMPROVE_PLIST_DIR="$plist_dir" \
+AUTO_IMPROVE_INSTANCE="chownfail" \
+AUTO_IMPROVE_TEST_PAYLOAD="$payload" \
+AUTO_IMPROVE_TEST_LAUNCHCTL_LOG="$launchctl_log" \
+AUTO_IMPROVE_TEST_CHOWN_FAIL=1 \
+bash "$ROOT/scripts/install.sh" >"$install_output_path" 2>&1
+status=$?
+set -e
+
+if [[ "$status" -ne 4 ]]; then
+  cat "$install_output_path" >&2
+  echo "expected install.sh chown failure to exit 4, got $status" >&2
+  exit 1
+fi
+
+if [[ "$(cat "$chown_plist")" != "old chown plist" ]]; then
+  echo "plist backup was not restored after install-launchd chown failure" >&2
   exit 1
 fi
 

@@ -104,10 +104,6 @@ func (e *GlobalNeedsRecoveryError) Error() string {
 	)
 }
 
-func (e *GlobalNeedsRecoveryError) RestartStep() contracts.FailedStep {
-	return contracts.FailedStep10
-}
-
 type GlobalSunsetSentinelError struct {
 	Path string
 }

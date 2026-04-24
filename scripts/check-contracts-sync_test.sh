@@ -11,7 +11,15 @@ cp "$repo_root/scripts/check-contracts-sync.sh" "$tmpdir/scripts/check-contracts
 cat >"$tmpdir/internal/contracts/registry.go" <<'GO'
 package contracts
 
+type RegistryKind string
+
+const (
+	RegistryKindAdded RegistryKind = "added"
+)
+
 type RuleRegistryAdded struct{}
+
+func (RuleRegistryAdded) ruleRegistryVariant() {}
 GO
 
 cat >"$tmpdir/docs/design/io-contracts.md" <<'MD'
@@ -57,5 +65,39 @@ if bash "$tmpdir/scripts/check-contracts-sync.sh" >"$tmpdir/out" 2>"$tmpdir/err"
   exit 1
 fi
 grep -Fq "no intention stages extracted from code" "$tmpdir/err"
+
+cat >"$tmpdir/internal/contracts/registry.go" <<'GO'
+package contracts
+
+type RegistryKind string
+
+const (
+	RegistryKindAdded   RegistryKind = "added"
+	RegistryKindRemoved RegistryKind = "removed"
+)
+
+type RuleRegistryAdded struct{}
+type RuleRegistryRemoved struct{}
+
+func (RuleRegistryAdded) ruleRegistryVariant() {}
+func (RuleRegistryRemoved) ruleRegistryVariant() {}
+GO
+
+cat >"$tmpdir/internal/contracts/intention.go" <<'GO'
+package contracts
+
+type IntentionStage string
+
+const (
+	IntentionStagePlanning IntentionStage = "planning"
+)
+GO
+
+if bash "$tmpdir/scripts/check-contracts-sync.sh" >"$tmpdir/out" 2>"$tmpdir/err"; then
+  echo "expected missing registry docs entries to fail" >&2
+  exit 1
+fi
+grep -Fq "registry variant missing in docs: RuleRegistryRemoved" "$tmpdir/err"
+grep -Fq "registry kind missing in docs: removed" "$tmpdir/err"
 
 printf 'check-contracts-sync failure-path tests OK\n'

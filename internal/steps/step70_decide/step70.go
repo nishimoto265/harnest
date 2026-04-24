@@ -549,20 +549,12 @@ func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.Ru
 		}
 		return finalizeAfterDecision(ctx, pr, runCtx, pkg, store, writer, deps)
 	case contracts.DecisionRollback:
-		if err := appendStateOnce(runCtx, writer, contracts.StateKindRollback, rollbackEvent(pr, runCtx.RunID, v.RollbackReason, v.FailedStep, deps.Now())); err != nil {
-			return err
-		}
-		_ = store.Delete()
-		return nil
+		return finalizeRollbackTerminal(ctx, pr, runCtx, pkg, v.RollbackReason, v.FailedStep, store, writer, deps)
 	case *contracts.DecisionRollback:
 		if v == nil {
 			return nil
 		}
-		if err := appendStateOnce(runCtx, writer, contracts.StateKindRollback, rollbackEvent(pr, runCtx.RunID, v.RollbackReason, v.FailedStep, deps.Now())); err != nil {
-			return err
-		}
-		_ = store.Delete()
-		return nil
+		return finalizeRollbackTerminal(ctx, pr, runCtx, pkg, v.RollbackReason, v.FailedStep, store, writer, deps)
 	default:
 		return cleanupWorktrees(ctx, runCtx, pkg, deps.Git)
 	}
@@ -665,13 +657,7 @@ func handleRollback(ctx context.Context, pr int, runCtx internalio.RunContext, p
 	if err := store.Save(intention); err != nil {
 		return err
 	}
-	if err := appendStateOnce(runCtx, writer, contracts.StateKindRollback, rollbackEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, deps.Now())); err != nil {
-		return err
-	}
-	if err := cleanupStagedRuleSidecars(runCtx); err != nil {
-		return err
-	}
-	return store.Delete()
+	return finalizeRollbackTerminal(ctx, pr, runCtx, pkg, reason, contracts.FailedStep70, store, writer, deps)
 }
 
 func resumeRollback(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
@@ -722,10 +708,17 @@ func resumeRollback(ctx context.Context, pr int, runCtx internalio.RunContext, p
 		}
 	}
 
-	if err := appendStateOnce(runCtx, writer, contracts.StateKindRollback, rollbackEvent(pr, runCtx.RunID, reason, contracts.FailedStep70, deps.Now())); err != nil {
+	return finalizeRollbackTerminal(ctx, pr, runCtx, pkg, reason, contracts.FailedStep70, store, writer, deps)
+}
+
+func finalizeRollbackTerminal(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, reason contracts.RollbackReason, failed contracts.FailedStep, store IntentionWriter, writer state.Writer, deps Deps) error {
+	if err := appendStateOnce(runCtx, writer, contracts.StateKindRollback, rollbackEvent(pr, runCtx.RunID, reason, failed, deps.Now())); err != nil {
 		return err
 	}
 	if err := cleanupStagedRuleSidecars(runCtx); err != nil {
+		return err
+	}
+	if err := cleanupWorktrees(ctx, runCtx, pkg, deps.Git); err != nil {
 		return err
 	}
 	return store.Delete()
