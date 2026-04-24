@@ -1,6 +1,7 @@
 package step70_decide
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -55,4 +56,21 @@ func TestRecoverMutationDoesNotBypassLockHeldByAnotherGoroutine(t *testing.T) {
 	require.NoError(t, <-holderErr)
 	require.NoError(t, <-mutationDone)
 	assert.NoFileExists(t, sentinelPath)
+}
+
+func TestRecoverClearSentinelAndTerminalizeKeepsSentinelWhenCompletedAppendFails(t *testing.T) {
+	runCtx, _, _, _, _ := newFixture(t, "PR125")
+	sentinelPath := filepath.Join(runCtx.RunsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelFilename(runCtx.RunID))
+	clearedPath := filepath.Join(runCtx.RunsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelClearedFilename(runCtx.RunID))
+	require.NoError(t, writeSentinel(runCtx.RunsBase, runCtx.RunID, 125, contracts.RollbackReasonTransactionalFailure, contracts.FailedStep70, fixedNow()()))
+	require.NoError(t, os.MkdirAll(runCtx.ProcessedPath(), 0o755))
+
+	lock, err := internalio.AcquireFileLock(runCtx.PromotionLockPath())
+	require.NoError(t, err)
+	defer func() { _ = lock.Unlock() }()
+
+	err = RecoverClearSentinelAndTerminalizeLocked(runCtx, lock, 125, true, fixedNow()())
+	require.Error(t, err)
+	assert.FileExists(t, sentinelPath)
+	assert.NoFileExists(t, clearedPath)
 }

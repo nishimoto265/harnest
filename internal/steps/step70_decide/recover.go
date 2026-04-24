@@ -131,12 +131,26 @@ func recoverAdoptAnywayUnlocked(ctx context.Context, pr int, runCtx internalio.R
 	if err != nil {
 		return err
 	}
-	if idempotencyHit && intention.RegistryAppendResult == nil {
-		matches, err := findPlannedRegistryMatches(runCtx, *intention)
+	if idempotencyHit {
+		result, err := currentPlannedRegistryAppendResult(runCtx, *intention)
 		if err != nil {
-			return err
+			return &RecoverRefusalError{
+				Message: fmt.Sprintf(
+					"adopt-anyway registry proof mismatch: stage=%s registry_head=%s idempotency_hit=%t",
+					intention.Stage, registryHead, idempotencyHit,
+				),
+			}
 		}
-		if result, ok := completePlannedRegistryMatches(matches); ok {
+		if intention.RegistryAppendResult != nil &&
+			(intention.RegistryAppendResult.Offset != result.Offset || intention.RegistryAppendResult.Sha256 != result.Sha256) {
+			return &RecoverRefusalError{
+				Message: fmt.Sprintf(
+					"adopt-anyway registry proof mismatch: stage=%s registry_head=%s persisted_offset=%d persisted_sha=%s actual_offset=%d actual_sha=%s",
+					intention.Stage, registryHead, intention.RegistryAppendResult.Offset, intention.RegistryAppendResult.Sha256, result.Offset, result.Sha256,
+				),
+			}
+		}
+		if intention.RegistryAppendResult == nil {
 			intention.RegistryAppendResult = &result
 			if err := store.Save(*intention); err != nil {
 				return err
@@ -275,11 +289,33 @@ func RecoverClearSentinelLocked(runCtx internalio.RunContext, lock *internalio.F
 	return recoverClearSentinelUnlocked(runCtx)
 }
 
-func recoverClearSentinelUnlocked(runCtx internalio.RunContext) error {
-	if err := removeNeedsRecoverySentinels(runCtx); err != nil {
+func RecoverClearSentinelAndTerminalizeLocked(runCtx internalio.RunContext, lock *internalio.FileLock, pr int, appendCompleted bool, at time.Time) error {
+	if err := requireRecoverPromotionLock(runCtx, lock); err != nil {
 		return err
 	}
-	return writeClearedSentinelMarker(runCtx)
+	if appendCompleted {
+		if err := state.NewWriter(runCtx).Append(contracts.StateEntry{
+			Kind: contracts.StateKindCompleted,
+			Value: contracts.StateEntryCompleted{
+				Kind:   contracts.StateKindCompleted,
+				PR:     pr,
+				RunID:  runCtx.RunID,
+				Step:   contracts.FailedStep70,
+				Detail: "sentinel_manually_cleared",
+				At:     at,
+			},
+		}); err != nil {
+			return err
+		}
+	}
+	return recoverClearSentinelUnlocked(runCtx)
+}
+
+func recoverClearSentinelUnlocked(runCtx internalio.RunContext) error {
+	if err := writeClearedSentinelMarker(runCtx); err != nil {
+		return err
+	}
+	return removeNeedsRecoverySentinels(runCtx)
 }
 
 func withRecoverPromotionLock(ctx context.Context, runCtx internalio.RunContext, fn func(*internalio.FileLock) error) error {
