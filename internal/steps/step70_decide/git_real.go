@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/nishimoto265/auto-improve/internal/gitremote"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/worktreecleanup"
 )
@@ -102,26 +103,8 @@ func (g RealGitOps) remotePushURL(ctx context.Context, remote string) string {
 	if err != nil {
 		return g.remoteURL(ctx, remote)
 	}
-	if remoteURL := preferredRemoteURLForAuth(string(out)); remoteURL != "" {
+	if remoteURL := gitremote.PreferredRemoteURLForAuth(string(out)); remoteURL != "" {
 		return remoteURL
 	}
 	return g.remoteURL(ctx, remote)
-}
-
-func preferredRemoteURLForAuth(output string) string {
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	first := ""
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if first == "" {
-			first = line
-		}
-		if strings.HasPrefix(strings.ToLower(line), "https://") {
-			return line
-		}
-	}
-	return first
 }
