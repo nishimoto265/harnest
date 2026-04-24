@@ -33,6 +33,18 @@ func RegistryLines(path string) ([]RegistryLine, error) {
 	return readRegistryLines(path)
 }
 
+func RegistryEntries(path string) ([]contracts.RuleRegistryEntry, error) {
+	lines, err := RegistryLines(path)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]contracts.RuleRegistryEntry, 0, len(lines))
+	for _, line := range lines {
+		entries = append(entries, line.Entry)
+	}
+	return entries, nil
+}
+
 func AppendRegistryEntry(path string, entry contracts.RuleRegistryEntry) (contracts.RegistryAppendResult, error) {
 	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
 		return contracts.RegistryAppendResult{}, err

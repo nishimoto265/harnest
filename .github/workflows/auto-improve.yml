@@ -49,6 +49,38 @@ on:
         required: false
         default: codex
         type: string
+      implementer_provider:
+        description: "Provider profile for implementation roles"
+        required: true
+        type: choice
+        default: claude
+        options:
+          - claude
+          - codex
+      judge_primary_provider:
+        description: "Provider profile for primary judge role"
+        required: true
+        type: choice
+        default: claude
+        options:
+          - claude
+          - codex
+      judge_secondary_provider:
+        description: "Provider profile for secondary judge role"
+        required: true
+        type: choice
+        default: codex
+        options:
+          - claude
+          - codex
+      judge_arbiter_provider:
+        description: "Provider profile for arbiter judge role"
+        required: true
+        type: choice
+        default: codex
+        options:
+          - claude
+          - codex
 
 concurrency:
   group: auto-improve-prod
@@ -89,6 +121,10 @@ jobs:
           INPUT_WORKTREE_BASE: ${{ inputs.worktree_base }}
           INPUT_CLAUDE_CLI_PATH: ${{ inputs.claude_cli_path }}
           INPUT_CODEX_CLI_PATH: ${{ inputs.codex_cli_path }}
+          INPUT_IMPLEMENTER_PROVIDER: ${{ inputs.implementer_provider }}
+          INPUT_JUDGE_PRIMARY_PROVIDER: ${{ inputs.judge_primary_provider }}
+          INPUT_JUDGE_SECONDARY_PROVIDER: ${{ inputs.judge_secondary_provider }}
+          INPUT_JUDGE_ARBITER_PROVIDER: ${{ inputs.judge_arbiter_provider }}
           REPOSITORY_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
@@ -110,6 +146,29 @@ jobs:
 
           mkdir -p "${runs_base}" "${worktree_base}"
 
+          yaml_quote() {
+            local value="${1}"
+            value="${value//\\/\\\\}"
+            value="${value//\"/\\\"}"
+            printf '"%s"' "${value}"
+          }
+
+          {
+            printf 'profiles:\n'
+            printf '  claude:\n'
+            printf '    provider: claude\n'
+            printf '    binary: %s\n' "$(yaml_quote "${INPUT_CLAUDE_CLI_PATH}")"
+            printf '    args: ["-p"]\n'
+            printf '  codex:\n'
+            printf '    provider: codex\n'
+            printf '    binary: %s\n' "$(yaml_quote "${INPUT_CODEX_CLI_PATH}")"
+            printf 'roles:\n'
+            printf '  implementer: %s\n' "$(yaml_quote "${INPUT_IMPLEMENTER_PROVIDER}")"
+            printf '  judge_primary: %s\n' "$(yaml_quote "${INPUT_JUDGE_PRIMARY_PROVIDER}")"
+            printf '  judge_secondary: %s\n' "$(yaml_quote "${INPUT_JUDGE_SECONDARY_PROVIDER}")"
+            printf '  judge_arbiter: %s\n' "$(yaml_quote "${INPUT_JUDGE_ARBITER_PROVIDER}")"
+          } > agents.yaml
+
           cat > config.yaml <<EOF
           repo:
             github: "${repo_github}"
@@ -120,6 +179,7 @@ jobs:
             runs: "${runs_base}"
           worktree:
             base: "${worktree_base}"
+          agent_config_path: "./agents.yaml"
           claude_cli_path: "${INPUT_CLAUDE_CLI_PATH}"
           codex_cli_path: "${INPUT_CODEX_CLI_PATH}"
           EOF

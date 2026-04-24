@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/registryview"
@@ -63,7 +62,7 @@ func loadActiveRuleSnapshots(runCtx internalio.RunContext) ([]activeRuleSnapshot
 		}
 		return nil, fmt.Errorf("judges: stat rules registry: %w", err)
 	}
-	entries, err := internalio.ReadJSONL[contracts.RuleRegistryEntry](registryPath)
+	entries, err := internalio.RegistryEntries(registryPath)
 	if err != nil {
 		return nil, fmt.Errorf("judges: read rules registry: %w", err)
 	}

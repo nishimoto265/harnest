@@ -63,7 +63,7 @@ func Run(ctx context.Context, cfg Config) (*contracts.Candidates, error) {
 	if err != nil {
 		return nil, err
 	}
-	registry, err := internalio.ReadJSONL[contracts.RuleRegistryEntry](cfg.registryPath())
+	registry, err := internalio.RegistryEntries(cfg.registryPath())
 	if err != nil {
 		return nil, err
 	}
