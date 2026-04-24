@@ -2,12 +2,15 @@ package processenv
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/nishimoto265/auto-improve/internal/gitremote"
 )
 
 // defaultTrustedPATH is the fixed PATH used for every sanitized subprocess env.
@@ -151,10 +154,29 @@ func GitLocalEnv(extra ...string) []string {
 
 // GitNetworkEnv returns the hardened env for network-crossing harness git.
 // Network auth env allowed by SanitizeForNetworkExec is preserved, but ambient
-// credential helpers stay reset. If raw HTTPS git auth needs a token, add a
-// call-site-scoped askpass/header instead of re-enabling global helpers here.
+// credential helpers stay reset. Prefer GitNetworkEnvForRemoteURL when the
+// remote URL is known so raw HTTPS git can receive scoped token auth.
 func GitNetworkEnv(extra ...string) []string {
 	return appendSafeGitProfile(SanitizeForNetworkExec(extra...))
+}
+
+// GitNetworkEnvForRemoteURL returns GitNetworkEnv plus an HTTPS-only GitHub
+// Authorization extraheader scoped to the remote host when GH_TOKEN or
+// GITHUB_TOKEN is present. The header is only added for github.com or GH_HOST,
+// so a token is not sent to same-slug remotes on unrelated hosts.
+func GitNetworkEnvForRemoteURL(remoteURL string, extra ...string) []string {
+	env := SanitizeForNetworkExec(extra...)
+	config := make([]gitConfigEntry, 0, 1)
+	token := gitTokenFromEnv(env)
+	if token != "" {
+		if info, err := gitremote.ParseGitHubRemote(remoteURL, gitremote.AllowedGitHubHostsFromEnv(env)); err == nil && info.Scheme == "https" {
+			config = append(config, gitConfigEntry{
+				key:   "http.https://" + info.Host + "/.extraheader",
+				value: "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)),
+			})
+		}
+	}
+	return appendSafeGitProfileWithConfig(env, config)
 }
 
 func sanitize(extra []string, allow func(string) bool) []string {
@@ -225,7 +247,16 @@ func networkAllowlist(key string) bool {
 	return false
 }
 
+type gitConfigEntry struct {
+	key   string
+	value string
+}
+
 func appendSafeGitProfile(env []string) []string {
+	return appendSafeGitProfileWithConfig(env, nil)
+}
+
+func appendSafeGitProfileWithConfig(env []string, extraConfig []gitConfigEntry) []string {
 	filtered := make([]string, 0, len(env)+20)
 	for _, item := range env {
 		key, _, ok := strings.Cut(item, "=")
@@ -235,10 +266,7 @@ func appendSafeGitProfile(env []string) []string {
 		filtered = append(filtered, item)
 	}
 
-	config := []struct {
-		key   string
-		value string
-	}{
+	config := []gitConfigEntry{
 		// Empty credential.helper resets helpers inherited from lower-priority
 		// config scopes without preventing explicit token/ssh-agent auth.
 		{key: "credential.helper", value: ""},
@@ -247,6 +275,7 @@ func appendSafeGitProfile(env []string) []string {
 		{key: "core.sshCommand", value: "ssh -F " + os.DevNull},
 		{key: "diff.external", value: ""},
 	}
+	config = append(config, extraConfig...)
 
 	filtered = append(filtered,
 		"GIT_CONFIG_NOSYSTEM=1",
@@ -267,6 +296,25 @@ func appendSafeGitProfile(env []string) []string {
 		"GIT_TERMINAL_PROMPT=0",
 	)
 	return filtered
+}
+
+func gitTokenFromEnv(env []string) string {
+	fallback := ""
+	for _, item := range env {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok || value == "" {
+			continue
+		}
+		switch key {
+		case "GH_TOKEN":
+			return value
+		case "GITHUB_TOKEN":
+			if fallback == "" {
+				fallback = value
+			}
+		}
+	}
+	return fallback
 }
 
 func trustedFalsePath() string {
