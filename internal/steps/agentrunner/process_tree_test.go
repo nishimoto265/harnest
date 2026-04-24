@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/stretchr/testify/require"
 )
 
@@ -511,6 +512,57 @@ func TestCleanupProcessTree_JoinsGroupKillErrorWithTimeout(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrCleanupTimeout)
 	require.ErrorIs(t, err, want)
+}
+
+func TestProcessTreePSUsesTrustedPathAndSanitizedEnv(t *testing.T) {
+	trustedDir := t.TempDir()
+	shadowDir := t.TempDir()
+	envPath := filepath.Join(t.TempDir(), "ps.env")
+	trustedPS := filepath.Join(trustedDir, "ps")
+	shadowPS := filepath.Join(shadowDir, "ps")
+	require.NoError(t, os.WriteFile(trustedPS, []byte(`#!/bin/sh
+/usr/bin/env > "$AUTO_IMPROVE_PS_ENV_PATH"
+case "$*" in
+  "-axo pid=,sess=")
+    printf " 11 22\n 12 22\n 13 23\n"
+    ;;
+  "-axo pid=,ppid=")
+    printf " 20 1\n 21 20\n"
+    ;;
+  "-axo pid=,pgid=")
+    printf " 30 40\n 31 41\n"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`), 0o755))
+	require.NoError(t, os.WriteFile(shadowPS, []byte("#!/bin/sh\nexit 99\n"), 0o755))
+	restore := processenv.SetTrustedPathForTest(trustedDir)
+	t.Cleanup(restore)
+	t.Setenv("PATH", shadowDir)
+	t.Setenv("BASH_ENV", "/tmp/malicious-bash-env")
+	t.Setenv("AUTO_IMPROVE_PS_ENV_PATH", envPath)
+
+	sessionPIDs, err := sessionProcesses(22)
+	require.NoError(t, err)
+	require.Equal(t, []int{11, 12}, sessionPIDs)
+
+	parents, err := processParents()
+	require.NoError(t, err)
+	require.Equal(t, []processParent{{pid: 20, ppid: 1}, {pid: 21, ppid: 20}}, parents)
+
+	groupPIDs, err := processGroupMembers(40)
+	require.NoError(t, err)
+	require.Equal(t, []int{30}, groupPIDs)
+
+	envBytes, err := os.ReadFile(envPath)
+	require.NoError(t, err)
+	env := string(envBytes)
+	require.Contains(t, env, "PATH="+trustedDir)
+	require.Contains(t, env, "AUTO_IMPROVE_PS_ENV_PATH="+envPath)
+	require.NotContains(t, env, "PATH="+shadowDir)
+	require.NotContains(t, env, "BASH_ENV=/tmp/malicious-bash-env")
 }
 
 func writeDetachedGrandchildHelper(t *testing.T, dir string) string {

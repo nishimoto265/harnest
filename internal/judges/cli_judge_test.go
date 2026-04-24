@@ -67,6 +67,49 @@ EOF
 	assert.Len(t, output.Compliance, 1)
 }
 
+func TestCodexJudgeExecArgsAreReadOnlyAndKeepProfileArgs(t *testing.T) {
+	args, err := codexJudgeExecArgs([]string{"--profile", "judge-ci", "--model", "gpt-5"}, "/tmp/worktree", "/tmp/output.json")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{
+		"exec",
+		"--sandbox", "read-only",
+		"--skip-git-repo-check",
+		"--ephemeral",
+		"-C", "/tmp/worktree",
+		"--profile", "judge-ci",
+		"--model", "gpt-5",
+		"-o", "/tmp/output.json",
+		"-",
+	}, args)
+	assert.NotContains(t, args, "--full-auto")
+	assert.NotContains(t, args, "--dangerously-bypass-approvals-and-sandbox")
+}
+
+func TestCodexJudgeExecArgsRejectUnsafeProfileArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "full auto", args: []string{"--full-auto"}},
+		{name: "danger bypass", args: []string{"--dangerously-bypass-approvals-and-sandbox"}},
+		{name: "workspace write sandbox", args: []string{"--sandbox", "workspace-write"}},
+		{name: "danger sandbox equals", args: []string{"--sandbox=danger-full-access"}},
+		{name: "short sandbox", args: []string{"-s", "workspace-write"}},
+		{name: "sandbox config", args: []string{"-c", `sandbox_mode="danger-full-access"`}},
+		{name: "approval config", args: []string{"--config=approval_policy=\"never\""}},
+		{name: "shell env config", args: []string{"-c", "shell_environment_policy.inherit=all"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args, err := codexJudgeExecArgs(tt.args, "/tmp/worktree", "/tmp/output.json")
+			require.Error(t, err)
+			assert.Nil(t, args)
+		})
+	}
+}
+
 func TestCLIJudgeClaudeScoreOutput(t *testing.T) {
 	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "output.patch")
