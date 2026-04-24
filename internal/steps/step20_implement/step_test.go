@@ -1364,6 +1364,12 @@ func TestPerformRescue_RemovesIgnoredFiles(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(fx.worktree, ".env.local"))
+	matches, err := filepath.Glob(filepath.Join(fx.agentDir, rescuedDirName, "*", "ignored", ".env.local"))
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+	rescuedBytes, err := os.ReadFile(matches[0])
+	require.NoError(t, err)
+	assert.Equal(t, "secret\n", string(rescuedBytes))
 }
 
 func TestPerformRescue_RequiresManualRecoveryForUnverifiedDetachedWorktreeWriter(t *testing.T) {

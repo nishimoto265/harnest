@@ -474,7 +474,8 @@ func loadLocalSnapshot(runsBase string) (snapshot, error) {
 		rules:           make(map[string][]byte),
 	}
 	rulesSrc := filepath.Join(runsBase, rulesLocalDirName)
-	if _, err := os.Stat(rulesSrc); err != nil {
+	info, err := os.Lstat(rulesSrc)
+	if err != nil {
 		if os.IsNotExist(err) {
 			if err := validateSnapshot(snap); err != nil {
 				return snapshot{}, err
@@ -482,6 +483,9 @@ func loadLocalSnapshot(runsBase string) (snapshot, error) {
 			return snap, nil
 		}
 		return snapshot{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return snapshot{}, fmt.Errorf("policyrepo: local rules path must be a real directory: %s", rulesSrc)
 	}
 	err = filepath.WalkDir(rulesSrc, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -493,6 +497,16 @@ func loadLocalSnapshot(runsBase string) (snapshot, error) {
 		}
 		if rel == "." || d.IsDir() {
 			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("policyrepo: local rule path must not be a symlink: %s", path)
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("policyrepo: local rule path must be a regular file: %s", path)
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {

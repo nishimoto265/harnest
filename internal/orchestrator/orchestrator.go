@@ -651,6 +651,13 @@ func (o *Orchestrator) resolveStartStep(run *StepRunContext) (contracts.FailedSt
 	if ok, err := hasRunRelative(run.IO, "60/done.marker"); err != nil {
 		return "", err
 	} else if ok {
+		timedOut, err := allFinalizedManifestsTimedOut(run, 2)
+		if err != nil {
+			return "", err
+		}
+		if timedOut {
+			return "", errAllPass2TimedOutResume
+		}
 		return contracts.FailedStep60, nil
 	}
 	if done, err := taskPackageHasAllManifests(run.IO, 2, run.TaskPackage); err != nil {
@@ -673,6 +680,13 @@ func (o *Orchestrator) resolveStartStep(run *StepRunContext) (contracts.FailedSt
 	if ok, err := hasRunRelative(run.IO, "30/done.marker"); err != nil {
 		return "", err
 	} else if ok {
+		timedOut, err := allFinalizedManifestsTimedOut(run, 1)
+		if err != nil {
+			return "", err
+		}
+		if timedOut {
+			return "", errAllPass1TimedOutResume
+		}
 		scorableAgents, err := scorableAgentsForPass(run.IO, run.TaskPackage, 1)
 		if err != nil {
 			return "", err

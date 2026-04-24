@@ -615,6 +615,44 @@ func TestRun_ResumeAllTimeoutPass1RecordsTimeout(t *testing.T) {
 	assert.Empty(t, recorder.snapshot())
 }
 
+func TestRun_ResumeAllTimeoutPass1BeatsStaleStep30Marker(t *testing.T) {
+	cfg := testConfig(t)
+	runID := contracts.RunID("2026-04-21-PR456-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, seedResumeRun(t, runCtx, 456))
+	require.NoError(t, os.RemoveAll(filepath.Join(runCtx.RunDir(), "40")))
+	require.NoError(t, os.RemoveAll(filepath.Join(runCtx.RunDir(), "50-pass2")))
+	require.NoError(t, os.RemoveAll(filepath.Join(runCtx.RunDir(), "60")))
+	overwriteTimeoutManifests(t, runCtx, 1)
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	recorder := &callRecorder{}
+	orch.steps = Steps{
+		Step10:  recordingStep{label: "10", recorder: recorder},
+		Step20:  recordingAgentSteps("20", recorder),
+		Step30:  recordingStep{label: "30", recorder: recorder},
+		Step40:  recordingStep{label: "40", recorder: recorder},
+		Step50:  recordingAgentSteps("50", recorder),
+		Step60:  recordingStep{label: "60", recorder: recorder},
+		Step70:  recordingStep{label: "70", recorder: recorder},
+		Archive: recordingStep{label: "archive", recorder: recorder},
+	}
+
+	require.NoError(t, orch.Run(context.Background(), 456, RunOptions{RunID: runID}))
+
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindTimeout, last.Kind)
+	timeout, ok := last.Value.(contracts.StateEntryTimeout)
+	require.True(t, ok)
+	assert.Equal(t, contracts.FailedStep20, timeout.Step)
+	assert.Empty(t, recorder.snapshot())
+}
+
 func TestRun_AllNonScorablePass2StopsBeforeStep70(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
@@ -645,6 +683,7 @@ func TestRun_AllNonScorablePass2StopsBeforeStep70(t *testing.T) {
 	failed, ok := last.Value.(contracts.StateEntryFailed)
 	require.True(t, ok)
 	assert.Equal(t, "no_scorable_agents", failed.Reason)
+	assert.Equal(t, contracts.FailedStep50, failed.Step)
 	assert.NotContains(t, recorder.snapshot(), "70")
 }
 
@@ -705,6 +744,41 @@ func TestRun_ResumeAllTimeoutPass2RecordsTimeout(t *testing.T) {
 	}
 
 	require.NoError(t, orch.Run(context.Background(), 455, RunOptions{RunID: runID}))
+
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindTimeout, last.Kind)
+	timeout, ok := last.Value.(contracts.StateEntryTimeout)
+	require.True(t, ok)
+	assert.Equal(t, contracts.FailedStep50, timeout.Step)
+	assert.Empty(t, recorder.snapshot())
+}
+
+func TestRun_ResumeAllTimeoutPass2BeatsStaleStep60Marker(t *testing.T) {
+	cfg := testConfig(t)
+	runID := contracts.RunID("2026-04-21-PR457-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, seedResumeRun(t, runCtx, 457))
+	overwriteTimeoutManifests(t, runCtx, 2)
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	recorder := &callRecorder{}
+	orch.steps = Steps{
+		Step10:  recordingStep{label: "10", recorder: recorder},
+		Step20:  recordingAgentSteps("20", recorder),
+		Step30:  recordingStep{label: "30", recorder: recorder},
+		Step40:  recordingStep{label: "40", recorder: recorder},
+		Step50:  recordingAgentSteps("50", recorder),
+		Step60:  recordingStep{label: "60", recorder: recorder},
+		Step70:  recordingStep{label: "70", recorder: recorder},
+		Archive: recordingStep{label: "archive", recorder: recorder},
+	}
+
+	require.NoError(t, orch.Run(context.Background(), 457, RunOptions{RunID: runID}))
 
 	events, err := state.ScanEventsForRun(runCtx, runID)
 	require.NoError(t, err)

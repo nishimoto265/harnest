@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/worktreecleanup"
 	"github.com/stretchr/testify/assert"
@@ -17,6 +18,7 @@ import (
 )
 
 var _ worktreecleanup.BranchRemover = RealGitOps{}
+var _ worktreecleanup.UnregisteredWorktreeVerifier = RealGitOps{}
 
 func TestRealGitOpsRemoteHeadAndPushForceWithLeaseLocalBareOrigin(t *testing.T) {
 	fixture := newRealGitFixture(t)
@@ -92,6 +94,30 @@ func TestRealGitOpsDeleteBranch(t *testing.T) {
 	err := fixture.runGitError(t, fixture.repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	require.Error(t, err)
 	require.NoError(t, gitOps.DeleteBranch(ctx, branch), "missing branch deletion is idempotent")
+}
+
+func TestRealGitOpsVerifyUnregisteredWorktreeRemoval(t *testing.T) {
+	fixture := newRealGitFixture(t)
+	ctx := context.Background()
+	gitOps := RealGitOps{RepoDir: fixture.repo, Remote: "origin"}
+
+	worktreePath := filepath.Join(fixture.root, "verify-worktree")
+	branch := "auto-improve/verify-test"
+	fixture.runGit(t, fixture.repo, "worktree", "add", "-b", branch, worktreePath, "HEAD")
+	allocation := contracts.WorktreeAllocation{
+		Agent:   "a1",
+		Pass:    1,
+		Path:    worktreePath,
+		Branch:  branch,
+		BaseSHA: strings.Repeat("a", 40),
+		HeadSHA: strings.Repeat("b", 40),
+	}
+
+	require.NoError(t, gitOps.VerifyUnregisteredWorktreeRemoval(ctx, allocation))
+	allocation.Branch = "auto-improve/wrong-branch"
+	err := gitOps.VerifyUnregisteredWorktreeRemoval(ctx, allocation)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, worktreecleanup.ErrUnregistered)
 }
 
 func TestRealGitOpsScopesHTTPSTokenAuthToResolvedRemote(t *testing.T) {

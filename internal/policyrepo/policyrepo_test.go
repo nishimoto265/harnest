@@ -265,6 +265,27 @@ func TestPublishSnapshotPushesRunsBasePolicyToBranch(t *testing.T) {
 	assert.Contains(t, body, "# Updated rule")
 }
 
+func TestPublishSnapshotRejectsSymlinkedLocalRule(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, rulesLocalDirName), 0o755))
+	const updatedRule = "# Updated rule\n\nnew body\n"
+	registry := "{\"kind\":\"added\",\"schema_version\":\"1\",\"rule_id\":\"r-sync-message-details\",\"rule_path\":\"rules/r-sync-message-details.md\",\"sha256\":\"" + sha256Hex([]byte(updatedRule)) + "\",\"idempotency_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_seq\":1,\"prev_hash\":\"\",\"by_run_id\":\"2026-04-23-PR1-feedbee\",\"at\":\"2026-04-23T08:00:00Z\"}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, registryLocalName), []byte(registry), 0o644))
+	target := filepath.Join(t.TempDir(), "outside-rule.md")
+	require.NoError(t, os.WriteFile(target, []byte(updatedRule), 0o644))
+	linkPath := filepath.Join(runsBase, rulesLocalDirName, "r-sync-message-details.md")
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	headBefore := strings.TrimSpace(string(mustGitOutput(t, repoRoot, "rev-parse", "origin/policy")))
+	_, err := PublishSnapshot(context.Background(), repoRoot, "policy", headBefore, runsBase, "2026-04-23-PR2-adopt")
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "must not be a symlink")
+}
+
 func TestPreparedPublishPushUsesScopedHTTPSTokenAuth(t *testing.T) {
 	t.Setenv("GH_TOKEN", "test-token")
 	t.Setenv("GH_HOST", "github.example.com")

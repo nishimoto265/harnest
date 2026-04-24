@@ -196,6 +196,7 @@ type PerformOptions struct {
 	WriteGitOutput func(context.Context, string, string, ...string) error
 	WriteBundle    func(context.Context, string, string, string) (int, string, error)
 	CopyUntracked  func(context.Context, string, string, *agentrunner.RescueArtifactBudget) ([]agentrunner.RescueArtifactDigest, error)
+	CopyIgnored    func(context.Context, string, string, *agentrunner.RescueArtifactBudget) ([]agentrunner.RescueArtifactDigest, error)
 	WriteIgnored   func(context.Context, string, string) error
 	FileDigest     func(string) (string, error)
 	VerifyState    func(string) error
@@ -307,6 +308,9 @@ func validatePerformOptions(opts PerformOptions) error {
 	if opts.CopyUntracked == nil {
 		return errors.New("implementrescue: perform missing CopyUntracked")
 	}
+	if opts.CopyIgnored == nil {
+		return errors.New("implementrescue: perform missing CopyIgnored")
+	}
 	if opts.WriteIgnored == nil {
 		return errors.New("implementrescue: perform missing WriteIgnored")
 	}
@@ -377,6 +381,12 @@ func CaptureArtifacts(ctx context.Context, opts PerformOptions, rescueDir, headS
 		return MapCaptureError(opts.StepName, err)
 	}
 	artifacts = append(artifacts, untrackedArtifacts...)
+
+	ignoredArtifacts, err := opts.CopyIgnored(ctx, opts.Allocation.Path, rescueDir, &budget)
+	if err != nil {
+		return MapCaptureError(opts.StepName, err)
+	}
+	artifacts = append(artifacts, ignoredArtifacts...)
 
 	ignoredPath := filepath.Join(rescueDir, "ignored.txt")
 	if err := ctx.Err(); err != nil {
@@ -505,12 +515,20 @@ func writeFullHeadBundle(ctx context.Context, repoPath, bundlePath string, gitOu
 type CopyOpenFileFunc func(context.Context, *os.File, string, os.FileMode, int64) error
 
 func CopyUntrackedFilesWithBudget(ctx context.Context, stepName, repoPath, rescueDir string, budget *agentrunner.RescueArtifactBudget, gitOutputBytes GitOutputBytesFunc, ensureDir func(string) error, copyOpenFile CopyOpenFileFunc, fileDigest func(string) (string, error)) ([]agentrunner.RescueArtifactDigest, error) {
-	output, err := gitOutputBytes(ctx, repoPath, "ls-files", "--others", "--exclude-standard", "-z")
+	return copyOtherFilesWithBudget(ctx, stepName, repoPath, rescueDir, "untracked", "untracked-symlinks.txt", []string{"ls-files", "--others", "--exclude-standard", "-z"}, budget, gitOutputBytes, ensureDir, copyOpenFile, fileDigest)
+}
+
+func CopyIgnoredFilesWithBudget(ctx context.Context, stepName, repoPath, rescueDir string, budget *agentrunner.RescueArtifactBudget, gitOutputBytes GitOutputBytesFunc, ensureDir func(string) error, copyOpenFile CopyOpenFileFunc, fileDigest func(string) (string, error)) ([]agentrunner.RescueArtifactDigest, error) {
+	return copyOtherFilesWithBudget(ctx, stepName, repoPath, rescueDir, "ignored", "ignored-skipped.txt", []string{"ls-files", "--others", "-i", "--exclude-standard", "-z"}, budget, gitOutputBytes, ensureDir, copyOpenFile, fileDigest)
+}
+
+func copyOtherFilesWithBudget(ctx context.Context, stepName, repoPath, rescueDir, rescueSubdir, skipLogName string, listArgs []string, budget *agentrunner.RescueArtifactBudget, gitOutputBytes GitOutputBytesFunc, ensureDir func(string) error, copyOpenFile CopyOpenFileFunc, fileDigest func(string) (string, error)) ([]agentrunner.RescueArtifactDigest, error) {
+	output, err := gitOutputBytes(ctx, repoPath, listArgs...)
 	if err != nil {
 		return nil, err
 	}
 	entries := strings.Split(string(output), "\x00")
-	rescueBase := filepath.Join(rescueDir, "untracked")
+	rescueBase := filepath.Join(rescueDir, rescueSubdir)
 	skipLog := make([]string, 0)
 	artifacts := make([]agentrunner.RescueArtifactDigest, 0, len(entries)+1)
 	for _, entry := range entries {
@@ -547,7 +565,8 @@ func CopyUntrackedFilesWithBudget(ctx context.Context, stepName, repoPath, rescu
 			skipLog = append(skipLog, fmt.Sprintf("skipped_too_large:%s:%d", cleaned, size))
 			continue
 		}
-		if err := budget.RecordFile(filepath.ToSlash(filepath.Join("untracked", cleaned)), size); err != nil {
+		artifactPath := filepath.ToSlash(filepath.Join(rescueSubdir, cleaned))
+		if err := budget.RecordFile(artifactPath, size); err != nil {
 			_ = file.Close()
 			return nil, err
 		}
@@ -563,22 +582,22 @@ func CopyUntrackedFilesWithBudget(ctx context.Context, stepName, repoPath, rescu
 			return nil, err
 		}
 		artifacts = append(artifacts, agentrunner.RescueArtifactDigest{
-			Path:   filepath.ToSlash(filepath.Join("untracked", cleaned)),
+			Path:   artifactPath,
 			SHA256: digest,
 		})
 	}
-	symlinkPath := filepath.Join(rescueDir, "untracked-symlinks.txt")
+	symlinkPath := filepath.Join(rescueDir, skipLogName)
 	if err := internalio.WriteAtomic(symlinkPath, []byte(strings.Join(skipLog, "\n"))); err != nil {
 		return nil, err
 	}
-	if err := recordArtifact(budget, symlinkPath, "untracked-symlinks.txt"); err != nil {
+	if err := recordArtifact(budget, symlinkPath, skipLogName); err != nil {
 		return nil, err
 	}
 	digest, err := fileDigest(symlinkPath)
 	if err != nil {
 		return nil, err
 	}
-	artifacts = append(artifacts, agentrunner.RescueArtifactDigest{Path: "untracked-symlinks.txt", SHA256: digest})
+	artifacts = append(artifacts, agentrunner.RescueArtifactDigest{Path: skipLogName, SHA256: digest})
 	return artifacts, nil
 }
 

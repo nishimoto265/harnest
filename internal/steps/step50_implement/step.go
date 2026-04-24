@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/agents"
@@ -310,7 +311,7 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	collectCtx, cancel := context.WithTimeout(ctx, successCollectTTL)
 	defer cancel()
 
-	headSHA, err := gitOutputContext(collectCtx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
+	headSHA, err := gitOutputContext(collectCtx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
 		return err
 	}
@@ -545,7 +546,7 @@ func verifyAllocationHead(ctx context.Context, allocation contracts.WorktreeAllo
 	if allocation.HeadSHA == "" {
 		return nil
 	}
-	head, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
+	head, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
 		return fmt.Errorf("step50: rev-parse HEAD for allocation %s: %w", allocation.Path, err)
 	}
@@ -556,7 +557,7 @@ func verifyAllocationHead(ctx context.Context, allocation contracts.WorktreeAllo
 }
 
 func verifyExistingAllocationWorktree(ctx context.Context, allocation contracts.WorktreeAllocation) error {
-	currentBranch, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "branch", "--show-current")
+	currentBranch, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "branch", "--show-current")
 	if err != nil {
 		return fmt.Errorf("step50: branch --show-current for allocation %s: %w", allocation.Path, err)
 	}
@@ -571,30 +572,12 @@ func verifyExistingAllocationWorktree(ctx context.Context, allocation contracts.
 			return fmt.Errorf("step50: allocation HEAD mismatch: path=%s want=%s", allocation.Path, allocation.HeadSHA)
 		}
 	}
-	status, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "status", "--porcelain", "--ignored")
+	status, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "status", "--porcelain", "--ignored")
 	if err != nil {
 		return fmt.Errorf("step50: status --porcelain --ignored for allocation %s: %w", allocation.Path, err)
 	}
 	if status != "" {
 		return fmt.Errorf("step50: existing worktree is dirty: path=%s", allocation.Path)
-	}
-	return nil
-}
-
-func restoreAllocationWorktree(ctx context.Context, allocation contracts.WorktreeAllocation, expectedBaseSHA string) error {
-	targetRef := expectedBaseSHA
-	currentHead, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
-	if err == nil && currentHead == expectedBaseSHA {
-		targetRef = "HEAD"
-	}
-	if err := runGitCommand(ctx, allocation.Path, "checkout", "--force", "-B", allocation.Branch, targetRef); err != nil {
-		return err
-	}
-	if err := runGitCommand(ctx, allocation.Path, "reset", "--hard", targetRef); err != nil {
-		return err
-	}
-	if err := runGitCommand(ctx, allocation.Path, "clean", "-fdx"); err != nil {
-		return err
 	}
 	return nil
 }
@@ -664,24 +647,24 @@ func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeA
 	if _, err := gitOutputContext(ctx, identity, allocation.Path, "add", "-A", "--", ".", ":(exclude)"+checklistFileName); err != nil {
 		return "", "", err
 	}
-	staged, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "diff", "--no-ext-diff", "--cached", "--name-only", "--", ".", ":(exclude)"+checklistFileName)
+	staged, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "diff", "--no-ext-diff", "--cached", "--name-only", "--", ".", ":(exclude)"+checklistFileName)
 	if err != nil {
 		return "", "", err
 	}
 	if staged == "" {
 		return "", "", errors.New("step50: synthetic success commit found no staged changes")
 	}
-	parent, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "rev-parse", "HEAD")
+	parent, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
 	if err != nil {
 		return "", "", err
 	}
-	tree, err := gitOutputContext(ctx, stringsTrimSpace, allocation.Path, "write-tree")
+	tree, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "write-tree")
 	if err != nil {
 		return "", "", err
 	}
 	commitSHA, err := gitOutputContextWithEnv(
 		ctx,
-		stringsTrimSpace,
+		strings.TrimSpace,
 		allocation.Path,
 		syntheticCommitEnv(),
 		"commit-tree",

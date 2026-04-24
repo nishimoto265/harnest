@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/gitremote"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/worktreecleanup"
@@ -72,6 +73,10 @@ func (g RealGitOps) RemoveWorktree(ctx context.Context, path string) error {
 
 func (g RealGitOps) DeleteBranch(ctx context.Context, branch string) error {
 	return worktreecleanup.RepoGit{RepoDir: g.RepoDir}.DeleteBranch(ctx, branch)
+}
+
+func (g RealGitOps) VerifyUnregisteredWorktreeRemoval(ctx context.Context, allocation contracts.WorktreeAllocation) error {
+	return worktreecleanup.RepoGit{RepoDir: g.RepoDir}.VerifyUnregisteredWorktreeRemoval(ctx, allocation)
 }
 
 func (g RealGitOps) remoteName() string {

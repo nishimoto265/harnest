@@ -81,6 +81,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		WriteGitOutput: writeGitOutputContext,
 		WriteBundle:    writeCommitBundle,
 		CopyUntracked:  copyUntrackedFilesWithBudget,
+		CopyIgnored:    copyIgnoredFilesWithBudget,
 		WriteIgnored:   writeIgnoredList,
 		FileDigest:     fileDigest,
 		VerifyState:    verifyRescueState,
@@ -136,6 +137,10 @@ func writeGitOutputContext(ctx context.Context, worktreePath, target string, arg
 
 func copyUntrackedFilesWithBudget(ctx context.Context, worktreePath, rescueDir string, budget *agentrunner.RescueArtifactBudget) ([]rescueArtifactDigest, error) {
 	return implementrescue.CopyUntrackedFilesWithBudget(ctx, "step20", worktreePath, rescueDir, budget, gitOutputBytesContext, ensureDir, copyOpenFileContext, fileDigest)
+}
+
+func copyIgnoredFilesWithBudget(ctx context.Context, worktreePath, rescueDir string, budget *agentrunner.RescueArtifactBudget) ([]rescueArtifactDigest, error) {
+	return implementrescue.CopyIgnoredFilesWithBudget(ctx, "step20", worktreePath, rescueDir, budget, gitOutputBytesContext, ensureDir, copyOpenFileContext, fileDigest)
 }
 
 func writeIgnoredList(ctx context.Context, worktreePath, target string) error {
@@ -250,24 +255,6 @@ func syntheticCommitEnv() []string {
 
 func identity(s string) string {
 	return s
-}
-
-func restoreAllocationWorktree(ctx context.Context, allocation contracts.WorktreeAllocation, expectedBaseSHA string) error {
-	targetRef := expectedBaseSHA
-	currentHead, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
-	if err == nil && currentHead == expectedBaseSHA {
-		targetRef = "HEAD"
-	}
-	if _, err := gitOutputContext(ctx, identity, allocation.Path, "checkout", "--force", "-B", allocation.Branch, targetRef); err != nil {
-		return err
-	}
-	if _, err := gitOutputContext(ctx, identity, allocation.Path, "reset", "--hard", targetRef); err != nil {
-		return err
-	}
-	if _, err := gitOutputContext(ctx, identity, allocation.Path, "clean", "-fdx"); err != nil {
-		return err
-	}
-	return nil
 }
 
 func finishRescueState(agentDir string, state resumeState, nextRetry int) (int, error) {

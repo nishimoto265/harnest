@@ -1747,12 +1747,8 @@ func currentRegistryHead(path string) (string, error) {
 	return lines[len(lines)-1].Sha256, nil
 }
 
-func registryLineCount(path string) (int, error) {
-	return internalio.RegistryLineCount(path)
-}
-
 func emitRegistrySizeWarnings(runCtx internalio.RunContext, writer state.Writer, deps Deps, pr int) error {
-	count, err := registryLineCount(runCtx.RulesRegistryPath())
+	count, err := internalio.RegistryLineCount(runCtx.RulesRegistryPath())
 	if err != nil {
 		return err
 	}

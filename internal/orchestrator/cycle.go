@@ -262,6 +262,10 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 					}
 					return nil
 				}
+				if err := o.appendState(failedEntry(pr, run.IO.RunID, contracts.FailedStep50, "no_scorable_agents", "step50 completed without any scorable pass2 manifests", time.Now().UTC())); err != nil {
+					return err
+				}
+				return nil
 			}
 		case contracts.FailedStep60:
 			if noActionableCandidates(run.Candidates) {

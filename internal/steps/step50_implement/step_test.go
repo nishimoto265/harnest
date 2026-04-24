@@ -985,6 +985,12 @@ func TestPerformRescue_RemovesIgnoredFiles(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(allocation.Path, ".env.local"))
+	matches, err := filepath.Glob(filepath.Join(agentDir, rescuedDirName, "*", "ignored", ".env.local"))
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+	rescuedBytes, err := os.ReadFile(matches[0])
+	require.NoError(t, err)
+	assert.Equal(t, "secret\n", string(rescuedBytes))
 }
 
 func TestStepRun_KillsDetachedSetsidChildAfterSuccessfulExit(t *testing.T) {
@@ -1158,11 +1164,11 @@ func (r cancelAfterSuccessRunner) Run(_ context.Context, req runnerRequest) (run
 	if err := os.WriteFile(filepath.Join(req.Workdir, checklistFileName), []byte(`{"schema_version":"1","run_id":"`+string(r.runID)+`","pass":2,"agent":"`+string(r.agent)+`","items":[]}`), 0o644); err != nil {
 		return runnerResult{}, err
 	}
-	_, err := gitOutputContext(context.Background(), stringsTrimSpace, req.Workdir, "add", "implemented.txt")
+	_, err := gitOutputContext(context.Background(), strings.TrimSpace, req.Workdir, "add", "implemented.txt")
 	if err != nil {
 		return runnerResult{}, err
 	}
-	_, err = gitOutputContext(context.Background(), stringsTrimSpace, req.Workdir, "commit", "-m", "synthetic success")
+	_, err = gitOutputContext(context.Background(), strings.TrimSpace, req.Workdir, "commit", "-m", "synthetic success")
 	if err != nil {
 		return runnerResult{}, err
 	}

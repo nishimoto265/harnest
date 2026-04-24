@@ -92,6 +92,7 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		WriteGitOutput: writeGitOutputContext,
 		WriteBundle:    writeCommitBundle,
 		CopyUntracked:  copyUntrackedFilesWithBudget,
+		CopyIgnored:    copyIgnoredFilesWithBudget,
 		WriteIgnored:   writeIgnoredList,
 		FileDigest:     fileDigest,
 		VerifyState:    verifyRescueState,
@@ -191,6 +192,10 @@ func copyUntrackedFilesWithBudget(ctx context.Context, repoPath, rescueDir strin
 	return implementrescue.CopyUntrackedFilesWithBudget(ctx, "step50", repoPath, rescueDir, budget, gitOutputBytesContext, ensureDir, copyOpenFileContext, fileDigest)
 }
 
+func copyIgnoredFilesWithBudget(ctx context.Context, repoPath, rescueDir string, budget *agentrunner.RescueArtifactBudget) ([]rescueArtifactDigest, error) {
+	return implementrescue.CopyIgnoredFilesWithBudget(ctx, "step50", repoPath, rescueDir, budget, gitOutputBytesContext, ensureDir, copyOpenFileContext, fileDigest)
+}
+
 func writeIgnoredList(ctx context.Context, repoPath, dest string) error {
 	return implementrescue.WriteIgnoredList(ctx, repoPath, dest, gitOutputBytesContext)
 }
@@ -210,10 +215,6 @@ func fileDigest(path string) (string, error) {
 
 func identity(s string) string {
 	return s
-}
-
-func stringsTrimSpace(s string) string {
-	return strings.TrimSpace(s)
 }
 
 func copyOpenFileContext(ctx context.Context, in *os.File, dst string, perm os.FileMode, sizeLimit int64) error {
