@@ -88,6 +88,9 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 	} else if !ok {
 		return Target{}, false, nil
 	}
+	if hasDuplicateUpdateTarget(candidates.Candidates) {
+		return Target{}, false, nil
+	}
 
 	manifest, err := internalio.LoadScorableManifest(runCtx, 2, winningAgent)
 	if err != nil {
@@ -824,6 +827,20 @@ func promotionGatePassedWithArtifacts(runCtx internalio.RunContext, artifacts st
 		}
 	}
 	return true, nil
+}
+
+func hasDuplicateUpdateTarget(candidates []contracts.Candidate) bool {
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.Kind != contracts.CandidateKindUpdate {
+			continue
+		}
+		if _, ok := seen[candidate.TargetRuleID]; ok {
+			return true
+		}
+		seen[candidate.TargetRuleID] = struct{}{}
+	}
+	return false
 }
 
 func hasCompliantCandidateEvidence(rows []contracts.ComplianceEntry, agent contracts.AgentID, candidates *contracts.Candidates) bool {
