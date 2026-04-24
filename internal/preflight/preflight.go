@@ -174,7 +174,16 @@ func (c Checker) checkAgentBinaries(cfg config.Config) []Failure {
 			failures = append(failures, Failure{Name: string(role), Detail: err.Error()})
 			continue
 		}
-		if profile.Provider == agents.ProviderStub || profile.Provider == agents.ProviderStubViolation || profile.Provider == agents.ProviderStubAdopt || profile.Binary == "" {
+		if agents.IsGatedTestStubProvider(profile.Provider) {
+			if !agents.AllowTestStubProviders() {
+				failures = append(failures, Failure{
+					Name:   string(role),
+					Detail: fmt.Sprintf("agents: provider %q requires %s=1", profile.Provider, agents.AllowTestStubProvidersEnv),
+				})
+			}
+			continue
+		}
+		if profile.Provider == agents.ProviderStub || profile.Binary == "" {
 			continue
 		}
 		key := string(profile.Provider) + ":" + profile.Binary

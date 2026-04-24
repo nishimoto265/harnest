@@ -31,6 +31,8 @@ const (
 	ProviderStubAdopt     Provider = "stub_adopt"
 )
 
+const AllowTestStubProvidersEnv = "AUTO_IMPROVE_ALLOW_TEST_STUB_PROVIDERS"
+
 type Profile struct {
 	Provider Provider `yaml:"provider"`
 	Binary   string   `yaml:"binary"`
@@ -124,6 +126,14 @@ func inferProviderFromBinary(binary string, fallback Provider) Provider {
 	default:
 		return fallback
 	}
+}
+
+func IsGatedTestStubProvider(provider Provider) bool {
+	return provider == ProviderStubViolation || provider == ProviderStubAdopt
+}
+
+func AllowTestStubProviders() bool {
+	return os.Getenv(AllowTestStubProvidersEnv) == "1"
 }
 
 func (f File) Validate() error {

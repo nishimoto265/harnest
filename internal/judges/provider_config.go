@@ -27,6 +27,9 @@ func NewJudgeFromConfig(cfg *config.Config, role contracts.JudgeRole) (Judge, er
 	if err != nil {
 		return nil, err
 	}
+	if agents.IsGatedTestStubProvider(profile.Provider) && !agents.AllowTestStubProviders() {
+		return nil, fmt.Errorf("judges: provider %q for role %q requires %s=1", profile.Provider, role, agents.AllowTestStubProvidersEnv)
+	}
 	switch profile.Provider {
 	case agents.ProviderStub:
 		return NewStub(Role(role))
