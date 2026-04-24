@@ -149,6 +149,15 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 	}
 	expectedComplianceRules := expectedComplianceRuleSet(expectedComplianceRuleIDs)
 
+	scorableAgents, err := resolveScorableAgents(req)
+	if err != nil {
+		return err
+	}
+	if len(scorableAgents) == 0 {
+		return ErrNoScorableAgents
+	}
+	agentIDs := scorableAgentIDs(scorableAgents)
+
 	// Short-circuit on a pre-existing valid marker (resume path).
 	markerExists, err := fileExists(paths.MarkerPath)
 	if err != nil {
@@ -163,11 +172,19 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		if versioned, ok := s.panel.(PanelVersionProvider); ok {
 			promptVersion = versioned.PanelPromptVersion(s.promptVersion)
 		}
-		versionsMatch, err := step30VersionsMatch(paths, rubricVersion, promptVersion, expectedComplianceRules)
+		versionsMatch, err := step30VersionsMatch(paths, agentIDs, rubricVersion, promptVersion, expectedComplianceRules)
 		if err != nil {
 			return err
 		}
-		if versionsMatch {
+		scopeComplete, err := step30FinalRowsCompleteForCurrentScope(paths, agentIDs, expectedComplianceRules)
+		if err != nil {
+			return err
+		}
+		markerScopeMatches, err := step30DoneMarkerAgentsMatch(paths.MarkerPath, agentIDs)
+		if err != nil {
+			return err
+		}
+		if versionsMatch && scopeComplete && markerScopeMatches {
 			return nil
 		}
 	}
@@ -178,12 +195,9 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		_ = os.Remove(paths.MarkerPath)
 	}
 
-	scorableAgents, err := resolveScorableAgents(req)
+	finalScopeCurrent, err := step30FinalRowsWithinCurrentScope(paths, agentIDs, expectedComplianceRules)
 	if err != nil {
 		return err
-	}
-	if len(scorableAgents) == 0 {
-		return ErrNoScorableAgents
 	}
 
 	state, err := loadResumeState(paths, expectedComplianceRules)
@@ -191,10 +205,12 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		return err
 	}
 
-	if forcedRebuild {
+	rebuildFinals := forcedRebuild || !finalScopeCurrent
+	if rebuildFinals {
 		if err := resetStep30FinalFiles(paths); err != nil {
 			return err
 		}
+		state.clearFinals()
 	}
 
 	for _, agent := range scorableAgents {
@@ -305,7 +321,7 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		if err != nil {
 			return fmt.Errorf("step30_score: resolve final agent=%s: %w", agent.agent, err)
 		}
-		if forcedRebuild {
+		if rebuildFinals {
 			agentState.clearFinal()
 		}
 		if err := appendExpectedFinalScores(paths, agentState, result); err != nil {
@@ -314,11 +330,6 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 		if err := appendExpectedFinalCompliance(paths, agentState, result); err != nil {
 			return fmt.Errorf("step30_score: append final compliance agent=%s: %w", agent.agent, err)
 		}
-	}
-
-	agentIDs := make([]contracts.AgentID, 0, len(scorableAgents))
-	for _, a := range scorableAgents {
-		agentIDs = append(agentIDs, a.agent)
 	}
 
 	marker, err := scorecore.BuildStep30DoneMarker(scorecore.Step30MarkerInputs{
@@ -435,6 +446,15 @@ func (s *Step) runRole(
 
 type scorableAgent struct {
 	agent contracts.AgentID
+}
+
+func scorableAgentIDs(agents []scorableAgent) []contracts.AgentID {
+	out := make([]contracts.AgentID, 0, len(agents))
+	for _, agent := range agents {
+		out = append(out, agent.agent)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 func resolveScorableAgents(req Request) ([]scorableAgent, error) {
@@ -596,6 +616,12 @@ func (s *resumeState) agent(agent contracts.AgentID) *resumeAgentState {
 	}
 	s.agents[agent] = state
 	return state
+}
+
+func (s *resumeState) clearFinals() {
+	for _, agentState := range s.agents {
+		agentState.clearFinal()
+	}
 }
 
 func (s *resumeAgentState) upsertRawScores(rows []contracts.RawScoreEntry) {
@@ -765,20 +791,44 @@ func complianceRuleExpected(ruleID string, expected map[string]struct{}) bool {
 	return ok
 }
 
-func filterRawComplianceRows(rows []contracts.RawComplianceEntry, expected map[string]struct{}) []contracts.RawComplianceEntry {
-	out := make([]contracts.RawComplianceEntry, 0, len(rows))
+func filterRawScoreRows(rows []contracts.RawScoreEntry, agents []contracts.AgentID) []contracts.RawScoreEntry {
+	agentSet := agentSet(agents)
+	out := make([]contracts.RawScoreEntry, 0, len(rows))
 	for _, row := range rows {
-		if complianceRuleExpected(row.RuleID, expected) {
+		if _, ok := agentSet[row.Agent]; ok {
 			out = append(out, row)
 		}
 	}
 	return out
 }
 
-func filterFinalComplianceRows(rows []contracts.ComplianceEntry, expected map[string]struct{}) []contracts.ComplianceEntry {
+func filterFinalScoreRows(rows []contracts.ScoreEntry, agents []contracts.AgentID) []contracts.ScoreEntry {
+	agentSet := agentSet(agents)
+	out := make([]contracts.ScoreEntry, 0, len(rows))
+	for _, row := range rows {
+		if _, ok := agentSet[row.Agent]; ok {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func filterRawComplianceRows(rows []contracts.RawComplianceEntry, agents []contracts.AgentID, expected map[string]struct{}) []contracts.RawComplianceEntry {
+	agentSet := agentSet(agents)
+	out := make([]contracts.RawComplianceEntry, 0, len(rows))
+	for _, row := range rows {
+		if _, ok := agentSet[row.Agent]; ok && complianceRuleExpected(row.RuleID, expected) {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func filterFinalComplianceRows(rows []contracts.ComplianceEntry, agents []contracts.AgentID, expected map[string]struct{}) []contracts.ComplianceEntry {
+	agentSet := agentSet(agents)
 	out := make([]contracts.ComplianceEntry, 0, len(rows))
 	for _, row := range rows {
-		if complianceRuleExpected(row.RuleID, expected) {
+		if _, ok := agentSet[row.Agent]; ok && complianceRuleExpected(row.RuleID, expected) {
 			out = append(out, row)
 		}
 	}
@@ -891,6 +941,126 @@ func fileExists(path string) (bool, error) {
 	return false, err
 }
 
+func step30DoneMarkerAgentsMatch(markerPath string, expectedAgents []contracts.AgentID) (bool, error) {
+	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return sameAgentSet(marker.CompletedAgents, expectedAgents), nil
+}
+
+func step30FinalRowsWithinCurrentScope(paths stepPathsResult, agents []contracts.AgentID, expectedComplianceRules map[string]struct{}) (bool, error) {
+	scoreFinal, err := internalio.ReadJSONL[contracts.ScoreEntry](paths.ScoreFinal)
+	if err != nil {
+		return false, err
+	}
+	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](paths.ComplianceFinal)
+	if err != nil {
+		return false, err
+	}
+	agentSet := agentSet(agents)
+	for _, row := range scorecore.CollapseFinalScores(scoreFinal) {
+		if _, ok := agentSet[row.Agent]; !ok {
+			return false, nil
+		}
+	}
+	for _, row := range scorecore.CollapseFinalCompliance(complianceFinal) {
+		if _, ok := agentSet[row.Agent]; !ok {
+			return false, nil
+		}
+		if !complianceRuleExpected(row.RuleID, expectedComplianceRules) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func step30FinalRowsCompleteForCurrentScope(paths stepPathsResult, agents []contracts.AgentID, expectedComplianceRules map[string]struct{}) (bool, error) {
+	withinScope, err := step30FinalRowsWithinCurrentScope(paths, agents, expectedComplianceRules)
+	if err != nil || !withinScope {
+		return withinScope, err
+	}
+
+	scoreFinal, err := internalio.ReadJSONL[contracts.ScoreEntry](paths.ScoreFinal)
+	if err != nil {
+		return false, err
+	}
+	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](paths.ComplianceFinal)
+	if err != nil {
+		return false, err
+	}
+
+	scoreRows := scorecore.CollapseFinalScores(scoreFinal)
+	if len(scoreRows) != len(agents)*len(allDimensions()) {
+		return false, nil
+	}
+	scores := make(map[contracts.AgentID]map[contracts.Dimension]struct{}, len(agents))
+	for _, row := range scoreRows {
+		if scores[row.Agent] == nil {
+			scores[row.Agent] = make(map[contracts.Dimension]struct{}, len(allDimensions()))
+		}
+		scores[row.Agent][row.Dimension] = struct{}{}
+	}
+	for _, agent := range agents {
+		for _, dimension := range allDimensions() {
+			if _, ok := scores[agent][dimension]; !ok {
+				return false, nil
+			}
+		}
+	}
+
+	complianceRows := scorecore.CollapseFinalCompliance(complianceFinal)
+	expectedComplianceCount := len(agents) * len(expectedComplianceRules)
+	if len(complianceRows) != expectedComplianceCount {
+		return false, nil
+	}
+	if len(expectedComplianceRules) == 0 {
+		return true, nil
+	}
+	compliance := make(map[contracts.AgentID]map[string]struct{}, len(agents))
+	for _, row := range complianceRows {
+		if compliance[row.Agent] == nil {
+			compliance[row.Agent] = make(map[string]struct{}, len(expectedComplianceRules))
+		}
+		compliance[row.Agent][row.RuleID] = struct{}{}
+	}
+	for _, agent := range agents {
+		for ruleID := range expectedComplianceRules {
+			if _, ok := compliance[agent][ruleID]; !ok {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+func agentSet(agents []contracts.AgentID) map[contracts.AgentID]struct{} {
+	out := make(map[contracts.AgentID]struct{}, len(agents))
+	for _, agent := range agents {
+		out[agent] = struct{}{}
+	}
+	return out
+}
+
+func sameAgentSet(left, right []contracts.AgentID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftSorted := append([]contracts.AgentID(nil), left...)
+	rightSorted := append([]contracts.AgentID(nil), right...)
+	sort.Slice(leftSorted, func(i, j int) bool { return leftSorted[i] < leftSorted[j] })
+	sort.Slice(rightSorted, func(i, j int) bool { return rightSorted[i] < rightSorted[j] })
+	for i := range leftSorted {
+		if leftSorted[i] != rightSorted[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func sameCanonicalJSON(left, right any) (bool, error) {
 	leftJSON, err := contracts.CanonicalMarshal(left)
 	if err != nil {
@@ -922,7 +1092,7 @@ func allDimensions() []contracts.Dimension {
 	}
 }
 
-func step30VersionsMatch(paths stepPathsResult, rubricVersion, promptVersion string, expectedComplianceRules map[string]struct{}) (bool, error) {
+func step30VersionsMatch(paths stepPathsResult, agents []contracts.AgentID, rubricVersion, promptVersion string, expectedComplianceRules map[string]struct{}) (bool, error) {
 	scoreRaw, err := internalio.ReadJSONL[contracts.RawScoreEntry](paths.ScoreRaw)
 	if err != nil {
 		return false, err
@@ -939,15 +1109,17 @@ func step30VersionsMatch(paths stepPathsResult, rubricVersion, promptVersion str
 	if err != nil {
 		return false, err
 	}
-	rawComplianceRows := filterRawComplianceRows(scorecore.CollapseRawCompliance(complianceRaw), expectedComplianceRules)
-	finalComplianceRows := filterFinalComplianceRows(scorecore.CollapseFinalCompliance(complianceFinal), expectedComplianceRules)
-	return scorecore.RowsMatchVersion(scorecore.CollapseRawScores(scoreRaw), func(row contracts.RawScoreEntry) (string, string) {
+	rawScoreRows := filterRawScoreRows(scorecore.CollapseRawScores(scoreRaw), agents)
+	rawComplianceRows := filterRawComplianceRows(scorecore.CollapseRawCompliance(complianceRaw), agents, expectedComplianceRules)
+	finalScoreRows := filterFinalScoreRows(scorecore.CollapseFinalScores(scoreFinal), agents)
+	finalComplianceRows := filterFinalComplianceRows(scorecore.CollapseFinalCompliance(complianceFinal), agents, expectedComplianceRules)
+	return scorecore.RowsMatchVersion(rawScoreRows, func(row contracts.RawScoreEntry) (string, string) {
 		return row.RubricVersion, row.PromptVersion
 	}, rubricVersion, promptVersion) &&
 		scorecore.RowsMatchVersion(rawComplianceRows, func(row contracts.RawComplianceEntry) (string, string) {
 			return row.RubricVersion, row.PromptVersion
 		}, rubricVersion, promptVersion) &&
-		scorecore.RowsMatchVersion(scorecore.CollapseFinalScores(scoreFinal), func(row contracts.ScoreEntry) (string, string) {
+		scorecore.RowsMatchVersion(finalScoreRows, func(row contracts.ScoreEntry) (string, string) {
 			return row.RubricVersion, row.PromptVersion
 		}, rubricVersion, promptVersion) &&
 		scorecore.RowsMatchVersion(finalComplianceRows, func(row contracts.ComplianceEntry) (string, string) {

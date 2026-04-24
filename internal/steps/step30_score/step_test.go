@@ -729,6 +729,118 @@ func TestStep30Score_DiscardsStaleFinalComplianceAfterInvalidMarkerRuleShrink(t 
 	assert.Zero(t, provider.calls[contracts.JudgeRoleArbiter])
 }
 
+func TestStep30Score_DiscardsStaleFinalComplianceAfterMarkerlessRuleShrink(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	rubricPath := filepath.Join(t.TempDir(), "rubric.md")
+	require.NoError(t, os.WriteFile(rubricPath, []byte("## Active Rule IDs\n- rule-a\n- rule-b\n"), 0o644))
+
+	currentVerdicts := []ruleVerdict{
+		{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
+		{ruleID: "rule-b", verdict: contracts.ComplianceVerdictViolated},
+	}
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			if role == contracts.JudgeRoleSecondary {
+				score = 79
+			}
+			return makeJudgeOutput(input, role, score, append([]ruleVerdict(nil), currentVerdicts...))
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	step.rubricPathFn = func(internalio.RunContext) (string, error) {
+		return rubricPath, nil
+	}
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(markerPath))
+
+	require.NoError(t, os.WriteFile(rubricPath, []byte("## Active Rule IDs\n- rule-a\n"), 0o644))
+	currentVerdicts = []ruleVerdict{{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant}}
+	provider.reset()
+
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
+	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
+
+	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
+	require.NoError(t, err)
+	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](complianceFinalPath)
+	require.NoError(t, err)
+	require.Len(t, complianceFinal, 3)
+	assert.Equal(t, map[string]int{"rule-a": 3}, finalComplianceRuleCounts(complianceFinal))
+
+	complianceRawPath, err := runCtx.ResolveRunRelative("30/compliance-A-raw.jsonl")
+	require.NoError(t, err)
+	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](complianceRawPath)
+	require.NoError(t, err)
+	require.Len(t, complianceRaw, 18)
+	assert.Equal(t, map[string]int{"rule-a": 12, "rule-b": 6}, rawComplianceRuleCounts(complianceRaw))
+
+	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), marker.ExpectedCounts.Compliance)
+	assert.Equal(t, []contracts.AgentID{"a1", "a2", "a3"}, marker.CompletedAgents)
+}
+
+func TestStep30Score_ValidMarkerDoesNotCertifyFinalRowsOutsideCurrentScorableSet(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			if role == contracts.JudgeRoleSecondary {
+				score = 79
+			}
+			return makeJudgeOutput(input, role, score, []ruleVerdict{{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant}})
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	setStepRubric(t, step, "rule-a")
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	a3ManifestPath, err := runCtx.ManifestPath(1, "a3")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(a3ManifestPath))
+	provider.reset()
+
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+	assert.Zero(t, provider.calls[contracts.JudgeRolePrimary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleArbiter])
+
+	scoreFinalPath, err := runCtx.ResolveRunRelative("30/scores-A.jsonl")
+	require.NoError(t, err)
+	scoreFinal, err := internalio.ReadJSONL[contracts.ScoreEntry](scoreFinalPath)
+	require.NoError(t, err)
+	require.Len(t, scoreFinal, 10)
+	assert.NotContains(t, finalScoreAgents(scoreFinal), contracts.AgentID("a3"))
+
+	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
+	require.NoError(t, err)
+	complianceFinal, err := internalio.ReadJSONL[contracts.ComplianceEntry](complianceFinalPath)
+	require.NoError(t, err)
+	require.Len(t, complianceFinal, 2)
+	assert.NotContains(t, finalComplianceAgents(complianceFinal), contracts.AgentID("a3"))
+
+	scoreRawPath, err := runCtx.ResolveRunRelative("30/scores-A-raw.jsonl")
+	require.NoError(t, err)
+	scoreRaw, err := internalio.ReadJSONL[contracts.RawScoreEntry](scoreRawPath)
+	require.NoError(t, err)
+	assert.Contains(t, rawScoreAgents(scoreRaw), contracts.AgentID("a3"))
+
+	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
+	require.NoError(t, err)
+	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
+	require.NoError(t, err)
+	assert.Equal(t, []contracts.AgentID{"a1", "a2"}, marker.CompletedAgents)
+	assert.Equal(t, int64(10), marker.ExpectedCounts.Scores)
+	assert.Equal(t, int64(2), marker.ExpectedCounts.Compliance)
+}
+
 func TestStep30Score_RunSerializesConcurrentWriters(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
 	primaryStarted := make(chan struct{})
@@ -1085,4 +1197,44 @@ func countRawComplianceForAgentAndSHA(rows []contracts.RawComplianceEntry, agent
 		}
 	}
 	return count
+}
+
+func finalComplianceRuleCounts(rows []contracts.ComplianceEntry) map[string]int {
+	counts := make(map[string]int)
+	for _, row := range rows {
+		counts[row.RuleID]++
+	}
+	return counts
+}
+
+func rawComplianceRuleCounts(rows []contracts.RawComplianceEntry) map[string]int {
+	counts := make(map[string]int)
+	for _, row := range rows {
+		counts[row.RuleID]++
+	}
+	return counts
+}
+
+func finalScoreAgents(rows []contracts.ScoreEntry) map[contracts.AgentID]struct{} {
+	agents := make(map[contracts.AgentID]struct{})
+	for _, row := range rows {
+		agents[row.Agent] = struct{}{}
+	}
+	return agents
+}
+
+func finalComplianceAgents(rows []contracts.ComplianceEntry) map[contracts.AgentID]struct{} {
+	agents := make(map[contracts.AgentID]struct{})
+	for _, row := range rows {
+		agents[row.Agent] = struct{}{}
+	}
+	return agents
+}
+
+func rawScoreAgents(rows []contracts.RawScoreEntry) map[contracts.AgentID]struct{} {
+	agents := make(map[contracts.AgentID]struct{})
+	for _, row := range rows {
+		agents[row.Agent] = struct{}{}
+	}
+	return agents
 }
