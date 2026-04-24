@@ -78,6 +78,29 @@ func TestIntegrationConcurrentSamePRSecondFailsWithPRLock(t *testing.T) {
 	assert.NotEmpty(t, stdout2.String()+stderr2.String())
 }
 
+func TestIntegrationRunWithPreflightSubprocess(t *testing.T) {
+	requireIntegrationEnv(t)
+
+	env := newCLIIntegrationEnv(t, 0)
+	ensureIntegrationRepoGitHubConfig(t, filepath.Join(env.root, "config.yaml"), "owner/repo")
+	installPreflightRuntimeTools(t, env.binDir)
+	bin := buildIntegrationBinary(t)
+
+	cmd := exec.Command(bin, "run", "--pr", "43", "--with-preflight")
+	cmd.Dir = env.root
+	cmd.Env = env.env
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Run(), "stdout=%s stderr=%s", stdout.String(), stderr.String())
+
+	namespacedRuns := cliIntegrationEnv{runsBase: filepath.Join(env.root, "owner__repo", "runs")}
+	runDirs := namespacedRuns.runDirs(t)
+	require.Len(t, runDirs, 1)
+	assert.FileExists(t, filepath.Join(runDirs[0], "70", "decision.json"))
+}
+
 func TestIntegrationRecoverAdoptAnywaySubprocess(t *testing.T) {
 	requireIntegrationEnv(t)
 
@@ -397,6 +420,71 @@ func buildIntegrationBinary(t *testing.T) string {
 
 func trustedPathWithFakeBin(binDir string) string {
 	return binDir + string(os.PathListSeparator) + testTrustedPathSuffix
+}
+
+func installPreflightRuntimeTools(t *testing.T, binDir string) {
+	t.Helper()
+	wrapIntegrationGitForPreflight(t, binDir)
+	wrapIntegrationGHForPreflight(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "curl"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(binDir, "jq"), "#!/bin/sh\nprintf 'jq-1.6\\n'\n")
+	writeExecutable(t, filepath.Join(binDir, "yq"), "#!/bin/sh\nprintf 'yq (https://github.com/mikefarah/yq/) version v4.40.5\\n'\n")
+	writeExecutable(t, filepath.Join(binDir, "lsof"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(binDir, "codex"), "#!/bin/sh\nexit 0\n")
+}
+
+func wrapIntegrationGitForPreflight(t *testing.T, binDir string) {
+	t.Helper()
+	path := filepath.Join(binDir, "git")
+	fixturePath := path + ".fixture"
+	copyExecutable(t, path, fixturePath)
+	writeExecutable(t, path, `#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "--version" ]; then
+  printf 'git version 2.45.0\n'
+  exit 0
+fi
+if [ "${1:-}" = "-C" ] && [ "${3:-}" = "remote" ] && [ "${4:-}" = "get-url" ] && [ "${5:-}" = "--push" ] && [ "${6:-}" = "--all" ] && [ "${7:-}" = "origin" ]; then
+  printf '%s\n' "git@github.com:owner/repo.git"
+  exit 0
+fi
+
+exec "$0.fixture" "$@"
+`)
+}
+
+func wrapIntegrationGHForPreflight(t *testing.T, binDir string) {
+	t.Helper()
+	path := filepath.Join(binDir, "gh")
+	fixturePath := path + ".fixture"
+	copyExecutable(t, path, fixturePath)
+	writeExecutable(t, path, `#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "--version" ]; then
+  printf 'gh version 2.40.1 (2024-01-01)\n'
+  exit 0
+fi
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
+  printf 'github.com\n  Logged in to github.com as test-user\n'
+  exit 0
+fi
+
+exec "$0.fixture" "$@"
+`)
+}
+
+func ensureIntegrationRepoGitHubConfig(t *testing.T, configPath, slug string) {
+	t.Helper()
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	content := string(data)
+	if strings.Contains(content, "  github: ") {
+		return
+	}
+	content = strings.Replace(content, "repo:\n", "repo:\n  github: "+slug+"\n", 1)
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0o644))
 }
 
 func writeIntegrationAgentsConfig(t *testing.T, root, claudePath string) {

@@ -145,6 +145,13 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 			return err
 		}
 	}
+	remainingResumeTargets, err := state.ResumeTargetPath(processedPath)
+	if err != nil {
+		return err
+	}
+	if len(remainingResumeTargets) > 0 {
+		return nil
+	}
 	prs, err := detectMergedPRs(ctx, cfg, processedPath)
 	if err != nil {
 		return err
