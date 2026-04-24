@@ -129,7 +129,6 @@ func SanitizeForLocalExec(extra ...string) []string {
 //   - SSH_AUTH_SOCK: ssh-agent auth for git+ssh clones/pushes
 //   - GH_TOKEN / GITHUB_TOKEN: gh CLI PAT auth
 //   - GH_HOST: gh CLI enterprise host override
-//   - GIT_ASKPASS: gh-provided credential helper hook (set by `gh auth setup-git`)
 //
 // Shell-init-injection vectors (BASH_ENV, LD_PRELOAD, GIT_CONFIG_* overrides,
 // etc.) are still blocked. Callers that only need local filesystem + git
@@ -200,7 +199,6 @@ func networkAllowlist(key string) bool {
 		"GH_TOKEN",
 		"GITHUB_TOKEN",
 		"GH_HOST",
-		"GIT_ASKPASS",
 		"KRB5CCNAME":
 		return true
 	}

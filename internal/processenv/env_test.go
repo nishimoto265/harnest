@@ -74,7 +74,7 @@ func TestSanitizeForLocalExec_IsSameAsSanitize(t *testing.T) {
 	assert.Equal(t, legacy, local)
 }
 
-func TestSanitizeForNetworkExec_PreservesAuthEnvButBlocksShellInit(t *testing.T) {
+func TestSanitizeForNetworkExec_PreservesAuthEnvButBlocksHooks(t *testing.T) {
 	setSanitizeTestEnv(t)
 
 	env := SanitizeForNetworkExec("AUTO_IMPROVE_STEP=10", "GH_TOKEN=override")
@@ -89,7 +89,6 @@ func TestSanitizeForNetworkExec_PreservesAuthEnvButBlocksShellInit(t *testing.T)
 	assert.Contains(t, env, "SSH_AUTH_SOCK=/tmp/ssh.sock")
 	assert.Contains(t, env, "GH_HOST=github.example.com")
 	assert.Contains(t, env, "GITHUB_TOKEN=gh-pat")
-	assert.Contains(t, env, "GIT_ASKPASS=/usr/local/bin/gh-askpass")
 	// Caller-provided override wins for auth tokens.
 	assert.Contains(t, env, "GH_TOKEN=override")
 	assert.NotContains(t, env, "GH_TOKEN=token")
@@ -105,6 +104,7 @@ func TestSanitizeForNetworkExec_PreservesAuthEnvButBlocksShellInit(t *testing.T)
 	assert.NotContains(t, env, "GIT_EXTERNAL_DIFF=/tmp/ext-diff")
 	assert.NotContains(t, env, "GIT_CONFIG_GLOBAL=/tmp/gitconfig")
 	assert.NotContains(t, env, "GIT_SSH_COMMAND=ssh -F /tmp/config")
+	assert.NotContains(t, env, "GIT_ASKPASS=/usr/local/bin/gh-askpass")
 	// GH_REPO is not in the allowlist — callers pass --repo explicitly.
 	assert.NotContains(t, env, "GH_REPO=owner/repo")
 }

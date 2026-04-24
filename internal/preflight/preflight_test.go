@@ -10,6 +10,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/config"
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,6 +60,68 @@ func TestCheckAcceptsGatedTestStubProvidersWithEnvGate(t *testing.T) {
 			assert.NotContains(t, failureNames(result.Failures), string(agents.RoleJudgePrimary))
 		})
 	}
+}
+
+func TestDefaultRunnerUsesSanitizedNetworkEnv(t *testing.T) {
+	toolsDir := t.TempDir()
+	envPath := filepath.Join(t.TempDir(), "preflight-env.txt")
+	toolScript := []byte(`#!/bin/sh
+/usr/bin/env >> "$FAKE_PREFLIGHT_ENV_OUT"
+printf "\n---\n" >> "$FAKE_PREFLIGHT_ENV_OUT"
+name="${0##*/}"
+if [ "$name" = "git" ] && [ "$1" = "--version" ]; then
+  printf "git version 2.35.1\n"
+  exit 0
+fi
+if [ "$name" = "git" ] && [ "$1" = "-C" ] && [ "$3" = "remote" ]; then
+  printf "https://github.com/owner/repo.git\n"
+  exit 0
+fi
+if [ "$name" = "git" ] && [ "$1" = "-C" ] && [ "$3" = "ls-remote" ]; then
+  printf "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/auto-improve/best\n"
+  exit 0
+fi
+if [ "$name" = "gh" ] && [ "$1" = "--version" ]; then
+  printf "gh version 2.40.1 (2024-01-01)\n"
+  exit 0
+fi
+if [ "$name" = "gh" ] && [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  printf "github.com\n  Logged in to github.com as test-user\n"
+  exit 0
+fi
+if [ "$name" = "jq" ] && [ "$1" = "--version" ]; then
+  printf "jq-1.6\n"
+  exit 0
+fi
+if [ "$name" = "yq" ] && [ "$1" = "--version" ]; then
+  printf "yq (https://github.com/mikefarah/yq/) version v4.40.5\n"
+  exit 0
+fi
+exit 0
+`)
+	for _, name := range []string{"git", "gh", "curl", "jq", "yq", "lsof", "claude", "codex"} {
+		require.NoError(t, os.WriteFile(filepath.Join(toolsDir, name), toolScript, 0o755))
+	}
+	restore := processenv.SetTrustedPathForTest(toolsDir)
+	t.Cleanup(restore)
+	t.Setenv("FAKE_PREFLIGHT_ENV_OUT", envPath)
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("GH_TOKEN", "token")
+	t.Setenv("GIT_ASKPASS", "/tmp/malicious-askpass")
+	t.Setenv("BASH_ENV", "/tmp/bash-env")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/tmp/gitconfig")
+
+	result := New().Check(context.Background(), testConfig(t))
+
+	require.True(t, result.OK, "failures: %+v", result.Failures)
+	envBytes, err := os.ReadFile(envPath)
+	require.NoError(t, err)
+	env := string(envBytes)
+	assert.Contains(t, env, "PATH="+toolsDir)
+	assert.Contains(t, env, "GH_TOKEN=token")
+	assert.NotContains(t, env, "GIT_ASKPASS=")
+	assert.NotContains(t, env, "BASH_ENV=")
+	assert.NotContains(t, env, "GIT_CONFIG_GLOBAL=")
 }
 
 func testConfig(t *testing.T) config.Config {
@@ -186,6 +249,16 @@ func fakeDependencies(t *testing.T, missing string) Dependencies {
 				return nil, fmt.Errorf("unexpected command: %s", key)
 			}
 			return []byte(output), nil
+		},
+		PrepareProviderBinary: func(_ agents.Provider, binary string) (string, []string, error) {
+			if binary == missing {
+				return "", nil, fmt.Errorf("%s not found", binary)
+			}
+			path, ok := toolPaths[binary]
+			if !ok {
+				return "", nil, fmt.Errorf("unexpected provider binary: %s", binary)
+			}
+			return path, nil, nil
 		},
 	}
 }

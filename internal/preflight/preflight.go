@@ -12,6 +12,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
+	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
 type Failure struct {
@@ -25,8 +26,9 @@ type PreflightResult struct {
 }
 
 type Dependencies struct {
-	LookPath func(string) (string, error)
-	Run      func(context.Context, string, ...string) ([]byte, error)
+	LookPath              func(string) (string, error)
+	Run                   func(context.Context, string, ...string) ([]byte, error)
+	PrepareProviderBinary func(agents.Provider, string) (string, []string, error)
 }
 
 type Checker struct {
@@ -44,13 +46,7 @@ var versionPattern = regexp.MustCompile(`(\d+)\.(\d+)(?:\.(\d+))?`)
 func New() Checker {
 	return NewWithDependencies(Dependencies{
 		LookPath: processenv.TrustedLookPath,
-		Run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
-			if err != nil {
-				return nil, err
-			}
-			return cmd.CombinedOutput()
-		},
+		Run:      runSanitizedNetworkCommand,
 	})
 }
 
@@ -59,15 +55,21 @@ func NewWithDependencies(deps Dependencies) Checker {
 		deps.LookPath = processenv.TrustedLookPath
 	}
 	if deps.Run == nil {
-		deps.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
-			if err != nil {
-				return nil, err
-			}
-			return cmd.CombinedOutput()
-		}
+		deps.Run = runSanitizedNetworkCommand
+	}
+	if deps.PrepareProviderBinary == nil {
+		deps.PrepareProviderBinary = agentrunner.PrepareProviderBinary
 	}
 	return Checker{deps: deps}
+}
+
+func runSanitizedNetworkCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = processenv.SanitizeForNetworkExec()
+	return cmd.CombinedOutput()
 }
 
 func (c Checker) Check(ctx context.Context, cfg config.Config) PreflightResult {
@@ -197,8 +199,8 @@ func (c Checker) checkAgentBinaries(cfg config.Config) []Failure {
 			continue
 		}
 		seen[key] = struct{}{}
-		if failure := c.checkBinary(profile.Binary, profile.Binary); failure != nil {
-			failures = append(failures, *failure)
+		if _, _, err := c.deps.PrepareProviderBinary(profile.Provider, profile.Binary); err != nil {
+			failures = append(failures, Failure{Name: profile.Binary, Detail: err.Error()})
 		}
 	}
 	return failures

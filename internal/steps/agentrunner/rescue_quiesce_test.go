@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,6 +23,35 @@ func TestWorktreeProcessIDs_RequiresLsof(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "lsof is required")
+}
+
+func TestWorktreeProcessIDs_DefaultsIgnorePathShadowAndSanitizeEnv(t *testing.T) {
+	trustedDir := t.TempDir()
+	shadowDir := t.TempDir()
+	envPath := filepath.Join(t.TempDir(), "env.txt")
+	trustedLsof := filepath.Join(trustedDir, "lsof")
+	shadowLsof := filepath.Join(shadowDir, "lsof")
+	require.NoError(t, os.WriteFile(trustedLsof, []byte("#!/bin/sh\n/usr/bin/env > \"$FAKE_ENV_OUT\"\nprintf '123\\n'\n"), 0o755))
+	require.NoError(t, os.WriteFile(shadowLsof, []byte("#!/bin/sh\nprintf 'shadow lsof ran' >&2\nexit 99\n"), 0o755))
+	restore := processenv.SetTrustedPathForTest(trustedDir)
+	t.Cleanup(restore)
+	t.Setenv("PATH", shadowDir)
+	t.Setenv("FAKE_ENV_OUT", envPath)
+	t.Setenv("GIT_ASKPASS", "/tmp/malicious-askpass")
+	t.Setenv("BASH_ENV", "/tmp/bash-env")
+	t.Setenv("GH_TOKEN", "token")
+
+	pids, err := WorktreeProcessIDs(context.Background(), t.TempDir(), WorktreeProcessIDsOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, []int{123}, pids)
+	envBytes, err := os.ReadFile(envPath)
+	require.NoError(t, err)
+	env := string(envBytes)
+	assert.Contains(t, env, "PATH="+trustedDir)
+	assert.NotContains(t, env, "PATH="+shadowDir)
+	assert.NotContains(t, env, "GIT_ASKPASS=")
+	assert.NotContains(t, env, "BASH_ENV=")
+	assert.NotContains(t, env, "GH_TOKEN=")
 }
 
 func TestShouldKillSavedProcessGroup_SkipsRecycledPIDWhenLeaderStartTimeDiffers(t *testing.T) {
@@ -291,8 +323,8 @@ func TestEnsureRescueLeaseQuiesced_MapsCleanupTimeoutToQuiesceTimeout(t *testing
 func TestWorktreeProcessIDs_PromotesLsofWarningsToEnumerationError(t *testing.T) {
 	_, err := WorktreeProcessIDs(context.Background(), t.TempDir(), WorktreeProcessIDsOptions{
 		LookPath: func(string) (string, error) { return "lsof", nil },
-		CommandContext: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-			return exec.CommandContext(ctx, "sh", "-c", "printf \"lsof: WARNING: can't stat (permission denied)\\n\" >&2; exit 1")
+		CommandContext: func(ctx context.Context, _ string, _ ...string) (*exec.Cmd, error) {
+			return exec.CommandContext(ctx, "sh", "-c", "printf \"lsof: WARNING: can't stat (permission denied)\\n\" >&2; exit 1"), nil
 		},
 	})
 	require.Error(t, err)
