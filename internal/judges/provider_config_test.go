@@ -54,6 +54,14 @@ func TestNewJudgeFromConfigPreservesPlainStubWithoutEnvGate(t *testing.T) {
 	assert.NotNil(t, judge)
 }
 
+func TestNewJudgeFromConfigRejectsNilConfig(t *testing.T) {
+	judge, err := NewJudgeFromConfig(nil, contracts.JudgeRolePrimary)
+
+	require.Error(t, err)
+	assert.Nil(t, judge)
+	assert.ErrorContains(t, err, "config is required")
+}
+
 func loadJudgeProviderConfig(t *testing.T, provider agents.Provider) config.Config {
 	t.Helper()
 

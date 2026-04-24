@@ -82,17 +82,6 @@ const (
 	InterruptedReasonPrePushCrash InterruptedReason = "pre_push_crash"
 )
 
-// WarningKind is an alias retained for code that wants to refer to the warning
-// sub-kinds without StateKind prefix. Values == StateKindWarning* constants.
-// io-contracts.md §warning event kind × emitter table、closed enum (rev33).
-type WarningKind = StateKind
-
-const (
-	WarningKindRegistrySizeHigh     = StateKindWarningRegistrySizeHigh
-	WarningKindRegistrySizeCritical = StateKindWarningRegistrySizeCritical
-	WarningKindRescueRetry          = StateKindWarningRescueRetry
-)
-
 type WarningSource string
 
 const (

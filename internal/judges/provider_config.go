@@ -10,7 +10,7 @@ import (
 
 func NewJudgeFromConfig(cfg *config.Config, role contracts.JudgeRole) (Judge, error) {
 	if cfg == nil {
-		return NewStub(Role(role))
+		return nil, fmt.Errorf("judges: config is required")
 	}
 	var agentRole agents.Role
 	switch role {
