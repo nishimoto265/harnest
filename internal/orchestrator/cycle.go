@@ -42,12 +42,20 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 	if err != nil {
 		return err
 	}
+	runConfig := o.cfg
+	if !selection.fresh {
+		snapshotConfig, err := loadRunConfigSnapshot(selection.runContext)
+		if err != nil {
+			return err
+		}
+		runConfig = &snapshotConfig
+	}
 
 	o.runContext = selection.runContext
 	o.stateWriter = state.NewWriter(selection.runContext)
 
 	run := &StepRunContext{
-		Config:        o.cfg,
+		Config:        runConfig,
 		Logger:        o.logger.With(slog.String(ilog.FieldRunID, string(selection.runContext.RunID))),
 		PR:            pr,
 		IO:            selection.runContext,

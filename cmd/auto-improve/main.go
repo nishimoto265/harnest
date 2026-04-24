@@ -662,10 +662,7 @@ func recoverConfigForRun(runCtx internalio.RunContext) (config.Config, error) {
 	if err == nil {
 		return cfg, nil
 	}
-	if os.IsNotExist(err) {
-		return config.LoadDefault()
-	}
-	return config.Config{}, err
+	return config.Config{}, fmt.Errorf("recover: config.snapshot.yaml is required for run_id=%s: %w", runCtx.RunID, err)
 }
 
 func recoverConfigFromSnapshotPath(runsBase, runID string) (config.Config, error) {

@@ -118,6 +118,32 @@ func TestRun_ResumesFromIntentionStage(t *testing.T) {
 	assert.Nil(t, loaded)
 }
 
+func TestRun_ResumeUsesConfigSnapshotPolicyBranch(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repo.PolicyBranch = "current-policy"
+	runID := contracts.RunID("2026-04-21-PR56-abcdef0")
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	require.NoError(t, seedResumeRun(t, runCtx, 56))
+	require.NoError(t, os.WriteFile(filepath.Join(runCtx.RunDir(), "config.snapshot.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+cfg.Repo.Root+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: best\n"+
+			"  policy_branch: snapshot-policy\n"+
+			"paths:\n"+
+			"  runs: "+cfg.Paths.Runs+"\n"+
+			"worktree:\n"+
+			"  base: "+cfg.Worktree.Base+"\n",
+	), 0o644))
+
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+	orch.steps = stubPipelineSteps(nil, assertPolicyBranchStep{t: t, want: "snapshot-policy"})
+
+	require.NoError(t, orch.Run(context.Background(), 56, RunOptions{}))
+}
+
 func TestRun_DefaultStub_EndToEnd(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
@@ -601,6 +627,16 @@ func TestRun_ResumeStep30WithNoScorableAgentsFailsImmediately(t *testing.T) {
 	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(runCtx.RunDir(), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runCtx.RunDir(), "config.snapshot.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+cfg.Repo.Root+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: best\n"+
+			"paths:\n"+
+			"  runs: "+cfg.Paths.Runs+"\n"+
+			"worktree:\n"+
+			"  base: "+cfg.Worktree.Base+"\n",
+	), 0o644))
 
 	pkg := stubTaskPackageForRun(runCtx, 78)
 	require.NoError(t, internalio.WriteJSONAtomic(runCtx.TaskPackagePath(), pkg))
@@ -1454,6 +1490,18 @@ func (s manualRecoveryStep) Run(context.Context, *StepRunContext) error {
 
 type tamperedDecisionStep70 struct {
 	runID contracts.RunID
+}
+
+type assertPolicyBranchStep struct {
+	t    *testing.T
+	want string
+}
+
+func (s assertPolicyBranchStep) Run(_ context.Context, run *StepRunContext) error {
+	s.t.Helper()
+	require.NotNil(s.t, run.Config)
+	assert.Equal(s.t, s.want, run.Config.Repo.PolicyBranch)
+	return stubStep70{}.Run(context.Background(), run)
 }
 
 func (s tamperedDecisionStep70) Run(_ context.Context, run *StepRunContext) error {
@@ -2541,6 +2589,18 @@ func writeValidStep30ArtifactsForTest(runCtx internalio.RunContext) error {
 func seedResumeRun(t *testing.T, runCtx internalio.RunContext, pr int) error {
 	t.Helper()
 	if err := os.MkdirAll(runCtx.RunDir(), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(runCtx.RunDir(), "config.snapshot.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+runCtx.RunsBase+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: best\n"+
+			"paths:\n"+
+			"  runs: "+runCtx.RunsBase+"\n"+
+			"worktree:\n"+
+			"  base: "+runCtx.WorktreeBase+"\n",
+	), 0o644); err != nil {
 		return err
 	}
 	pkg := contracts.TaskPackage{

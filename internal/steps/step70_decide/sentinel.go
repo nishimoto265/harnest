@@ -1,6 +1,7 @@
 package step70_decide
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -120,6 +121,12 @@ func writeClearedMarker(runsBase string, runID contracts.RunID) error {
 // FinalizeCleanup clears the durable manual-recovery block for a run after an
 // operator has explicitly reconciled branch/registry state out of band.
 func FinalizeCleanup(runCtx internalio.RunContext, store IntentionWriter) error {
+	return withRecoverPromotionLock(context.Background(), runCtx, func() error {
+		return finalizeCleanupUnlocked(runCtx, store)
+	})
+}
+
+func finalizeCleanupUnlocked(runCtx internalio.RunContext, store IntentionWriter) error {
 	if store != nil {
 		if err := store.Delete(); err != nil {
 			return err

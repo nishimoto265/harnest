@@ -234,6 +234,16 @@ func TestRecoverInspectWithRunIDUsesRunScopedPath(t *testing.T) {
 	runID := "2026-04-21-PR42-abcdef0"
 	runDir := filepath.Join(runsBase, runID)
 	require.NoError(t, os.MkdirAll(filepath.Join(runDir, "70"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runDir, "config.snapshot.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+root+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: auto-improve/best\n"+
+			"paths:\n"+
+			"  runs: "+runsBase+"\n"+
+			"worktree:\n"+
+			"  base: "+worktreeBase+"\n",
+	), 0o644))
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "task-package.json"), contracts.TaskPackage{
 		SchemaVersion:           "1",
 		RunID:                   contracts.RunID(runID),
@@ -293,6 +303,16 @@ func TestRecoverInspectWithRunIDTimesOutRemoteHeadLookup(t *testing.T) {
 	runID := "2026-04-21-PR42-abcdef0"
 	runDir := filepath.Join(runsBase, runID)
 	require.NoError(t, os.MkdirAll(filepath.Join(runDir, "70"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runDir, "config.snapshot.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+root+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: auto-improve/best\n"+
+			"paths:\n"+
+			"  runs: "+runsBase+"\n"+
+			"worktree:\n"+
+			"  base: "+worktreeBase+"\n",
+	), 0o644))
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(runDir, "task-package.json"), contracts.TaskPackage{
 		SchemaVersion:           "1",
 		RunID:                   contracts.RunID(runID),
@@ -390,6 +410,17 @@ func TestRecoverFinalizeCleanupVerifiesHeadsAndClearsAbortedSentinel(t *testing.
 	runDir := filepath.Join(runsBase, string(runID))
 	require.NoError(t, os.MkdirAll(filepath.Join(runDir, "70"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, "needs-recovery"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runDir, "config.snapshot.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+root+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: auto-improve/best\n"+
+			"  policy_branch: auto-improve/policy\n"+
+			"paths:\n"+
+			"  runs: "+runsBase+"\n"+
+			"worktree:\n"+
+			"  base: "+worktreeBase+"\n",
+	), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelAbortedFilename(runID)), []byte(`{"run_id":"2026-04-21-PR42-abcdef0","pr":42,"reason":"manual_abort_pending_cleanup","failed_step":"70","created_at":"2026-04-21T12:00:00Z"}`), 0o644))
 
 	pkg := contracts.TaskPackage{
@@ -1168,6 +1199,16 @@ func seedRecoverActionRun(t *testing.T) (string, string, string, contracts.RunID
 	runDir := filepath.Join(runsBase, string(runID))
 	require.NoError(t, os.MkdirAll(filepath.Join(runDir, "70"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, "needs-recovery"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runDir, "config.snapshot.yaml"), []byte(
+		"repo:\n"+
+			"  root: "+root+"\n"+
+			"  default_branch: main\n"+
+			"  best_branch: auto-improve/best\n"+
+			"paths:\n"+
+			"  runs: "+runsBase+"\n"+
+			"worktree:\n"+
+			"  base: "+worktreeBase+"\n",
+	), 0o644))
 
 	pkg := contracts.TaskPackage{
 		SchemaVersion:           "1",
