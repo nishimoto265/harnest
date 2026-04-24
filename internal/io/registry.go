@@ -7,6 +7,7 @@ import (
 	"fmt"
 	stdio "io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -87,6 +88,9 @@ func AppendRegistryEntry(path string, entry contracts.RuleRegistryEntry) (contra
 		return contracts.RegistryAppendResult{}, err
 	}
 	if err := ensurePathMatchesIdentity(path, identity); err != nil {
+		return contracts.RegistryAppendResult{}, err
+	}
+	if err := directorySync(filepath.Dir(path)); err != nil {
 		return contracts.RegistryAppendResult{}, err
 	}
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +29,12 @@ func TestResumeStateValidate_RejectsActiveLeaseWithoutLeaderStartTime(t *testing
 }
 
 func TestLoadResumeState_MigratesLegacyActiveLeaseWithoutLeaderStartTime(t *testing.T) {
+	originalKillProcess := killProcess
+	killProcess = func(int, syscall.Signal) error { return syscall.ESRCH }
+	t.Cleanup(func() {
+		killProcess = originalKillProcess
+	})
+
 	agentDir := t.TempDir()
 	oldTime := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339Nano)
 	baseSHA := strings.Repeat("a", 40)

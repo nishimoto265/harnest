@@ -18,6 +18,10 @@ RELEASE_URL="${AUTO_IMPROVE_RELEASE_URL:-}"
 DOWNLOAD_BASE_URL="${AUTO_IMPROVE_RELEASE_BASE_URL:-$ARCHIVE_URL_DEFAULT_BASE}"
 CHECKSUMS_URL="${AUTO_IMPROVE_CHECKSUMS_URL:-}"
 EXPECTED_SHA256="${AUTO_IMPROVE_EXPECTED_SHA256:-}"
+PLIST_OVERRIDE_SET=0
+if [[ -n "${PLIST:-}" ]]; then
+  PLIST_OVERRIDE_SET=1
+fi
 
 archive_path=""
 checksums_path=""
@@ -221,6 +225,9 @@ if [[ "$asset_os" == "darwin" ]]; then
     rm -f "$TARGET"
     [[ -f "$BACKUP" ]] && mv "$BACKUP" "$TARGET"
     exit 4
+  fi
+  if [[ "$PLIST_OVERRIDE_SET" -eq 0 ]]; then
+    auto_improve_migrate_legacy_launchd_plist "$PLIST"
   fi
 
   auto_improve_launchctl_bootout "$PLIST"

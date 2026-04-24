@@ -192,6 +192,39 @@ func TestAppendJSONL_SyncsParentDirectory(t *testing.T) {
 	require.Equal(t, []string{filepath.Dir(path)}, synced)
 }
 
+func TestAppendRegistryEntry_SyncsParentDirectory(t *testing.T) {
+	path := filepath.Join(realTempDir(t), "rules-registry.jsonl")
+	entry := contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "rule-1",
+			RulePath:       "rules/rule-1.md",
+			Sha256:         strings.Repeat("1", 64),
+			IdempotencyKey: strings.Repeat("2", 64),
+			VersionSeq:     1,
+			PrevHash:       "",
+			ByRunID:        "2026-04-21-PR1-abcdef0",
+			At:             time.Unix(100, 0).UTC(),
+		},
+	}
+
+	originalSync := directorySync
+	var synced []string
+	directorySync = func(path string) error {
+		synced = append(synced, path)
+		return nil
+	}
+	t.Cleanup(func() {
+		directorySync = originalSync
+	})
+
+	_, err := AppendRegistryEntry(path, entry)
+	require.NoError(t, err)
+	require.Equal(t, []string{filepath.Dir(path)}, synced)
+}
+
 func TestAppendJSONL_RollsBackPartialWrite(t *testing.T) {
 	path := filepath.Join(realTempDir(t), "records.jsonl")
 	require.NoError(t, AppendJSONL(path, testJSONLRecord{Name: "alpha"}))

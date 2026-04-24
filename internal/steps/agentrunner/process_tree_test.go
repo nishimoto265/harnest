@@ -46,6 +46,11 @@ func TestCleanupProcessTree_KillsDetachedGrandchildSpawnedAfterRootExit(t *testi
 	require.NoError(t, err)
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		if !processDead(pid) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
 
 	require.Eventually(t, func() bool {
 		return processDead(pid)
