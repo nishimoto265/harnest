@@ -40,6 +40,7 @@ type Opts struct {
 	RunsBase    string
 	SunsetRunID string
 	Transitions []Transition
+	AutoPlan    bool
 	Force       bool
 	Now         func() time.Time
 	Gate        time.Duration
@@ -87,6 +88,11 @@ func RunSunset(ctx context.Context, opts Opts) (Result, error) {
 	registryPath := filepath.Join(opts.RunsBase, "rules-registry.jsonl")
 	result := Result{}
 	for _, t := range opts.Transitions {
+		if diverged, err := divergedMarkerExists(opts.RunsBase); err != nil {
+			return result, err
+		} else if diverged {
+			return result, ErrStaleMarkerDiverged
+		}
 		if blocked, err := sentinelExists(opts.RunsBase); err != nil {
 			return result, err
 		} else if blocked {
@@ -117,6 +123,11 @@ func RunSunset(ctx context.Context, opts Opts) (Result, error) {
 		if err != nil {
 			return result, err
 		}
+		if diverged, err := divergedMarkerExists(opts.RunsBase); err != nil {
+			return result, err
+		} else if diverged {
+			return result, ErrStaleMarkerDiverged
+		}
 		if blocked, err := sentinelExists(opts.RunsBase); err != nil {
 			return result, err
 		} else if blocked {
@@ -130,6 +141,11 @@ func RunSunset(ctx context.Context, opts Opts) (Result, error) {
 		result.AppendedOpIDs = append(result.AppendedOpIDs, opID)
 	}
 
+	if diverged, err := divergedMarkerExists(opts.RunsBase); err != nil {
+		return result, err
+	} else if diverged {
+		return result, ErrStaleMarkerDiverged
+	}
 	if blocked, err := sentinelExists(opts.RunsBase); err != nil {
 		return result, err
 	} else if blocked {
@@ -189,15 +205,15 @@ func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 	if opts.SunsetRunID == "" {
 		return Result{}, errors.New("archive: sunset_run_id is required")
 	}
-	if blocked, err := sentinelExists(opts.RunsBase); err != nil {
-		return Result{}, err
-	} else if blocked {
-		return Result{}, nil
-	}
 	if diverged, err := divergedMarkerExists(opts.RunsBase); err != nil {
 		return Result{}, err
 	} else if diverged {
 		return Result{}, ErrStaleMarkerDiverged
+	}
+	if blocked, err := sentinelExists(opts.RunsBase); err != nil {
+		return Result{}, err
+	} else if blocked {
+		return Result{}, nil
 	}
 
 	lockPath := filepath.Join(opts.RunsBase, "promotion.lock")
@@ -225,23 +241,38 @@ func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 		_ = lock.Unlock()
 	}()
 
+	if diverged, err := divergedMarkerExists(opts.RunsBase); err != nil {
+		return Result{}, err
+	} else if diverged {
+		return Result{}, ErrStaleMarkerDiverged
+	}
 	if blocked, err := sentinelExists(opts.RunsBase); err != nil {
 		return Result{}, err
 	} else if blocked {
 		return Result{}, nil
+	}
+
+	if err := reconcileStaleMarker(ctx, opts); err != nil {
+		return Result{}, err
 	}
 	if diverged, err := divergedMarkerExists(opts.RunsBase); err != nil {
 		return Result{}, err
 	} else if diverged {
 		return Result{}, ErrStaleMarkerDiverged
 	}
-
-	if err := reconcileStaleMarker(ctx, opts); err != nil {
-		return Result{}, err
-	}
 	if blocked, err := sentinelExists(opts.RunsBase); err != nil {
 		return Result{}, err
 	} else if blocked {
+		return Result{}, nil
+	}
+	if opts.AutoPlan {
+		transitions, err := BuildTransitionPlan(opts.RunsBase)
+		if err != nil {
+			return Result{}, err
+		}
+		opts.Transitions = transitions
+	}
+	if len(opts.Transitions) == 0 {
 		return Result{}, nil
 	}
 	if !opts.Force {
@@ -253,24 +284,31 @@ func RunSunsetWithLock(ctx context.Context, opts Opts) (Result, error) {
 			return Result{}, nil
 		}
 	}
-	if len(opts.Transitions) == 0 {
-		return Result{}, nil
-	}
 
 	if err := writeMarker(opts); err != nil {
 		return Result{}, err
 	}
 	result, runErr := RunSunset(ctx, opts)
 	if errors.Is(runErr, errBlockedBySentinel) {
+		if len(result.AppendedOpIDs) == 0 {
+			if err := removeSunsetMarker(opts.RunsBase); err != nil {
+				return result, err
+			}
+		}
 		return result, nil
 	}
 	if runErr != nil {
+		if len(result.AppendedOpIDs) == 0 {
+			if err := removeSunsetMarker(opts.RunsBase); err != nil {
+				return result, errors.Join(runErr, err)
+			}
+		}
 		return result, runErr
 	}
 	if err := writeLastSunsetAt(opts.RunsBase, opts.Now()); err != nil {
 		return result, err
 	}
-	if err := os.Remove(filepath.Join(opts.RunsBase, markerFilename)); err != nil && !os.IsNotExist(err) {
+	if err := removeSunsetMarker(opts.RunsBase); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -713,6 +751,13 @@ func writeMarker(opts Opts) error {
 
 func writeLastSunsetAt(runsBase string, t time.Time) error {
 	return internalio.WriteAtomic(filepath.Join(runsBase, lastSunsetFilename), []byte(t.Format(time.RFC3339Nano)+"\n"))
+}
+
+func removeSunsetMarker(runsBase string) error {
+	if err := os.Remove(filepath.Join(runsBase, markerFilename)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func emitSizeWarnings(opts Opts) error {

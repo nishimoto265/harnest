@@ -426,6 +426,85 @@ func TestBuildTransitionPlan_ArchivesDeprecatedRulesDeterministically(t *testing
 	assert.Equal(t, archiveTransition("rule-a", contracts.RuleStatusDeprecated), transitions[0])
 }
 
+func TestRunSunsetWithLock_AutoPlanBuiltAfterLockAcquired(t *testing.T) {
+	runsBase := realTempDir(t)
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	seedArchiveRuleState(t, registryPath, "rule-1", contracts.RuleStatusActive)
+
+	lock, err := internalio.AcquireFileLock(filepath.Join(runsBase, "promotion.lock"))
+	require.NoError(t, err)
+
+	resultCh := make(chan struct {
+		result Result
+		err    error
+	}, 1)
+	go func() {
+		result, err := RunSunsetWithLock(context.Background(), Opts{
+			RunsBase:    runsBase,
+			SunsetRunID: "sunset-auto",
+			AutoPlan:    true,
+			Force:       true,
+			Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+		})
+		resultCh <- struct {
+			result Result
+			err    error
+		}{result: result, err: err}
+	}()
+
+	deprecated := deprecateTransition("rule-1")
+	entry, err := buildRegistryEntry(registryPath, deprecated, "seed-deprecate", ComputeOpID("seed-deprecate", deprecated.RuleID, transitionKey(deprecated)), time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	_, err = internalio.AppendRegistryEntry(registryPath, entry)
+	require.NoError(t, err)
+	require.NoError(t, lock.Unlock())
+
+	select {
+	case got := <-resultCh:
+		require.NoError(t, got.err)
+		require.Len(t, got.result.AppendedOpIDs, 1)
+	case <-time.After(time.Second):
+		t.Fatal("sunset did not finish after promotion.lock was released")
+	}
+
+	lines := readRegistryLinesForTest(t, registryPath)
+	require.Len(t, lines, 3)
+	archived, ok := lines[2].Entry.Value.(contracts.RuleRegistryArchived)
+	require.True(t, ok)
+	assert.Equal(t, "rule-1", archived.RuleID)
+}
+
+func TestRunSunsetWithLock_AutoPlanOnlyArchivesDeprecatedRules(t *testing.T) {
+	runsBase := realTempDir(t)
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	first := appendArchiveSeedAdded(t, registryPath, "active-rule", 1, "")
+	appendArchiveSeedAdded(t, registryPath, "deprecated-rule", 2, first.Sha256)
+	deprecated := deprecateTransition("deprecated-rule")
+	entry, err := buildRegistryEntry(registryPath, deprecated, "seed-deprecate", ComputeOpID("seed-deprecate", deprecated.RuleID, transitionKey(deprecated)), time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	_, err = internalio.AppendRegistryEntry(registryPath, entry)
+	require.NoError(t, err)
+
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "sunset-auto",
+		AutoPlan:    true,
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+	})
+	require.NoError(t, err)
+	require.Len(t, result.AppendedOpIDs, 1)
+
+	lines := readRegistryLinesForTest(t, registryPath)
+	require.Len(t, lines, 4)
+	archived, ok := lines[3].Entry.Value.(contracts.RuleRegistryArchived)
+	require.True(t, ok)
+	assert.Equal(t, "deprecated-rule", archived.RuleID)
+
+	transitions, err := BuildTransitionPlan(runsBase)
+	require.NoError(t, err)
+	assert.Empty(t, transitions)
+}
+
 func TestRunSunsetWithLock_EmptyPlanDoesNotAdvanceGate(t *testing.T) {
 	runsBase := realTempDir(t)
 	now := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
@@ -641,6 +720,75 @@ func TestRunSunsetWithLock_ProceedsAfterFinalizeCleanupWritesClearedMarker(t *te
 	require.NoError(t, err)
 	require.Len(t, result.AppendedOpIDs, 1)
 	assert.FileExists(t, filepath.Join(runsBase, "needs-recovery", contracts.NeedsRecoverySentinelClearedFilename(runCtx.RunID)))
+}
+
+func TestRunSunsetWithLock_ReturnsDivergedMarkerError(t *testing.T) {
+	runsBase := realTempDir(t)
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, divergedMarkerFile), []byte("diverged\n"), 0o644))
+
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "sunset-diverged",
+		AutoPlan:    true,
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+	})
+	require.ErrorIs(t, err, ErrStaleMarkerDiverged)
+	assert.Empty(t, result.AppendedOpIDs)
+}
+
+func TestRunSunsetWithLock_ForceBypassesGate(t *testing.T) {
+	runsBase := realTempDir(t)
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	now := time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)
+	seedArchiveRuleState(t, registryPath, "rule-1", contracts.RuleStatusDeprecated)
+	require.NoError(t, writeLastSunsetAt(runsBase, now))
+
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "sunset-gated",
+		AutoPlan:    true,
+		Now:         func() time.Time { return now.Add(time.Hour) },
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.AppendedOpIDs)
+
+	result, err = RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "sunset-forced",
+		AutoPlan:    true,
+		Force:       true,
+		Now:         func() time.Time { return now.Add(2 * time.Hour) },
+	})
+	require.NoError(t, err)
+	require.Len(t, result.AppendedOpIDs, 1)
+	assert.Len(t, readRegistryLinesForTest(t, registryPath), 3)
+}
+
+func TestRunSunsetWithLock_RunFailureWithoutProgressClearsMarker(t *testing.T) {
+	runsBase := realTempDir(t)
+	registryPath := filepath.Join(runsBase, "rules-registry.jsonl")
+	seedArchiveRuleState(t, registryPath, "rule-1", contracts.RuleStatusActive)
+
+	original := appendRegistryEntry
+	appendRegistryEntry = func(string, contracts.RuleRegistryEntry) (contracts.RegistryAppendResult, error) {
+		return contracts.RegistryAppendResult{}, fmt.Errorf("injected append failure")
+	}
+	t.Cleanup(func() {
+		appendRegistryEntry = original
+	})
+
+	result, err := RunSunsetWithLock(context.Background(), Opts{
+		RunsBase:    runsBase,
+		SunsetRunID: "sunset-fails",
+		Transitions: []Transition{deprecateTransition("rule-1")},
+		Now:         func() time.Time { return time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC) },
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "injected append failure")
+	assert.Empty(t, result.AppendedOpIDs)
+	assert.NoFileExists(t, filepath.Join(runsBase, markerFilename))
+	assert.NoFileExists(t, filepath.Join(runsBase, divergedMarkerFile))
+	assert.Len(t, readRegistryLinesForTest(t, registryPath), 1)
 }
 
 func TestRunSunsetWithLock_StopsMutatingWhenSentinelAppearsMidRun(t *testing.T) {
