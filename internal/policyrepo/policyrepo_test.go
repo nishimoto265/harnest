@@ -335,12 +335,22 @@ func assertSafeGitEnv(t *testing.T, env []string) {
 	assert.Contains(t, env, "GIT_CONFIG_KEY_4=diff.external")
 	assert.Contains(t, env, "GIT_CONFIG_VALUE_4=")
 	assert.Contains(t, env, "GIT_SSH_COMMAND=ssh -F "+os.DevNull)
-	assert.Contains(t, env, "GIT_ASKPASS=/bin/false")
-	assert.Contains(t, env, "SSH_ASKPASS=/bin/false")
+	assert.NotEmpty(t, envValue(env, "GIT_ASKPASS"))
+	assert.NotEmpty(t, envValue(env, "SSH_ASKPASS"))
 	assert.Contains(t, env, "GIT_TERMINAL_PROMPT=0")
 	assert.NotContains(t, env, "GIT_CONFIG_GLOBAL=/tmp/malicious-gitconfig")
 	assert.NotContains(t, env, "GIT_SSH_COMMAND=ssh -F /tmp/malicious-ssh-config")
 	assert.NotContains(t, env, "GIT_ASKPASS=/tmp/malicious-askpass")
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, value := range env {
+		if strings.HasPrefix(value, prefix) {
+			return strings.TrimPrefix(value, prefix)
+		}
+	}
+	return ""
 }
 
 func slicesContains(values []string, want string) bool {

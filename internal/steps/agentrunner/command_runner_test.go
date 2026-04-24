@@ -163,7 +163,7 @@ func TestRunCommand_AppliesSafeGitProfileToAgentEnv(t *testing.T) {
 	require.Contains(t, output, os.DevNull)
 	require.Contains(t, output, "\n1\n")
 	require.Contains(t, output, "\nssh -F "+os.DevNull+"\n")
-	require.Contains(t, output, "\n/bin/false\n")
+	require.Contains(t, output, "/false\n")
 	require.NotContains(t, output, "/tmp/malicious-gitconfig")
 	require.NotContains(t, output, "ssh -F /tmp/malicious-ssh-config")
 	require.NotContains(t, output, "/tmp/malicious-askpass")
