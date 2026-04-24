@@ -1306,8 +1306,13 @@ func TestCopyUntrackedFiles_SkipsFIFOWithinBoundedTime(t *testing.T) {
 
 func TestStepRun_FailsWhenSuccessDiffOverflows(t *testing.T) {
 	fx := newTestFixture(t, 30)
-	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(fx.worktree, "huge.bin"))
-	t.Setenv("FAKE_CLAUDE_WRITE_SIZE", fmt.Sprintf("%d", (16<<20)+1))
+	originalCollectSuccessDiffBytes := collectSuccessDiffBytes
+	collectSuccessDiffBytes = func(context.Context, string, string, string) ([]byte, error) {
+		return nil, agentrunner.ErrSuccessDiffOverflow
+	}
+	t.Cleanup(func() {
+		collectSuccessDiffBytes = originalCollectSuccessDiffBytes
+	})
 
 	err := fx.step.Run(context.Background(), fx.run)
 	require.Error(t, err)

@@ -104,8 +104,9 @@ func executableFile(path string) error {
 	return nil
 }
 
-// Sanitize returns a strict allowlist env for purely local subprocess (e.g. the
-// `claude` agent binary and git operations scoped to a carved worktree).
+// SanitizeForLocalExec returns a strict allowlist env for purely local
+// subprocess (e.g. the `claude` agent binary and git operations scoped to a
+// carved worktree).
 //
 // This is the most restrictive profile: it drops $PATH, SSH agent credentials,
 // gh auth tokens, and any git-plumbing override. Extra k=v entries supplied by
@@ -115,14 +116,6 @@ func executableFile(path string) error {
 // Use SanitizeForNetworkExec when invoking a binary that needs to hit the
 // network (gh, git push/fetch against origin). Those callers must cross a
 // trust boundary and require auth variables the local profile strips.
-//
-// Sanitize is retained as a synonym for SanitizeForLocalExec to preserve
-// existing callers (step20/50 agent runner, local git plumbing).
-func Sanitize(extra ...string) []string {
-	return SanitizeForLocalExec(extra...)
-}
-
-// SanitizeForLocalExec is the strict allowlist profile; see Sanitize.
 func SanitizeForLocalExec(extra ...string) []string {
 	return sanitize(extra, localAllowlist)
 }

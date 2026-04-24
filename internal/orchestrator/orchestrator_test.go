@@ -3433,7 +3433,7 @@ func runGit(t *testing.T, repoRoot string, args ...string) string {
 	}
 	cmd, err := processenv.TrustedCommand("git", cmdArgs...)
 	require.NoError(t, err)
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.SanitizeForLocalExec()
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %s\n%s", strings.Join(cmdArgs, " "), string(out))
 	return string(out)
