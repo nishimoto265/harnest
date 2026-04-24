@@ -18,6 +18,8 @@ jobs:
         run: go build ./...
       - name: Test
         run: go test ./... -race
+      - name: Integration tests
+        run: AUTO_IMPROVE_INTEGRATION=1 go test ./cmd/auto-improve -count=1
       - name: Vet
         run: go vet ./...
       - name: Check contracts sync
