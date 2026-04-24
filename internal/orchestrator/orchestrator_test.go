@@ -607,6 +607,88 @@ func TestRun_ProviderInterruptedPass1IsNonTerminalInterrupted(t *testing.T) {
 	assert.Equal(t, contracts.FailedStep20, interrupted.Step)
 	assert.Equal(t, contracts.InterruptedReasonRateLimit, interrupted.Reason)
 	assert.Empty(t, recorder.snapshot())
+	for _, event := range events {
+		if event.Kind != contracts.StateKindStepDone {
+			continue
+		}
+		done := event.Value.(contracts.StateEntryStepDone)
+		assert.NotEqual(t, contracts.FailedStep20, done.Step)
+	}
+}
+
+func TestRun_ProviderInterruptedPass1RerunsInterruptedAgentsOnResume(t *testing.T) {
+	for _, reason := range []string{
+		string(contracts.InterruptedReasonRateLimit),
+		string(contracts.InterruptedReasonBudget),
+		string(contracts.InterruptedReasonContext),
+		string(contracts.InterruptedReasonSignal),
+	} {
+		t.Run(reason, func(t *testing.T) {
+			cfg := testConfig(t)
+			first, err := NewOrchestrator(cfg)
+			require.NoError(t, err)
+			first.steps = Steps{
+				Step10:  stubStep10{},
+				Step20:  providerInterruptedAgentSteps(reason),
+				Step30:  stubMarkerStep{path: "30/done.marker"},
+				Step40:  stubStep40{},
+				Step50:  stubAgentSteps(),
+				Step60:  stubMarkerStep{path: "60/done.marker"},
+				Step70:  stubStep70{},
+				Archive: stubArchiveStep{},
+			}
+
+			runID := contracts.RunID("2026-04-21-PR462-" + map[string]string{
+				string(contracts.InterruptedReasonRateLimit): "aaaaaaa",
+				string(contracts.InterruptedReasonBudget):    "bbbbbbb",
+				string(contracts.InterruptedReasonContext):   "ccccccc",
+				string(contracts.InterruptedReasonSignal):    "ddddddd",
+			}[reason])
+			require.NoError(t, first.Run(context.Background(), 462, RunOptions{RunID: runID}))
+
+			runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+			require.NoError(t, err)
+			firstEvents, err := state.ScanEventsForRun(runCtx, runID)
+			require.NoError(t, err)
+			require.NotEmpty(t, firstEvents)
+			assert.Equal(t, contracts.StateKindInterrupted, firstEvents[len(firstEvents)-1].Kind)
+			for _, event := range firstEvents {
+				if event.Kind != contracts.StateKindStepDone {
+					continue
+				}
+				done := event.Value.(contracts.StateEntryStepDone)
+				assert.NotEqual(t, contracts.FailedStep20, done.Step)
+			}
+
+			recorder := &callRecorder{}
+			second, err := NewOrchestrator(cfg)
+			require.NoError(t, err)
+			second.steps = Steps{
+				Step10:  recordingStep{label: "10", recorder: recorder},
+				Step20:  recordingAgentSteps("20", recorder),
+				Step30:  recordingStep{label: "30", recorder: recorder},
+				Step40:  recordingStep{label: "40", recorder: recorder},
+				Step50:  recordingAgentSteps("50", recorder),
+				Step60:  recordingStep{label: "60", recorder: recorder},
+				Step70:  recordingStep{label: "70", recorder: recorder},
+				Archive: recordingStep{label: "archive", recorder: recorder},
+			}
+			require.NoError(t, second.Run(context.Background(), 462, RunOptions{}))
+
+			calls := recorder.snapshot()
+			assert.NotContains(t, calls, "10")
+			assert.Contains(t, calls, "20:a1")
+			assert.Contains(t, calls, "20:a2")
+			assert.Contains(t, calls, "20:a3")
+			assert.Contains(t, calls, "30")
+			assert.Contains(t, calls, "70")
+
+			events, err := state.ScanEventsForRun(runCtx, runID)
+			require.NoError(t, err)
+			require.NotEmpty(t, events)
+			assert.Equal(t, contracts.StateKindCompleted, events[len(events)-1].Kind)
+		})
+	}
 }
 
 func TestRun_ProviderInterruptedPass2IsNonTerminalInterrupted(t *testing.T) {
@@ -642,6 +724,13 @@ func TestRun_ProviderInterruptedPass2IsNonTerminalInterrupted(t *testing.T) {
 	assert.Equal(t, contracts.InterruptedReasonBudget, interrupted.Reason)
 	assert.NotContains(t, recorder.snapshot(), "60")
 	assert.NotContains(t, recorder.snapshot(), "70")
+	for _, event := range events {
+		if event.Kind != contracts.StateKindStepDone {
+			continue
+		}
+		done := event.Value.(contracts.StateEntryStepDone)
+		assert.NotEqual(t, contracts.FailedStep50, done.Step)
+	}
 }
 
 func TestRun_ContextCancellationDuringStepRecordsInterrupted(t *testing.T) {
@@ -735,7 +824,7 @@ func TestRun_FromScratchSupersedesNonTerminalRunAndPrunesWorktrees(t *testing.T)
 	assert.Equal(t, state.NextActionFreshStart, latest.Action)
 }
 
-func TestRun_FromScratchCleanupFailureAppendsSkippedBeforeReturningError(t *testing.T) {
+func TestRun_FromScratchCleanupFailureLeavesStartedReplacementRun(t *testing.T) {
 	if _, err := processenv.TrustedLookPath("git"); err != nil {
 		t.Skipf("git not available in trusted PATH: %v", err)
 	}
@@ -791,6 +880,30 @@ func TestRun_FromScratchCleanupFailureAppendsSkippedBeforeReturningError(t *test
 	for _, wt := range pkg.Worktrees {
 		assert.DirExists(t, wt.Path)
 	}
+
+	latest, err := state.LatestRunForPR(oldRunCtx, 457)
+	require.NoError(t, err)
+	require.NotNil(t, latest.LastEvent)
+	assert.Equal(t, state.NextActionResume, latest.Action)
+	assert.Equal(t, contracts.FailedStep10, latest.Step)
+	assert.NotEqual(t, oldRunID, latest.RunID)
+	assert.Equal(t, contracts.StateKindStarted, latest.LastEvent.Kind)
+
+	replacementCtx, err := internalio.NewRunContext(latest.RunID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	assert.DirExists(t, replacementCtx.RunDir())
+	assert.FileExists(t, filepath.Join(replacementCtx.RunDir(), "config.snapshot.yaml"))
+	replacementEvents, err := state.ScanEventsForRun(replacementCtx, latest.RunID)
+	require.NoError(t, err)
+	require.Len(t, replacementEvents, 1)
+	assert.Equal(t, contracts.StateKindStarted, replacementEvents[0].Kind)
+
+	targets, err := state.ResumeTargetPath(oldRunCtx.ProcessedPath())
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	assert.Equal(t, 457, targets[0].PR)
+	assert.Equal(t, latest.RunID, targets[0].RunID)
+	assert.Equal(t, contracts.FailedStep10, targets[0].Step)
 }
 
 func TestRun_FromScratchRefusesUnfinishedStep70(t *testing.T) {

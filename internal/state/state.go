@@ -134,6 +134,10 @@ func AppendStateEntry(ctx internalio.RunContext, entry contracts.StateEntry) err
 	return Append(ctx, entry)
 }
 
+func AppendStateEntries(ctx internalio.RunContext, entries []contracts.StateEntry) error {
+	return NewWriter(ctx).AppendAll(entries)
+}
+
 func ScanEventsForRun(ctx internalio.RunContext, runID contracts.RunID) ([]contracts.StateEntry, error) {
 	entries, err := readProcessedEntriesPath(ctx.ProcessedPath())
 	if err != nil {
@@ -348,6 +352,32 @@ func (w Writer) Append(entry contracts.StateEntry) error {
 
 func (w Writer) AppendStateEntry(entry contracts.StateEntry) error {
 	return w.Append(entry)
+}
+
+func (w Writer) AppendAll(entries []contracts.StateEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	records := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		runDir := w.runDir
+		if _, ok := stateEntryRunID(entry); !ok {
+			runDir = ""
+		}
+		normalized, err := normalizeDetailOverflow(runDir, entry)
+		if err != nil {
+			return err
+		}
+		records = append(records, normalized)
+	}
+	lock, err := internalio.AcquireFileLock(stateLockPath(w.path))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = lock.Unlock()
+	}()
+	return internalio.AppendJSONLBatch(w.path, records)
 }
 
 type processedLine struct {

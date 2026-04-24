@@ -83,7 +83,8 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 		if err := o.ensureNoGlobalSentinel(run.IO); err != nil {
 			return err
 		}
-		if err := o.appendState(startedEntry(pr, selection.runContext.RunID, time.Now().UTC())); err != nil {
+		started := startedEntry(pr, selection.runContext.RunID, time.Now().UTC())
+		if err := o.startFromScratchReplacement(ctx, run, selection.fromScratch, started); err != nil {
 			return err
 		}
 	}
@@ -153,6 +154,14 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 				}
 				return err
 			}
+			if reason, detail, ok, classifyErr := providerInterruptionFromManifests(run, 1); classifyErr != nil {
+				return classifyErr
+			} else if ok {
+				if err := o.appendInterrupted(run.PR, run.IO.RunID, contracts.FailedStep20, reason, detail); err != nil {
+					return err
+				}
+				return nil
+			}
 			if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep20, time.Now().UTC())); err != nil {
 				return err
 			}
@@ -206,6 +215,14 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 					return appendErr
 				}
 				return err
+			}
+			if reason, detail, ok, classifyErr := providerInterruptionFromManifests(run, 2); classifyErr != nil {
+				return classifyErr
+			} else if ok {
+				if err := o.appendInterrupted(run.PR, run.IO.RunID, contracts.FailedStep50, reason, detail); err != nil {
+					return err
+				}
+				return nil
 			}
 			if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep50, time.Now().UTC())); err != nil {
 				return err

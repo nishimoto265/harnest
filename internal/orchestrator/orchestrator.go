@@ -266,12 +266,18 @@ func (o *Orchestrator) selectRun(ctx context.Context, pr int, opts RunOptions) (
 		return newFreshSelection(pr, opts, runsBase, worktreeBase)
 	}
 	if opts.FromScratch {
-		if err := o.supersedeNonTerminalRun(ctx, pr, latest, runsBase, worktreeBase); err != nil {
+		replacement, err := o.prepareFromScratchReplacement(pr, latest, runsBase, worktreeBase)
+		if err != nil {
 			return runSelection{}, err
 		}
 		freshOpts := opts
 		freshOpts.RunID = ""
-		return newFreshSelection(pr, freshOpts, runsBase, worktreeBase)
+		selection, err := newFreshSelection(pr, freshOpts, runsBase, worktreeBase)
+		if err != nil {
+			return runSelection{}, err
+		}
+		selection.fromScratch = replacement
+		return selection, nil
 	}
 
 	action := latest.Action
@@ -309,23 +315,23 @@ func (o *Orchestrator) selectRun(ctx context.Context, pr int, opts RunOptions) (
 	}
 }
 
-func (o *Orchestrator) supersedeNonTerminalRun(ctx context.Context, pr int, latest state.LatestRun, runsBase, worktreeBase string) error {
+func (o *Orchestrator) prepareFromScratchReplacement(pr int, latest state.LatestRun, runsBase, worktreeBase string) (*fromScratchReplacement, error) {
 	if latest.LastEvent == nil || latest.LastEvent.Kind.IsTerminal() {
-		return nil
+		return nil, nil
 	}
 	runID, ok := stateRunID(*latest.LastEvent)
 	if !ok {
-		return errors.New("orchestrator: latest non-terminal event is missing run_id")
+		return nil, errors.New("orchestrator: latest non-terminal event is missing run_id")
 	}
 	runCtx, err := loadRunContext(runID, runsBase, worktreeBase)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var pkg *contracts.TaskPackage
 	if fileExists(runCtx.TaskPackagePath()) {
 		loaded, err := internalio.ReadJSON[contracts.TaskPackage](runCtx.TaskPackagePath())
 		if err != nil {
-			return err
+			return nil, err
 		}
 		pkg = &loaded
 	}
@@ -334,16 +340,16 @@ func (o *Orchestrator) supersedeNonTerminalRun(ctx context.Context, pr int, late
 		step = contracts.FailedStep10
 	}
 	if step == contracts.FailedStep70 {
-		return fmt.Errorf("orchestrator: --from-scratch refused for run_id=%s with unfinished step70; resume or recover first", runID)
+		return nil, fmt.Errorf("orchestrator: --from-scratch refused for run_id=%s with unfinished step70; resume or recover first", runID)
 	}
 	if has, err := hasPersistedIntention(runCtx); err != nil {
-		return err
+		return nil, err
 	} else if has {
-		return fmt.Errorf("orchestrator: --from-scratch refused for run_id=%s with persisted step70 intention; resume or recover first", runID)
+		return nil, fmt.Errorf("orchestrator: --from-scratch refused for run_id=%s with persisted step70 intention; resume or recover first", runID)
 	}
 	repoRoot, err := o.cfg.RepoRoot()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	value := contracts.StateEntrySkipped{
 		Kind:   contracts.StateKindSkipped,
@@ -353,10 +359,26 @@ func (o *Orchestrator) supersedeNonTerminalRun(ctx context.Context, pr int, late
 		Detail: "superseded_by_from_scratch",
 		At:     time.Now().UTC(),
 	}
-	if err := state.NewWriter(runCtx).Append(contracts.StateEntry{Kind: value.Kind, Value: value}); err != nil {
+	return &fromScratchReplacement{
+		oldRunContext: runCtx,
+		oldPackage:    pkg,
+		repoRoot:      repoRoot,
+		skippedEntry:  contracts.StateEntry{Kind: value.Kind, Value: value},
+	}, nil
+}
+
+func (o *Orchestrator) startFromScratchReplacement(ctx context.Context, run *StepRunContext, replacement *fromScratchReplacement, started contracts.StateEntry) error {
+	entries := []contracts.StateEntry{started}
+	if replacement != nil {
+		entries = []contracts.StateEntry{replacement.skippedEntry, started}
+	}
+	if err := state.NewWriter(run.IO).AppendAll(entries); err != nil {
 		return err
 	}
-	return cleanupWorktreesWithGit(ctx, runCtx, pkg, repoRoot)
+	if replacement == nil {
+		return nil
+	}
+	return cleanupWorktreesWithGit(ctx, replacement.oldRunContext, replacement.oldPackage, replacement.repoRoot)
 }
 
 func hasPersistedIntention(runCtx internalio.RunContext) (bool, error) {
@@ -938,8 +960,16 @@ func fileExists(path string) bool {
 }
 
 type runSelection struct {
-	runContext internalio.RunContext
-	fresh      bool
+	runContext  internalio.RunContext
+	fresh       bool
+	fromScratch *fromScratchReplacement
+}
+
+type fromScratchReplacement struct {
+	oldRunContext internalio.RunContext
+	oldPackage    *contracts.TaskPackage
+	repoRoot      string
+	skippedEntry  contracts.StateEntry
 }
 
 func stateRunID(entry contracts.StateEntry) (contracts.RunID, bool) {
@@ -1138,6 +1168,9 @@ func noActionableCandidates(candidates *contracts.Candidates) bool {
 func hasFinalizedManifest(runIO internalio.RunContext, pass int, agent contracts.AgentID) (bool, error) {
 	manifest, err := internalio.LoadFinalizedManifest(runIO, pass, agent)
 	if err == nil && manifest != nil {
+		if isProviderInterruptedManifest(*manifest) {
+			return false, nil
+		}
 		return true, nil
 	}
 	if os.IsNotExist(err) {
@@ -1173,6 +1206,41 @@ func scorableAgentsForPass(runIO internalio.RunContext, pkg *contracts.TaskPacka
 		agents = append(agents, wt.Agent)
 	}
 	return agents, nil
+}
+
+func providerInterruptionFromManifests(run *StepRunContext, pass int) (contracts.InterruptedReason, string, bool, error) {
+	if run == nil || run.TaskPackage == nil {
+		return "", "", false, errors.New("orchestrator: task package is required")
+	}
+	agents := passAgents(run.TaskPackage, pass)
+	if len(agents) == 0 {
+		return "", "", false, nil
+	}
+	var reason contracts.InterruptedReason
+	details := make([]string, 0, len(agents))
+	for _, agent := range agents {
+		manifest, err := internalio.LoadFinalizedManifest(run.IO, pass, agent)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", "", false, err
+		}
+		agentReason, ok := providerInterruptionManifestReason(*manifest)
+		if !ok {
+			continue
+		}
+		if reason == "" {
+			reason = agentReason
+		} else if reason != agentReason {
+			reason = contracts.InterruptedReasonUnknown
+		}
+		details = append(details, fmt.Sprintf("agent=%s reason=%s", agent, manifestErrorReason(*manifest)))
+	}
+	if reason == "" {
+		return "", "", false, nil
+	}
+	return reason, strings.Join(details, "; "), true, nil
 }
 
 func providerInterruptionFromNonScorableManifests(run *StepRunContext, pass int) (contracts.InterruptedReason, string, bool, error) {
@@ -1224,6 +1292,31 @@ func providerInterruptionFromNonScorableManifests(run *StepRunContext, pass int)
 		return "", "", false, nil
 	}
 	return reason, strings.Join(details, "; "), true, nil
+}
+
+func isProviderInterruptedManifest(manifest contracts.Manifest) bool {
+	_, ok := providerInterruptionManifestReason(manifest)
+	return ok
+}
+
+func providerInterruptionManifestReason(manifest contracts.Manifest) (contracts.InterruptedReason, bool) {
+	reason := manifestErrorReason(manifest)
+	if reason == "" {
+		return "", false
+	}
+	return providerManifestReason(reason)
+}
+
+func manifestErrorReason(manifest contracts.Manifest) string {
+	switch value := manifest.Value.(type) {
+	case contracts.ManifestError:
+		return value.Reason
+	case *contracts.ManifestError:
+		if value != nil {
+			return value.Reason
+		}
+	}
+	return ""
 }
 
 func providerManifestReason(reason string) (contracts.InterruptedReason, bool) {

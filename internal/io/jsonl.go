@@ -47,6 +47,38 @@ func AppendJSONL(path string, record any) error {
 	return directorySync(filepath.Dir(path))
 }
 
+// AppendJSONLBatch validates, canonicalizes, and appends records under one
+// file sync. If any write or sync fails, the append is rolled back to the
+// original file size.
+func AppendJSONLBatch(path string, records []any) error {
+	if len(records) == 0 {
+		return nil
+	}
+	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
+		return err
+	}
+	payloads := make([][]byte, 0, len(records))
+	for _, record := range records {
+		payload, err := marshalJSONLRecord(record)
+		if err != nil {
+			return err
+		}
+		payloads = append(payloads, payload)
+	}
+	if err := ensureWritableParentDir(path); err != nil {
+		return err
+	}
+	f, err := appendJSONLOpenFile(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := appendJSONLPayloads(path, f, payloads); err != nil {
+		return err
+	}
+	return directorySync(filepath.Dir(path))
+}
+
 // ReadJSONL strict-decodes each JSONL row via contracts.DecodeStrictJSON.
 func ReadJSONL[T any](path string) ([]T, error) {
 	f, err := openFileNoFollow(path, os.O_RDONLY, 0)
@@ -134,18 +166,24 @@ func marshalJSONLRecord(record any) ([]byte, error) {
 }
 
 func appendJSONLPayload(path string, f appendJSONLFile, payload []byte) error {
+	return appendJSONLPayloads(path, f, [][]byte{payload})
+}
+
+func appendJSONLPayloads(path string, f appendJSONLFile, payloads [][]byte) error {
 	originalSize, err := f.Seek(0, stdio.SeekEnd)
 	if err != nil {
 		return err
 	}
 
-	if err := writeAll(f, payload); err != nil {
-		rollbackAppendJSONL(path, f, originalSize)
-		return err
-	}
-	if err := writeAll(f, []byte{'\n'}); err != nil {
-		rollbackAppendJSONL(path, f, originalSize)
-		return err
+	for _, payload := range payloads {
+		if err := writeAll(f, payload); err != nil {
+			rollbackAppendJSONL(path, f, originalSize)
+			return err
+		}
+		if err := writeAll(f, []byte{'\n'}); err != nil {
+			rollbackAppendJSONL(path, f, originalSize)
+			return err
+		}
 	}
 	if err := f.Sync(); err != nil {
 		rollbackAppendJSONL(path, f, originalSize)
