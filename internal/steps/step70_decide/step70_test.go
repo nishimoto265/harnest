@@ -240,6 +240,63 @@ func TestFilesystemResolver_RejectsStep60ArtifactsThatDoNotMatchDoneMarker(t *te
 	assert.NoDirExists(t, stagingRulesPath)
 }
 
+func TestVerifyStep60ArtifactSnapshot_AllowsNoComplianceRules(t *testing.T) {
+	artifacts := step60ArtifactSnapshot{
+		Scores: []contracts.ScoreEntry{
+			{
+				SchemaVersion: "1",
+				RunID:         "2026-04-21-PR430-abcdef0",
+				Pass:          2,
+				Agent:         "a1",
+				Dimension:     contracts.DimensionFidelity,
+				Score:         90,
+				Reasons:       "resolver fixture pass2",
+				VerdictPath:   contracts.VerdictPathAgreement,
+				RubricVersion: "default",
+				PromptVersion: "phase0-stub",
+				ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+			},
+		},
+		Pairwise: []contracts.PairwiseEntry{
+			{
+				SchemaVersion: "1",
+				RunID:         "2026-04-21-PR430-abcdef0",
+				AgentA:        "a1",
+				AgentB:        "a1",
+				Winner:        contracts.PairwiseWinnerB,
+				Margin:        contracts.PairwiseMarginClear,
+				Justification: "resolver fixture",
+				VerdictPath:   contracts.VerdictPathAgreement,
+				RubricVersion: "default",
+				PromptVersion: "phase0-stub",
+				ResolvedAt:    time.Date(2026, 4, 21, 10, 2, 0, 0, time.UTC),
+			},
+		},
+	}
+	scoresCount, scoresHash, err := step70FinalScoresState(artifacts.Scores)
+	require.NoError(t, err)
+	complianceCount, complianceHash, err := step70FinalComplianceState(artifacts.Compliance)
+	require.NoError(t, err)
+	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(artifacts.Pairwise)
+	require.NoError(t, err)
+
+	err = verifyStep60ArtifactSnapshot(contracts.Step60DoneMarker{
+		CompletedAgents: []contracts.AgentID{"a1"},
+		Dimensions:      append([]contracts.Dimension(nil), step70CanonicalDimensions...),
+		ExpectedCounts: contracts.Step60ExpectedCounts{
+			Scores:     int64(scoresCount),
+			Compliance: int64(complianceCount),
+			Pairwise:   int64(pairwiseCount),
+		},
+		ContentHashes: contracts.Step60DoneContentHashes{
+			ScoresFinal:     scoresHash,
+			ComplianceFinal: complianceHash,
+			PairwiseFinal:   pairwiseHash,
+		},
+	}, artifacts)
+	require.NoError(t, err)
+}
+
 func TestFilesystemResolver_RejectsStep60RawArtifactsThatDoNotMatchDoneMarker(t *testing.T) {
 	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
 	rawPath, err := runCtx.ResolveRunRelative("60/scores-B-raw.jsonl")

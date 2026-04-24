@@ -262,7 +262,7 @@ func verifyStep60ArtifactSnapshot(marker contracts.Step60DoneMarker, artifacts s
 		marker.ContentHashes.PairwiseFinal != pairwiseHash {
 		return errors.New("step70: step60 done marker does not match step60 artifacts")
 	}
-	if !step70MarkerAgentsMatchArtifacts(marker.CompletedAgents, artifacts) {
+	if !step70MarkerAgentsMatchArtifacts(marker, artifacts) {
 		return errors.New("step70: step60 done marker completed agents do not match step60 artifacts")
 	}
 	return nil
@@ -293,13 +293,19 @@ func verifyStep60InputSnapshot(runCtx internalio.RunContext, pkg *contracts.Task
 	return nil
 }
 
-func step70MarkerAgentsMatchArtifacts(completedAgents []contracts.AgentID, artifacts step60ArtifactSnapshot) bool {
-	expected := append([]contracts.AgentID(nil), completedAgents...)
+func step70MarkerAgentsMatchArtifacts(marker contracts.Step60DoneMarker, artifacts step60ArtifactSnapshot) bool {
+	expected := append([]contracts.AgentID(nil), marker.CompletedAgents...)
 	sort.Slice(expected, func(i, j int) bool { return expected[i] < expected[j] })
 	scoreAgents := step70AgentsFromScores(artifacts.Scores)
-	complianceAgents := step70AgentsFromCompliance(artifacts.Compliance)
 	pairwiseAgents := step70AgentsFromPairwise(artifacts.Pairwise)
-	return slices.Equal(expected, scoreAgents) && slices.Equal(expected, complianceAgents) && slices.Equal(expected, pairwiseAgents)
+	if !slices.Equal(expected, scoreAgents) || !slices.Equal(expected, pairwiseAgents) {
+		return false
+	}
+	complianceAgents := step70AgentsFromCompliance(artifacts.Compliance)
+	if marker.ExpectedCounts.Compliance == 0 {
+		return len(complianceAgents) == 0
+	}
+	return slices.Equal(expected, complianceAgents)
 }
 
 func step70AgentsFromScores(rows []contracts.ScoreEntry) []contracts.AgentID {
