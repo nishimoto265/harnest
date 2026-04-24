@@ -255,6 +255,50 @@ func TestStepRun_BranchDriftRequiresManualRecoveryAndPreservesWorktree(t *testin
 	assert.True(t, os.IsNotExist(rescueErr))
 }
 
+func TestStepRun_MissingRescueWorktreeCapturesAdvancedBranchBeforeReset(t *testing.T) {
+	env := newEnsureEnv(t)
+	allocation, err := worktreeFor(&env.taskPackage, 1, "a1")
+	require.NoError(t, err)
+	agentDir, err := agentDir(env.runCtx.IO, 1, "a1")
+	require.NoError(t, err)
+	env.cfg.ClaudeCLIPath = writeFakeClaudeScript(t, t.TempDir())
+
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "rescuable.txt"), []byte("rescue me\n"), 0o644))
+	runGit(t, allocation.Path, "add", "rescuable.txt")
+	runGit(t, allocation.Path, "commit", "-m", "rescuable commit")
+	advancedHead := strings.TrimSpace(runGit(t, allocation.Path, "rev-parse", "HEAD"))
+	require.NotEqual(t, allocation.HeadSHA, advancedHead)
+
+	oldTime := time.Now().Add(-2 * time.Hour).UTC()
+	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	require.NoError(t, saveResumeState(agentDir, resumeState{
+		ExpectedBaseSHA: allocation.BaseSHA,
+		StartedAt:       oldTime,
+		Pid:             999999,
+		LeaderStartTime: "stale-start",
+		RetryCount:      0,
+		LastHeartbeat:   oldTime,
+	}))
+	require.NoError(t, touchHeartbeat(agentDir, oldTime))
+	stubQuiescentRescueWorktree(t)
+
+	require.NoError(t, os.RemoveAll(allocation.Path))
+	t.Setenv("FAKE_CLAUDE_STDOUT", `{"event":"retry-after-rescue"}`+"\n")
+	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(allocation.Path, "retry.txt"))
+
+	step := newStep(env.cfg, stepOptions{
+		now:               time.Now,
+		heartbeatInterval: 10 * time.Millisecond,
+		staleAfter:        time.Second,
+	})
+	require.NoError(t, step.Run(context.Background(), env.runCtx))
+
+	rescueState, err := agentrunner.ReadRescueState(filepath.Join(latestRescueDir(t, agentDir), "state.json"))
+	require.NoError(t, err)
+	assert.Equal(t, advancedHead, rescueState.RescuedHeadSHA)
+	assert.Greater(t, rescueState.CommitCount, 0)
+}
+
 func TestStepRun_QuiesceTimeoutRequiresManualRecoveryWithoutReset(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	fx.seedResumeState(t, 0)

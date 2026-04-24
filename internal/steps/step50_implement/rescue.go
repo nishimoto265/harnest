@@ -85,6 +85,9 @@ func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation co
 		}
 	}
 
+	if err := ensureAllocationWorktreeForRescue(ctx, run.Config, allocation); err != nil {
+		return 0, err
+	}
 	nextRetry, err := s.performRescue(ctx, run, allocation, agentDir, state)
 	if err != nil {
 		return 0, err
