@@ -455,7 +455,7 @@ func runRecoverClearSentinel(cmd *cobra.Command, runID string) error {
 	if err := step70_decide.RecoverClearSentinelLocked(runCtx, lock); err != nil {
 		return err
 	}
-	if !lastRunEventIsTerminal(events) {
+	if !latestRunActionEventIsTerminal(events) {
 		if pr, ok := recoverPRForClearSentinel(runCtx, events); ok {
 			if err := state.NewWriter(runCtx).Append(contracts.StateEntry{
 				Kind: contracts.StateKindCompleted,
@@ -576,10 +576,14 @@ func recoverRunPrereqs(runID string, requireSentinel bool) (context.Context, str
 		_ = lock.Unlock()
 		return nil, "", internalio.RunContext{}, contracts.TaskPackage{}, contracts.Candidates{}, recoverIntentionStore{}, nil, err
 	}
-	sentinelValue, _, err := existingRecoverSentinel(runCtx)
+	sentinelValue, sentinelName, err := existingRecoverSentinel(runCtx)
 	if err != nil {
 		_ = lock.Unlock()
 		return nil, "", internalio.RunContext{}, contracts.TaskPackage{}, contracts.Candidates{}, recoverIntentionStore{}, nil, err
+	}
+	if sentinelName == contracts.NeedsRecoverySentinelAbortedFilename(runCtx.RunID) {
+		_ = lock.Unlock()
+		return nil, "", internalio.RunContext{}, contracts.TaskPackage{}, contracts.Candidates{}, recoverIntentionStore{}, nil, commandExitError{code: 2, msg: fmt.Sprintf("recover: %s is an aborted sentinel; use --finalize-cleanup", sentinelName)}
 	}
 	if err := validateRegistryIntegrity(runsBase); err != nil {
 		_ = lock.Unlock()
@@ -623,10 +627,14 @@ func recoverRunSentinelPrereqs(runID string) (string, internalio.RunContext, *in
 		_ = lock.Unlock()
 		return "", internalio.RunContext{}, nil, err
 	}
-	sentinelValue, _, err := existingRecoverSentinel(runCtx)
+	sentinelValue, sentinelName, err := existingRecoverSentinel(runCtx)
 	if err != nil {
 		_ = lock.Unlock()
 		return "", internalio.RunContext{}, nil, err
+	}
+	if sentinelName == contracts.NeedsRecoverySentinelAbortedFilename(runCtx.RunID) {
+		_ = lock.Unlock()
+		return "", internalio.RunContext{}, nil, commandExitError{code: 2, msg: fmt.Sprintf("recover: %s is an aborted sentinel; use --finalize-cleanup", sentinelName)}
 	}
 	if sentinelValue == nil {
 		_ = lock.Unlock()
@@ -785,11 +793,14 @@ func requireAbortedSentinel(runCtx internalio.RunContext) error {
 	return nil
 }
 
-func lastRunEventIsTerminal(events []contracts.StateEntry) bool {
-	if len(events) == 0 {
-		return false
+func latestRunActionEventIsTerminal(events []contracts.StateEntry) bool {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Kind.IsWarning() {
+			continue
+		}
+		return events[i].Kind.IsTerminal()
 	}
-	return events[len(events)-1].Kind.IsTerminal()
+	return false
 }
 
 type recoverIntentionStore struct {

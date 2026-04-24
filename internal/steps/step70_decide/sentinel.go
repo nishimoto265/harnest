@@ -129,6 +129,9 @@ func FinalizeCleanupLocked(runCtx internalio.RunContext, lock *internalio.FileLo
 }
 
 func finalizeCleanupUnlocked(runCtx internalio.RunContext, store IntentionWriter) error {
+	if err := appendFinalizeCleanupCompleted(runCtx); err != nil {
+		return err
+	}
 	if store != nil {
 		if err := store.Delete(); err != nil {
 			return err
@@ -140,7 +143,7 @@ func finalizeCleanupUnlocked(runCtx internalio.RunContext, store IntentionWriter
 	if err := writeClearedMarker(runCtx.RunsBase, runCtx.RunID); err != nil {
 		return err
 	}
-	return appendFinalizeCleanupCompleted(runCtx)
+	return nil
 }
 
 func removeNeedsRecoverySentinels(runCtx internalio.RunContext) error {

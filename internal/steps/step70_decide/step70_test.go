@@ -1655,6 +1655,23 @@ func TestRun_NeedsManualRecoveryStageRequiresExplicitCleanup(t *testing.T) {
 	assert.Equal(t, contracts.DecisionActionAdopt, readDecision(t, runCtx).Action)
 }
 
+func TestFinalizeCleanupKeepsSentinelAndIntentionWhenCompletedAppendFails(t *testing.T) {
+	runCtx, _, candidates, store, resolver := newFixtureWithResolver(t, "PR124")
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageNeedsManualRecovery
+	intention.RecoveryReason = contracts.RollbackReasonManualAbortPendingCleanup
+	intention.FailedStep = contracts.FailedStep70
+	require.NoError(t, store.Save(intention))
+	require.NoError(t, writeAbortedSentinel(runCtx.RunsBase, runCtx.RunID, 124, contracts.RollbackReasonManualAbortPendingCleanup, contracts.FailedStep70, fixedNow()()))
+	require.NoError(t, os.Mkdir(filepath.Join(runCtx.RunsBase, "state.lock"), 0o755))
+
+	err := FinalizeCleanup(runCtx, store)
+	require.Error(t, err)
+	assert.FileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelAbortedFilename(runCtx.RunID)))
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, contracts.NeedsRecoverySentinelClearedFilename(runCtx.RunID)))
+	assert.FileExists(t, intentionPath(t, runCtx))
+}
+
 func TestRun_PlanningRecoveryPrePushCrash_RegistryAdvancedRestartsFresh(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR13")
 	initialTarget := resolver.target
