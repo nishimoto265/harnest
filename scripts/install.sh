@@ -240,7 +240,13 @@ if [[ "$asset_os" == "darwin" ]]; then
     exit 4
   fi
   if [[ "$PLIST_OVERRIDE_SET" -eq 0 ]]; then
-    auto_improve_migrate_legacy_launchd_plist "$PLIST"
+    if ! auto_improve_migrate_legacy_launchd_plist "$PLIST"; then
+      auto_improve_launchctl_bootout "$PLIST"
+      rm -f "$TARGET"
+      [[ -f "$BACKUP" ]] && mv "$BACKUP" "$TARGET"
+      restore_backup_launchd || true
+      exit 4
+    fi
   fi
 fi
 

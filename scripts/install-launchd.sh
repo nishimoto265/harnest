@@ -82,6 +82,6 @@ if [[ "$(id -un)" != "$LAUNCHD_USER" ]]; then
   chown "$LAUNCHD_USER" "$PLIST"
 fi
 
-if [[ "$PLIST_OVERRIDE_SET" -eq 0 ]]; then
+if [[ "$PLIST_OVERRIDE_SET" -eq 0 ]] && auto_improve_launchctl_label_loaded "$LAUNCHD_LABEL"; then
   auto_improve_migrate_legacy_launchd_plist "$PLIST"
 fi

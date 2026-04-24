@@ -2046,6 +2046,34 @@ func TestCleanupWorktrees_RejectsPathOutsideWorktreeBase(t *testing.T) {
 	assert.ErrorIs(t, err, internalio.ErrWorktreePathEscapesBase)
 }
 
+func TestCleanupWorktrees_UnregisteredMissingPathIsNoop(t *testing.T) {
+	runCtx, pkg, _, _, _ := newFixture(t, "PR203")
+	git := &fakeGit{removeWorktreeErr: ErrWorktreeUnregistered}
+
+	require.NoError(t, cleanupWorktrees(context.Background(), runCtx, pkg, git))
+
+	require.Len(t, git.removeWorktreeCalls, len(pkg.Worktrees))
+	for _, wt := range pkg.Worktrees {
+		assert.NoFileExists(t, wt.Path)
+	}
+}
+
+func TestCleanupWorktrees_UnregisteredExistingPathRemovedUnderBase(t *testing.T) {
+	runCtx, pkg, _, _, _ := newFixture(t, "PR204")
+	for _, wt := range pkg.Worktrees {
+		require.NoError(t, os.MkdirAll(wt.Path, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(wt.Path, "leftover.txt"), []byte("leftover\n"), 0o644))
+	}
+	git := &fakeGit{removeWorktreeErr: ErrWorktreeUnregistered}
+
+	require.NoError(t, cleanupWorktrees(context.Background(), runCtx, pkg, git))
+
+	require.Len(t, git.removeWorktreeCalls, len(pkg.Worktrees))
+	for _, wt := range pkg.Worktrees {
+		assert.NoDirExists(t, wt.Path)
+	}
+}
+
 // ---- helpers ----
 
 type fixtureResolver struct {
@@ -2098,6 +2126,7 @@ type fakePushCall struct {
 type fakeGit struct {
 	head                string
 	pushErr             error
+	removeWorktreeErr   error
 	pushCalls           []fakePushCall
 	onPush              func(fakePushCall)
 	remoteHeadCalls     int
@@ -2130,7 +2159,7 @@ func (g *fakeGit) PushForceWithLease(_ context.Context, branch, target, expected
 
 func (g *fakeGit) RemoveWorktree(_ context.Context, path string) error {
 	g.removeWorktreeCalls = append(g.removeWorktreeCalls, path)
-	return nil
+	return g.removeWorktreeErr
 }
 
 func (g cancelOnPushGit) RemoteHead(_ context.Context, _ string) (string, error) {

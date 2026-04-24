@@ -113,12 +113,22 @@ auto_improve_launchd_path() {
 
 auto_improve_launchctl_bootout() {
   local plist="$1"
-  launchctl bootout "$(auto_improve_launchd_domain)" "$plist" >/dev/null 2>&1 || true
+  auto_improve_launchctl_bootout_checked "$plist" || true
+}
+
+auto_improve_launchctl_bootout_checked() {
+  local plist="$1"
+  launchctl bootout "$(auto_improve_launchd_domain)" "$plist" >/dev/null 2>&1
 }
 
 auto_improve_launchctl_bootstrap() {
   local plist="$1"
   launchctl bootstrap "$(auto_improve_launchd_domain)" "$plist"
+}
+
+auto_improve_launchctl_label_loaded() {
+  local label="$1"
+  launchctl print "$(auto_improve_launchd_domain)/$label" >/dev/null 2>&1
 }
 
 auto_improve_migrate_legacy_launchd_plist() {
@@ -128,7 +138,12 @@ auto_improve_migrate_legacy_launchd_plist() {
   if [[ "$legacy_plist" == "$current_plist" || ! -e "$legacy_plist" ]]; then
     return 0
   fi
-  auto_improve_launchctl_bootout "$legacy_plist"
+  if ! auto_improve_launchctl_bootout_checked "$legacy_plist"; then
+    if auto_improve_launchctl_label_loaded "$(auto_improve_legacy_launchd_label)"; then
+      echo "failed to unload legacy launchd job; keeping $legacy_plist" >&2
+      return 1
+    fi
+  fi
   rm -f "$legacy_plist"
 }
 

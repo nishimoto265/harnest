@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -65,7 +66,13 @@ func (g RealGitOps) RemoveWorktree(ctx context.Context, path string) error {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("step70: git worktree remove refused for unregistered path %s", path)
+		if _, err := os.Lstat(path); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		return fmt.Errorf("%w: %s", ErrWorktreeUnregistered, path)
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", g.RepoDir, "worktree", "remove", "--force", path)
 	cmd.Env = processenv.Sanitize()
