@@ -85,7 +85,7 @@ exit 1
 	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:token"))
 	assert.Contains(t, env, "ARGS:-C /tmp/repo remote get-url origin")
 	assert.Contains(t, env, "ARGS:-C /tmp/repo fetch --no-tags origin "+strings.Repeat("a", 40))
-	assert.Contains(t, env, "GIT_CONFIG_KEY_5=http.https://github.com/.extraheader")
-	assert.Contains(t, env, "GIT_CONFIG_VALUE_5="+header)
+	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.com/.extraheader")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+header)
 	assert.NotContains(t, env, "GIT_ASKPASS=/tmp/malicious-askpass")
 }

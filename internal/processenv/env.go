@@ -273,7 +273,6 @@ func appendSafeGitProfileWithConfig(env []string, extraConfig []gitConfigEntry) 
 		{key: "core.hooksPath", value: os.DevNull},
 		{key: "core.fsmonitor", value: "false"},
 		{key: "core.sshCommand", value: "ssh -F " + os.DevNull},
-		{key: "diff.external", value: ""},
 	}
 	config = append(config, extraConfig...)
 

@@ -388,8 +388,6 @@ func assertSafeGitEnv(t *testing.T, env []string) {
 	assert.Contains(t, env, "GIT_CONFIG_VALUE_2=false")
 	assert.Contains(t, env, "GIT_CONFIG_KEY_3=core.sshCommand")
 	assert.Contains(t, env, "GIT_CONFIG_VALUE_3=ssh -F "+os.DevNull)
-	assert.Contains(t, env, "GIT_CONFIG_KEY_4=diff.external")
-	assert.Contains(t, env, "GIT_CONFIG_VALUE_4=")
 	assert.Contains(t, env, "GIT_SSH_COMMAND=ssh -F "+os.DevNull)
 	assert.NotEmpty(t, envValue(env, "GIT_ASKPASS"))
 	assert.NotEmpty(t, envValue(env, "SSH_ASKPASS"))

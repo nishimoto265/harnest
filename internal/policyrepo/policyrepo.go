@@ -739,7 +739,7 @@ func gitText(ctx context.Context, repoRoot string, args ...string) ([]byte, erro
 }
 
 func hasStagedDiff(ctx context.Context, repoRoot string) (bool, error) {
-	_, err := runGit(ctx, processenv.GitLocalEnv(), "-C", repoRoot, "diff", "--cached", "--quiet", "--", RepoDirName)
+	_, err := runGit(ctx, processenv.GitLocalEnv(), "-C", repoRoot, "diff", "--no-ext-diff", "--cached", "--quiet", "--", RepoDirName)
 	if err == nil {
 		return false, nil
 	}

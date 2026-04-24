@@ -132,7 +132,7 @@ func TestGitLocalEnv_AppendsSafeGitProfile(t *testing.T) {
 	assert.Contains(t, env, "PATH="+defaultTrustedPATH)
 	assert.Contains(t, env, "GIT_CONFIG_NOSYSTEM=1")
 	assert.Contains(t, env, "GIT_CONFIG_GLOBAL="+os.DevNull)
-	assert.Contains(t, env, "GIT_CONFIG_COUNT=5")
+	assert.Contains(t, env, "GIT_CONFIG_COUNT=4")
 	assert.Contains(t, env, "GIT_CONFIG_KEY_0=credential.helper")
 	assert.Contains(t, env, "GIT_CONFIG_VALUE_0=")
 	assert.Contains(t, env, "GIT_CONFIG_KEY_1=core.hooksPath")
@@ -141,8 +141,6 @@ func TestGitLocalEnv_AppendsSafeGitProfile(t *testing.T) {
 	assert.Contains(t, env, "GIT_CONFIG_VALUE_2=false")
 	assert.Contains(t, env, "GIT_CONFIG_KEY_3=core.sshCommand")
 	assert.Contains(t, env, "GIT_CONFIG_VALUE_3=ssh -F "+os.DevNull)
-	assert.Contains(t, env, "GIT_CONFIG_KEY_4=diff.external")
-	assert.Contains(t, env, "GIT_CONFIG_VALUE_4=")
 	assert.Contains(t, env, "GIT_SSH_COMMAND=ssh -F "+os.DevNull)
 	assert.Contains(t, env, "GIT_ASKPASS="+falsePath)
 	assert.Contains(t, env, "SSH_ASKPASS="+falsePath)
@@ -187,9 +185,9 @@ func TestGitNetworkEnvForRemoteURL_AddsScopedHTTPSGitHubTokenHeader(t *testing.T
 	env := GitNetworkEnvForRemoteURL("https://github.com/owner/repo.git", "GH_TOKEN=override")
 	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:override"))
 
-	assert.Contains(t, env, "GIT_CONFIG_COUNT=6")
-	assert.Contains(t, env, "GIT_CONFIG_KEY_5=http.https://github.com/.extraheader")
-	assert.Contains(t, env, "GIT_CONFIG_VALUE_5="+header)
+	assert.Contains(t, env, "GIT_CONFIG_COUNT=5")
+	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.com/.extraheader")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+header)
 }
 
 func TestGitNetworkEnvForRemoteURL_DoesNotScopeTokenToWrongHost(t *testing.T) {
@@ -197,7 +195,7 @@ func TestGitNetworkEnvForRemoteURL_DoesNotScopeTokenToWrongHost(t *testing.T) {
 
 	env := GitNetworkEnvForRemoteURL("https://evil.example.com/owner/repo.git", "GH_TOKEN=override")
 
-	assert.Contains(t, env, "GIT_CONFIG_COUNT=5")
+	assert.Contains(t, env, "GIT_CONFIG_COUNT=4")
 	for _, item := range env {
 		assert.NotContains(t, item, ".extraheader")
 		assert.NotContains(t, item, "x-access-token")
@@ -210,8 +208,8 @@ func TestGitNetworkEnvForRemoteURL_AllowsConfiguredGHHost(t *testing.T) {
 	env := GitNetworkEnvForRemoteURL("https://github.example.com/owner/repo.git", "GH_TOKEN=override")
 	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:override"))
 
-	assert.Contains(t, env, "GIT_CONFIG_KEY_5=http.https://github.example.com/.extraheader")
-	assert.Contains(t, env, "GIT_CONFIG_VALUE_5="+header)
+	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.example.com/.extraheader")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+header)
 }
 
 func TestGitSafeProfile_UsesPortableFalseFromTrustedPath(t *testing.T) {

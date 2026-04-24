@@ -456,7 +456,7 @@ func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeA
 	if _, err := gitOutputContext(ctx, identity, allocation.Path, "add", "-A", "--", ".", ":(exclude)"+checklistFileName); err != nil {
 		return "", "", err
 	}
-	staged, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "diff", "--cached", "--name-only", "--", ".", ":(exclude)"+checklistFileName)
+	staged, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "diff", "--no-ext-diff", "--cached", "--name-only", "--", ".", ":(exclude)"+checklistFileName)
 	if err != nil {
 		return "", "", err
 	}

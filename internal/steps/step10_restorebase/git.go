@@ -197,7 +197,7 @@ func (g gitCLI) RepoSlug(ctx context.Context, repoRoot string) (string, error) {
 }
 
 func (g gitCLI) ChangedFiles(ctx context.Context, repoRoot, from, to string) ([]string, error) {
-	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "diff", "--name-only", "--find-renames", from, to, "--")
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "diff", "--no-ext-diff", "--name-only", "--find-renames", from, to, "--")
 	if err != nil {
 		return nil, formatCommandFailure(fmt.Sprintf("step10: git diff --name-only %s %s (in %s)", from, to, repoRoot), err, out, stderr)
 	}
@@ -214,7 +214,7 @@ func (g gitCLI) ChangedFiles(ctx context.Context, repoRoot, from, to string) ([]
 }
 
 func (g gitCLI) Diff(ctx context.Context, repoRoot, from, to string) (string, error) {
-	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "diff", "--find-renames", "--unified=3", from, to, "--")
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "diff", "--no-ext-diff", "--find-renames", "--unified=3", from, to, "--")
 	if err != nil {
 		return "", formatCommandFailure(fmt.Sprintf("step10: git diff %s %s (in %s)", from, to, repoRoot), err, out, stderr)
 	}

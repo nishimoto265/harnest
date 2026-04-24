@@ -119,8 +119,8 @@ exit 1
 	assert.Contains(t, env, "ARGS:-C /tmp/repo remote get-url origin")
 	assert.Contains(t, env, "ARGS:-C /tmp/repo ls-remote --heads origin "+realGitBranch)
 	assert.Contains(t, env, "ARGS:-C /tmp/repo push origin "+strings.Repeat("b", 40)+":"+realGitBranch)
-	assert.Contains(t, env, "GIT_CONFIG_KEY_5=http.https://github.com/.extraheader")
-	assert.Contains(t, env, "GIT_CONFIG_VALUE_5="+header)
+	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.com/.extraheader")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+header)
 	assert.NotContains(t, env, "GIT_ASKPASS=/tmp/malicious-askpass")
 }
 
