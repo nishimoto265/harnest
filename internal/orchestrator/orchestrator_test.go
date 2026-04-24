@@ -21,6 +21,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/state"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
@@ -289,7 +290,6 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Repo.Root = repoRootFromTestFile(t)
 	binDir := installFakeCLI(t)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
 
 	t.Setenv("AUTO_IMPROVE_TEST_BASE_SHA", strings.Repeat("a", 40))
@@ -333,7 +333,6 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs_AdoptFlow(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Repo.Root = repoRootFromTestFile(t)
 	binDir := installFakeCLI(t)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
 
 	t.Setenv("AUTO_IMPROVE_TEST_BASE_SHA", strings.Repeat("a", 40))
@@ -373,7 +372,6 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs_BlockedBySentinel(t *testing.T)
 	cfg := testConfig(t)
 	cfg.Repo.Root = repoRootFromTestFile(t)
 	binDir := installFakeCLI(t)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
 
 	t.Setenv("AUTO_IMPROVE_TEST_BASE_SHA", strings.Repeat("a", 40))
@@ -410,7 +408,6 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs_NeedsManualRecovery(t *testing.
 	cfg.Repo.Root = repoRootFromTestFile(t)
 	binDir := installFakeCLI(t)
 	overwriteFakeGitScript(t, binDir, manualRecoveryGitScript())
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("AUTO_IMPROVE_GIT_STATE_DIR", t.TempDir())
 	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
 
@@ -444,7 +441,6 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs_PostPushRollback(t *testing.T) 
 	binDir := installFakeCLI(t)
 	sentinelPath := filepath.Join(cfg.Paths.Runs, "needs-recovery", "other-run.json")
 	overwriteFakeGitScript(t, binDir, postPushRollbackGitScript())
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("AUTO_IMPROVE_GIT_STATE_DIR", t.TempDir())
 	t.Setenv("AUTO_IMPROVE_TEST_SENTINEL_PATH", sentinelPath)
 	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
@@ -479,7 +475,6 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs_ResumesBranchPushedIntention(t 
 	cfg := testConfig(t)
 	cfg.Repo.Root = repoRootFromTestFile(t)
 	binDir := installFakeCLI(t)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
 
 	t.Setenv("AUTO_IMPROVE_TEST_BASE_SHA", strings.Repeat("a", 40))
@@ -2785,6 +2780,8 @@ func installFakeCLI(t *testing.T) string {
 		dst := filepath.Join(destDir, name)
 		require.NoError(t, os.WriteFile(dst, data, 0o755))
 	}
+	restoreTrustedPath := processenv.SetTrustedPathForTest(destDir + string(os.PathListSeparator) + processenv.TrustedPath())
+	t.Cleanup(restoreTrustedPath)
 	return destDir
 }
 

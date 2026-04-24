@@ -39,7 +39,7 @@ func TestSanitize_UsesStrictAllowlistForBaseAndExtraEnv(t *testing.T) {
 	env := Sanitize("AUTO_IMPROVE_STEP=20", "GH_TOKEN=override", "BASH_ENV=/tmp/extra", "PATH=/override/bin")
 
 	assert.Contains(t, env, "HOME=/tmp/home")
-	assert.Contains(t, env, "PATH="+trustedPATH)
+	assert.Contains(t, env, "PATH="+defaultTrustedPATH)
 	assert.Contains(t, env, "USER=tester")
 	assert.Contains(t, env, "LANG=en_US.UTF-8")
 	assert.Contains(t, env, "LC_ALL=C.UTF-8")
@@ -81,7 +81,7 @@ func TestSanitizeForNetworkExec_PreservesAuthEnvButBlocksShellInit(t *testing.T)
 
 	// Baseline allowlist still applied.
 	assert.Contains(t, env, "HOME=/tmp/home")
-	assert.Contains(t, env, "PATH="+trustedPATH)
+	assert.Contains(t, env, "PATH="+defaultTrustedPATH)
 	assert.Contains(t, env, "USER=tester")
 	assert.Contains(t, env, "AUTO_IMPROVE_STEP=10")
 
@@ -118,7 +118,7 @@ func TestTrustedLookPath_IgnoresParentPathShadow(t *testing.T) {
 	resolved, err := TrustedLookPath("sh")
 	require.NoError(t, err)
 	assert.NotEqual(t, shadowPath, resolved)
-	assert.Contains(t, filepath.SplitList(trustedPATH), filepath.Dir(resolved))
+	assert.Contains(t, filepath.SplitList(defaultTrustedPATH), filepath.Dir(resolved))
 }
 
 func TestTrustedLookPath_RejectsRelativePathWithSeparator(t *testing.T) {
@@ -126,4 +126,17 @@ func TestTrustedLookPath_RejectsRelativePathWithSeparator(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "relative executable path")
+}
+
+func TestSetTrustedPathForTest_ControlsLookupAndSanitizedPath(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "tool")
+	require.NoError(t, os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	restore := SetTrustedPathForTest(dir)
+	t.Cleanup(restore)
+
+	resolved, err := TrustedLookPath("tool")
+	require.NoError(t, err)
+	assert.Equal(t, bin, resolved)
+	assert.Contains(t, Sanitize(), "PATH="+dir)
 }

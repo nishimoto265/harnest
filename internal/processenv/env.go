@@ -7,12 +7,36 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
-// trustedPATH is the fixed PATH used for every sanitized subprocess env.
+// defaultTrustedPATH is the fixed PATH used for every sanitized subprocess env.
 // Callers MUST NOT inherit the caller's $PATH since shell-init payloads can
 // inject attacker-controlled binaries earlier on the path.
-const trustedPATH = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
+const defaultTrustedPATH = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
+
+var trustedPathState = struct {
+	sync.RWMutex
+	value string
+}{value: defaultTrustedPATH}
+
+func TrustedPath() string {
+	trustedPathState.RLock()
+	defer trustedPathState.RUnlock()
+	return trustedPathState.value
+}
+
+func SetTrustedPathForTest(path string) func() {
+	trustedPathState.Lock()
+	previous := trustedPathState.value
+	trustedPathState.value = path
+	trustedPathState.Unlock()
+	return func() {
+		trustedPathState.Lock()
+		trustedPathState.value = previous
+		trustedPathState.Unlock()
+	}
+}
 
 // TrustedLookPath resolves bare command names against trustedPATH instead of
 // the parent process PATH. Absolute paths are allowed for explicit operator
@@ -31,7 +55,8 @@ func TrustedLookPath(file string) (string, error) {
 	if strings.ContainsRune(file, os.PathSeparator) {
 		return "", fmt.Errorf("processenv: relative executable path %q is not allowed; use an absolute path or a bare name in trusted PATH", file)
 	}
-	for _, dir := range filepath.SplitList(trustedPATH) {
+	trustedPath := TrustedPath()
+	for _, dir := range filepath.SplitList(trustedPath) {
 		if dir == "" {
 			continue
 		}
@@ -40,7 +65,7 @@ func TrustedLookPath(file string) (string, error) {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("processenv: executable %q not found in trusted PATH %q: %w", file, trustedPATH, exec.ErrNotFound)
+	return "", fmt.Errorf("processenv: executable %q not found in trusted PATH %q: %w", file, trustedPath, exec.ErrNotFound)
 }
 
 // TrustedCommand returns an exec.Cmd whose path has already been resolved by
@@ -137,7 +162,7 @@ func sanitize(extra []string, allow func(string) bool) []string {
 	for _, item := range extra {
 		appendAllowed(item, true)
 	}
-	out = append(out, "PATH="+trustedPATH)
+	out = append(out, "PATH="+TrustedPath())
 	return out
 }
 
