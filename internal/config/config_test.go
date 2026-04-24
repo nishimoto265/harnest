@@ -395,12 +395,11 @@ worktree:
 	assert.ErrorContains(t, err, "paths.runs and runs_base both set different paths")
 }
 
-func TestLoadConfig_LegacyCLIPathsOverrideDefaultAgentNames(t *testing.T) {
+func TestLoadConfig_LegacyClaudeCLIPathOverridesDefaultImplementerBinary(t *testing.T) {
 	path := writeConfigFixture(t, `
 runs_base: "/tmp/auto-improve/runs"
 worktree_base: "/tmp/auto-improve/worktrees"
 claude_cli_path: "/opt/bin/claude"
-codex_cli_path: "/opt/bin/codex"
 `)
 
 	cfg, err := LoadConfig(path)
@@ -408,7 +407,6 @@ codex_cli_path: "/opt/bin/codex"
 	profile, err := cfg.AgentProfile(agents.RoleImplementer)
 	require.NoError(t, err)
 	assert.Equal(t, "/opt/bin/claude", profile.Binary)
-	assert.Equal(t, "/opt/bin/codex", cfg.CodexBinary())
 }
 
 func writeConfigFixture(t *testing.T, body string) string {

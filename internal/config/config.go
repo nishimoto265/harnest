@@ -19,8 +19,6 @@ const defaultConfigFile = "config.yaml"
 const (
 	DefaultRegistryHighThreshold     = 1501
 	DefaultRegistryCriticalThreshold = 2001
-	defaultRunsDirName               = "runs"
-	defaultWorktreesDirName          = "worktrees"
 )
 
 var requiredStepTimeoutKeys = []string{
@@ -195,7 +193,7 @@ func (c Config) RunsBase() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return c.namespaceStatePath(resolved, defaultRunsDirName), nil
+	return c.namespaceStatePath(resolved), nil
 }
 
 func (c Config) WorktreeBase() (string, error) {
@@ -210,7 +208,7 @@ func (c Config) WorktreeBase() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return c.namespaceStatePath(resolved, defaultWorktreesDirName), nil
+	return c.namespaceStatePath(resolved), nil
 }
 
 func (c Config) PolicyBranch() (string, bool) {
@@ -220,7 +218,7 @@ func (c Config) PolicyBranch() (string, bool) {
 	return c.Repo.PolicyBranch, true
 }
 
-func (c Config) namespaceStatePath(path, leaf string) string {
+func (c Config) namespaceStatePath(path string) string {
 	namespace, ok := c.repoStateNamespace()
 	if !ok {
 		return path
@@ -283,29 +281,6 @@ func (c Config) PromotionLockPath() (string, error) {
 		return "", err
 	}
 	return path, nil
-}
-
-func (c Config) ClaudeBinary() string {
-	if c.ClaudeCLIPath != "" {
-		return c.ClaudeCLIPath
-	}
-	if c.Agents.Implementer != "" {
-		return c.Agents.Implementer
-	}
-	if c.Agents.JudgePrimary != "" {
-		return c.Agents.JudgePrimary
-	}
-	return "claude"
-}
-
-func (c Config) CodexBinary() string {
-	if c.CodexCLIPath != "" {
-		return c.CodexCLIPath
-	}
-	if c.Agents.JudgeSecondary != "" {
-		return c.Agents.JudgeSecondary
-	}
-	return "codex"
 }
 
 func (c Config) AgentFile() agents.File {
