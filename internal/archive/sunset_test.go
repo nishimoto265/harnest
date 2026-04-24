@@ -491,6 +491,73 @@ func TestRunSunsetWithLock_BlocksOnNeedsManualRecoveryStateWithoutSentinelFile(t
 	assert.NoFileExists(t, filepath.Join(runsBase, "rules-registry.jsonl"))
 }
 
+func TestRunSunsetWithLock_BlocksOnAnyNeedsManualRecoveryState(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		runID      contracts.RunID
+		pr         int
+		step       contracts.FailedStep
+		reason     contracts.RollbackReason
+		failedStep contracts.FailedStep
+	}{
+		{
+			name:       "step20 rescue loop",
+			runID:      "2026-04-21-PR20-deadbee",
+			pr:         20,
+			step:       contracts.FailedStep20,
+			reason:     contracts.RollbackReasonWorktreeRescueLoop,
+			failedStep: contracts.FailedStep20,
+		},
+		{
+			name:       "step50 rescue loop",
+			runID:      "2026-04-21-PR50-deadbee",
+			pr:         50,
+			step:       contracts.FailedStep50,
+			reason:     contracts.RollbackReasonWorktreeRescueLoop,
+			failedStep: contracts.FailedStep50,
+		},
+		{
+			name:       "step70 transactional failure",
+			runID:      "2026-04-21-PR70-deadbee",
+			pr:         70,
+			step:       contracts.FailedStep70,
+			reason:     contracts.RollbackReasonTransactionalFailure,
+			failedStep: contracts.FailedStep70,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runsBase := realTempDir(t)
+			worktreeBase := realTempDir(t)
+			runCtx, err := internalio.NewRunContext(tc.runID, runsBase, worktreeBase)
+			require.NoError(t, err)
+			writer, err := state.NewWriterPath(filepath.Join(runsBase, "processed.jsonl"))
+			require.NoError(t, err)
+			require.NoError(t, writer.Append(contracts.StateEntry{
+				Kind: contracts.StateKindNeedsManualRecovery,
+				Value: contracts.StateEntryNeedsManualRecovery{
+					Kind:       contracts.StateKindNeedsManualRecovery,
+					PR:         tc.pr,
+					RunID:      runCtx.RunID,
+					Step:       tc.step,
+					Reason:     tc.reason,
+					FailedStep: tc.failedStep,
+					At:         time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+				},
+			}))
+
+			result, err := RunSunsetWithLock(context.Background(), Opts{
+				RunsBase:    runsBase,
+				SunsetRunID: "sunset-blocked",
+				Transitions: []Transition{deprecateTransition("rule-1")},
+				Now:         func() time.Time { return time.Date(2026, 4, 21, 13, 0, 0, 0, time.UTC) },
+			})
+			require.NoError(t, err)
+			assert.Empty(t, result.AppendedOpIDs)
+			assert.NoFileExists(t, filepath.Join(runsBase, "rules-registry.jsonl"))
+		})
+	}
+}
+
 func TestRunSunsetWithLock_ProceedsAfterFinalizeCleanupWritesClearedMarker(t *testing.T) {
 	runsBase := realTempDir(t)
 	worktreeBase := realTempDir(t)

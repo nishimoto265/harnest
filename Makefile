@@ -1,8 +1,8 @@
 SHELL := /bin/bash
 
-.PHONY: all build test lint tidy check-sync
+.PHONY: all build test lint tidy check-sync script-test
 
-all: build test lint check-sync
+all: build test lint check-sync script-test
 
 build:
 	go build ./...
@@ -19,6 +19,11 @@ tidy:
 
 check-sync:
 	bash scripts/check-contracts-sync.sh
+
+script-test:
+	bash -n scripts/install.sh scripts/install-launchd.sh scripts/launchd-common.sh scripts/install-migration-test.sh scripts/check-contracts-sync.sh scripts/check-contracts-sync_test.sh
+	bash scripts/install-migration-test.sh
+	bash scripts/check-contracts-sync_test.sh
 
 .PHONY: release install
 

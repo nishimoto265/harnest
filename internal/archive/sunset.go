@@ -671,16 +671,7 @@ func sentinelExists(runsBase string) (bool, error) {
 				continue
 			}
 		}
-		switch value := latest.LastEvent.Value.(type) {
-		case contracts.StateEntryNeedsManualRecovery:
-			if value.Step == contracts.FailedStep70 && value.Reason != contracts.RollbackReasonWorktreeRescueLoop {
-				return true, nil
-			}
-		case *contracts.StateEntryNeedsManualRecovery:
-			if value != nil && value.Step == contracts.FailedStep70 && value.Reason != contracts.RollbackReasonWorktreeRescueLoop {
-				return true, nil
-			}
-		}
+		return true, nil
 	}
 	dir := filepath.Join(runsBase, "needs-recovery")
 	entries, err := os.ReadDir(dir)

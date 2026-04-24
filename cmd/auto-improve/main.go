@@ -452,6 +452,9 @@ func runRecoverClearSentinel(cmd *cobra.Command, runID string) error {
 	if err != nil {
 		return err
 	}
+	if err := step70_decide.RecoverClearSentinelLocked(runCtx, lock); err != nil {
+		return err
+	}
 	if !lastRunEventIsTerminal(events) {
 		if pr, ok := recoverPRForClearSentinel(runCtx, events); ok {
 			if err := state.NewWriter(runCtx).Append(contracts.StateEntry{
@@ -468,9 +471,6 @@ func runRecoverClearSentinel(cmd *cobra.Command, runID string) error {
 				return err
 			}
 		}
-	}
-	if err := step70_decide.RecoverClearSentinelLocked(runCtx, lock); err != nil {
-		return err
 	}
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(recoverActionOutput{
 		Event:    "recover_clear_sentinel",

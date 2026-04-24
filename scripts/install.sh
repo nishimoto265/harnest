@@ -19,6 +19,7 @@ DOWNLOAD_BASE_URL="${AUTO_IMPROVE_RELEASE_BASE_URL:-$ARCHIVE_URL_DEFAULT_BASE}"
 CHECKSUMS_URL="${AUTO_IMPROVE_CHECKSUMS_URL:-}"
 EXPECTED_SHA256="${AUTO_IMPROVE_EXPECTED_SHA256:-}"
 PLIST_OVERRIDE_SET=0
+PLIST_OVERRIDE="${PLIST:-}"
 if [[ -n "${PLIST:-}" ]]; then
   PLIST_OVERRIDE_SET=1
 fi
@@ -49,24 +50,6 @@ sha256_file() {
   fi
   echo "neither shasum nor sha256sum is available for checksum verification" >&2
   return 1
-}
-
-resolve_effective_url() {
-  local url="$1"
-  curl -fsSIL -o /dev/null -w '%{url_effective}' "$url"
-}
-
-resolve_latest_release_tag() {
-  local repo_slug="$1"
-  local latest_url effective_url tag
-  latest_url="https://github.com/${repo_slug}/releases/latest"
-  effective_url="$(resolve_effective_url "$latest_url")"
-  tag="${effective_url##*/}"
-  if [[ -z "$tag" || "$tag" == "latest" ]]; then
-    echo "failed to resolve latest release tag for ${repo_slug}" >&2
-    return 1
-  fi
-  printf '%s\n' "$tag"
 }
 
 if ! REPO_ROOT="$(cd "$REPO_ROOT_INPUT" 2>/dev/null && pwd -P)"; then
@@ -114,7 +97,7 @@ if [[ "$asset_os" == "linux" && "$asset_arch" != "amd64" ]]; then
   exit 1
 fi
 
-PLIST=""
+PLIST="$PLIST_OVERRIDE"
 PLIST_BAK=""
 if [[ "$asset_os" == "darwin" ]]; then
   PLIST="$(auto_improve_launchd_plist_path)"
@@ -123,8 +106,7 @@ fi
 
 asset_name="auto-improve_${asset_os}_${asset_arch}"
 if [[ -z "$RELEASE_URL" ]]; then
-  release_tag="$(resolve_latest_release_tag "$REPO_SLUG")" || exit 1
-  release_base="https://github.com/${REPO_SLUG}/releases/download/${release_tag}"
+  release_base="${DOWNLOAD_BASE_URL%/}"
   RELEASE_URL="${release_base}/${asset_name}"
   if [[ -z "$CHECKSUMS_URL" && -z "$EXPECTED_SHA256" ]]; then
     CHECKSUMS_URL="${release_base}/checksums.txt"
