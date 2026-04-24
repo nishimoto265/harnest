@@ -1,6 +1,7 @@
 package policyrepo
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -54,6 +55,16 @@ type ActiveRule struct {
 	Body     string
 }
 
+type PreparedPublish struct {
+	RepoRoot     string
+	Branch       string
+	ExpectedHead string
+	Head         string
+	worktreeDir  string
+	needsPush    bool
+	cleaned      bool
+}
+
 func HydrateFromBranch(ctx context.Context, repoRoot, branch, runsBase string) error {
 	_, err := hydrateSnapshotFromBranch(ctx, repoRoot, branch, runsBase, "")
 	return err
@@ -65,6 +76,12 @@ func HydrateAndSnapshotFromBranch(ctx context.Context, repoRoot, branch, runsBas
 }
 
 func hydrateSnapshotFromBranch(ctx context.Context, repoRoot, branch, runsBase, runDir string) (snapshot, error) {
+	lock, err := internalio.AcquireFileLockContext(ctx, filepath.Join(runsBase, "promotion.lock"))
+	if err != nil {
+		return snapshot{}, err
+	}
+	defer func() { _ = lock.Unlock() }()
+
 	if err := fetchBranch(ctx, repoRoot, branch); err != nil {
 		return snapshot{}, err
 	}
@@ -76,11 +93,6 @@ func hydrateSnapshotFromBranch(ctx context.Context, repoRoot, branch, runsBase, 
 	if err != nil {
 		return snapshot{}, err
 	}
-	lock, err := internalio.AcquireFileLockContext(ctx, filepath.Join(runsBase, "promotion.lock"))
-	if err != nil {
-		return snapshot{}, err
-	}
-	defer func() { _ = lock.Unlock() }()
 	if strings.TrimSpace(runDir) != "" {
 		if err := applySnapshotToRunDir(runDir, snap); err != nil {
 			return snapshot{}, err
@@ -105,46 +117,64 @@ func hydrateSnapshotFromBranch(ctx context.Context, repoRoot, branch, runsBase, 
 }
 
 func PublishSnapshot(ctx context.Context, repoRoot, branch, expectedHead, runsBase, runID string) (string, error) {
+	plan, err := PrepareSnapshotPublish(ctx, repoRoot, branch, expectedHead, runsBase, runID)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = plan.Cleanup()
+	}()
+	if err := plan.Push(ctx); err != nil {
+		return "", err
+	}
+	return plan.Head, nil
+}
+
+func PrepareSnapshotPublish(ctx context.Context, repoRoot, branch, expectedHead, runsBase, runID string) (*PreparedPublish, error) {
 	if expectedHead == "" {
-		return "", fmt.Errorf("policyrepo: expected head is required for publish")
+		return nil, fmt.Errorf("policyrepo: expected head is required for publish")
 	}
 	snap, err := loadLocalSnapshot(runsBase)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if err := fetchBranch(ctx, repoRoot, branch); err != nil {
-		return "", err
+		return nil, err
 	}
 	tmpDir, err := os.MkdirTemp(runsBase, "policy-publish-"+sanitizeRunID(runID)+"-")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	cleanupDone := false
-	defer func() {
-		if !cleanupDone {
-			_ = removeWorktree(repoRoot, tmpDir)
-		}
-	}()
+	plan := &PreparedPublish{
+		RepoRoot:     repoRoot,
+		Branch:       branch,
+		ExpectedHead: expectedHead,
+		Head:         expectedHead,
+		worktreeDir:  tmpDir,
+	}
 	if _, err := gitText(ctx, repoRoot, "worktree", "add", "--detach", tmpDir, expectedHead); err != nil {
-		return "", err
+		_ = plan.Cleanup()
+		return nil, err
 	}
 
 	if err := syncSnapshotToWorktree(tmpDir, snap); err != nil {
-		return "", err
+		_ = plan.Cleanup()
+		return nil, err
 	}
 	if _, err := gitText(ctx, tmpDir, "add", "-A", "--", RepoDirName); err != nil {
-		return "", err
+		_ = plan.Cleanup()
+		return nil, err
 	}
 	hasDiff, err := hasStagedDiff(ctx, tmpDir)
 	if err != nil {
-		return "", err
+		_ = plan.Cleanup()
+		return nil, err
 	}
 	if !hasDiff {
-		cleanupDone = true
-		if removeErr := removeWorktree(repoRoot, tmpDir); removeErr != nil {
-			return "", removeErr
+		if err := plan.Cleanup(); err != nil {
+			return nil, err
 		}
-		return expectedHead, nil
+		return plan, nil
 	}
 
 	env := processenv.Sanitize()
@@ -153,27 +183,76 @@ func PublishSnapshot(ctx context.Context, repoRoot, branch, expectedHead, runsBa
 		"GIT_AUTHOR_EMAIL=auto-improve@local",
 		"GIT_COMMITTER_NAME=auto-improve",
 		"GIT_COMMITTER_EMAIL=auto-improve@local",
+		"GIT_AUTHOR_DATE=2000-01-01T00:00:00Z",
+		"GIT_COMMITTER_DATE=2000-01-01T00:00:00Z",
 	)
 	if _, err := runGit(ctx, env, "-C", tmpDir, "commit", "-m", fmt.Sprintf("auto-improve: publish policy snapshot for %s", runID)); err != nil {
-		return "", fmt.Errorf("policyrepo: commit policy snapshot: %w", err)
+		_ = plan.Cleanup()
+		return nil, fmt.Errorf("policyrepo: commit policy snapshot: %w", err)
 	}
 	headBytes, err := gitText(ctx, tmpDir, "rev-parse", "HEAD")
 	if err != nil {
-		return "", err
+		_ = plan.Cleanup()
+		return nil, err
 	}
-	newHead := strings.TrimSpace(string(headBytes))
-	cleanupDone = true
-	if err := removeWorktree(repoRoot, tmpDir); err != nil {
-		removeErr := os.RemoveAll(tmpDir)
+	plan.Head = strings.TrimSpace(string(headBytes))
+	plan.needsPush = true
+	return plan, nil
+}
+
+func (p *PreparedPublish) Push(ctx context.Context) error {
+	if p == nil {
+		return errors.New("policyrepo: prepared publish is required")
+	}
+	if !p.needsPush {
+		return nil
+	}
+	if _, err := runGit(ctx, processenv.SanitizeForNetworkExec(), "-C", p.RepoRoot, "push", "origin", fmt.Sprintf("%s:%s", p.Head, p.Branch), fmt.Sprintf("--force-with-lease=%s:%s", p.Branch, p.ExpectedHead)); err != nil {
+		return fmt.Errorf("policyrepo: push policy snapshot: %w", err)
+	}
+	return nil
+}
+
+func (p *PreparedPublish) Cleanup() error {
+	if p == nil || p.cleaned || p.worktreeDir == "" {
+		return nil
+	}
+	p.cleaned = true
+	if err := removeWorktree(p.RepoRoot, p.worktreeDir); err != nil {
+		removeErr := os.RemoveAll(p.worktreeDir)
 		if removeErr != nil {
-			return newHead, fmt.Errorf("policyrepo: remove policy worktree after publish: %w; remove temp dir: %v", err, removeErr)
+			return fmt.Errorf("policyrepo: remove policy worktree after publish: %w; remove temp dir: %v", err, removeErr)
 		}
-		return newHead, fmt.Errorf("policyrepo: remove policy worktree after publish: %w", err)
+		return fmt.Errorf("policyrepo: remove policy worktree after publish: %w", err)
 	}
-	if _, err := runGit(ctx, processenv.SanitizeForNetworkExec(), "-C", repoRoot, "push", "origin", fmt.Sprintf("%s:%s", newHead, branch), fmt.Sprintf("--force-with-lease=%s:%s", branch, expectedHead)); err != nil {
-		return "", fmt.Errorf("policyrepo: push policy snapshot: %w", err)
+	return nil
+}
+
+func BranchSnapshotMatchesLocal(ctx context.Context, repoRoot, branch, runsBase string) (bool, error) {
+	if err := fetchBranch(ctx, repoRoot, branch); err != nil {
+		return false, err
 	}
-	return newHead, nil
+	remote, err := loadBranchSnapshot(ctx, repoRoot, branch)
+	if err != nil {
+		return false, err
+	}
+	local, err := loadLocalSnapshot(runsBase)
+	if err != nil {
+		return false, err
+	}
+	return snapshotsEqual(remote, local), nil
+}
+
+func snapshotsEqual(a, b snapshot) bool {
+	if !bytes.Equal(a.registry, b.registry) || len(a.rules) != len(b.rules) {
+		return false
+	}
+	for path, aBody := range a.rules {
+		if !bytes.Equal(aBody, b.rules[path]) {
+			return false
+		}
+	}
+	return true
 }
 
 func applySnapshotToRunDir(runDir string, snap snapshot) error {

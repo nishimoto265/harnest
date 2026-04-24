@@ -371,6 +371,18 @@ func loadRunContext(runID contracts.RunID, runsBase, worktreeBase string) (inter
 	if err != nil {
 		return internalio.RunContext{}, err
 	}
+	if cfg, err := loadRunConfigSnapshot(runCtx); err == nil {
+		snapshotWorktreeBase, err := cfg.WorktreeBase()
+		if err != nil {
+			return internalio.RunContext{}, err
+		}
+		runCtx, err = internalio.NewRunContext(runID, runsBase, snapshotWorktreeBase)
+		if err != nil {
+			return internalio.RunContext{}, err
+		}
+	} else if !os.IsNotExist(err) {
+		return internalio.RunContext{}, err
+	}
 	if err := internalio.EnsureNoSymlinkPathComponents(runCtx.RunDir()); err != nil {
 		return internalio.RunContext{}, err
 	}
@@ -398,6 +410,10 @@ func loadRunContext(runID contracts.RunID, runsBase, worktreeBase string) (inter
 	return runCtx, nil
 }
 
+func loadRunConfigSnapshot(runCtx internalio.RunContext) (config.Config, error) {
+	return config.Load(filepath.Join(runCtx.RunDir(), "config.snapshot.yaml"))
+}
+
 func (o *Orchestrator) ensureRunScaffold(run *StepRunContext) error {
 	for _, path := range []string{
 		run.IO.RunDir(),
@@ -416,7 +432,7 @@ func (o *Orchestrator) ensureRunScaffold(run *StepRunContext) error {
 	if err := os.MkdirAll(run.IO.RunDir(), 0o755); err != nil {
 		return err
 	}
-	return writeConfigSnapshot(filepath.Join(run.IO.RunDir(), "config.snapshot.yaml"), o.cfg)
+	return writeConfigSnapshot(filepath.Join(run.IO.RunDir(), "config.snapshot.yaml"), run.Config)
 }
 
 func (o *Orchestrator) loadPersistedArtifacts(run *StepRunContext) error {

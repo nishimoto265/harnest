@@ -153,6 +153,11 @@ func (l *FileLock) Path() string {
 	return l.path
 }
 
+func IsFileLockHeld(path string) bool {
+	_, ok := activeLockPaths.Load(path)
+	return ok
+}
+
 func (l *FileLock) Unlock() error {
 	if l == nil || l.file == nil {
 		return nil

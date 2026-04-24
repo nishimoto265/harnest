@@ -36,6 +36,8 @@ var promoteRuleSidecarFn = promoteRuleSidecar
 var syncStagingParentDir = syncDir
 var writeSentinelFn = writeSentinel
 var promoteRuleSidecarBeforeDestinationRead = func(string) {}
+var preparePolicyPublish = policyrepo.PrepareSnapshotPublish
+var branchSnapshotMatchesLocal = policyrepo.BranchSnapshotMatchesLocal
 
 var errRulePublishConflict = errors.New("step70: canonical rule sidecar conflict")
 var errRulePublishIntegrity = errors.New("step70: canonical rule sidecar integrity failure")
@@ -427,26 +429,80 @@ func drivePolicyPublish(ctx context.Context, pr int, runCtx internalio.RunContex
 		return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_remote_head_failure")
 	}
 	if intention.PolicyHeadAfter != "" {
-		if policyHeadBefore != intention.PolicyHeadAfter {
+		switch policyHeadBefore {
+		case intention.PolicyHeadAfter:
+			intention.Stage = contracts.IntentionStagePolicyPublished
+			if err := store.Save(intention); err != nil {
+				return intention, err
+			}
+			return intention, nil
+		case intention.PolicyHeadBefore:
+			plan, err := preparePolicyPublish(ctx, deps.RepoRoot, configuredBranch, intention.PolicyHeadBefore, runCtx.RunsBase, string(runCtx.RunID))
+			if err != nil {
+				if ctx.Err() != nil {
+					return intention, ctx.Err()
+				}
+				return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_publish_failure")
+			}
+			defer func() {
+				_ = plan.Cleanup()
+			}()
+			if plan.Head != intention.PolicyHeadAfter {
+				return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_publish_plan_mismatch")
+			}
+			if err := plan.Push(ctx); err != nil {
+				if ctx.Err() != nil {
+					return intention, ctx.Err()
+				}
+				return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_publish_failure")
+			}
+			intention.Stage = contracts.IntentionStagePolicyPublished
+			if err := store.Save(intention); err != nil {
+				return intention, err
+			}
+			return intention, nil
+		default:
 			return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_branch_post_publish_stale")
 		}
-		intention.Stage = contracts.IntentionStagePolicyPublished
-		if err := store.Save(intention); err != nil {
-			return intention, err
-		}
-		return intention, nil
 	}
 	if policyHeadBefore != intention.PolicyHeadBefore {
+		matches, err := branchSnapshotMatchesLocal(ctx, deps.RepoRoot, configuredBranch, runCtx.RunsBase)
+		if err != nil {
+			if ctx.Err() != nil {
+				return intention, ctx.Err()
+			}
+			return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_publish_probe_failure")
+		}
+		if matches {
+			intention.PolicyHeadAfter = policyHeadBefore
+			intention.Stage = contracts.IntentionStagePolicyPublished
+			if err := store.Save(intention); err != nil {
+				return intention, err
+			}
+			return intention, nil
+		}
 		return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_branch_stale_or_untracked_publish")
 	}
-	newHead, err := policyrepo.PublishSnapshot(ctx, deps.RepoRoot, configuredBranch, intention.PolicyHeadBefore, runCtx.RunsBase, string(runCtx.RunID))
+	plan, err := preparePolicyPublish(ctx, deps.RepoRoot, configuredBranch, intention.PolicyHeadBefore, runCtx.RunsBase, string(runCtx.RunID))
 	if err != nil {
 		if ctx.Err() != nil {
 			return intention, ctx.Err()
 		}
 		return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_publish_failure")
 	}
-	intention.PolicyHeadAfter = newHead
+	defer func() {
+		_ = plan.Cleanup()
+	}()
+	intention.PolicyHeadAfter = plan.Head
+	if err := store.Save(intention); err != nil {
+		return intention, err
+	}
+	if err := plan.Push(ctx); err != nil {
+		if ctx.Err() != nil {
+			return intention, ctx.Err()
+		}
+		return intention, markManualRecoveryWithDetail(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "policy_publish_failure")
+	}
 	intention.Stage = contracts.IntentionStagePolicyPublished
 	if err := store.Save(intention); err != nil {
 		return intention, err

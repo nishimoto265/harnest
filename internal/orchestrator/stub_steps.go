@@ -325,15 +325,19 @@ type step60Step struct {
 }
 
 func (s step60Step) Run(ctx context.Context, run *StepRunContext) error {
-	primary, err := judges.NewJudgeFromConfig(s.cfg, contracts.JudgeRolePrimary)
+	cfg := s.cfg
+	if run != nil && run.Config != nil {
+		cfg = run.Config
+	}
+	primary, err := judges.NewJudgeFromConfig(cfg, contracts.JudgeRolePrimary)
 	if err != nil {
 		return err
 	}
-	secondary, err := judges.NewJudgeFromConfig(s.cfg, contracts.JudgeRoleSecondary)
+	secondary, err := judges.NewJudgeFromConfig(cfg, contracts.JudgeRoleSecondary)
 	if err != nil {
 		return err
 	}
-	arbiter, err := judges.NewJudgeFromConfig(s.cfg, contracts.JudgeRoleArbiter)
+	arbiter, err := judges.NewJudgeFromConfig(cfg, contracts.JudgeRoleArbiter)
 	if err != nil {
 		return err
 	}

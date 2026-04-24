@@ -34,6 +34,30 @@ func TestHydrateFromBranchCopiesPolicyFilesToRunsBase(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(runsBase, rulesLocalDirName, "stale.md"))
 }
 
+func TestHydrateFromBranchFetchesAndLoadsWhilePromotionLockHeld(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	lockPath := filepath.Join(runsBase, "promotion.lock")
+	originalRunGit := runGit
+	checked := 0
+	runGit = func(ctx context.Context, env []string, args ...string) ([]byte, error) {
+		for _, arg := range args {
+			if arg == "fetch" || arg == "ls-tree" || arg == "show" {
+				checked++
+				assert.True(t, internalio.IsFileLockHeld(lockPath), "policy snapshot git read %q must run under promotion.lock", arg)
+				break
+			}
+		}
+		return originalRunGit(ctx, env, args...)
+	}
+	t.Cleanup(func() {
+		runGit = originalRunGit
+	})
+
+	require.NoError(t, HydrateFromBranch(context.Background(), repoRoot, "policy", runsBase))
+	assert.GreaterOrEqual(t, checked, 3)
+}
+
 func TestHydrateAndSnapshotFromBranchCopiesPolicyFilesToRunDir(t *testing.T) {
 	repoRoot := newClonedRepoWithPolicyBranch(t)
 	runsBase := filepath.Join(t.TempDir(), "runs")
