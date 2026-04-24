@@ -162,6 +162,80 @@ func TestRun_RejectsMissingExpectedCandidateComplianceRule(t *testing.T) {
 	assert.ErrorContains(t, err, "cand-1")
 }
 
+func TestRun_JudgeSeesPinnedPass2SnapshotBytes(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score: true,
+	})
+
+	manifest, err := internalio.LoadScorableManifest(runIO, 2, "a1")
+	require.NoError(t, err)
+	liveDiff, err := runIO.ResolveRunRelative(manifest.DiffPath)
+	require.NoError(t, err)
+	liveBefore := mustReadFile(t, liveDiff)
+	liveBeforeHash := sha256Hex(liveBefore)
+
+	primary := &mutatingReadJudge{
+		delegate: scriptedJudge{
+			score:        80,
+			reasonPrefix: "primary",
+		},
+		targetAgent: contracts.AgentID("a1"),
+		mutatePath:  liveDiff,
+		mutateBytes: []byte("mutated live pass2 diff\n"),
+	}
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     primary,
+		Secondary: scriptedJudge{
+			score:        80,
+			reasonPrefix: "secondary",
+		},
+		Arbiter: unexpectedCallJudge{},
+		Now:     func() time.Time { return time.Date(2026, 4, 21, 15, 4, 5, 0, time.UTC) },
+	}))
+
+	assert.NotEqual(t, liveDiff, primary.seenPath, "judge must not be handed the live manifest diff")
+	assert.Contains(t, primary.seenPath, "60/snapshots/", "OutputPath must live under the pinned snapshot dir")
+	assert.Equal(t, liveBefore, primary.seenBytes, "judge-observed bytes must match the bytes that output_sha256 hashed")
+
+	rawScores := mustReadJSONL[contracts.RawScoreEntry](t, runIO, "60/scores-B-raw.jsonl")
+	require.NotEmpty(t, rawScores)
+	rawOutputHashes := make(map[contracts.AgentID]string)
+	for _, row := range rawScores {
+		if previous, ok := rawOutputHashes[row.Agent]; ok {
+			assert.Equal(t, previous, row.OutputSha256)
+		} else {
+			rawOutputHashes[row.Agent] = row.OutputSha256
+		}
+		if row.Agent != "a1" {
+			continue
+		}
+		assert.Equal(t, liveBeforeHash, row.OutputSha256)
+		assert.Equal(t, sha256Hex(primary.seenBytes), row.OutputSha256)
+	}
+
+	rawCompliance := mustReadJSONL[contracts.RawComplianceEntry](t, runIO, "60/compliance-B-raw.jsonl")
+	require.NotEmpty(t, rawCompliance)
+	for _, row := range rawCompliance {
+		if row.Agent != "a1" {
+			continue
+		}
+		assert.Equal(t, liveBeforeHash, row.OutputSha256)
+		assert.Equal(t, sha256Hex(primary.seenBytes), row.OutputSha256)
+	}
+
+	marker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
+	require.NoError(t, marker.Validate())
+	expectedPass2OutputsHash, err := hashPass2OutputHashes(rawOutputHashes)
+	require.NoError(t, err)
+	assert.Equal(t, expectedPass2OutputsHash, marker.InputHashes.Pass2Outputs)
+	assert.Equal(t, mustHashReducedRawScores(t, runIO), marker.RawHashes.ScoresRaw)
+	assert.Equal(t, mustHashReducedRawCompliance(t, runIO), marker.RawHashes.ComplianceRaw)
+	assert.Equal(t, []byte("mutated live pass2 diff\n"), mustReadFile(t, liveDiff))
+}
+
 func TestRun_RejectsMissingExpectedActiveAndPass1ComplianceRules(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score: true,
@@ -2068,6 +2142,48 @@ func TestRun_SkipsPass2AgentWhenDeclaredArtifactIsMissing(t *testing.T) {
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
+func TestRun_ValidatesPass2SessionAndChecklistManifestArtifactsBeforeSnapshot(t *testing.T) {
+	cases := []struct {
+		name       string
+		removePath string
+		wantError  string
+	}{
+		{
+			name:       "session",
+			removePath: "50-pass2/a1/session.jsonl",
+			wantError:  "missing declared pass2 session artifact",
+		},
+		{
+			name:       "checklist",
+			removePath: "50-pass2/a1/checklist-result.json",
+			wantError:  "missing declared pass2 checklist artifact",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+				agents:          []contracts.AgentID{"a1", "a2", "a3"},
+				writePass1Score: true,
+			})
+			require.NoError(t, os.Remove(mustResolve(t, runIO, tc.removePath)))
+
+			err := Run(context.Background(), Input{
+				IO:          runIO,
+				TaskPackage: &pkg,
+				Primary:     judges.NewPrimaryStub(),
+				Secondary:   judges.NewSecondaryStub(),
+				Arbiter:     judges.NewArbiterStub(),
+				Now:         func() time.Time { return time.Date(2026, 4, 21, 19, 0, 0, 0, time.UTC) },
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantError)
+			assert.NoDirExists(t, mustResolve(t, runIO, "60/snapshots"))
+			assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
+		})
+	}
+}
+
 func TestRun_FailsClosedWhenPass2AgentIsNotPass1Scorable(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score:        true,
@@ -2230,6 +2346,15 @@ type scriptedJudge struct {
 	strictCompliance bool
 }
 
+type mutatingReadJudge struct {
+	delegate    scriptedJudge
+	targetAgent contracts.AgentID
+	mutatePath  string
+	mutateBytes []byte
+	seenPath    string
+	seenBytes   []byte
+}
+
 type echoExpectedComplianceJudge struct {
 	score  int
 	inputs []judges.JudgeInput
@@ -2287,6 +2412,22 @@ func (j *echoExpectedComplianceJudge) ScoreOutput(ctx context.Context, input jud
 	}
 	output := judges.JudgeOutput{Scores: scores, Compliance: compliance}
 	return output, output.ValidateFor(input)
+}
+
+func (j *mutatingReadJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
+	if input.Agent != j.targetAgent {
+		return j.delegate.ScoreOutput(ctx, input)
+	}
+	if err := os.WriteFile(j.mutatePath, j.mutateBytes, 0o644); err != nil {
+		return judges.JudgeOutput{}, err
+	}
+	data, err := os.ReadFile(input.OutputPath)
+	if err != nil {
+		return judges.JudgeOutput{}, err
+	}
+	j.seenPath = input.OutputPath
+	j.seenBytes = append([]byte(nil), data...)
+	return j.delegate.ScoreOutput(ctx, input)
 }
 
 func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
