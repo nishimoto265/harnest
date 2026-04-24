@@ -295,6 +295,77 @@ func TestCheckReportsRepoGitHubMismatch(t *testing.T) {
 	assert.Contains(t, failureNames(result.Failures), "repo.github")
 }
 
+func TestCheckRejectsOriginPushURLRepoMismatch(t *testing.T) {
+	cfg := testConfig(t)
+	deps := fakeDependencies(t, "")
+	originalRun := deps.Run
+	deps.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) >= 7 && args[0] == "-C" && args[2] == "remote" && args[3] == "get-url" && args[4] == "--push" && args[5] == "--all" {
+			return []byte("https://github.com/owner/other.git\n"), nil
+		}
+		return originalRun(ctx, name, args...)
+	}
+
+	result := NewWithDependencies(deps).Check(context.Background(), cfg)
+
+	require.False(t, result.OK)
+	failure, ok := failureByName(result.Failures, "repo.github")
+	require.True(t, ok)
+	assert.Contains(t, failure.Detail, "does not match origin fetch repo")
+}
+
+func TestCheckRejectsOriginPushURLHostMismatch(t *testing.T) {
+	cfg := testConfig(t)
+	deps := fakeDependencies(t, "")
+	originalRun := deps.Run
+	deps.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) >= 7 && args[0] == "-C" && args[2] == "remote" && args[3] == "get-url" && args[4] == "--push" && args[5] == "--all" {
+			return []byte("https://github.example.com/owner/repo.git\n"), nil
+		}
+		return originalRun(ctx, name, args...)
+	}
+
+	t.Setenv("GH_HOST", "github.example.com")
+	result := NewWithDependencies(deps).Check(context.Background(), cfg)
+
+	require.False(t, result.OK)
+	failure, ok := failureByName(result.Failures, "repo.github")
+	require.True(t, ok)
+	assert.Contains(t, failure.Detail, "does not match origin fetch host")
+}
+
+func TestCheckRejectsOriginPushURLLocalPathStyleRemote(t *testing.T) {
+	cfg := testConfig(t)
+	deps := fakeDependencies(t, "")
+	originalRun := deps.Run
+	deps.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) >= 7 && args[0] == "-C" && args[2] == "remote" && args[3] == "get-url" && args[4] == "--push" && args[5] == "--all" {
+			return []byte("github.com/owner/repo\n"), nil
+		}
+		return originalRun(ctx, name, args...)
+	}
+
+	result := NewWithDependencies(deps).Check(context.Background(), cfg)
+
+	require.False(t, result.OK)
+	failure, ok := failureByName(result.Failures, "repo.github")
+	require.True(t, ok)
+	assert.Contains(t, failure.Detail, "origin push url")
+	assert.Contains(t, failure.Detail, "could not parse GitHub remote url")
+}
+
+func TestCheckRejectsPolicyBranchSameAsDefaultBranch(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repo.PolicyBranch = cfg.Repo.DefaultBranch
+
+	result := NewWithDependencies(fakeDependencies(t, "")).Check(context.Background(), cfg)
+
+	require.False(t, result.OK)
+	failure, ok := failureByName(result.Failures, "repo.policy_branch")
+	require.True(t, ok)
+	assert.Contains(t, failure.Detail, "repo.default_branch")
+}
+
 func TestCheckRejectsSameSlugOriginOnWrongHost(t *testing.T) {
 	cfg := testConfig(t)
 	deps := fakeDependencies(t, "")

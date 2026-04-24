@@ -310,26 +310,17 @@ func (r *Runner) validateInput(in Input) ([]contracts.AgentID, error) {
 
 func (r *Runner) resolveRepoSlug(ctx context.Context, repoRoot, configuredRepo string) (string, error) {
 	repoSlug, err := r.Git.RepoSlug(ctx, repoRoot)
-	if configuredRepo == "" {
-		if err != nil {
-			return "", err
-		}
-		if repoSlug == "" {
-			return "", fmt.Errorf("step10: resolved repo slug is empty for repo_root=%s", repoRoot)
-		}
-		return repoSlug, nil
-	}
-	if err == nil && repoSlug != "" && !strings.EqualFold(configuredRepo, repoSlug) {
-		return "", fmt.Errorf("step10: repo mismatch: configured=%s resolved=%s", configuredRepo, repoSlug)
-	}
-	if configuredRepo != "" {
-		return configuredRepo, nil
-	}
 	if err != nil {
 		return "", err
 	}
 	if repoSlug == "" {
 		return "", fmt.Errorf("step10: resolved repo slug is empty for repo_root=%s", repoRoot)
+	}
+	if configuredRepo != "" {
+		if !strings.EqualFold(configuredRepo, repoSlug) {
+			return "", fmt.Errorf("step10: repo mismatch: configured=%s resolved=%s", configuredRepo, repoSlug)
+		}
+		return configuredRepo, nil
 	}
 	return repoSlug, nil
 }

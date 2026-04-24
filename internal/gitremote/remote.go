@@ -61,14 +61,6 @@ func parse(remoteURL string, allowedHosts []string) (Info, error) {
 		return infoFromParts("ssh", host, path)
 	}
 
-	trimmed := strings.Trim(remoteURL, "/")
-	for _, host := range normalizedAllowedHosts(allowedHosts) {
-		prefix := host + "/"
-		if strings.HasPrefix(strings.ToLower(trimmed), strings.ToLower(prefix)) {
-			return infoFromParts("", host, trimmed[len(prefix):])
-		}
-	}
-
 	return Info{}, fmt.Errorf("could not parse GitHub remote url: %q", remoteURL)
 }
 

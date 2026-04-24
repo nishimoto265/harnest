@@ -49,6 +49,7 @@ type stubGit struct {
 	mergeBase         map[string]string
 	fetched           []string
 	repoSlug          string
+	repoSlugErr       error
 	repoSlugByRoot    map[string]string
 	changedFiles      []string
 	diffText          string
@@ -116,6 +117,9 @@ func (s *stubGit) FetchCommit(ctx context.Context, repoRoot, sha string) error {
 func (s *stubGit) RepoSlug(ctx context.Context, repoRoot string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.repoSlugErr != nil {
+		return "", s.repoSlugErr
+	}
 	if slug, ok := s.repoSlugByRoot[repoRoot]; ok {
 		return slug, nil
 	}
@@ -426,6 +430,50 @@ func TestRun_RejectsConfiguredRepoMismatchWhenLocalSlugIsKnown(t *testing.T) {
 	_, err := runner.Run(context.Background(), in)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "repo mismatch")
+}
+
+func TestRun_RejectsConfiguredRepoWhenLocalSlugCannotBeResolved(t *testing.T) {
+	rc := newRunCtx(t)
+	repoRoot := t.TempDir()
+	git := newStubGit()
+	git.repoSlugErr = errors.New("origin unavailable")
+	runner := &Runner{
+		GH:  &recordingGH{info: PRInfo{Number: 42, Title: "improve X", MergeCommitOID: testMergeCommitOID}},
+		Git: git,
+	}
+
+	in := Input{
+		PR:         42,
+		BestBranch: "auto-improve/best",
+		RepoRoot:   repoRoot,
+		Repo:       "owner/repo",
+		RunCtx:     rc,
+	}
+	_, err := runner.Run(context.Background(), in)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "origin unavailable")
+}
+
+func TestRun_RejectsConfiguredRepoWhenLocalSlugIsEmpty(t *testing.T) {
+	rc := newRunCtx(t)
+	repoRoot := t.TempDir()
+	git := newStubGit()
+	git.repoSlugByRoot[repoRoot] = ""
+	runner := &Runner{
+		GH:  &recordingGH{info: PRInfo{Number: 42, Title: "improve X", MergeCommitOID: testMergeCommitOID}},
+		Git: git,
+	}
+
+	in := Input{
+		PR:         42,
+		BestBranch: "auto-improve/best",
+		RepoRoot:   repoRoot,
+		Repo:       "owner/repo",
+		RunCtx:     rc,
+	}
+	_, err := runner.Run(context.Background(), in)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "resolved repo slug is empty")
 }
 
 func TestRun_InvalidBaseSHA(t *testing.T) {
