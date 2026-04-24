@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -173,10 +172,15 @@ func (t *DescendantTracker) CaptureBurst(window time.Duration) {
 	deadline := time.Now().Add(window)
 	for {
 		t.capture()
-		if !time.Now().Before(deadline) {
+		now := time.Now()
+		if !now.Before(deadline) {
 			return
 		}
-		runtime.Gosched()
+		sleepFor := deadline.Sub(now)
+		if sleepFor > time.Millisecond {
+			sleepFor = time.Millisecond
+		}
+		time.Sleep(sleepFor)
 	}
 }
 
@@ -350,14 +354,6 @@ func killSessionProcessesUntilGoneOwned(lease ProcessLease, sessionID int, maxWa
 		}
 		cleanupSleep(interval)
 	}
-}
-
-func processIdentityMatches(pid int, expectedStartTime string) (bool, error) {
-	status, err := inspectProcessIdentity(pid, expectedStartTime)
-	if err != nil {
-		return false, err
-	}
-	return status == processIdentityMatch, nil
 }
 
 func inspectProcessIdentity(pid int, expectedStartTime string) (processIdentityStatus, error) {
@@ -573,28 +569,6 @@ func killTrackedPIDs(ids []processIdentity) error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-func processStartTime(pid int) (string, error) {
-	if pid <= 0 {
-		return "", syscall.ESRCH
-	}
-	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return "", syscall.ESRCH
-		}
-		if isProcessInspectionUnavailable(err) {
-			return processInspectionUnavailableStartTime(pid), nil
-		}
-		return "", err
-	}
-	startTime := strings.TrimSpace(string(output))
-	if startTime == "" {
-		return "", syscall.ESRCH
-	}
-	return startTime, nil
 }
 
 func isProcessInspectionUnavailable(err error) bool {
