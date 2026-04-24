@@ -570,11 +570,8 @@ func restoreAllocationWorktree(ctx context.Context, allocation contracts.Worktre
 	return nil
 }
 
-func manifestPrefix(pass int, agent contracts.AgentID) string {
-	if pass == passNumber {
-		return filepath.Join("50-pass2", string(agent))
-	}
-	return filepath.Join("20-pass1", string(agent))
+func manifestPrefix(_ int, agent contracts.AgentID) string {
+	return filepath.Join("50-pass2", string(agent))
 }
 
 func worktreeFor(pkg *contracts.TaskPackage, pass int, agent contracts.AgentID) (contracts.WorktreeAllocation, error) {
@@ -610,10 +607,6 @@ func loadChecklistArtifact(ctx context.Context, worktreePath string, runID contr
 
 func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte, error) {
 	return collectSuccessDiffBytes(ctx, worktreePath, baseSHA, "step50")
-}
-
-func shouldWriteTimeoutManifest(err error, execCtx context.Context) bool {
-	return err != nil && errors.Is(execCtx.Err(), context.DeadlineExceeded)
 }
 
 func (s *Step) writeNoChangeManifest(ctx context.Context, run RunContext, runResult runnerResult) error {

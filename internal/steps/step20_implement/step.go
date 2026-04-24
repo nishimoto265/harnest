@@ -189,7 +189,7 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 
 	remaining := deadline.Sub(s.now().UTC())
 	if remaining <= 0 {
-		return s.writeTimeoutManifest(ctx, run, allocation, timeout, stepStartedAt, s.now().UTC())
+		return s.writeTimeoutManifest(ctx, run, timeout, stepStartedAt, s.now().UTC())
 	}
 	implementer, err := run.Config.AgentProfile(agents.RoleImplementer)
 	if err != nil {
@@ -269,7 +269,7 @@ func (s *Step) Run(ctx context.Context, run RunContext) error {
 
 	var finalizeErr error
 	if runResult.TimedOut {
-		finalizeErr = s.writeTimeoutManifest(finalizeCtx, run, allocation, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
+		finalizeErr = s.writeTimeoutManifest(finalizeCtx, run, timeout, runResult.StartedAt.UTC(), runResult.FinishedAt.UTC())
 	} else if runResult.ExitCode != 0 {
 		finalizeErr = s.writeErrorManifest(finalizeCtx, run, runResult)
 	} else if runResult.CleanupErr != nil {
@@ -410,8 +410,7 @@ func (s *Step) writeErrorManifest(ctx context.Context, run RunContext, runResult
 	return writeManifest(run.IO, run.Pass, run.Agent, manifest)
 }
 
-func (s *Step) writeTimeoutManifest(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, timeout time.Duration, startedAt, finishedAt time.Time) error {
-	_ = allocation
+func (s *Step) writeTimeoutManifest(ctx context.Context, run RunContext, timeout time.Duration, startedAt, finishedAt time.Time) error {
 	manifest := contracts.Manifest{
 		Kind: contracts.ManifestKindTimeout,
 		Value: contracts.ManifestTimeout{

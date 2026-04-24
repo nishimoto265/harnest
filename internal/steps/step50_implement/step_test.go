@@ -833,7 +833,8 @@ func TestCopyUntrackedFiles_SkipsSymlinksAndKeepsWhitespaceNames(t *testing.T) {
 	rescueDir := filepath.Join(t.TempDir(), "rescue")
 	require.NoError(t, os.MkdirAll(filepath.Join(rescueDir, "untracked"), 0o755))
 
-	artifacts, err := copyUntrackedFiles(context.Background(), worktree, rescueDir)
+	budget := agentrunner.NewRescueArtifactBudget()
+	artifacts, err := copyUntrackedFilesWithBudget(context.Background(), worktree, rescueDir, &budget)
 	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(rescueDir, "untracked", "loot"))
 	assert.FileExists(t, filepath.Join(rescueDir, "untracked", "space name.txt"))
@@ -848,15 +849,6 @@ func TestCopyUntrackedFiles_SkipsSymlinksAndKeepsWhitespaceNames(t *testing.T) {
 	}
 	assert.Contains(t, paths, "untracked/space name.txt")
 	assert.Contains(t, paths, "untracked-symlinks.txt")
-}
-
-func TestShouldWriteTimeoutManifestRequiresRunError(t *testing.T) {
-	execCtx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
-	defer cancel()
-	<-execCtx.Done()
-
-	assert.False(t, shouldWriteTimeoutManifest(nil, execCtx))
-	assert.True(t, shouldWriteTimeoutManifest(errors.New("run failed"), execCtx))
 }
 
 func TestWriteCommitBundle_ZeroCommitProducesEmptyBundle(t *testing.T) {

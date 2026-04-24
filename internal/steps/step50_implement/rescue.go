@@ -492,11 +492,6 @@ func writeGitOutputContext(ctx context.Context, dir, dest string, args ...string
 	return err
 }
 
-func copyUntrackedFiles(ctx context.Context, repoPath, rescueDir string) ([]rescueArtifactDigest, error) {
-	budget := agentrunner.NewRescueArtifactBudget()
-	return copyUntrackedFilesWithBudget(ctx, repoPath, rescueDir, &budget)
-}
-
 func copyUntrackedFilesWithBudget(ctx context.Context, repoPath, rescueDir string, budget *agentrunner.RescueArtifactBudget) ([]rescueArtifactDigest, error) {
 	output, err := gitOutputBytesContext(ctx, repoPath, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
@@ -708,18 +703,6 @@ func worktreeProcessIDs(ctx context.Context, worktreePath string) ([]int, error)
 		return nil, fmt.Errorf("step50: %w", err)
 	}
 	return pids, nil
-}
-
-func shouldKillSavedProcessGroup(state resumeState) bool {
-	return agentrunner.ShouldKillSavedProcessGroup(agentrunner.RescueLeaseState{
-		PID:             state.Pid,
-		PGID:            state.Pgid,
-		LeaderStartTime: state.LeaderStartTime,
-	}, pidAlive, lookupLeaseStartTime)
-}
-
-func parsePIDList(output string) []int {
-	return agentrunner.ParsePIDList(output)
 }
 
 func recordRescueArtifact(budget *agentrunner.RescueArtifactBudget, path, logicalPath string) error {
