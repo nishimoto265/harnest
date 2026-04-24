@@ -198,6 +198,9 @@ func taskPromptDiffRange(pr PRInfo, baseSHA string) (string, string, bool) {
 	if pr.MergeCommitOID != "" {
 		return baseSHA, pr.MergeCommitOID, true
 	}
+	if pr.HeadRefOid != "" && baseSHA != "" {
+		return baseSHA, pr.HeadRefOid, true
+	}
 	return "", "", false
 }
 

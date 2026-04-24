@@ -547,9 +547,12 @@ func ensureAllocationWorktreeAtRef(ctx context.Context, cfg *config.Config, allo
 		if !info.IsDir() {
 			return fmt.Errorf("step20: worktree path is not a directory: %s", allocation.Path)
 		}
-		// Existing worktree: HEAD may legitimately have advanced via a prior
-		// successful attempt. Trust the on-disk state; BaseSHA / HeadSHA
-		// verification happens downstream in rescue / diff flows.
+		if resetBranch {
+			if ref == "" {
+				return errors.New("step20: cannot reuse worktree without immutable head_sha")
+			}
+			return verifyExistingAllocationWorktree(ctx, allocation)
+		}
 		return nil
 	}
 	if !os.IsNotExist(err) {
@@ -617,6 +620,32 @@ func verifyAllocationHead(ctx context.Context, allocation contracts.WorktreeAllo
 	}
 	if head != allocation.HeadSHA {
 		return fmt.Errorf("step20: allocation HEAD mismatch: path=%s want=%s got=%s", allocation.Path, allocation.HeadSHA, head)
+	}
+	return nil
+}
+
+func verifyExistingAllocationWorktree(ctx context.Context, allocation contracts.WorktreeAllocation) error {
+	currentBranch, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "branch", "--show-current")
+	if err != nil {
+		return fmt.Errorf("step20: branch --show-current for allocation %s: %w", allocation.Path, err)
+	}
+	if currentBranch != allocation.Branch {
+		return fmt.Errorf("step20: current branch mismatch: path=%s want=%s got=%s", allocation.Path, allocation.Branch, currentBranch)
+	}
+	if allocation.HeadSHA != "" {
+		if _, err := gitOutputContext(ctx, identity, allocation.Path, "merge-base", "--is-ancestor", "HEAD", allocation.HeadSHA); err != nil {
+			return fmt.Errorf("step20: allocation HEAD mismatch: path=%s want=%s", allocation.Path, allocation.HeadSHA)
+		}
+		if _, err := gitOutputContext(ctx, identity, allocation.Path, "merge-base", "--is-ancestor", allocation.HeadSHA, "HEAD"); err != nil {
+			return fmt.Errorf("step20: allocation HEAD mismatch: path=%s want=%s", allocation.Path, allocation.HeadSHA)
+		}
+	}
+	status, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "status", "--porcelain")
+	if err != nil {
+		return fmt.Errorf("step20: status --porcelain for allocation %s: %w", allocation.Path, err)
+	}
+	if status != "" {
+		return fmt.Errorf("step20: existing worktree is dirty: path=%s", allocation.Path)
 	}
 	return nil
 }

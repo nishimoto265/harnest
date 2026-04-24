@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
@@ -74,10 +73,6 @@ func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation co
 	})
 }
 
-func rescueMaxRetries(runCfg, defaultCfg *config.Config) int {
-	return implementrescue.MaxRetries(runCfg, defaultCfg, defaultRescueMaxRetries)
-}
-
 func (s *Step) performRescue(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, agentDir string, state resumeState) (int, error) {
 	return implementrescue.Perform(ctx, implementrescue.PerformOptions{
 		StepName:       "step50",
@@ -107,21 +102,6 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		},
 	})
 }
-
-// findExistingRescueDir selects the newest verified rescue dir matching
-// ExpectedBaseSHA + RetryCount whose stored worktree fingerprint still matches
-// the live worktree (HEAD + dirty-status digest). Adoption is refused when:
-//   - stored RescuedHeadSHA differs from currentHead (worktree moved)
-//   - stored DirtyFingerprint differs from currentDirtyFingerprint
-//   - stored DirtyFingerprint is empty (legacy rescue dir) AND current
-//     worktree is dirty (would silently discard uncaptured edits)
-func findExistingRescueDir(agentDir, expectedBaseSHA string, nextRetry int, currentHead, currentDirtyFingerprint string) (string, bool, error) {
-	return implementrescue.FindExistingDir(agentDir, rescuedDirName, expectedBaseSHA, nextRetry, currentHead, currentDirtyFingerprint, verifyRescueState)
-}
-
-// emptyDirtyFingerprint is the digest ComputeDirtyFingerprint returns for a
-// clean worktree (zero porcelain entries). sha256 over empty input.
-const emptyDirtyFingerprint = implementrescue.EmptyDirtyFingerprint
 
 type rescueLock = implementrescue.Lock
 

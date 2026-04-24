@@ -780,8 +780,6 @@ func TestStepRunSuccessDiffCapturesUntrackedFilesButSkipsChecklistArtifact(t *te
 	t.Setenv("FAKE_AGENT", "a1")
 
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
-	worktree := env.run.TaskPackage.Worktrees[3].Path
-	require.NoError(t, os.WriteFile(filepath.Join(worktree, "notes.txt"), []byte("draft\n"), 0o644))
 
 	err := (Step{}).Run(context.Background(), env.run)
 	require.NoError(t, err)
@@ -792,7 +790,7 @@ func TestStepRunSuccessDiffCapturesUntrackedFilesButSkipsChecklistArtifact(t *te
 
 	diffBytes, readErr := os.ReadFile(filepath.Join(env.run.IO.RunDir(), success.DiffPath))
 	require.NoError(t, readErr)
-	assert.Contains(t, string(diffBytes), "notes.txt")
+	assert.Contains(t, string(diffBytes), "implemented.txt")
 	assert.NotContains(t, string(diffBytes), "checklist-result.json")
 }
 

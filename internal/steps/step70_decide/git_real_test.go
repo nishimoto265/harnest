@@ -11,9 +11,12 @@ import (
 	"testing"
 
 	"github.com/nishimoto265/auto-improve/internal/processenv"
+	"github.com/nishimoto265/auto-improve/internal/worktreecleanup"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+var _ worktreecleanup.BranchRemover = RealGitOps{}
 
 func TestRealGitOpsRemoteHeadAndPushForceWithLeaseLocalBareOrigin(t *testing.T) {
 	fixture := newRealGitFixture(t)
@@ -75,6 +78,20 @@ func TestRealGitOpsRemoveWorktreeRegisteredAndUnregisteredPaths(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrWorktreeUnregistered), "err=%v", err)
 	assert.DirExists(t, unregisteredPath)
+}
+
+func TestRealGitOpsDeleteBranch(t *testing.T) {
+	fixture := newRealGitFixture(t)
+	ctx := context.Background()
+	gitOps := RealGitOps{RepoDir: fixture.repo, Remote: "origin"}
+
+	branch := "auto-improve/delete-test"
+	fixture.runGit(t, fixture.repo, "branch", branch, "HEAD")
+	require.NoError(t, gitOps.DeleteBranch(ctx, branch))
+
+	err := fixture.runGitError(t, fixture.repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	require.Error(t, err)
+	require.NoError(t, gitOps.DeleteBranch(ctx, branch), "missing branch deletion is idempotent")
 }
 
 func TestRealGitOpsScopesHTTPSTokenAuthToResolvedRemote(t *testing.T) {
@@ -196,4 +213,14 @@ func (f realGitFixture) runGit(t *testing.T, dir string, args ...string) string 
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %s\n%s", strings.Join(args, " "), string(out))
 	return string(out)
+}
+
+func (f realGitFixture) runGitError(t *testing.T, dir string, args ...string) error {
+	t.Helper()
+	cmd := exec.Command(f.git, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	_, err := cmd.CombinedOutput()
+	return err
 }

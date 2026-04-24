@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
@@ -63,10 +62,6 @@ func (s *Step) resumeIfNeeded(ctx context.Context, run RunContext, allocation co
 	})
 }
 
-func rescueMaxRetries(runCfg, defaultCfg *config.Config) int {
-	return implementrescue.MaxRetries(runCfg, defaultCfg, defaultRescueMaxRetries)
-}
-
 func (s *Step) performRescue(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, agentDir string, state resumeState) (int, error) {
 	return implementrescue.Perform(ctx, implementrescue.PerformOptions{
 		StepName:       "step20",
@@ -110,7 +105,6 @@ var rescueQuiesceInterval = 25 * time.Millisecond
 var rescueSleep = time.Sleep
 var rescueExecLookPath = processenv.TrustedLookPath
 var rescueCommandContext = processenv.TrustedCommandContext
-var trustedGitCommand = processenv.TrustedCommand
 var trustedGitCommandContext = processenv.TrustedCommandContext
 var streamGitOutputWithLimit = agentrunner.StreamGitOutputWithLimit
 
@@ -208,14 +202,6 @@ func fileDigest(path string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func gitOutput(transform func(string) string, worktreePath string, args ...string) (string, error) {
-	out, err := gitOutputBytes(worktreePath, args...)
-	if err != nil {
-		return "", err
-	}
-	return transform(string(out)), nil
-}
-
 func gitOutputContext(ctx context.Context, transform func(string) string, worktreePath string, args ...string) (string, error) {
 	out, err := gitOutputBytesContext(ctx, worktreePath, args...)
 	if err != nil {
@@ -230,20 +216,6 @@ func gitOutputContextWithEnv(ctx context.Context, transform func(string) string,
 		return "", err
 	}
 	return transform(string(out)), nil
-}
-
-func gitOutputBytes(worktreePath string, args ...string) ([]byte, error) {
-	cmd, err := trustedGitCommand("git", args...)
-	if err != nil {
-		return nil, fmt.Errorf("step20: resolve git: %w", err)
-	}
-	cmd.Dir = worktreePath
-	cmd.Env = processenv.GitLocalEnv()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("step20: git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return out, nil
 }
 
 func gitOutputBytesContext(ctx context.Context, worktreePath string, args ...string) ([]byte, error) {
@@ -303,24 +275,6 @@ func finishRescueState(agentDir string, state resumeState, nextRetry int) (int, 
 		return saveResumeState(agentDir, resumeState(state))
 	})
 }
-
-// findExistingRescueDir selects the newest verified rescue dir matching
-// ExpectedBaseSHA + RetryCount whose stored worktree fingerprint still matches
-// the live worktree (HEAD + dirty-status digest). Adoption is refused when:
-//   - stored RescuedHeadSHA differs from currentHead (worktree moved)
-//   - stored DirtyFingerprint differs from currentDirtyFingerprint (worktree
-//     gained or lost uncaptured edits since capture)
-//   - stored DirtyFingerprint is empty (legacy pre-fingerprint rescue dir)
-//     AND the current worktree is dirty (would silently discard new edits)
-//
-// When no candidate qualifies we return false so performRescue recaptures.
-func findExistingRescueDir(agentDir, expectedBaseSHA string, nextRetry int, currentHead, currentDirtyFingerprint string) (string, bool, error) {
-	return implementrescue.FindExistingDir(agentDir, rescuedDirName, expectedBaseSHA, nextRetry, currentHead, currentDirtyFingerprint, verifyRescueState)
-}
-
-// emptyDirtyFingerprint is the digest ComputeDirtyFingerprint returns for a
-// clean worktree (zero porcelain entries). sha256 over empty input.
-const emptyDirtyFingerprint = implementrescue.EmptyDirtyFingerprint
 
 func ensureRescueLeaseQuiesced(ctx context.Context, worktreePath string, state resumeState) error {
 	err := agentrunner.EnsureRescueLeaseQuiesced(ctx, worktreePath, agentrunner.RescueLeaseState{

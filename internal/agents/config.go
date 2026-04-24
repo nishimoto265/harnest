@@ -230,6 +230,7 @@ func claudeJudgeProfileArgIsBlocked(arg string) bool {
 		"--allowed-tools",
 		"--disallowedTools",
 		"--disallowed-tools",
+		"--output-format",
 		"--cwd",
 		"--add-dir",
 		"--permission-mode",

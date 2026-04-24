@@ -621,10 +621,12 @@ func TestRun_TaskPromptSourceIssueRequiresUsableIssue(t *testing.T) {
 	assert.Zero(t, git.diffCalls)
 }
 
-func TestRun_TaskPromptSourceDiffSynthRequiresImmutableMergedDiff(t *testing.T) {
+func TestRun_TaskPromptSourceDiffSynthUsesHeadRefFallbackWhenMergeCommitMissing(t *testing.T) {
 	rc := newRunCtx(t)
 	git := newStubGit()
 	git.mergeBase[testBaseSHA+"::"+testBaseRefOID] = testBaseSHA
+	git.changedFiles = []string{"internal/foo_test.go"}
+	git.diffText = "diff --git a/internal/foo_test.go b/internal/foo_test.go\n+assert True\n"
 	runner := &Runner{
 		GH: stubGH{info: PRInfo{
 			Number:     42,
@@ -637,14 +639,26 @@ func TestRun_TaskPromptSourceDiffSynthRequiresImmutableMergedDiff(t *testing.T) 
 		Git: git,
 	}
 
-	_, err := runner.Run(context.Background(), Input{
+	res, err := runner.Run(context.Background(), Input{
 		PR:               42,
 		BestBranch:       "auto-improve/best",
 		TaskPromptSource: "diff_synth",
 		RepoRoot:         t.TempDir(),
 		RunCtx:           rc,
 	})
-	require.ErrorContains(t, err, "diff_synth requires an immutable merged diff source")
+	require.NoError(t, err)
+	assert.Contains(t, res.Response.TaskPackage.ReconstructedTaskPrompt, "### Changed Tests")
+	assert.Contains(t, res.Response.TaskPackage.ReconstructedTaskPrompt, "### Diff Excerpt")
+	assert.Equal(t, 1, git.changedFilesCalls)
+	assert.Equal(t, 1, git.diffCalls)
+}
+
+func TestTaskPromptDiffRangeFallsBackToHeadRefOIDWhenMergeCommitMissing(t *testing.T) {
+	from, to, ok := taskPromptDiffRange(PRInfo{HeadRefOid: testBaseSHA}, testBaseRefOID)
+
+	require.True(t, ok)
+	assert.Equal(t, testBaseRefOID, from)
+	assert.Equal(t, testBaseSHA, to)
 }
 
 func TestRun_RebaseMergedPR_WithoutImmutableBaseFailsClosed(t *testing.T) {

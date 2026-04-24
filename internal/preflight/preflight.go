@@ -110,15 +110,6 @@ func runSanitizedGitLocalCommand(ctx context.Context, name string, args ...strin
 	return cmd.CombinedOutput()
 }
 
-func runSanitizedLocalCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
-	if err != nil {
-		return nil, err
-	}
-	cmd.Env = processenv.SanitizeForLocalExec()
-	return cmd.CombinedOutput()
-}
-
 func runSanitizedAgentCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
 	if err != nil {

@@ -261,6 +261,23 @@ func TestFilesystemResolver_AdoptPromotesExactSidecarBytes(t *testing.T) {
 	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, filepath.Join("rules", ruleID+".md")))
 }
 
+func TestFilesystemResolver_SelectsNextPromotablePairwiseWinner(t *testing.T) {
+	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
+	seedAdditionalResolverAgent(t, runCtx, pkg, "a2", strings.Repeat("3", 40), 80, 90)
+	seedResolverAgentScores(t, runCtx, "a1", sha256String("pass2 diff\n"), 94, 95)
+	writeStep60DoneMarkerForResolverFixture(t, runCtx)
+
+	resolver := FilesystemResolver{
+		RepoDir: runCtx.RunsBase,
+		Now:     fixedNow(),
+	}
+	target, ok, err := resolver.Resolve(runCtx, pkg, candidates)
+
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, strings.Repeat("3", 40), target.TargetSHA)
+}
+
 func TestFilesystemResolver_RejectsDuplicateUpdateTargetsBeforeBuildingRegistryEntries(t *testing.T) {
 	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
 	targetRuleID := "r-existing"
@@ -2387,10 +2404,10 @@ func TestPromoteRuleSidecar_DetectsDestinationSwapToSymlinkBeforeRead(t *testing
 func TestFindRegistryByIdempotencyKey_RebuildsMandatoryIndexBeforeLookup(t *testing.T) {
 	runCtx, _, candidates, _, _ := newFixture(t, "PR14")
 	targetKey := contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), strings.Repeat("2", 40), strings.Repeat("1", 40), candidates.CandidatesHash)
-	specs := make([]seedRegistrySpec, 0, registryMandatoryIndexAt)
-	for i := 0; i < registryMandatoryIndexAt; i++ {
+	specs := make([]seedRegistrySpec, 0, internalio.RegistryMandatoryIndexAt)
+	for i := 0; i < internalio.RegistryMandatoryIndexAt; i++ {
 		key := fmt.Sprintf("%064x", i+1)
-		if i == registryMandatoryIndexAt/2 {
+		if i == internalio.RegistryMandatoryIndexAt/2 {
 			key = targetKey
 		}
 		specs = append(specs, seedRegistrySpec{
@@ -3082,6 +3099,177 @@ func seedFilesystemResolverFixture(t *testing.T) (internalio.RunContext, *contra
 	}))
 	writeStep60DoneMarkerForResolverFixture(t, runCtx)
 	return runCtx, pkg, candidates
+}
+
+func seedAdditionalResolverAgent(t *testing.T, runCtx internalio.RunContext, pkg *contracts.TaskPackage, agent contracts.AgentID, headSHA string, pass1Score, pass2Score int) {
+	t.Helper()
+	pass1Branch := ""
+	pass2Branch := ""
+	for _, wt := range pkg.Worktrees {
+		if wt.Agent != agent {
+			continue
+		}
+		switch wt.Pass {
+		case 1:
+			pass1Branch = wt.Branch
+		case 2:
+			pass2Branch = wt.Branch
+		}
+	}
+	require.NotEmpty(t, pass1Branch)
+	require.NotEmpty(t, pass2Branch)
+
+	pass1ManifestPath, err := runCtx.ManifestPath(1, agent)
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(pass1ManifestPath, contracts.Manifest{
+		Kind: contracts.ManifestKindSuccess,
+		Value: contracts.ManifestSuccess{
+			Kind:          contracts.ManifestKindSuccess,
+			SchemaVersion: "1",
+			RunID:         runCtx.RunID,
+			Pass:          1,
+			Agent:         agent,
+			BranchName:    pass1Branch,
+			HeadSHA:       strings.Repeat("1", 40),
+			BaseSHA:       strings.Repeat("a", 40),
+			DiffPath:      filepath.Join("20-pass1", string(agent), "diff.patch"),
+			SessionPath:   filepath.Join("20-pass1", string(agent), "session.jsonl"),
+			ChecklistPath: filepath.Join("20-pass1", string(agent), "checklist-result.json"),
+			PromptVersion: "stub",
+			StartedAt:     time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+			FinishedAt:    time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC),
+		},
+	}))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, filepath.Join("20-pass1", string(agent), "diff.patch")), []byte("pass1 diff\n")))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, filepath.Join("20-pass1", string(agent), "session.jsonl")), []byte("{}\n")))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, filepath.Join("20-pass1", string(agent), "checklist-result.json")), []byte("{}\n")))
+
+	pass2ManifestPath, err := runCtx.ManifestPath(2, agent)
+	require.NoError(t, err)
+	pass2DiffPath := filepath.Join("50-pass2", string(agent), "diff.patch")
+	require.NoError(t, internalio.WriteJSONAtomic(pass2ManifestPath, contracts.Manifest{
+		Kind: contracts.ManifestKindSuccess,
+		Value: contracts.ManifestSuccess{
+			Kind:          contracts.ManifestKindSuccess,
+			SchemaVersion: "1",
+			RunID:         runCtx.RunID,
+			Pass:          2,
+			Agent:         agent,
+			BranchName:    pass2Branch,
+			HeadSHA:       headSHA,
+			BaseSHA:       strings.Repeat("a", 40),
+			DiffPath:      pass2DiffPath,
+			SessionPath:   filepath.Join("50-pass2", string(agent), "session.jsonl"),
+			ChecklistPath: filepath.Join("50-pass2", string(agent), "checklist-result.json"),
+			PromptVersion: "stub",
+			StartedAt:     time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+			FinishedAt:    time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC),
+		},
+	}))
+	pass2Diff := []byte("pass2 diff for " + string(agent) + "\n")
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, pass2DiffPath), pass2Diff))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, filepath.Join("50-pass2", string(agent), "session.jsonl")), []byte("{}\n")))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, filepath.Join("50-pass2", string(agent), "checklist-result.json")), []byte("{}\n")))
+
+	pairwisePath, err := runCtx.ResolveRunRelative("60/pairwise.jsonl")
+	require.NoError(t, err)
+	require.NoError(t, internalio.AppendJSONL(pairwisePath, contracts.PairwiseEntry{
+		SchemaVersion: "1",
+		RunID:         runCtx.RunID,
+		AgentA:        agent,
+		AgentB:        agent,
+		Winner:        contracts.PairwiseWinnerB,
+		Margin:        contracts.PairwiseMarginClear,
+		Justification: "resolver fixture",
+		VerdictPath:   contracts.VerdictPathAgreement,
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    time.Date(2026, 4, 21, 10, 3, 0, 0, time.UTC),
+	}))
+	seedResolverAgentScores(t, runCtx, agent, sha256String(string(pass2Diff)), pass1Score, pass2Score)
+}
+
+func seedResolverAgentScores(t *testing.T, runCtx internalio.RunContext, agent contracts.AgentID, outputHash string, pass1Score, pass2Score int) {
+	t.Helper()
+	pass1ScorePath, err := runCtx.ResolveRunRelative("30/scores-A.jsonl")
+	require.NoError(t, err)
+	pass2ScorePath, err := runCtx.ResolveRunRelative("60/scores-B.jsonl")
+	require.NoError(t, err)
+	scoreRawPath, err := runCtx.ResolveRunRelative("60/scores-B-raw.jsonl")
+	require.NoError(t, err)
+	compliancePath, err := runCtx.ResolveRunRelative("60/compliance-B.jsonl")
+	require.NoError(t, err)
+	complianceRawPath, err := runCtx.ResolveRunRelative("60/compliance-B-raw.jsonl")
+	require.NoError(t, err)
+	for _, dimension := range resolverScoreDimensions() {
+		require.NoError(t, internalio.AppendJSONL(pass1ScorePath, contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         runCtx.RunID,
+			Pass:          1,
+			Agent:         agent,
+			Dimension:     dimension,
+			Score:         pass1Score,
+			Reasons:       "resolver fixture pass1 override",
+			VerdictPath:   contracts.VerdictPathAgreement,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 10, 4, 0, 0, time.UTC),
+		}))
+		require.NoError(t, internalio.AppendJSONL(pass2ScorePath, contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         runCtx.RunID,
+			Pass:          2,
+			Agent:         agent,
+			Dimension:     dimension,
+			Score:         pass2Score,
+			Reasons:       "resolver fixture pass2 override",
+			VerdictPath:   contracts.VerdictPathAgreement,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 10, 4, 0, 0, time.UTC),
+		}))
+		require.NoError(t, internalio.AppendJSONL(scoreRawPath, contracts.RawScoreEntry{
+			SchemaVersion: "1",
+			RunID:         runCtx.RunID,
+			Pass:          2,
+			Agent:         agent,
+			JudgeRole:     contracts.JudgeRolePrimary,
+			Dimension:     dimension,
+			Score:         pass2Score,
+			Reasons:       "resolver fixture pass2 override",
+			OutputSha256:  outputHash,
+			RubricVersion: "default",
+			PromptVersion: "phase0-stub",
+			ResolvedAt:    time.Date(2026, 4, 21, 10, 4, 0, 0, time.UTC),
+		}))
+	}
+	require.NoError(t, internalio.AppendJSONL(compliancePath, contracts.ComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         runCtx.RunID,
+		Pass:          2,
+		Agent:         agent,
+		RuleID:        "cand-1",
+		Verdict:       contracts.ComplianceVerdictCompliant,
+		Rationale:     "candidate judged compliant",
+		VerdictPath:   contracts.VerdictPathAgreement,
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    time.Date(2026, 4, 21, 10, 4, 0, 0, time.UTC),
+	}))
+	require.NoError(t, internalio.AppendJSONL(complianceRawPath, contracts.RawComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         runCtx.RunID,
+		Pass:          2,
+		Agent:         agent,
+		JudgeRole:     contracts.JudgeRolePrimary,
+		RuleID:        "cand-1",
+		Verdict:       contracts.ComplianceVerdictCompliant,
+		Rationale:     "candidate judged compliant",
+		OutputSha256:  outputHash,
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    time.Date(2026, 4, 21, 10, 4, 0, 0, time.UTC),
+	}))
 }
 
 func writeStep60DoneMarkerForResolverFixture(t *testing.T, runCtx internalio.RunContext) {

@@ -1810,14 +1810,7 @@ exec "$REAL_GIT" "$@"
 
 func useFakeGitWrapper(t *testing.T, wrapperPath string) {
 	t.Helper()
-	oldCommand := trustedGitCommand
 	oldCommandContext := trustedGitCommandContext
-	trustedGitCommand = func(name string, args ...string) (*exec.Cmd, error) {
-		if name == "git" {
-			return exec.Command(wrapperPath, args...), nil
-		}
-		return oldCommand(name, args...)
-	}
 	trustedGitCommandContext = func(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
 		if name == "git" {
 			return exec.CommandContext(ctx, wrapperPath, args...), nil
@@ -1825,7 +1818,6 @@ func useFakeGitWrapper(t *testing.T, wrapperPath string) {
 		return oldCommandContext(ctx, name, args...)
 	}
 	t.Cleanup(func() {
-		trustedGitCommand = oldCommand
 		trustedGitCommandContext = oldCommandContext
 	})
 }

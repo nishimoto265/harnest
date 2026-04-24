@@ -147,18 +147,16 @@ func TestEnsureAllocationWorktree_Step20_MissingHeadSHAFailsClosed(t *testing.T)
 	assert.Contains(t, err.Error(), "head_sha")
 }
 
-// TestEnsureAllocationWorktree_Step20_ExistingDirAcceptedEvenIfHeadAdvanced
-// verifies that a pre-existing worktree dir is trusted without forcing HEAD
-// back to allocation.HeadSHA (the agent may have legitimately advanced HEAD
-// via an earlier successful attempt whose finalize path raced).
-func TestEnsureAllocationWorktree_Step20_ExistingDirAcceptedEvenIfHeadAdvanced(t *testing.T) {
+// TestEnsureAllocationWorktree_Step20_ExistingDirWithAdvancedHeadFailsClosed
+// verifies that a stale pre-existing worktree dir is rejected before a fresh
+// inactive run starts, so prior commits cannot contaminate pass1 output.
+func TestEnsureAllocationWorktree_Step20_ExistingDirWithAdvancedHeadFailsClosed(t *testing.T) {
 	env := newEnsureEnv(t)
 	allocation, err := worktreeFor(&env.taskPackage, 1, "a1")
 	require.NoError(t, err)
 	runGit(t, allocation.Path, "commit", "--allow-empty", "-m", "legitimate agent progress")
 
-	require.NoError(t, ensureAllocationWorktree(context.Background(), env.cfg, allocation))
-
-	advanced := strings.TrimSpace(runGit(t, allocation.Path, "rev-parse", "HEAD"))
-	assert.NotEqual(t, allocation.HeadSHA, advanced, "existing HEAD must not be rewound")
+	err = ensureAllocationWorktree(context.Background(), env.cfg, allocation)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "allocation HEAD mismatch")
 }

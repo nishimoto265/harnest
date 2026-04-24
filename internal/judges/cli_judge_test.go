@@ -132,6 +132,54 @@ EOF
 	assert.Equal(t, "-", argv[len(argv)-1])
 }
 
+func TestCLIJudgeCodexFailsClosedOnNonZeroExitEvenWithOutput(t *testing.T) {
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "output.patch")
+	rubricPath := filepath.Join(dir, "rubric.md")
+	require.NoError(t, os.WriteFile(outputPath, []byte("diff --git a/app/message.txt b/app/message.txt\n"), 0o644))
+	require.NoError(t, os.WriteFile(rubricPath, []byte("# rubric\n"), 0o644))
+
+	codexPath := filepath.Join(dir, "codex")
+	require.NoError(t, os.WriteFile(codexPath, []byte(`#!/bin/sh
+set -eu
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    out="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+cat > /dev/null
+cat > "$out" <<'EOF'
+{"scores":[
+  {"dimension":"fidelity","score":100,"reason":"stale"},
+  {"dimension":"correctness","score":100,"reason":"stale"},
+  {"dimension":"maintainability","score":100,"reason":"stale"},
+  {"dimension":"discipline","score":100,"reason":"stale"},
+  {"dimension":"communication","score":100,"reason":"stale"}
+],"compliance":[
+  {"rule_id":"stub-rubric-rule","verdict":"compliant","rationale":"stale"}
+]}
+EOF
+echo "judge failed" >&2
+exit 42
+`), 0o755))
+
+	judge := NewCLIJudge(agents.Profile{Provider: agents.ProviderCodex, Binary: codexPath}, RolePrimary)
+	_, err := judge.ScoreOutput(context.Background(), JudgeInput{
+		RunID:      "2026-04-23-PR1-abcdef0",
+		Pass:       1,
+		Agent:      "a1",
+		OutputPath: outputPath,
+		RubricPath: rubricPath,
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "exited with code 42")
+	assert.ErrorContains(t, err, "judge failed")
+}
+
 func TestCodexJudgeExecArgsAreReadOnlyAndKeepSafeProfileArgs(t *testing.T) {
 	args, err := codexJudgeExecArgs([]string{"--model", "gpt-5", "--model=gpt-5-mini", "-m", "gpt-5"}, "/tmp/worktree", "/tmp/output.json")
 	require.NoError(t, err)
@@ -246,6 +294,8 @@ func TestClaudeJudgeExecArgsRejectUnsafeProfileArgs(t *testing.T) {
 		{name: "allowed tools equals", args: []string{"--allowedTools=Read,Bash"}},
 		{name: "kebab allowed tools", args: []string{"--allowed-tools", "Bash"}},
 		{name: "disallowed tools override", args: []string{"--disallowedTools", ""}},
+		{name: "output format", args: []string{"--output-format", "text"}},
+		{name: "output format equals", args: []string{"--output-format=text"}},
 		{name: "cwd", args: []string{"--cwd", "/tmp/other"}},
 		{name: "cwd equals", args: []string{"--cwd=/tmp/other"}},
 		{name: "add dir", args: []string{"--add-dir", "/tmp/other"}},

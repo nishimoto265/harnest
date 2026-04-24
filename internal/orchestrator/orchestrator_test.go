@@ -542,6 +542,40 @@ func TestRun_AllNonScorablePass1StopsBeforeStep30(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(cfg.Paths.Runs, string(runID), "30", "done.marker"))
 }
 
+func TestRun_AllTimeoutPass1RecordsTimeout(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	recorder := &callRecorder{}
+	orch.steps = Steps{
+		Step10:  stubStep10{},
+		Step20:  nonScorableAgentSteps(contracts.ManifestKindTimeout),
+		Step30:  recordingStep{label: "30", recorder: recorder},
+		Step40:  recordingStep{label: "40", recorder: recorder},
+		Step50:  stubAgentSteps(),
+		Step60:  recordingStep{label: "60", recorder: recorder},
+		Step70:  stubStep70{},
+		Archive: recordingStep{label: "archive", recorder: recorder},
+	}
+
+	runID := contracts.RunID("2026-04-21-PR452-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 452, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindTimeout, last.Kind)
+	timeout, ok := last.Value.(contracts.StateEntryTimeout)
+	require.True(t, ok)
+	assert.Equal(t, contracts.FailedStep20, timeout.Step)
+	assert.Empty(t, recorder.snapshot())
+	assert.NoFileExists(t, filepath.Join(cfg.Paths.Runs, string(runID), "30", "done.marker"))
+}
+
 func TestRun_AllNonScorablePass2StopsBeforeStep70(t *testing.T) {
 	cfg := testConfig(t)
 	orch, err := NewOrchestrator(cfg)
@@ -573,6 +607,39 @@ func TestRun_AllNonScorablePass2StopsBeforeStep70(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "no_scorable_agents", failed.Reason)
 	assert.NotContains(t, recorder.snapshot(), "70")
+}
+
+func TestRun_AllTimeoutPass2RecordsTimeout(t *testing.T) {
+	cfg := testConfig(t)
+	orch, err := NewOrchestrator(cfg)
+	require.NoError(t, err)
+
+	recorder := &callRecorder{}
+	orch.steps = Steps{
+		Step10:  stubStep10{},
+		Step20:  stubAgentSteps(),
+		Step30:  stubMarkerStep{path: "30/done.marker"},
+		Step40:  forcedCandidateStep{},
+		Step50:  nonScorableAgentSteps(contracts.ManifestKindTimeout),
+		Step60:  recordingStep{label: "60", recorder: recorder},
+		Step70:  recordingStep{label: "70", recorder: recorder},
+		Archive: recordingStep{label: "archive", recorder: recorder},
+	}
+
+	runID := contracts.RunID("2026-04-21-PR453-abcdef0")
+	require.NoError(t, orch.Run(context.Background(), 453, RunOptions{RunID: runID}))
+
+	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
+	require.NoError(t, err)
+	events, err := state.ScanEventsForRun(runCtx, runID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, contracts.StateKindTimeout, last.Kind)
+	timeout, ok := last.Value.(contracts.StateEntryTimeout)
+	require.True(t, ok)
+	assert.Equal(t, contracts.FailedStep50, timeout.Step)
+	assert.Empty(t, recorder.snapshot())
 }
 
 func TestRun_ProviderInterruptedPass1IsNonTerminalInterrupted(t *testing.T) {

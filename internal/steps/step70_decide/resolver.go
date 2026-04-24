@@ -76,19 +76,25 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 	if err != nil {
 		return Target{}, false, err
 	}
-	winningAgent, ok, err := resolveWinningAgentFromArtifacts(step60Artifacts)
-	if err != nil {
-		return Target{}, false, err
-	}
-	if !ok {
-		return Target{}, false, nil
-	}
-	if ok, err := promotionGatePassedWithArtifacts(runCtx, step60Artifacts, winningAgent, candidates); err != nil {
-		return Target{}, false, err
-	} else if !ok {
+	winningAgents := rankedWinningAgentsFromArtifacts(step60Artifacts)
+	if len(winningAgents) == 0 {
 		return Target{}, false, nil
 	}
 	if hasDuplicateUpdateTarget(candidates.Candidates) {
+		return Target{}, false, nil
+	}
+	var winningAgent contracts.AgentID
+	for _, agent := range winningAgents {
+		ok, err := promotionGatePassedWithArtifacts(runCtx, step60Artifacts, agent, candidates)
+		if err != nil {
+			return Target{}, false, err
+		}
+		if ok {
+			winningAgent = agent
+			break
+		}
+	}
+	if winningAgent == "" {
 		return Target{}, false, nil
 	}
 
@@ -142,20 +148,29 @@ func resolveWinningAgent(runCtx internalio.RunContext) (contracts.AgentID, bool,
 }
 
 func resolveWinningAgentFromArtifacts(artifacts step60ArtifactSnapshot) (contracts.AgentID, bool, error) {
+	agents := rankedWinningAgentsFromArtifacts(artifacts)
+	if len(agents) == 0 {
+		return "", false, nil
+	}
+	return agents[0], true, nil
+}
+
+type winningAgentScoreSummary struct {
+	agent contracts.AgentID
+	sum   int
+	count int
+}
+
+func rankedWinningAgentsFromArtifacts(artifacts step60ArtifactSnapshot) []contracts.AgentID {
 	pairwise := internalio.CollapseByKey(artifacts.Pairwise, func(entry contracts.PairwiseEntry) [2]contracts.AgentID {
 		return [2]contracts.AgentID{entry.AgentA, entry.AgentB}
 	})
 	if len(pairwise) == 0 {
-		return "", false, nil
+		return nil
 	}
 
 	scores := scorecore.CollapseFinalScores(artifacts.Scores)
-	type scoreSummary struct {
-		agent contracts.AgentID
-		sum   int
-		count int
-	}
-	summaries := make(map[contracts.AgentID]scoreSummary)
+	summaries := make(map[contracts.AgentID]winningAgentScoreSummary)
 	for _, score := range scores {
 		s := summaries[score.Agent]
 		s.agent = score.Agent
@@ -164,25 +179,37 @@ func resolveWinningAgentFromArtifacts(artifacts step60ArtifactSnapshot) (contrac
 		summaries[score.Agent] = s
 	}
 
-	best := scoreSummary{}
-	bestSet := false
+	winning := make(map[contracts.AgentID]struct{})
 	for _, entry := range pairwise {
 		if entry.Winner != contracts.PairwiseWinnerB {
 			continue
 		}
-		s, ok := summaries[entry.AgentB]
+		winning[entry.AgentB] = struct{}{}
+	}
+
+	ranked := make([]winningAgentScoreSummary, 0, len(winning))
+	for agent := range winning {
+		s, ok := summaries[agent]
 		if !ok || s.count == 0 {
 			continue
 		}
-		if !bestSet || s.sum*best.count > best.sum*s.count || (s.sum*best.count == best.sum*s.count && string(s.agent) < string(best.agent)) {
-			best = s
-			bestSet = true
+		ranked = append(ranked, s)
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		left := ranked[i]
+		right := ranked[j]
+		leftProduct := left.sum * right.count
+		rightProduct := right.sum * left.count
+		if leftProduct == rightProduct {
+			return string(left.agent) < string(right.agent)
 		}
+		return leftProduct > rightProduct
+	})
+	agents := make([]contracts.AgentID, 0, len(ranked))
+	for _, summary := range ranked {
+		agents = append(agents, summary.agent)
 	}
-	if !bestSet {
-		return "", false, nil
-	}
-	return best.agent, true, nil
+	return agents
 }
 
 func loadStep60Artifacts(runCtx internalio.RunContext) (step60ArtifactSnapshot, error) {

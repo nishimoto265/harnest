@@ -1083,6 +1083,17 @@ func stepDoneEntry(pr int, runID contracts.RunID, step contracts.FailedStep, at 
 	return contracts.StateEntry{Kind: contracts.StateKindStepDone, Value: value}
 }
 
+func timeoutEntry(pr int, runID contracts.RunID, step contracts.FailedStep, at time.Time) contracts.StateEntry {
+	value := contracts.StateEntryTimeout{
+		Kind:  contracts.StateKindTimeout,
+		PR:    pr,
+		RunID: runID,
+		Step:  step,
+		At:    at,
+	}
+	return contracts.StateEntry{Kind: contracts.StateKindTimeout, Value: value}
+}
+
 func interruptedReasonFromContext(ctx context.Context, err error) contracts.InterruptedReason {
 	if cause := context.Cause(ctx); cause != nil && strings.HasPrefix(cause.Error(), "signal:") {
 		return contracts.InterruptedReasonSignal
@@ -1282,6 +1293,29 @@ func providerInterruptionFromNonScorableManifests(run *StepRunContext, pass int)
 		return "", "", false, nil
 	}
 	return reason, strings.Join(details, "; "), true, nil
+}
+
+func allFinalizedManifestsTimedOut(run *StepRunContext, pass int) (bool, error) {
+	if run == nil || run.TaskPackage == nil {
+		return false, errors.New("orchestrator: task package is required")
+	}
+	agents := passAgents(run.TaskPackage, pass)
+	if len(agents) == 0 {
+		return false, nil
+	}
+	for _, agent := range agents {
+		manifest, err := internalio.LoadFinalizedManifest(run.IO, pass, agent)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		if manifest.Kind != contracts.ManifestKindTimeout {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func isProviderInterruptedManifest(manifest contracts.Manifest) bool {

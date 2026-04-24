@@ -155,6 +155,11 @@ func TestValidateRejectsUnsafeJudgeProfileArgs(t *testing.T) {
 			want:    "claude judge profile arg",
 		},
 		{
+			name:    "claude output override",
+			profile: Profile{Provider: ProviderClaude, Binary: "claude", Args: []string{"--output-format", "text"}},
+			want:    "claude judge profile arg",
+		},
+		{
 			name:    "codex write sandbox",
 			profile: Profile{Provider: ProviderCodex, Binary: "codex", Args: []string{"--sandbox", "workspace-write"}},
 			want:    "codex judge profile arg",

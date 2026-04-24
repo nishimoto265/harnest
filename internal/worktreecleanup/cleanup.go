@@ -43,24 +43,27 @@ func Cleanup(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.T
 			return err
 		}
 		path := filepath.Clean(wt.Path)
-		removedByGit := false
+		cleanedWorktree := false
 		if remover != nil {
 			if err := remover.RemoveWorktree(ctx, path); err != nil {
 				if !os.IsNotExist(err) && !errors.Is(err, ErrUnregistered) {
 					return err
 				}
 			} else {
-				removedByGit = true
+				cleanedWorktree = true
 			}
 		}
 		if _, err := os.Lstat(path); err == nil {
 			if err := os.RemoveAll(path); err != nil {
 				return err
 			}
+			cleanedWorktree = true
 		} else if !os.IsNotExist(err) {
 			return err
+		} else {
+			cleanedWorktree = true
 		}
-		if branchRemover, ok := remover.(BranchRemover); ok && removedByGit && cleanupOwnsBranch(runCtx.RunID, wt) {
+		if branchRemover, ok := remover.(BranchRemover); ok && cleanedWorktree && cleanupOwnsBranch(runCtx.RunID, wt) {
 			if err := branchRemover.DeleteBranch(ctx, wt.Branch); err != nil {
 				return err
 			}

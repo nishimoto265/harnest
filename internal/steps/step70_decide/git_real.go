@@ -70,6 +70,10 @@ func (g RealGitOps) RemoveWorktree(ctx context.Context, path string) error {
 	return worktreecleanup.RepoGit{RepoDir: g.RepoDir}.RemoveWorktree(ctx, path)
 }
 
+func (g RealGitOps) DeleteBranch(ctx context.Context, branch string) error {
+	return worktreecleanup.RepoGit{RepoDir: g.RepoDir}.DeleteBranch(ctx, branch)
+}
+
 func (g RealGitOps) remoteName() string {
 	if g.Remote != "" {
 		return g.Remote

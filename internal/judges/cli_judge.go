@@ -219,7 +219,7 @@ func runCLIJudge(ctx context.Context, binary string, prefixArgs []string, profil
 	default:
 		return "", fmt.Errorf("judges: CLI provider %q is not implemented yet", profile.Provider)
 	}
-	_, err = agentrunner.RunCommand(timeoutCtx, agentrunner.CommandRequest{
+	result, err := agentrunner.RunCommand(timeoutCtx, agentrunner.CommandRequest{
 		Binary:      binary,
 		Args:        args,
 		Workdir:     workdir,
@@ -231,6 +231,9 @@ func runCLIJudge(ctx context.Context, binary string, prefixArgs []string, profil
 	if err != nil {
 		return "", err
 	}
+	if err := validateCLIJudgeCommandResult(result); err != nil {
+		return "", err
+	}
 	switch profile.Provider {
 	case agents.ProviderCodex:
 		return outputPath, nil
@@ -239,6 +242,23 @@ func runCLIJudge(ctx context.Context, binary string, prefixArgs []string, profil
 	default:
 		return "", fmt.Errorf("judges: CLI provider %q is not implemented yet", profile.Provider)
 	}
+}
+
+func validateCLIJudgeCommandResult(result agentrunner.CommandResult) error {
+	switch {
+	case result.TimedOut:
+		return fmt.Errorf("judges: CLI judge timed out: stdout=%q stderr=%q", snippetForError(result.StdoutSnippet), snippetForError(result.StderrSnippet))
+	case result.ExitCode != 0:
+		return fmt.Errorf("judges: CLI judge exited with code %d: stdout=%q stderr=%q", result.ExitCode, snippetForError(result.StdoutSnippet), snippetForError(result.StderrSnippet))
+	case result.CleanupErr != nil:
+		return fmt.Errorf("judges: CLI judge cleanup failed: %w", result.CleanupErr)
+	default:
+		return nil
+	}
+}
+
+func snippetForError(value []byte) string {
+	return strings.TrimSpace(string(value))
 }
 
 func codexJudgeExecArgs(profileArgs []string, workdir, outputPath string) ([]string, error) {

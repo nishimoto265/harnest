@@ -162,6 +162,14 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 				}
 				return nil
 			}
+			if timedOut, err := allFinalizedManifestsTimedOut(run, 1); err != nil {
+				return err
+			} else if timedOut {
+				if err := o.appendState(timeoutEntry(pr, run.IO.RunID, contracts.FailedStep20, time.Now().UTC())); err != nil {
+					return err
+				}
+				return nil
+			}
 			if err := o.appendState(stepDoneEntry(pr, run.IO.RunID, contracts.FailedStep20, time.Now().UTC())); err != nil {
 				return err
 			}
@@ -220,6 +228,14 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 				return classifyErr
 			} else if ok {
 				if err := o.appendInterrupted(run.PR, run.IO.RunID, contracts.FailedStep50, reason, detail); err != nil {
+					return err
+				}
+				return nil
+			}
+			if timedOut, err := allFinalizedManifestsTimedOut(run, 2); err != nil {
+				return err
+			} else if timedOut {
+				if err := o.appendState(timeoutEntry(pr, run.IO.RunID, contracts.FailedStep50, time.Now().UTC())); err != nil {
 					return err
 				}
 				return nil

@@ -42,6 +42,24 @@ func TestCleanupAllowsUnregisteredWorktreeFallbackRemoval(t *testing.T) {
 	assert.NoDirExists(t, wtPath)
 }
 
+func TestCleanupDeletesOwnedLocalBranchAfterUnregisteredFallbackRemoval(t *testing.T) {
+	runCtx := testRunContext(t)
+	wtPath := filepath.Join(runCtx.WorktreeBase, string(runCtx.RunID)+"-pass1-a1")
+	require.NoError(t, os.MkdirAll(wtPath, 0o755))
+	wt := testAllocation(wtPath)
+	wt.Branch = fmt.Sprintf("auto-improve/%s/pass1/a1", runCtx.RunID)
+	pkg := contracts.TaskPackage{
+		Worktrees: []contracts.WorktreeAllocation{wt},
+	}
+	remover := &recordingErrorRemover{err: fmt.Errorf("%w: %s", ErrUnregistered, wtPath)}
+
+	err := Cleanup(context.Background(), runCtx, &pkg, remover)
+
+	require.NoError(t, err)
+	assert.NoDirExists(t, wtPath)
+	assert.Equal(t, []string{wt.Branch}, remover.deletedBranches)
+}
+
 func TestCleanupDeletesOwnedLocalBranchAfterGitWorktreeRemoval(t *testing.T) {
 	runCtx := testRunContext(t)
 	wtPath := filepath.Join(runCtx.WorktreeBase, string(runCtx.RunID)+"-pass1-a1")
@@ -84,6 +102,20 @@ type errorRemover struct {
 
 func (r errorRemover) RemoveWorktree(context.Context, string) error {
 	return r.err
+}
+
+type recordingErrorRemover struct {
+	err             error
+	deletedBranches []string
+}
+
+func (r *recordingErrorRemover) RemoveWorktree(context.Context, string) error {
+	return r.err
+}
+
+func (r *recordingErrorRemover) DeleteBranch(_ context.Context, branch string) error {
+	r.deletedBranches = append(r.deletedBranches, branch)
+	return nil
 }
 
 type recordingRemover struct {

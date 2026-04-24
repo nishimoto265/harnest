@@ -30,8 +30,6 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/worktreecleanup"
 )
 
-const registryMandatoryIndexAt = internalio.RegistryMandatoryIndexAt
-
 var appendRegistryEntry = internalio.AppendRegistryEntry
 var promoteRuleSidecarFn = promoteRuleSidecar
 var syncStagingParentDir = syncDir
