@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/preflight"
 	"github.com/spf13/cobra"
 )
 
@@ -19,10 +18,13 @@ func newPreflightCmd() *cobra.Command {
 			if err != nil {
 				return commandExitError{code: 2, msg: err.Error()}
 			}
+			if err := checkCLIRecoveryGate(cfg); err != nil {
+				return err
+			}
 
 			checkCtx, cancel := withPreflightTimeout(cmd.Context(), cfg)
 			defer cancel()
-			result := preflight.New().Check(checkCtx, cfg)
+			result := runPreflightCheck(checkCtx, cfg)
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
 			if err := enc.Encode(result); err != nil {

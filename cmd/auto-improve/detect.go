@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/detect"
 	"github.com/spf13/cobra"
 )
 
@@ -17,11 +16,14 @@ func newDetectMergedCmd() *cobra.Command {
 			if err != nil {
 				return commandExitError{code: 2, msg: err.Error()}
 			}
+			if err := checkCLIRecoveryGate(cfg); err != nil {
+				return err
+			}
 			processedPath, err := cfg.ProcessedPath()
 			if err != nil {
 				return commandExitError{code: 2, msg: err.Error()}
 			}
-			prs, err := detect.New(processedPath).DetectMergedPRs(cmd.Context(), cfg.Repo.GitHub, cfg.Repo.DefaultBranch)
+			prs, err := detectMergedPRs(cmd.Context(), cfg, processedPath)
 			if err != nil {
 				return err
 			}

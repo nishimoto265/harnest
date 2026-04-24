@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/detect"
@@ -48,6 +47,9 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return commandExitError{code: 2, msg: err.Error()}
 			}
+			if err := checkCLIRecoveryGate(cfg); err != nil {
+				return err
+			}
 			if withPreflight {
 				checkCtx, cancel := withPreflightTimeout(cmd.Context(), cfg)
 				defer cancel()
@@ -82,7 +84,7 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 	if err != nil {
 		return commandExitError{code: 2, msg: err.Error()}
 	}
-	if err := checkDetectLoopRecoveryGate(runsBase); err != nil {
+	if err := checkCLIRecoveryGateForRunsBase(runsBase); err != nil {
 		return err
 	}
 	resumeTargets, err := state.ResumeTargetPath(processedPath)
@@ -91,12 +93,12 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 	}
 	for _, item := range resumeTargets {
 		if err := runner.Run(ctx, item.PR, orchestrator.RunOptions{RunID: item.RunID}); err != nil {
-			if commandErr := detectLoopBlockExitError(err); commandErr != nil {
+			if commandErr := recoveryGateExitError(err); commandErr != nil {
 				return commandErr
 			}
 			return err
 		}
-		if err := checkDetectLoopRecoveryGate(runsBase); err != nil {
+		if err := checkCLIRecoveryGateForRunsBase(runsBase); err != nil {
 			return err
 		}
 	}
@@ -105,36 +107,20 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 		return err
 	}
 	if len(resumeTargets) == 0 && len(prs) == 0 {
-		if err := checkDetectLoopRecoveryGate(runsBase); err != nil {
+		if err := checkCLIRecoveryGateForRunsBase(runsBase); err != nil {
 			return err
 		}
 	}
 	for _, pr := range prs {
 		if err := runner.Run(ctx, pr.Number, orchestrator.RunOptions{}); err != nil {
-			if commandErr := detectLoopBlockExitError(err); commandErr != nil {
+			if commandErr := recoveryGateExitError(err); commandErr != nil {
 				return commandErr
 			}
 			return err
 		}
-	}
-	return nil
-}
-
-func checkDetectLoopRecoveryGate(runsBase string) error {
-	if err := orchestrator.CheckGlobalRecoveryGate(runsBase); err != nil {
-		if commandErr := detectLoopBlockExitError(err); commandErr != nil {
-			return commandErr
+		if err := checkCLIRecoveryGateForRunsBase(runsBase); err != nil {
+			return err
 		}
-		return err
-	}
-	return nil
-}
-
-func detectLoopBlockExitError(err error) error {
-	var needsRecovery *orchestrator.GlobalNeedsRecoveryError
-	var sunset *orchestrator.GlobalSunsetSentinelError
-	if errors.As(err, &needsRecovery) || errors.As(err, &sunset) {
-		return commandExitError{code: 10, msg: err.Error()}
 	}
 	return nil
 }
