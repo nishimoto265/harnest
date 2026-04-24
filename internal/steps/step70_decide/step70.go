@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -412,6 +413,19 @@ func verifyPersistedAdoptDecisionState(ctx context.Context, pr int, runCtx inter
 	}
 	if !exists {
 		return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonRegistryDivergence, "decision_written_registry_mismatch")
+	}
+	if intention != nil && strings.TrimSpace(intention.PolicyBranch) != "" && intention.PolicyHeadAfter != "" {
+		policyBranch := strings.TrimSpace(intention.PolicyBranch)
+		policyHead, err := deps.Git.RemoteHead(ctx, policyBranch)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "decision_written_policy_remote_head_failure")
+		}
+		if policyHead != intention.PolicyHeadAfter {
+			return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "decision_written_policy_branch_stale")
+		}
 	}
 	return nil
 }

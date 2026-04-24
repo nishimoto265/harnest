@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
+	"github.com/nishimoto265/auto-improve/internal/steps/rescuetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,7 +60,7 @@ func TestWriteIgnoredList_QuotesEntries(t *testing.T) {
 	assert.Equal(t, "dir/line\nbreak.txt", second)
 }
 
-func TestFindExistingDir_RequiresIgnoredCoverage(t *testing.T) {
+func TestFindExistingDir_RequiresCompleteCaptureCoverage(t *testing.T) {
 	agentDir := t.TempDir()
 	rescueRoot := filepath.Join(agentDir, "rescued")
 	rescueDir := filepath.Join(rescueRoot, "candidate")
@@ -80,21 +81,61 @@ func TestFindExistingDir_RequiresIgnoredCoverage(t *testing.T) {
 	}
 	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), state))
 
-	selected, adopted, err := FindExistingDir(agentDir, "rescued", state.ExpectedBaseSHA, 1, state.RescuedHeadSHA, state.DirtyFingerprint, func(string) error {
+	selected, adopted, err := FindExistingDir(agentDir, "rescued", state.ExpectedBaseSHA, 1, state.RescuedHeadSHA, state.DirtyFingerprint, nil, func(string) error {
 		return nil
 	})
 	require.NoError(t, err)
 	assert.False(t, adopted)
 	assert.Empty(t, selected)
 
-	state.Artifacts = append(state.Artifacts, agentrunner.RescueArtifactDigest{
-		Path:   "ignored-skipped.txt",
-		SHA256: strings.Repeat("b", 64),
-	})
+	artifacts, err := rescuetest.WriteCompleteCaptureArtifacts(rescueDir, testFileDigest)
+	require.NoError(t, err)
+	state.Artifacts = artifacts
 	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), state))
 
-	selected, adopted, err = FindExistingDir(agentDir, "rescued", state.ExpectedBaseSHA, 1, state.RescuedHeadSHA, state.DirtyFingerprint, func(string) error {
+	selected, adopted, err = FindExistingDir(agentDir, "rescued", state.ExpectedBaseSHA, 1, state.RescuedHeadSHA, state.DirtyFingerprint, nil, func(string) error {
 		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, adopted)
+	assert.Equal(t, rescueDir, selected)
+}
+
+func TestFindExistingDir_RequiresCurrentUntrackedCoverage(t *testing.T) {
+	agentDir := t.TempDir()
+	rescueRoot := filepath.Join(agentDir, "rescued")
+	rescueDir := filepath.Join(rescueRoot, "candidate")
+	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
+
+	state := agentrunner.RescueStateFile{
+		ExpectedBaseSHA:  "1111111111111111111111111111111111111111",
+		RescuedHeadSHA:   "2222222222222222222222222222222222222222",
+		RetryCount:       1,
+		CommitCount:      0,
+		BundleMode:       agentrunner.RescueBundleModeNone,
+		CreatedAt:        time.Now().UTC(),
+		DirtyFingerprint: "dirty-fingerprint",
+	}
+	artifacts, err := rescuetest.WriteCompleteCaptureArtifacts(rescueDir, testFileDigest)
+	require.NoError(t, err)
+	state.Artifacts = artifacts
+	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), state))
+
+	dirtyEntries := []string{"?? dirty.txt"}
+	selected, adopted, err := FindExistingDir(agentDir, "rescued", state.ExpectedBaseSHA, 1, state.RescuedHeadSHA, state.DirtyFingerprint, dirtyEntries, func(candidateDir string) error {
+		return agentrunner.VerifyRescueState(candidateDir, testFileDigest, "test")
+	})
+	require.NoError(t, err)
+	assert.False(t, adopted)
+	assert.Empty(t, selected)
+
+	artifacts, err = rescuetest.WriteCompleteCaptureArtifacts(rescueDir, testFileDigest, "untracked/dirty.txt")
+	require.NoError(t, err)
+	state.Artifacts = artifacts
+	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), state))
+
+	selected, adopted, err = FindExistingDir(agentDir, "rescued", state.ExpectedBaseSHA, 1, state.RescuedHeadSHA, state.DirtyFingerprint, dirtyEntries, func(candidateDir string) error {
+		return agentrunner.VerifyRescueState(candidateDir, testFileDigest, "test")
 	})
 	require.NoError(t, err)
 	assert.True(t, adopted)
@@ -106,8 +147,9 @@ func TestFindExistingDir_SkipsCorruptRescueState(t *testing.T) {
 	rescueRoot := filepath.Join(agentDir, "rescued")
 	rescueDir := filepath.Join(rescueRoot, "candidate")
 	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(rescueDir, "ignored.txt"), nil, 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(rescueDir, "ignored-skipped.txt"), nil, 0o644))
+	artifacts, err := rescuetest.WriteCompleteCaptureArtifacts(rescueDir, testFileDigest)
+	require.NoError(t, err)
+	artifacts[0].SHA256 = strings.Repeat("0", 64)
 
 	state := agentrunner.RescueStateFile{
 		ExpectedBaseSHA:  "1111111111111111111111111111111111111111",
@@ -117,19 +159,47 @@ func TestFindExistingDir_SkipsCorruptRescueState(t *testing.T) {
 		BundleMode:       agentrunner.RescueBundleModeNone,
 		CreatedAt:        time.Now().UTC(),
 		DirtyFingerprint: "dirty-fingerprint",
-		Artifacts: []agentrunner.RescueArtifactDigest{
-			{Path: "ignored.txt", SHA256: strings.Repeat("0", 64)},
-			{Path: "ignored-skipped.txt", SHA256: strings.Repeat("0", 64)},
-		},
+		Artifacts:        artifacts,
 	}
 	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), state))
 
-	selected, adopted, err := FindExistingDir(agentDir, "rescued", state.ExpectedBaseSHA, 1, state.RescuedHeadSHA, state.DirtyFingerprint, func(candidateDir string) error {
+	selected, adopted, err := FindExistingDir(agentDir, "rescued", state.ExpectedBaseSHA, 1, state.RescuedHeadSHA, state.DirtyFingerprint, nil, func(candidateDir string) error {
 		return agentrunner.VerifyRescueState(candidateDir, testFileDigest, "test")
 	})
 	require.NoError(t, err)
 	assert.False(t, adopted)
 	assert.Empty(t, selected)
+}
+
+func TestFindExistingDir_SkipsMalformedStateJSON(t *testing.T) {
+	agentDir := t.TempDir()
+	rescueRoot := filepath.Join(agentDir, "rescued")
+	badDir := filepath.Join(rescueRoot, "bad-candidate")
+	validDir := filepath.Join(rescueRoot, "valid-candidate")
+	require.NoError(t, os.MkdirAll(badDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(badDir, "state.json"), []byte("{"), 0o644))
+	require.NoError(t, os.MkdirAll(validDir, 0o755))
+
+	state := agentrunner.RescueStateFile{
+		ExpectedBaseSHA:  "1111111111111111111111111111111111111111",
+		RescuedHeadSHA:   "2222222222222222222222222222222222222222",
+		RetryCount:       1,
+		CommitCount:      0,
+		BundleMode:       agentrunner.RescueBundleModeNone,
+		CreatedAt:        time.Now().UTC(),
+		DirtyFingerprint: "dirty-fingerprint",
+	}
+	artifacts, err := rescuetest.WriteCompleteCaptureArtifacts(validDir, testFileDigest)
+	require.NoError(t, err)
+	state.Artifacts = artifacts
+	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(validDir, "state.json"), state))
+
+	selected, adopted, err := FindExistingDir(agentDir, "rescued", state.ExpectedBaseSHA, 1, state.RescuedHeadSHA, state.DirtyFingerprint, nil, func(candidateDir string) error {
+		return agentrunner.VerifyRescueState(candidateDir, testFileDigest, "test")
+	})
+	require.NoError(t, err)
+	assert.True(t, adopted)
+	assert.Equal(t, validDir, selected)
 }
 
 func testFileDigest(path string) (string, error) {

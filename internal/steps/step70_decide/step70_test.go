@@ -1489,6 +1489,55 @@ func TestRun_ResumeFromDecisionWritten_RemoteMismatchNeedsManualRecovery(t *test
 	assert.Equal(t, "decision_written_remote_mismatch", recovery.Detail)
 }
 
+func TestRun_ResumeFromDecisionWritten_PolicyBranchStaleNeedsManualRecovery(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR5011")
+	registryPath := runCtx.RulesRegistryPath()
+	appendResult, _ := seedRegistryAdd(t, registryPath, resolver, runCtx.RunID, candidates.CandidatesHash)
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.Stage = contracts.IntentionStageDecisionWritten
+	intention.RegistryAppendResult = &appendResult
+	intention.PolicyBranch = "auto-improve/policy"
+	intention.PolicyHeadBefore = strings.Repeat("3", 40)
+	intention.PolicyHeadAfter = strings.Repeat("4", 40)
+	require.NoError(t, store.Save(intention))
+
+	decision := contracts.Decision{
+		Action: contracts.DecisionActionAdopt,
+		Value: contracts.DecisionAdopt{
+			Action:               contracts.DecisionActionAdopt,
+			SchemaVersion:        "1",
+			RunID:                runCtx.RunID,
+			IdempotencyKey:       intention.IdempotencyKey,
+			BestShaBefore:        intention.BestShaBefore,
+			TargetSha:            intention.TargetSha,
+			CandidatesHash:       intention.CandidatesHash,
+			RegistryAppendResult: appendResult,
+			DecidedAt:            fixedNow()(),
+		},
+	}
+	decisionPath, err := runCtx.ResolveRunRelative("70/decision.json")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(decisionPath, decision))
+
+	err = Run(context.Background(), 5011, runCtx, pkg, candidates, store, Deps{
+		Git: &fakeGit{heads: map[string]string{
+			resolver.target.BestBranch: intention.TargetSha,
+			"auto-improve/policy":      strings.Repeat("5", 40),
+		}},
+		Resolver: unexpectedResolver{t: t},
+		Now:      fixedNow(),
+	})
+	require.ErrorIs(t, err, ErrNeedsManualRecovery)
+
+	events := readStateEvents(t, runCtx)
+	require.NotEmpty(t, events)
+	recovery := mustNeedsManualRecoveryEvent(t, events[len(events)-1])
+	assert.Equal(t, contracts.RollbackReasonTransactionalFailure, recovery.Reason)
+	assert.Equal(t, "decision_written_policy_branch_stale", recovery.Detail)
+	assert.NotContains(t, readStateKinds(t, runCtx), contracts.StateKindPromoted)
+}
+
 func TestRun_ResumeFromRegistryAppendedAllowsLaterRegistryProgress(t *testing.T) {
 	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR504")
 	registryPath := runCtx.RulesRegistryPath()
@@ -2825,6 +2874,7 @@ type fakePushCall struct {
 
 type fakeGit struct {
 	head                string
+	heads               map[string]string
 	remoteHeadErr       error
 	pushErr             error
 	removeWorktreeErr   error
@@ -2839,10 +2889,15 @@ type cancelOnPushGit struct {
 	cancel context.CancelFunc
 }
 
-func (g *fakeGit) RemoteHead(_ context.Context, _ string) (string, error) {
+func (g *fakeGit) RemoteHead(_ context.Context, branch string) (string, error) {
 	g.remoteHeadCalls++
 	if g.remoteHeadErr != nil {
 		return "", g.remoteHeadErr
+	}
+	if g.heads != nil {
+		if head, ok := g.heads[branch]; ok {
+			return head, nil
+		}
 	}
 	return g.head, nil
 }

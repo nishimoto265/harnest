@@ -33,7 +33,8 @@ type RescueStateFile struct {
 	BundleMode      string                 `json:"bundle_mode" validate:"required,oneof=none range full_head"`
 	CreatedAt       time.Time              `json:"created_at" validate:"required"`
 	Artifacts       []RescueArtifactDigest `json:"artifacts" validate:"required,dive"`
-	// DirtyFingerprint is a sha256 hex digest of `git status --porcelain=v1 -z`
+	// DirtyFingerprint is a sha256 hex digest of
+	// `git status --porcelain=v1 -z --untracked-files=all`
 	// captured at rescue-artifact capture time. It is used at rescue-dir
 	// adoption time to detect that the worktree's dirty state has drifted
 	// from the stored snapshot (e.g. a crash between state.json write and
@@ -53,22 +54,22 @@ func ReadRescueState(path string) (RescueStateFile, error) {
 	return internalio.ReadJSON[RescueStateFile](path)
 }
 
-// ComputeDirtyFingerprint returns a sha256 hex digest of the worktree's
-// porcelain-v1 dirty status. The digest is stable under re-ordering because
-// entries are sorted before hashing, so it can be compared across adoption
-// attempts to detect uncaptured worktree changes.
-func ComputeDirtyFingerprint(ctx context.Context, worktreePath string) (string, error) {
-	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", worktreePath, "status", "--porcelain=v1", "-z")
+// ComputeDirtyState returns a sha256 hex digest plus normalized entries for
+// the worktree's porcelain-v1 dirty status. The digest is stable under
+// re-ordering because entries are sorted before hashing, so it can be compared
+// across adoption attempts to detect uncaptured worktree changes.
+func ComputeDirtyState(ctx context.Context, worktreePath string) (string, []string, error) {
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", worktreePath, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil {
-		return "", fmt.Errorf("agentrunner: resolve git: %w", err)
+		return "", nil, fmt.Errorf("agentrunner: resolve git: %w", err)
 	}
 	cmd.Env = processenv.GitLocalEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return "", nil, ctx.Err()
 		}
-		return "", fmt.Errorf("agentrunner: git status --porcelain=v1 -z: %w", err)
+		return "", nil, fmt.Errorf("agentrunner: git status --porcelain=v1 -z --untracked-files=all: %w", err)
 	}
 	entries := strings.Split(strings.TrimRight(string(out), "\x00"), "\x00")
 	filtered := make([]string, 0, len(entries))
@@ -84,7 +85,14 @@ func ComputeDirtyFingerprint(ctx context.Context, worktreePath string) (string, 
 		hash.Write([]byte(entry))
 		hash.Write([]byte{0})
 	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	return hex.EncodeToString(hash.Sum(nil)), filtered, nil
+}
+
+// ComputeDirtyFingerprint returns only the fingerprint portion of
+// ComputeDirtyState for callers that do not need entry-level coverage checks.
+func ComputeDirtyFingerprint(ctx context.Context, worktreePath string) (string, error) {
+	fingerprint, _, err := ComputeDirtyState(ctx, worktreePath)
+	return fingerprint, err
 }
 
 func VerifyRescueState(rescueDir string, fileDigest func(string) (string, error), errPrefix string) error {

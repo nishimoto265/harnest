@@ -103,7 +103,7 @@ func TestResumeIfNeeded_AdoptsExistingRescueAfterCrashBeforeResumeStateSave(t *t
 
 	rescueDir := filepath.Join(agentDir, rescuedDirName, "existing-rescue")
 	require.NoError(t, os.MkdirAll(rescueDir, 0o755))
-	artifacts, err := rescuetest.WriteIgnoredCoverageArtifacts(rescueDir, fileDigest)
+	artifacts, err := rescuetest.WriteCompleteCaptureArtifacts(rescueDir, fileDigest, "untracked/dirty.txt")
 	require.NoError(t, err)
 	require.NoError(t, agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), agentrunner.RescueStateFile{
 		ExpectedBaseSHA:  env.run.TaskPackage.BaseSHA,
@@ -229,6 +229,7 @@ func TestResumeIfNeeded_SkipsRescueDirWithPartialIgnoredCoverage(t *testing.T) {
 	assert.Equal(t, 1, retryCount)
 	assert.NoFileExists(t, filepath.Join(allocation.Path, "dirty.txt"))
 	assert.GreaterOrEqual(t, len(rescueDirEntries(t, agentDir)), 2, "partial ignored coverage must force a fresh rescue capture")
+	assertRescueStateHasArtifacts(t, agentDir, "partial-rescue", "commits.bundle", "tracked.patch", "staged.patch", "untracked-symlinks.txt", "ignored-skipped.txt", "ignored.txt", "untracked/dirty.txt")
 }
 
 func TestEnsureRescueLeaseQuiesced_PreservesTimeoutSentinel(t *testing.T) {
@@ -291,6 +292,30 @@ func staleResumeState(baseSHA string) resumeState {
 		RetryCount:      0,
 		LastHeartbeat:   oldTime,
 	}
+}
+
+func assertRescueStateHasArtifacts(t *testing.T, agentDir, skipDir string, paths ...string) {
+	t.Helper()
+	entries := rescueDirEntries(t, agentDir)
+	require.NotEmpty(t, entries)
+	for _, entry := range entries {
+		if entry.Name() == skipDir {
+			continue
+		}
+		state, err := agentrunner.ReadRescueState(filepath.Join(agentDir, rescuedDirName, entry.Name(), "state.json"))
+		if err != nil {
+			continue
+		}
+		artifacts := make(map[string]bool, len(state.Artifacts))
+		for _, artifact := range state.Artifacts {
+			artifacts[artifact.Path] = true
+		}
+		for _, path := range paths {
+			assert.True(t, artifacts[path], "fresh rescue artifact %s missing from %s", path, entry.Name())
+		}
+		return
+	}
+	t.Fatalf("fresh rescue state not found under %s", filepath.Join(agentDir, rescuedDirName))
 }
 
 func writeRescueGitWrapper(t *testing.T, dir, body string) {

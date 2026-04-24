@@ -156,10 +156,11 @@ func TestDrivePolicyPublish_PlanMismatchRequiresManualRecovery(t *testing.T) {
 	intention.PolicyBranch = "auto-improve/policy"
 	intention.PolicyHeadBefore = strings.Repeat("1", 40)
 	intention.PolicyHeadAfter = strings.Repeat("2", 40)
+	plan := &fakePolicyPublishPlan{head: strings.Repeat("3", 40)}
 
 	originalPrepare := preparePolicyPublish
 	preparePolicyPublish = func(context.Context, string, string, string, string, string) (policyPublishPlan, error) {
-		return &fakePolicyPublishPlan{head: strings.Repeat("3", 40)}, nil
+		return plan, nil
 	}
 	t.Cleanup(func() { preparePolicyPublish = originalPrepare })
 
@@ -169,6 +170,7 @@ func TestDrivePolicyPublish_PlanMismatchRequiresManualRecovery(t *testing.T) {
 		Git:          &fakeGit{head: strings.Repeat("1", 40)},
 		Now:          fixedNow(),
 	}, "policy_publish_plan_mismatch")
+	assert.Equal(t, 1, plan.cleanupCalls)
 }
 
 func TestDrivePolicyPublish_PostSavePushFailureRequiresManualRecovery(t *testing.T) {
@@ -192,6 +194,7 @@ func TestDrivePolicyPublish_PostSavePushFailureRequiresManualRecovery(t *testing
 		Now:          fixedNow(),
 	}, "policy_publish_failure")
 	assert.Equal(t, 1, plan.pushCalls)
+	assert.Equal(t, 1, plan.cleanupCalls)
 
 	loaded, err := store.Load()
 	require.NoError(t, err)
@@ -220,6 +223,38 @@ func TestDrivePolicyPublish_RetryWithPersistedHeadAfterPushFailureRequiresManual
 		Now:          fixedNow(),
 	}, "policy_publish_failure")
 	assert.Equal(t, 1, plan.pushCalls)
+	assert.Equal(t, 1, plan.cleanupCalls)
+}
+
+func TestDrivePolicyPublish_RetryWithPersistedHeadAfterAlreadyRemoteMarksPublished(t *testing.T) {
+	runCtx, store, intention := newPolicyPublishTestFixture(t, "PR118")
+	intention.Stage = contracts.IntentionStagePolicyPublishing
+	intention.PolicyBranch = "auto-improve/policy"
+	intention.PolicyHeadBefore = strings.Repeat("1", 40)
+	intention.PolicyHeadAfter = strings.Repeat("2", 40)
+
+	prepareCalled := false
+	originalPrepare := preparePolicyPublish
+	preparePolicyPublish = func(context.Context, string, string, string, string, string) (policyPublishPlan, error) {
+		prepareCalled = true
+		return nil, errors.New("prepare should not be called")
+	}
+	t.Cleanup(func() { preparePolicyPublish = originalPrepare })
+
+	updated, err := drivePolicyPublish(context.Background(), 918, runCtx, intention, store, state.NewWriter(runCtx), Deps{
+		PolicyBranch: "auto-improve/policy",
+		RepoRoot:     "repo-root",
+		Git:          &fakeGit{head: intention.PolicyHeadAfter},
+		Now:          fixedNow(),
+	})
+	require.NoError(t, err)
+	assert.False(t, prepareCalled)
+	assert.Equal(t, contracts.IntentionStagePolicyPublished, updated.Stage)
+
+	loaded, err := store.Load()
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, contracts.IntentionStagePolicyPublished, loaded.Stage)
 }
 
 func newPolicyPublishTestFixture(t *testing.T, prLabel string) (internalio.RunContext, IntentionWriter, contracts.IntentionRecord) {
@@ -251,9 +286,10 @@ func assertDrivePolicyPublishManualRecovery(t *testing.T, runCtx internalio.RunC
 }
 
 type fakePolicyPublishPlan struct {
-	head      string
-	pushErr   error
-	pushCalls int
+	head         string
+	pushErr      error
+	pushCalls    int
+	cleanupCalls int
 }
 
 func (p *fakePolicyPublishPlan) HeadSHA() string {
@@ -266,5 +302,6 @@ func (p *fakePolicyPublishPlan) Push(context.Context) error {
 }
 
 func (p *fakePolicyPublishPlan) Cleanup() error {
+	p.cleanupCalls++
 	return nil
 }
