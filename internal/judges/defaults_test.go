@@ -142,6 +142,56 @@ func TestResolveRunRubricPath_EmbedsActiveRules(t *testing.T) {
 	assert.Equal(t, []string{"r-sync-message-details"}, ruleIDs)
 }
 
+func TestResolveRunRubricPath_RejectsBrokenRegistryPrevHashChain(t *testing.T) {
+	dir := t.TempDir()
+	SetDefaultRubricDirForTest(dir)
+	t.Cleanup(func() { SetDefaultRubricDirForTest("") })
+
+	runCtx, err := internalio.NewRunContext("2026-04-23-PR1-deadbee", filepath.Join(dir, "runs"), filepath.Join(dir, "worktrees"))
+	require.NoError(t, err)
+
+	firstBody := []byte("# First Rule\n")
+	require.NoError(t, internalio.WriteAtomic(filepath.Join(runCtx.RunsBase, "rules", "r-first.md"), firstBody))
+	_, err = internalio.AppendRegistryEntry(runCtx.RulesRegistryPath(), contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "r-first",
+			RulePath:       "rules/r-first.md",
+			Sha256:         runtimeRubricSHA256Hex(firstBody),
+			IdempotencyKey: strings.Repeat("1", 64),
+			ByRunID:        "2026-04-23-PR1-feedbee",
+			At:             time.Date(2026, 4, 23, 7, 0, 0, 0, time.UTC),
+			VersionSeq:     1,
+		},
+	})
+	require.NoError(t, err)
+
+	secondBody := []byte("# Second Rule\n")
+	require.NoError(t, internalio.WriteAtomic(filepath.Join(runCtx.RunsBase, "rules", "r-second.md"), secondBody))
+	err = internalio.AppendJSONL(runCtx.RulesRegistryPath(), contracts.RuleRegistryEntry{
+		Kind: contracts.RegistryKindAdded,
+		Value: contracts.RuleRegistryAdded{
+			Kind:           contracts.RegistryKindAdded,
+			SchemaVersion:  "1",
+			RuleID:         "r-second",
+			RulePath:       "rules/r-second.md",
+			Sha256:         runtimeRubricSHA256Hex(secondBody),
+			IdempotencyKey: strings.Repeat("2", 64),
+			ByRunID:        "2026-04-23-PR1-feedbee",
+			At:             time.Date(2026, 4, 23, 7, 5, 0, 0, time.UTC),
+			VersionSeq:     2,
+			PrevHash:       strings.Repeat("f", 64),
+		},
+	})
+	require.NoError(t, err)
+
+	path, err := ResolveRunRubricPath(runCtx)
+	require.ErrorIs(t, err, internalio.ErrRegistryCASMismatch)
+	assert.Empty(t, path)
+}
+
 func TestResolveRunRubricPath_PrefersRunPolicySnapshot(t *testing.T) {
 	dir := t.TempDir()
 	SetDefaultRubricDirForTest(dir)

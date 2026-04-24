@@ -245,6 +245,36 @@ func TestCandidates_Validate_PropagatesCandidateError(t *testing.T) {
 	assert.True(t, strings.Contains(err.Error(), "candidates[0]"))
 }
 
+func TestCandidates_Validate_RejectsDuplicateCandidateID(t *testing.T) {
+	items := []Candidate{
+		{
+			CandidateID:        "c1",
+			Kind:               CandidateKindNew,
+			Title:              "x",
+			ProposedBodyPath:   "40/candidates/c1-a.md",
+			ProposedBodySha256: "0000000000000000000000000000000000000000000000000000000000000001",
+		},
+		{
+			CandidateID:        "c1",
+			Kind:               CandidateKindNew,
+			Title:              "y",
+			ProposedBodyPath:   "40/candidates/c1-b.md",
+			ProposedBodySha256: "0000000000000000000000000000000000000000000000000000000000000002",
+		},
+	}
+	cs := Candidates{
+		SchemaVersion:  "1",
+		RunID:          "2026-04-20-PR42-abcdef0",
+		Candidates:     items,
+		CandidatesHash: CanonicalCandidatesHash(items),
+		CreatedAt:      time.Now(),
+	}
+
+	err := cs.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCandidateIDDuplicate)
+}
+
 func TestCandidate_Validate_RejectsOverflowRefOutside40Prefix(t *testing.T) {
 	c := Candidate{
 		CandidateID: "c1",

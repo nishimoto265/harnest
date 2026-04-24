@@ -66,6 +66,7 @@ var (
 	ErrCandidateTargetRequired  = errors.New("contracts: candidate: target_rule_id is required for kind=update/duplicate")
 	ErrCandidateTargetForbidden = errors.New("contracts: candidate: target_rule_id must be empty for kind=new")
 	ErrCandidateBodyPathInvalid = errors.New("contracts: candidate: proposed_body_path must be a clean run-relative path")
+	ErrCandidateIDDuplicate     = errors.New("contracts: candidates: duplicate candidate_id")
 )
 
 // Validate runs tag-based struct validation + kind-specific invariants.
@@ -155,10 +156,16 @@ func (c Candidates) Validate() error {
 	if err := validateStruct(c); err != nil {
 		return err
 	}
+	seenCandidateIDs := make(map[string]struct{}, len(c.Candidates))
 	for i := range c.Candidates {
 		if err := c.Candidates[i].Validate(); err != nil {
 			return fmt.Errorf("candidates[%d]: %w", i, err)
 		}
+		candidateID := c.Candidates[i].CandidateID
+		if _, ok := seenCandidateIDs[candidateID]; ok {
+			return fmt.Errorf("%w: candidate_id=%s", ErrCandidateIDDuplicate, candidateID)
+		}
+		seenCandidateIDs[candidateID] = struct{}{}
 	}
 	return c.VerifyCandidatesHash()
 }

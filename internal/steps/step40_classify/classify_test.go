@@ -165,6 +165,24 @@ func TestRun_RegistryMatchesProduceMixedNewAndUpdateCandidates(t *testing.T) {
 	}
 }
 
+func TestRun_RejectsBrokenRegistryPrevHashChain(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+	writeCompliance(t, cfg.IO, testComplianceEntry(cfg.IO.RunID, "rule-b", contracts.ComplianceVerdictViolated))
+
+	first := registryAdded("rule-a", strings.Repeat("1", 64))
+	writeRegistry(t, cfg.registryPath(), first)
+
+	second := registryAdded("rule-b", strings.Repeat("2", 64))
+	second = setRegistryChainFields(second, 2, strings.Repeat("f", 64))
+	writeRegistryRuleSidecar(t, filepath.Dir(cfg.registryPath()), filepath.Join("rules", "rule-b.md"), "# rule-b added\n")
+	require.NoError(t, internalio.AppendJSONL(cfg.registryPath(), second))
+
+	got, err := Run(context.Background(), cfg)
+	require.ErrorIs(t, err, internalio.ErrRegistryCASMismatch)
+	assert.Nil(t, got)
+}
+
 func TestRun_RerunTruncatesClassificationJSONL(t *testing.T) {
 	cfg := newTestConfig(t)
 	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
@@ -731,10 +749,12 @@ func writeCompliance(t *testing.T, runIO internalio.RunContext, entries ...contr
 
 func writeRegistry(t *testing.T, path string, entries ...contracts.RuleRegistryEntry) {
 	t.Helper()
-	normalized := make([]contracts.RuleRegistryEntry, 0, len(entries))
 	lastSha := make(map[string]string)
+	appended := make(map[string][]contracts.RegistryAppendResult)
 	registryBase := filepath.Dir(path)
-	for _, entry := range entries {
+	require.NoError(t, internalio.WriteAtomic(path, nil))
+	prevHash := ""
+	for idx, entry := range entries {
 		switch value := entry.Value.(type) {
 		case contracts.RuleRegistryAdded:
 			absPath := filepath.Join(registryBase, value.RulePath)
@@ -754,10 +774,64 @@ func writeRegistry(t *testing.T, path string, entries ...contracts.RuleRegistryE
 			writeRegistryRuleSidecar(t, registryBase, value.RulePath, body)
 			lastSha[value.RuleID] = value.Sha256
 			entry = contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
+		case contracts.RuleRegistryRolledBack:
+			targets := appended[value.TargetOpID]
+			require.NotEmpty(t, targets, "rollback target must have been appended before rollback entry")
+			target := targets[len(targets)-1]
+			value.TargetOffset = target.Offset
+			value.TargetSha256 = target.Sha256
+			entry = contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
 		}
-		normalized = append(normalized, entry)
+		entry = setRegistryChainFields(entry, int64(idx+1), prevHash)
+		result, err := internalio.AppendRegistryEntry(path, entry)
+		require.NoError(t, err)
+		if key, ok := registryPromotionKey(entry); ok {
+			appended[key] = append(appended[key], result)
+		}
+		prevHash = result.Sha256
 	}
-	writeJSONL(t, path, normalized...)
+}
+
+func setRegistryChainFields(entry contracts.RuleRegistryEntry, versionSeq int64, prevHash string) contracts.RuleRegistryEntry {
+	switch value := entry.Value.(type) {
+	case contracts.RuleRegistryAdded:
+		value.VersionSeq = versionSeq
+		value.PrevHash = prevHash
+		return contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
+	case contracts.RuleRegistryUpdated:
+		value.VersionSeq = versionSeq
+		value.PrevHash = prevHash
+		return contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
+	case contracts.RuleRegistryStatusChanged:
+		value.VersionSeq = versionSeq
+		value.PrevHash = prevHash
+		return contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
+	case contracts.RuleRegistryArchived:
+		value.VersionSeq = versionSeq
+		value.PrevHash = prevHash
+		return contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
+	case contracts.RuleRegistryRestored:
+		value.VersionSeq = versionSeq
+		value.PrevHash = prevHash
+		return contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
+	case contracts.RuleRegistryRolledBack:
+		value.VersionSeq = versionSeq
+		value.PrevHash = prevHash
+		return contracts.RuleRegistryEntry{Kind: entry.Kind, Value: value}
+	default:
+		return entry
+	}
+}
+
+func registryPromotionKey(entry contracts.RuleRegistryEntry) (string, bool) {
+	switch value := entry.Value.(type) {
+	case contracts.RuleRegistryAdded:
+		return value.IdempotencyKey, true
+	case contracts.RuleRegistryUpdated:
+		return value.IdempotencyKey, true
+	default:
+		return "", false
+	}
 }
 
 func writeRegistryRuleSidecar(t *testing.T, registryBase, rulePath, body string) {
