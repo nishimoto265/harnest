@@ -1451,13 +1451,17 @@ func TestRunDetectLoopBlocksOnNeedsRecoveryWhenNoWork(t *testing.T) {
 	assert.Empty(t, stub.prs)
 }
 
-func TestRunDetectLoopBlocksOnSunsetSentinelWhenNoWork(t *testing.T) {
+func TestRunDetectLoopReconcilesStaleSunsetMarkerBeforeDetect(t *testing.T) {
 	root := realTempDir(t)
 	runsBase := filepath.Join(root, "runs")
 	worktreeBase := filepath.Join(root, "worktrees")
 	require.NoError(t, os.MkdirAll(runsBase, 0o755))
 	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "sunset-running.marker.diverged"), []byte("diverged\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "sunset-running.marker"), []byte(`{
+  "recorded_start_time": "2026-04-21T09:00:00Z",
+  "sunset_run_id": "stale-run",
+  "transitions": []
+}`), 0o644))
 	writeTestConfig(t, root, runsBase, worktreeBase)
 
 	originalWD, err := os.Getwd()
@@ -1472,6 +1476,55 @@ func TestRunDetectLoopBlocksOnSunsetSentinelWhenNoWork(t *testing.T) {
 		return stub, nil
 	}
 	detectMergedPRs = func(context.Context, config.Config, string) ([]detect.MergedPR, error) {
+		return []detect.MergedPR{{Number: 306}}, nil
+	}
+	t.Cleanup(func() {
+		newPipelineRunner = originalNewPipelineRunner
+		detectMergedPRs = originalDetectMergedPRs
+	})
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--detect-loop"})
+	require.NoError(t, cmd.Execute())
+
+	assert.Equal(t, []int{306}, stub.prs)
+	assert.NoFileExists(t, filepath.Join(runsBase, "sunset-running.marker"))
+	lastSunset, err := os.ReadFile(filepath.Join(runsBase, "last-sunset-at"))
+	require.NoError(t, err)
+	assert.Equal(t, "2026-04-21T09:00:00Z\n", string(lastSunset))
+}
+
+func TestRunDetectLoopBlocksOnLiveSunsetMarkerBeforeDetect(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "sunset-running.marker"), []byte(`{
+  "recorded_start_time": "2026-04-21T09:00:00Z",
+  "sunset_run_id": "live-run",
+  "transitions": []
+}`), 0o644))
+	lock, err := internalio.AcquireFileLock(filepath.Join(runsBase, "promotion.lock"))
+	require.NoError(t, err)
+	defer func() { _ = lock.Unlock() }()
+	writeTestConfig(t, root, runsBase, worktreeBase)
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	runnerCreated := false
+	detectCalled := false
+	originalNewPipelineRunner := newPipelineRunner
+	originalDetectMergedPRs := detectMergedPRs
+	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
+		runnerCreated = true
+		return &stubPipelineRunner{}, nil
+	}
+	detectMergedPRs = func(context.Context, config.Config, string) ([]detect.MergedPR, error) {
+		detectCalled = true
 		return nil, nil
 	}
 	t.Cleanup(func() {
@@ -1483,8 +1536,52 @@ func TestRunDetectLoopBlocksOnSunsetSentinelWhenNoWork(t *testing.T) {
 	cmd.SetArgs([]string{"run", "--detect-loop"})
 	err = cmd.Execute()
 	require.Error(t, err)
+	assertCommandExitCode(t, err, 10)
 	assert.Contains(t, err.Error(), "global sunset block")
-	assert.Empty(t, stub.prs)
+	assert.False(t, runnerCreated)
+	assert.False(t, detectCalled)
+	assert.FileExists(t, filepath.Join(runsBase, "sunset-running.marker"))
+}
+
+func TestRunDetectLoopBlocksOnSunsetSentinelWhenNoWork(t *testing.T) {
+	root := realTempDir(t)
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "sunset-running.marker.diverged"), []byte("diverged\n"), 0o644))
+	writeTestConfig(t, root, runsBase, worktreeBase)
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	runnerCreated := false
+	detectCalled := false
+	originalNewPipelineRunner := newPipelineRunner
+	originalDetectMergedPRs := detectMergedPRs
+	newPipelineRunner = func(*config.Config) (pipelineRunner, error) {
+		runnerCreated = true
+		return &stubPipelineRunner{}, nil
+	}
+	detectMergedPRs = func(context.Context, config.Config, string) ([]detect.MergedPR, error) {
+		detectCalled = true
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		newPipelineRunner = originalNewPipelineRunner
+		detectMergedPRs = originalDetectMergedPRs
+	})
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"run", "--detect-loop"})
+	err = cmd.Execute()
+	require.Error(t, err)
+	assertCommandExitCode(t, err, 10)
+	assert.Contains(t, err.Error(), "global sunset block")
+	assert.False(t, runnerCreated)
+	assert.False(t, detectCalled)
 }
 
 func TestSunsetCommandInvokesRunner(t *testing.T) {

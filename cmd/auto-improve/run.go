@@ -47,7 +47,11 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return commandExitError{code: 2, msg: err.Error()}
 			}
-			if err := checkCLIRecoveryGate(cfg); err != nil {
+			if detectLoop {
+				if err := checkDetectLoopRecoveryGate(cmd.Context(), cfg); err != nil {
+					return err
+				}
+			} else if err := checkCLIRecoveryGate(cfg); err != nil {
 				return err
 			}
 			if withPreflight {
@@ -84,7 +88,7 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 	if err != nil {
 		return commandExitError{code: 2, msg: err.Error()}
 	}
-	if err := checkCLIRecoveryGateForRunsBase(runsBase); err != nil {
+	if err := checkDetectLoopRecoveryGateForRunsBase(ctx, runsBase); err != nil {
 		return err
 	}
 	resumeTargets, err := state.ResumeTargetPath(processedPath)
@@ -98,7 +102,7 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 			}
 			return err
 		}
-		if err := checkCLIRecoveryGateForRunsBase(runsBase); err != nil {
+		if err := checkDetectLoopRecoveryGateForRunsBase(ctx, runsBase); err != nil {
 			return err
 		}
 	}
@@ -107,7 +111,7 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 		return err
 	}
 	if len(resumeTargets) == 0 && len(prs) == 0 {
-		if err := checkCLIRecoveryGateForRunsBase(runsBase); err != nil {
+		if err := checkDetectLoopRecoveryGateForRunsBase(ctx, runsBase); err != nil {
 			return err
 		}
 	}
@@ -118,7 +122,7 @@ func runDetectLoop(ctx context.Context, cfg config.Config, runner pipelineRunner
 			}
 			return err
 		}
-		if err := checkCLIRecoveryGateForRunsBase(runsBase); err != nil {
+		if err := checkDetectLoopRecoveryGateForRunsBase(ctx, runsBase); err != nil {
 			return err
 		}
 	}
