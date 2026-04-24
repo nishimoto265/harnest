@@ -21,7 +21,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const integrationEnvVar = "AUTO_IMPROVE_INTEGRATION"
+const (
+	integrationEnvVar            = "AUTO_IMPROVE_INTEGRATION"
+	integrationTrustedPathEnvVar = "AUTO_IMPROVE_INTEGRATION_TRUSTED_PATH"
+	testTrustedPathSuffix        = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
+)
 
 func TestIntegrationConcurrentRunsDifferentPRsSucceed(t *testing.T) {
 	requireIntegrationEnv(t)
@@ -110,7 +114,7 @@ func TestIntegrationRecoverAdoptAnywaySubprocess(t *testing.T) {
 	cmd := exec.Command(bin, "recover", "--run", string(runID), "--adopt-anyway")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		integrationTrustedPathEnvVar+"="+trustedPathWithFakeBin(binDir),
 		"AUTO_IMPROVE_GIT_STATE_DIR="+gitStateDir,
 		"AUTO_IMPROVE_TEST_REMOTE_SHA="+strings.Repeat("b", 40),
 	)
@@ -148,12 +152,14 @@ func TestIntegrationRunFailsClosedOnBrokenPolicyBranch(t *testing.T) {
 	require.NoError(t, os.MkdirAll(binDir, 0o755))
 	copyExecutable(t, filepath.Join(mustRepoRoot(t), "internal", "orchestrator", "testdata", "bin", "gh"), filepath.Join(binDir, "gh"))
 	writeExecutable(t, filepath.Join(binDir, "git"), brokenPolicyGitScript())
-	writeExecutable(t, filepath.Join(binDir, "claude"), fakeClaudeScript(0))
+	claudePath := filepath.Join(binDir, "claude")
+	writeExecutable(t, claudePath, fakeClaudeScript(0))
+	writeIntegrationAgentsConfig(t, root, claudePath)
 
 	cmd := exec.Command(bin, "run", "--pr", "1")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		integrationTrustedPathEnvVar+"="+trustedPathWithFakeBin(binDir),
 		"AUTO_IMPROVE_TEST_BASE_SHA="+strings.Repeat("a", 40),
 		"AUTO_IMPROVE_TEST_TARGET_SHA="+strings.Repeat("b", 40),
 		"AUTO_IMPROVE_TEST_MERGE_SHA="+strings.Repeat("c", 40),
@@ -199,11 +205,13 @@ func newCLIIntegrationEnv(t *testing.T, agentSleep time.Duration) cliIntegration
 	repoRoot := mustRepoRoot(t)
 	copyExecutable(t, filepath.Join(repoRoot, "internal", "orchestrator", "testdata", "bin", "git"), filepath.Join(binDir, "git"))
 	copyExecutable(t, filepath.Join(repoRoot, "internal", "orchestrator", "testdata", "bin", "gh"), filepath.Join(binDir, "gh"))
-	writeExecutable(t, filepath.Join(binDir, "claude"), fakeClaudeScript(agentSleep))
+	claudePath := filepath.Join(binDir, "claude")
+	writeExecutable(t, claudePath, fakeClaudeScript(agentSleep))
+	writeIntegrationAgentsConfig(t, root, claudePath)
 
 	baseEnv := os.Environ()
 	baseEnv = append(baseEnv,
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		integrationTrustedPathEnvVar+"="+trustedPathWithFakeBin(binDir),
 		"AUTO_IMPROVE_GIT_STATE_DIR="+filepath.Join(root, "git-state"),
 		"AUTO_IMPROVE_TEST_BASE_SHA="+strings.Repeat("a", 40),
 		"AUTO_IMPROVE_TEST_TARGET_SHA="+strings.Repeat("b", 40),
@@ -254,11 +262,50 @@ func buildIntegrationBinary(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "auto-improve")
-	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd := exec.Command("go", "build", "-tags", "integrationtest", "-o", bin, ".")
 	cmd.Dir = mustPackageDir(t)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 	return bin
+}
+
+func trustedPathWithFakeBin(binDir string) string {
+	return binDir + string(os.PathListSeparator) + testTrustedPathSuffix
+}
+
+func writeIntegrationAgentsConfig(t *testing.T, root, claudePath string) {
+	t.Helper()
+	content := "profiles:\n" +
+		"  fake-claude:\n" +
+		"    provider: claude\n" +
+		"    binary: " + yamlDoubleQuote(claudePath) + "\n" +
+		"    args: [\"-p\"]\n" +
+		"  judge-primary:\n" +
+		"    provider: stub\n" +
+		"  judge-secondary:\n" +
+		"    provider: stub\n" +
+		"  judge-arbiter:\n" +
+		"    provider: stub\n" +
+		"roles:\n" +
+		"  implementer: fake-claude\n" +
+		"  judge_primary: judge-primary\n" +
+		"  judge_secondary: judge-secondary\n" +
+		"  judge_arbiter: judge-arbiter\n"
+	require.NoError(t, os.WriteFile(filepath.Join(root, "agents.yaml"), []byte(content), 0o644))
+
+	configPath := filepath.Join(root, "config.yaml")
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	if strings.Contains(string(data), "agent_config_path:") {
+		return
+	}
+	require.NoError(t, os.WriteFile(configPath, append(data, []byte("agent_config_path: \"./agents.yaml\"\n")...), 0o644))
+}
+
+func yamlDoubleQuote(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "\"", "\\\"")
+	return "\"" + value + "\""
 }
 
 func mustRepoRoot(t *testing.T) string {
