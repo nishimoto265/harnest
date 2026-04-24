@@ -1279,6 +1279,31 @@ func TestRun_RerunsWhenRubricVersionChanges(t *testing.T) {
 	assert.True(t, called)
 }
 
+func TestRun_DerivesMissingRubricVersionFromPass1Scores(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+		writePass1Score:    true,
+		pass1RubricVersion: "rubric-hash-v1",
+		pass1PromptVersion: "prompt-hash-v1",
+	})
+	now := time.Date(2026, 4, 21, 11, 35, 0, 0, time.UTC)
+
+	require.NoError(t, Run(context.Background(), Input{
+		IO:          runIO,
+		TaskPackage: &pkg,
+		Primary:     judges.NewPrimaryStub(),
+		Secondary:   judges.NewSecondaryStub(),
+		Arbiter:     judges.NewArbiterStub(),
+		Now:         func() time.Time { return now },
+	}))
+
+	scores := mustReadJSONL[contracts.ScoreEntry](t, runIO, "60/scores-B.jsonl")
+	require.NotEmpty(t, scores)
+	for _, score := range scores {
+		assert.Equal(t, "rubric-hash-v1", score.RubricVersion)
+		assert.Equal(t, "prompt-hash-v1", score.PromptVersion)
+	}
+}
+
 // TestRun_FailsClosedOnPass1VersionMismatch is the F8 contract: when pass1
 // scores were generated under a different rubric/prompt version than step60
 // is running, pairwise winner classification is meaningless, so Run must

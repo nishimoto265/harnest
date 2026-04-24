@@ -5,8 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -32,6 +32,22 @@ type FilesystemResolver struct {
 	Now     func() time.Time
 }
 
+type step60ArtifactSnapshot struct {
+	Scores     []contracts.ScoreEntry
+	Compliance []contracts.ComplianceEntry
+	Pairwise   []contracts.PairwiseEntry
+}
+
+type step70ScoreKey struct {
+	Agent     contracts.AgentID
+	Dimension contracts.Dimension
+}
+
+type step70ComplianceKey struct {
+	Agent  contracts.AgentID
+	RuleID string
+}
+
 func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates) (Target, bool, error) {
 	if pkg == nil || candidates == nil {
 		return Target{}, false, errors.New("step70: resolver requires task_package and candidates")
@@ -44,14 +60,18 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 		now = func() time.Time { return time.Now().UTC() }
 	}
 
-	winningAgent, ok, err := resolveWinningAgent(runCtx)
+	step60Artifacts, err := loadVerifiedStep60Artifacts(runCtx)
+	if err != nil {
+		return Target{}, false, err
+	}
+	winningAgent, ok, err := resolveWinningAgentFromArtifacts(step60Artifacts)
 	if err != nil {
 		return Target{}, false, err
 	}
 	if !ok {
 		return Target{}, false, nil
 	}
-	if ok, err := promotionGatePassed(runCtx, winningAgent, candidates); err != nil {
+	if ok, err := promotionGatePassedWithArtifacts(runCtx, step60Artifacts, winningAgent, candidates); err != nil {
 		return Target{}, false, err
 	} else if !ok {
 		return Target{}, false, nil
@@ -99,30 +119,22 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 }
 
 func resolveWinningAgent(runCtx internalio.RunContext) (contracts.AgentID, bool, error) {
-	pairwisePath, err := runCtx.ResolveRunRelative("60/pairwise.jsonl")
+	artifacts, err := loadStep60Artifacts(runCtx)
 	if err != nil {
 		return "", false, err
 	}
-	pairwiseRows, err := internalio.ReadJSONL[contracts.PairwiseEntry](pairwisePath)
-	if err != nil {
-		return "", false, err
-	}
-	pairwise := internalio.CollapseByKey(pairwiseRows, func(entry contracts.PairwiseEntry) [2]contracts.AgentID {
+	return resolveWinningAgentFromArtifacts(artifacts)
+}
+
+func resolveWinningAgentFromArtifacts(artifacts step60ArtifactSnapshot) (contracts.AgentID, bool, error) {
+	pairwise := internalio.CollapseByKey(artifacts.Pairwise, func(entry contracts.PairwiseEntry) [2]contracts.AgentID {
 		return [2]contracts.AgentID{entry.AgentA, entry.AgentB}
 	})
 	if len(pairwise) == 0 {
 		return "", false, nil
 	}
 
-	scoresPath, err := runCtx.ResolveRunRelative("60/scores-B.jsonl")
-	if err != nil {
-		return "", false, err
-	}
-	scoreRows, err := internalio.ReadJSONL[contracts.ScoreEntry](scoresPath)
-	if err != nil {
-		return "", false, err
-	}
-	scores := scorecore.CollapseFinalScores(scoreRows)
+	scores := scorecore.CollapseFinalScores(artifacts.Scores)
 	type scoreSummary struct {
 		agent contracts.AgentID
 		sum   int
@@ -158,18 +170,158 @@ func resolveWinningAgent(runCtx internalio.RunContext) (contracts.AgentID, bool,
 	return best.agent, true, nil
 }
 
+func loadStep60Artifacts(runCtx internalio.RunContext) (step60ArtifactSnapshot, error) {
+	pairwisePath, err := runCtx.ResolveRunRelative("60/pairwise.jsonl")
+	if err != nil {
+		return step60ArtifactSnapshot{}, err
+	}
+	pairwiseRows, err := internalio.ReadJSONL[contracts.PairwiseEntry](pairwisePath)
+	if err != nil {
+		return step60ArtifactSnapshot{}, err
+	}
+
+	scoresPath, err := runCtx.ResolveRunRelative("60/scores-B.jsonl")
+	if err != nil {
+		return step60ArtifactSnapshot{}, err
+	}
+	scoreRows, err := internalio.ReadJSONL[contracts.ScoreEntry](scoresPath)
+	if err != nil {
+		return step60ArtifactSnapshot{}, err
+	}
+
+	compliancePath, err := runCtx.ResolveRunRelative("60/compliance-B.jsonl")
+	if err != nil {
+		return step60ArtifactSnapshot{}, err
+	}
+	complianceRows, err := internalio.ReadJSONL[contracts.ComplianceEntry](compliancePath)
+	if err != nil {
+		return step60ArtifactSnapshot{}, err
+	}
+
+	return step60ArtifactSnapshot{Scores: scoreRows, Compliance: complianceRows, Pairwise: pairwiseRows}, nil
+}
+
+func loadVerifiedStep60Artifacts(runCtx internalio.RunContext) (step60ArtifactSnapshot, error) {
+	markerPath, err := runCtx.ResolveRunRelative("60/done.marker")
+	if err != nil {
+		return step60ArtifactSnapshot{}, err
+	}
+	marker, err := internalio.ReadJSON[contracts.Step60DoneMarker](markerPath)
+	if err != nil {
+		return step60ArtifactSnapshot{}, fmt.Errorf("step70: read step60 done marker: %w", err)
+	}
+	if err := marker.Validate(); err != nil {
+		return step60ArtifactSnapshot{}, fmt.Errorf("step70: validate step60 done marker: %w", err)
+	}
+	artifacts, err := loadStep60Artifacts(runCtx)
+	if err != nil {
+		return step60ArtifactSnapshot{}, err
+	}
+	if err := verifyStep60ArtifactSnapshot(marker, artifacts); err != nil {
+		return step60ArtifactSnapshot{}, err
+	}
+	return artifacts, nil
+}
+
+func verifyStep60ArtifactSnapshot(marker contracts.Step60DoneMarker, artifacts step60ArtifactSnapshot) error {
+	scoreCount, scoreHash, err := step70FinalScoresState(artifacts.Scores)
+	if err != nil {
+		return fmt.Errorf("step70: hash step60 scores: %w", err)
+	}
+	complianceCount, complianceHash, err := step70FinalComplianceState(artifacts.Compliance)
+	if err != nil {
+		return fmt.Errorf("step70: hash step60 compliance: %w", err)
+	}
+	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(artifacts.Pairwise)
+	if err != nil {
+		return fmt.Errorf("step70: hash step60 pairwise: %w", err)
+	}
+	if marker.ExpectedCounts.Scores != int64(scoreCount) ||
+		marker.ExpectedCounts.Compliance != int64(complianceCount) ||
+		marker.ExpectedCounts.Pairwise != int64(pairwiseCount) ||
+		marker.ContentHashes.ScoresFinal != scoreHash ||
+		marker.ContentHashes.ComplianceFinal != complianceHash ||
+		marker.ContentHashes.PairwiseFinal != pairwiseHash {
+		return errors.New("step70: step60 done marker does not match step60 artifacts")
+	}
+	return nil
+}
+
+func step70FinalScoresState(rows []contracts.ScoreEntry) (int, string, error) {
+	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ScoreEntry) step70ScoreKey {
+		return step70ScoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
+	})
+	sort.Slice(collapsed, func(i, j int) bool {
+		if collapsed[i].Agent != collapsed[j].Agent {
+			return collapsed[i].Agent < collapsed[j].Agent
+		}
+		return collapsed[i].Dimension < collapsed[j].Dimension
+	})
+	hash, err := hashCanonicalRows(collapsed)
+	return len(collapsed), hash, err
+}
+
+func step70FinalComplianceState(rows []contracts.ComplianceEntry) (int, string, error) {
+	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ComplianceEntry) step70ComplianceKey {
+		return step70ComplianceKey{Agent: entry.Agent, RuleID: entry.RuleID}
+	})
+	sort.Slice(collapsed, func(i, j int) bool {
+		if collapsed[i].Agent != collapsed[j].Agent {
+			return collapsed[i].Agent < collapsed[j].Agent
+		}
+		return collapsed[i].RuleID < collapsed[j].RuleID
+	})
+	hash, err := hashCanonicalRows(collapsed)
+	return len(collapsed), hash, err
+}
+
+func step70FinalPairwiseState(rows []contracts.PairwiseEntry) (int, string, error) {
+	collapsed := internalio.CollapseByKey(rows, func(entry contracts.PairwiseEntry) step70ComplianceKey {
+		return step70ComplianceKey{Agent: entry.AgentA, RuleID: string(entry.AgentB)}
+	})
+	sort.Slice(collapsed, func(i, j int) bool {
+		if collapsed[i].AgentA != collapsed[j].AgentA {
+			return collapsed[i].AgentA < collapsed[j].AgentA
+		}
+		return collapsed[i].AgentB < collapsed[j].AgentB
+	})
+	hash, err := hashCanonicalRows(collapsed)
+	return len(collapsed), hash, err
+}
+
+func hashCanonicalRows[T any](rows []T) (string, error) {
+	joined := make([]byte, 0)
+	for i, row := range rows {
+		payload, err := contracts.CanonicalMarshal(row)
+		if err != nil {
+			return "", err
+		}
+		if i > 0 {
+			joined = append(joined, 0x00)
+		}
+		joined = append(joined, payload...)
+	}
+	sum := sha256.Sum256(joined)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func promotionGatePassed(runCtx internalio.RunContext, agent contracts.AgentID, candidates *contracts.Candidates) (bool, error) {
-	if ok, err := hasCompliantCandidateEvidence(runCtx, agent, candidates); err != nil || !ok {
-		return ok, err
+	artifacts, err := loadStep60Artifacts(runCtx)
+	if err != nil {
+		return false, err
+	}
+	return promotionGatePassedWithArtifacts(runCtx, artifacts, agent, candidates)
+}
+
+func promotionGatePassedWithArtifacts(runCtx internalio.RunContext, artifacts step60ArtifactSnapshot, agent contracts.AgentID, candidates *contracts.Candidates) (bool, error) {
+	if ok := hasCompliantCandidateEvidence(artifacts.Compliance, agent, candidates); !ok {
+		return false, nil
 	}
 	pass1Scores, err := loadCollapsedScores(runCtx, "30/scores-A.jsonl")
 	if err != nil {
 		return false, err
 	}
-	pass2Scores, err := loadCollapsedScores(runCtx, "60/scores-B.jsonl")
-	if err != nil {
-		return false, err
-	}
+	pass2Scores := collapsedScoresByAgent(artifacts.Scores)
 	pass1 := pass1Scores[agent]
 	pass2 := pass2Scores[agent]
 	if !completeScoreSet(pass1) || !completeScoreSet(pass2) {
@@ -186,21 +338,10 @@ func promotionGatePassed(runCtx internalio.RunContext, agent contracts.AgentID, 
 	return true, nil
 }
 
-func hasCompliantCandidateEvidence(runCtx internalio.RunContext, agent contracts.AgentID, candidates *contracts.Candidates) (bool, error) {
+func hasCompliantCandidateEvidence(rows []contracts.ComplianceEntry, agent contracts.AgentID, candidates *contracts.Candidates) bool {
 	required := requiredCandidateComplianceRuleIDs(candidates)
 	if len(required) == 0 {
-		return true, nil
-	}
-	path, err := runCtx.ResolveRunRelative("60/compliance-B.jsonl")
-	if err != nil {
-		return false, err
-	}
-	rows, err := internalio.ReadJSONL[contracts.ComplianceEntry](path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, err
+		return true
 	}
 	collapsed := scorecore.CollapseFinalCompliance(rows)
 	byRule := make(map[string]contracts.ComplianceEntry, len(collapsed))
@@ -212,10 +353,10 @@ func hasCompliantCandidateEvidence(runCtx internalio.RunContext, agent contracts
 	for _, ruleID := range required {
 		row, ok := byRule[ruleID]
 		if !ok || row.Verdict != contracts.ComplianceVerdictCompliant {
-			return false, nil
+			return false
 		}
 	}
-	return true, nil
+	return true
 }
 
 func requiredCandidateComplianceRuleIDs(candidates *contracts.Candidates) []string {
@@ -241,6 +382,10 @@ func loadCollapsedScores(runCtx internalio.RunContext, rel string) (map[contract
 	if err != nil {
 		return nil, err
 	}
+	return collapsedScoresByAgent(rows), nil
+}
+
+func collapsedScoresByAgent(rows []contracts.ScoreEntry) map[contracts.AgentID]map[contracts.Dimension]contracts.ScoreEntry {
 	collapsed := scorecore.CollapseFinalScores(rows)
 	byAgent := make(map[contracts.AgentID]map[contracts.Dimension]contracts.ScoreEntry)
 	for _, row := range collapsed {
@@ -249,7 +394,7 @@ func loadCollapsedScores(runCtx internalio.RunContext, rel string) (map[contract
 		}
 		byAgent[row.Agent][row.Dimension] = row
 	}
-	return byAgent, nil
+	return byAgent
 }
 
 func completeScoreSet(scores map[contracts.Dimension]contracts.ScoreEntry) bool {
