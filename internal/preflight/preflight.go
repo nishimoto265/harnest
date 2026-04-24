@@ -3,7 +3,6 @@ package preflight
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/config"
+	"github.com/nishimoto265/auto-improve/internal/gitremote"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
@@ -28,6 +28,8 @@ type PreflightResult struct {
 type Dependencies struct {
 	LookPath              func(string) (string, error)
 	Run                   func(context.Context, string, ...string) ([]byte, error)
+	RunGitLocal           func(context.Context, string, ...string) ([]byte, error)
+	RunGitNetwork         func(context.Context, string, string, ...string) ([]byte, error)
 	PrepareProviderBinary func(agents.Provider, string) (string, []string, error)
 }
 
@@ -45,17 +47,36 @@ var versionPattern = regexp.MustCompile(`(\d+)\.(\d+)(?:\.(\d+))?`)
 
 func New() Checker {
 	return NewWithDependencies(Dependencies{
-		LookPath: processenv.TrustedLookPath,
-		Run:      runSanitizedNetworkCommand,
+		LookPath:      processenv.TrustedLookPath,
+		Run:           runSanitizedNetworkCommand,
+		RunGitLocal:   runSanitizedGitLocalCommand,
+		RunGitNetwork: runSanitizedGitNetworkCommand,
 	})
 }
 
 func NewWithDependencies(deps Dependencies) Checker {
+	customRun := deps.Run != nil
 	if deps.LookPath == nil {
 		deps.LookPath = processenv.TrustedLookPath
 	}
 	if deps.Run == nil {
 		deps.Run = runSanitizedNetworkCommand
+	}
+	if deps.RunGitLocal == nil {
+		if customRun {
+			deps.RunGitLocal = deps.Run
+		} else {
+			deps.RunGitLocal = runSanitizedGitLocalCommand
+		}
+	}
+	if deps.RunGitNetwork == nil {
+		if customRun {
+			deps.RunGitNetwork = func(ctx context.Context, remoteURL, name string, args ...string) ([]byte, error) {
+				return deps.Run(ctx, name, args...)
+			}
+		} else {
+			deps.RunGitNetwork = runSanitizedGitNetworkCommand
+		}
 	}
 	if deps.PrepareProviderBinary == nil {
 		deps.PrepareProviderBinary = agentrunner.PrepareProviderBinary
@@ -69,6 +90,24 @@ func runSanitizedNetworkCommand(ctx context.Context, name string, args ...string
 		return nil, err
 	}
 	cmd.Env = processenv.SanitizeForNetworkExec()
+	return cmd.CombinedOutput()
+}
+
+func runSanitizedGitLocalCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = processenv.GitLocalEnv()
+	return cmd.CombinedOutput()
+}
+
+func runSanitizedGitNetworkCommand(ctx context.Context, remoteURL, name string, args ...string) ([]byte, error) {
+	cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = processenv.GitNetworkEnvForRemoteURL(remoteURL)
 	return cmd.CombinedOutput()
 }
 
@@ -122,10 +161,14 @@ func (c Checker) Check(ctx context.Context, cfg config.Config) PreflightResult {
 	if err != nil {
 		failures = append(failures, Failure{Name: "repo.root", Detail: err.Error()})
 	} else if cfg.Repo.BestBranch != "" {
-		failures = appendFailure(failures, c.checkRepoSlugMatches(ctx, repoRoot, cfg.Repo.GitHub))
-		failures = appendFailure(failures, c.checkRemoteBranch(ctx, repoRoot, cfg.Repo.BestBranch))
-		if policyBranch, ok := cfg.PolicyBranch(); ok {
-			failures = appendFailure(failures, c.checkRemoteBranchNamed(ctx, repoRoot, policyBranch, "repo.policy_branch"))
+		remoteURL, failure := c.originRemoteURL(ctx, repoRoot)
+		failures = appendFailure(failures, failure)
+		if failure == nil {
+			failures = appendFailure(failures, c.checkRepoSlugMatches(remoteURL, cfg.Repo.GitHub))
+			failures = appendFailure(failures, c.checkRemoteBranch(ctx, repoRoot, remoteURL, cfg.Repo.BestBranch))
+			if policyBranch, ok := cfg.PolicyBranch(); ok {
+				failures = appendFailure(failures, c.checkRemoteBranchNamed(ctx, repoRoot, remoteURL, policyBranch, "repo.policy_branch"))
+			}
 		}
 	}
 
@@ -222,16 +265,32 @@ func (c Checker) checkGHAuth(ctx context.Context) *Failure {
 	return nil
 }
 
-func (c Checker) checkRemoteBranch(ctx context.Context, repoRoot, branch string) *Failure {
-	return c.checkRemoteBranchNamed(ctx, repoRoot, branch, "repo.best_branch")
+func (c Checker) originRemoteURL(ctx context.Context, repoRoot string) (string, *Failure) {
+	resolved, err := c.deps.LookPath("git")
+	if err != nil {
+		return "", &Failure{Name: "repo.github", Detail: err.Error()}
+	}
+	output, err := c.deps.RunGitLocal(ctx, resolved, "-C", repoRoot, "remote", "get-url", "origin")
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return "", &Failure{Name: "repo.github", Detail: detail}
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
-func (c Checker) checkRemoteBranchNamed(ctx context.Context, repoRoot, branch, failureName string) *Failure {
+func (c Checker) checkRemoteBranch(ctx context.Context, repoRoot, remoteURL, branch string) *Failure {
+	return c.checkRemoteBranchNamed(ctx, repoRoot, remoteURL, branch, "repo.best_branch")
+}
+
+func (c Checker) checkRemoteBranchNamed(ctx context.Context, repoRoot, remoteURL, branch, failureName string) *Failure {
 	resolved, err := c.deps.LookPath("git")
 	if err != nil {
 		return &Failure{Name: failureName, Detail: err.Error()}
 	}
-	output, err := c.deps.Run(ctx, resolved, "-C", repoRoot, "ls-remote", "--heads", "origin", branch)
+	output, err := c.deps.RunGitNetwork(ctx, remoteURL, resolved, "-C", repoRoot, "ls-remote", "--heads", "origin", branch)
 	if err != nil {
 		detail := strings.TrimSpace(string(output))
 		if detail == "" {
@@ -245,53 +304,18 @@ func (c Checker) checkRemoteBranchNamed(ctx context.Context, repoRoot, branch, f
 	return nil
 }
 
-func (c Checker) checkRepoSlugMatches(ctx context.Context, repoRoot, configured string) *Failure {
+func (c Checker) checkRepoSlugMatches(remoteURL, configured string) *Failure {
 	if strings.TrimSpace(configured) == "" {
 		return nil
 	}
-	resolved, err := c.deps.LookPath("git")
+	info, err := gitremote.ParseGitHubRemote(remoteURL, gitremote.AllowedGitHubHostsFromEnv(processenv.SanitizeForNetworkExec()))
 	if err != nil {
 		return &Failure{Name: "repo.github", Detail: err.Error()}
 	}
-	output, err := c.deps.Run(ctx, resolved, "-C", repoRoot, "remote", "get-url", "origin")
-	if err != nil {
-		detail := strings.TrimSpace(string(output))
-		if detail == "" {
-			detail = err.Error()
-		}
-		return &Failure{Name: "repo.github", Detail: detail}
-	}
-	slug, err := repoSlugFromRemoteURL(strings.TrimSpace(string(output)))
-	if err != nil {
-		return &Failure{Name: "repo.github", Detail: err.Error()}
-	}
-	if !strings.EqualFold(slug, configured) {
-		return &Failure{Name: "repo.github", Detail: fmt.Sprintf("config: repo.github=%q does not match origin=%q", configured, slug)}
+	if !strings.EqualFold(info.Slug, configured) {
+		return &Failure{Name: "repo.github", Detail: fmt.Sprintf("config: repo.github=%q does not match origin=%q", configured, info.Slug)}
 	}
 	return nil
-}
-
-func repoSlugFromRemoteURL(remoteURL string) (string, error) {
-	if remoteURL == "" {
-		return "", fmt.Errorf("origin remote url is empty")
-	}
-	if strings.HasPrefix(remoteURL, "git@") {
-		parts := strings.SplitN(remoteURL, ":", 2)
-		if len(parts) != 2 || parts[1] == "" {
-			return "", fmt.Errorf("could not parse git remote url: %q", remoteURL)
-		}
-		return strings.TrimSuffix(strings.Trim(parts[1], "/"), ".git"), nil
-	}
-	parsed, err := url.Parse(remoteURL)
-	if err != nil {
-		return "", fmt.Errorf("could not parse git remote url %q: %w", remoteURL, err)
-	}
-	path := strings.Trim(parsed.Path, "/")
-	path = strings.TrimSuffix(path, ".git")
-	if path == "" {
-		return "", fmt.Errorf("could not parse git remote url: %q", remoteURL)
-	}
-	return path, nil
 }
 
 func checkWritableDirectory(name string, path string) *Failure {

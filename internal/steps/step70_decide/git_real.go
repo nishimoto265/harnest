@@ -18,12 +18,13 @@ type RealGitOps struct {
 
 func (g RealGitOps) RemoteHead(ctx context.Context, branch string) (string, error) {
 	remote := g.remoteName()
+	remoteURL := g.remoteURL(ctx, remote)
 	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "ls-remote", "--heads", remote, branch)
 	if err != nil {
 		return "", err
 	}
-	// ls-remote hits the network; preserve ssh-agent/token auth while disabling git extension points.
-	cmd.Env = processenv.GitNetworkEnv()
+	// ls-remote hits the network; preserve ssh-agent/token auth and scope HTTPS token auth to the resolved remote host.
+	cmd.Env = processenv.GitNetworkEnvForRemoteURL(remoteURL)
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -40,14 +41,15 @@ func (g RealGitOps) RemoteHead(ctx context.Context, branch string) (string, erro
 
 func (g RealGitOps) PushForceWithLease(ctx context.Context, branch, targetSHA, expected string) error {
 	remote := g.remoteName()
+	remoteURL := g.remoteURL(ctx, remote)
 	refspec := fmt.Sprintf("%s:%s", targetSHA, branch)
 	lease := fmt.Sprintf("--force-with-lease=%s:%s", branch, expected)
 	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "push", remote, refspec, lease)
 	if err != nil {
 		return err
 	}
-	// push hits the network; preserve ssh-agent/token auth while disabling git extension points.
-	cmd.Env = processenv.GitNetworkEnv()
+	// push hits the network; preserve ssh-agent/token auth and scope HTTPS token auth to the resolved remote host.
+	cmd.Env = processenv.GitNetworkEnvForRemoteURL(remoteURL)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -72,4 +74,20 @@ func (g RealGitOps) remoteName() string {
 		return g.Remote
 	}
 	return "origin"
+}
+
+func (g RealGitOps) remoteURL(ctx context.Context, remote string) string {
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "remote", "get-url", remote)
+	if err != nil {
+		return remote
+	}
+	cmd.Env = processenv.GitLocalEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return remote
+	}
+	if remoteURL := strings.TrimSpace(string(out)); remoteURL != "" {
+		return remoteURL
+	}
+	return remote
 }

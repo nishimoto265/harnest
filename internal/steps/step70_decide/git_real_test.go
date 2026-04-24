@@ -2,6 +2,7 @@ package step70_decide
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"os/exec"
@@ -74,6 +75,53 @@ func TestRealGitOpsRemoveWorktreeRegisteredAndUnregisteredPaths(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrWorktreeUnregistered), "err=%v", err)
 	assert.DirExists(t, unregisteredPath)
+}
+
+func TestRealGitOpsScopesHTTPSTokenAuthToResolvedRemote(t *testing.T) {
+	toolsDir := t.TempDir()
+	envPath := filepath.Join(t.TempDir(), "git-env.txt")
+	gitScript := []byte(`#!/bin/sh
+{
+  printf 'ARGS:%s\n' "$*"
+  /usr/bin/env
+  printf '%s\n' '---'
+} >> "$FAKE_GIT_ENV_OUT"
+if [ "$3" = "remote" ] && [ "$4" = "get-url" ]; then
+  printf 'https://github.com/owner/repo.git\n'
+  exit 0
+fi
+if [ "$3" = "ls-remote" ]; then
+  printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/auto-improve/best\n'
+  exit 0
+fi
+if [ "$3" = "push" ]; then
+  exit 0
+fi
+exit 1
+`)
+	require.NoError(t, os.WriteFile(filepath.Join(toolsDir, "git"), gitScript, 0o755))
+	restore := processenv.SetTrustedPathForTest(toolsDir)
+	t.Cleanup(restore)
+	t.Setenv("FAKE_GIT_ENV_OUT", envPath)
+	t.Setenv("GH_TOKEN", "token")
+	t.Setenv("GIT_ASKPASS", "/tmp/malicious-askpass")
+
+	gitOps := RealGitOps{RepoDir: "/tmp/repo", Remote: "origin"}
+	head, err := gitOps.RemoteHead(context.Background(), realGitBranch)
+	require.NoError(t, err)
+	assert.Equal(t, strings.Repeat("a", 40), head)
+	require.NoError(t, gitOps.PushForceWithLease(context.Background(), realGitBranch, strings.Repeat("b", 40), strings.Repeat("a", 40)))
+
+	envBytes, err := os.ReadFile(envPath)
+	require.NoError(t, err)
+	env := string(envBytes)
+	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:token"))
+	assert.Contains(t, env, "ARGS:-C /tmp/repo remote get-url origin")
+	assert.Contains(t, env, "ARGS:-C /tmp/repo ls-remote --heads origin "+realGitBranch)
+	assert.Contains(t, env, "ARGS:-C /tmp/repo push origin "+strings.Repeat("b", 40)+":"+realGitBranch)
+	assert.Contains(t, env, "GIT_CONFIG_KEY_5=http.https://github.com/.extraheader")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_5="+header)
+	assert.NotContains(t, env, "GIT_ASKPASS=/tmp/malicious-askpass")
 }
 
 const realGitBranch = "auto-improve/best"

@@ -2,6 +2,7 @@ package preflight
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -117,11 +118,15 @@ exit 0
 	envBytes, err := os.ReadFile(envPath)
 	require.NoError(t, err)
 	env := string(envBytes)
+	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:token"))
 	assert.Contains(t, env, "PATH="+toolsDir)
 	assert.Contains(t, env, "GH_TOKEN=token")
-	assert.NotContains(t, env, "GIT_ASKPASS=")
+	assert.Contains(t, env, "GIT_CONFIG_KEY_5=http.https://github.com/.extraheader")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_5="+header)
+	assert.Contains(t, env, "GIT_ASKPASS=")
+	assert.NotContains(t, env, "GIT_ASKPASS=/tmp/malicious-askpass")
 	assert.NotContains(t, env, "BASH_ENV=")
-	assert.NotContains(t, env, "GIT_CONFIG_GLOBAL=")
+	assert.NotContains(t, env, "GIT_CONFIG_GLOBAL=/tmp/gitconfig")
 }
 
 func testConfig(t *testing.T) config.Config {
@@ -288,6 +293,25 @@ func TestCheckReportsRepoGitHubMismatch(t *testing.T) {
 
 	require.False(t, result.OK)
 	assert.Contains(t, failureNames(result.Failures), "repo.github")
+}
+
+func TestCheckRejectsSameSlugOriginOnWrongHost(t *testing.T) {
+	cfg := testConfig(t)
+	deps := fakeDependencies(t, "")
+	originalRun := deps.Run
+	deps.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) >= 5 && args[0] == "-C" && args[2] == "remote" && args[3] == "get-url" {
+			return []byte("https://evil.example.com/owner/repo.git"), nil
+		}
+		return originalRun(ctx, name, args...)
+	}
+
+	result := NewWithDependencies(deps).Check(context.Background(), cfg)
+
+	require.False(t, result.OK)
+	failure, ok := failureByName(result.Failures, "repo.github")
+	require.True(t, ok)
+	assert.Contains(t, failure.Detail, "not an allowed GitHub host")
 }
 
 func failureNames(failures []Failure) []string {

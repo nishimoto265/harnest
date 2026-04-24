@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/auto-improve/internal/gitremote"
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 )
 
 // GitClient abstracts the subset of `git` commands step10 needs so tests can
@@ -51,14 +53,14 @@ type gitCLI struct {
 
 // NewGitClient returns a GitClient backed by the real `git` binary.
 func NewGitClient() GitClient {
-	return gitCLI{run: defaultCmdRunner, stat: os.Stat}
+	return gitCLI{stat: os.Stat}
 }
 
 // NewGitClientWithRunner exposes the subprocess seam for tests. The same
 // runner is used for every git operation.
 func NewGitClientWithRunner(runner cmdRunner) GitClient {
 	if runner == nil {
-		runner = defaultCmdRunner
+		return NewGitClient()
 	}
 	return gitCLI{run: runner, stat: os.Stat}
 }
@@ -107,12 +109,12 @@ func (g gitCLI) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha str
 		return false, fmt.Errorf("step10: stat %s: %w", path, err)
 	}
 
-	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "worktree", "add", "-b", branch, path, sha)
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "worktree", "add", "-b", branch, path, sha)
 	if err != nil {
 		// If branch already exists, retry without -b.
 		details := string(out) + string(stderr)
 		if strings.Contains(details, "already exists") || strings.Contains(details, "is already checked out") {
-			out2, stderr2, err2 := g.run(ctx, "git", "-C", repoRoot, "worktree", "add", path, branch)
+			out2, stderr2, err2 := g.runLocal(ctx, "-C", repoRoot, "worktree", "add", path, branch)
 			if err2 != nil {
 				return false, formatCommandFailure(fmt.Sprintf("step10: git worktree add %s", path), err2, out2, stderr2)
 			}
@@ -135,7 +137,7 @@ func (g gitCLI) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha str
 }
 
 func (g gitCLI) removeWorktreeForce(ctx context.Context, repoRoot, path string) error {
-	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "worktree", "remove", "--force", path)
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "worktree", "remove", "--force", path)
 	if err != nil {
 		return formatCommandFailure(fmt.Sprintf("step10: git worktree remove --force %s", path), err, out, stderr)
 	}
@@ -143,7 +145,7 @@ func (g gitCLI) removeWorktreeForce(ctx context.Context, repoRoot, path string) 
 }
 
 func (g gitCLI) currentBranch(ctx context.Context, repoRoot string) (string, error) {
-	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "branch", "--show-current")
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "branch", "--show-current")
 	if err != nil {
 		return "", formatCommandFailure(fmt.Sprintf("step10: git branch --show-current (in %s)", repoRoot), err, out, stderr)
 	}
@@ -151,7 +153,7 @@ func (g gitCLI) currentBranch(ctx context.Context, repoRoot string) (string, err
 }
 
 func (g gitCLI) worktreeClean(ctx context.Context, repoRoot string) (bool, error) {
-	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "status", "--porcelain", "--ignored")
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "status", "--porcelain", "--ignored")
 	if err != nil {
 		return false, formatCommandFailure(fmt.Sprintf("step10: git status --porcelain --ignored (in %s)", repoRoot), err, out, stderr)
 	}
@@ -159,7 +161,7 @@ func (g gitCLI) worktreeClean(ctx context.Context, repoRoot string) (bool, error
 }
 
 func (g gitCLI) ResolveRef(ctx context.Context, repoRoot, ref string) (string, error) {
-	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "rev-parse", ref)
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "rev-parse", ref)
 	if err != nil {
 		return "", formatCommandFailure(fmt.Sprintf("step10: git rev-parse %s (in %s)", ref, repoRoot), err, out, stderr)
 	}
@@ -167,7 +169,7 @@ func (g gitCLI) ResolveRef(ctx context.Context, repoRoot, ref string) (string, e
 }
 
 func (g gitCLI) MergeBase(ctx context.Context, repoRoot, left, right string) (string, error) {
-	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "merge-base", left, right)
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "merge-base", left, right)
 	if err != nil {
 		return "", formatCommandFailure(fmt.Sprintf("step10: git merge-base %s %s (in %s)", left, right, repoRoot), err, out, stderr)
 	}
@@ -175,7 +177,7 @@ func (g gitCLI) MergeBase(ctx context.Context, repoRoot, left, right string) (st
 }
 
 func (g gitCLI) FetchCommit(ctx context.Context, repoRoot, sha string) error {
-	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "fetch", "--no-tags", "origin", sha)
+	out, stderr, err := g.runNetwork(ctx, repoRoot, "-C", repoRoot, "fetch", "--no-tags", "origin", sha)
 	if err != nil {
 		return formatCommandFailure(fmt.Sprintf("step10: git fetch origin %s (in %s)", sha, repoRoot), err, out, stderr)
 	}
@@ -183,7 +185,7 @@ func (g gitCLI) FetchCommit(ctx context.Context, repoRoot, sha string) error {
 }
 
 func (g gitCLI) RepoSlug(ctx context.Context, repoRoot string) (string, error) {
-	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "remote", "get-url", "origin")
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "remote", "get-url", "origin")
 	if err != nil {
 		return "", formatCommandFailure(fmt.Sprintf("step10: git remote get-url origin (in %s)", repoRoot), err, out, stderr)
 	}
@@ -195,7 +197,7 @@ func (g gitCLI) RepoSlug(ctx context.Context, repoRoot string) (string, error) {
 }
 
 func (g gitCLI) ChangedFiles(ctx context.Context, repoRoot, from, to string) ([]string, error) {
-	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "diff", "--name-only", "--find-renames", from, to, "--")
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "diff", "--name-only", "--find-renames", from, to, "--")
 	if err != nil {
 		return nil, formatCommandFailure(fmt.Sprintf("step10: git diff --name-only %s %s (in %s)", from, to, repoRoot), err, out, stderr)
 	}
@@ -212,7 +214,7 @@ func (g gitCLI) ChangedFiles(ctx context.Context, repoRoot, from, to string) ([]
 }
 
 func (g gitCLI) Diff(ctx context.Context, repoRoot, from, to string) (string, error) {
-	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "diff", "--find-renames", "--unified=3", from, to, "--")
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "diff", "--find-renames", "--unified=3", from, to, "--")
 	if err != nil {
 		return "", formatCommandFailure(fmt.Sprintf("step10: git diff %s %s (in %s)", from, to, repoRoot), err, out, stderr)
 	}
@@ -220,7 +222,7 @@ func (g gitCLI) Diff(ctx context.Context, repoRoot, from, to string) (string, er
 }
 
 func (g gitCLI) worktreeBelongsToRepo(ctx context.Context, repoRoot, path string) (bool, error) {
-	out, stderr, err := g.run(ctx, "git", "-C", repoRoot, "worktree", "list", "--porcelain")
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "worktree", "list", "--porcelain")
 	if err != nil {
 		return false, formatCommandFailure(fmt.Sprintf("step10: git worktree list --porcelain (in %s)", repoRoot), err, out, stderr)
 	}
@@ -245,65 +247,52 @@ func (g gitCLI) worktreeBelongsToRepo(ctx context.Context, repoRoot, path string
 }
 
 func repoSlugFromRemoteURL(remoteURL string) (string, error) {
-	if remoteURL == "" {
-		return "", errors.New("origin remote url is empty")
+	info, err := gitremote.ParseGitHubRemote(remoteURL, gitremote.AllowedGitHubHostsFromEnv(processenv.SanitizeForNetworkExec()))
+	if err != nil {
+		return "", err
 	}
-	if strings.HasPrefix(remoteURL, "/") || strings.HasPrefix(remoteURL, "./") || strings.HasPrefix(remoteURL, "../") {
-		return "", fmt.Errorf("expected owner/name repo slug, got %q", remoteURL)
-	}
-	remoteURL = strings.TrimSuffix(remoteURL, ".git")
-
-	if strings.Contains(remoteURL, "://") {
-		parsed, err := url.Parse(remoteURL)
-		if err != nil {
-			return "", err
-		}
-		return repoSlugFromPath(parsed.Path)
-	}
-
-	if at := strings.LastIndex(remoteURL, "@"); at >= 0 {
-		if colon := strings.Index(remoteURL[at+1:], ":"); colon >= 0 {
-			return repoSlugFromPath(remoteURL[at+1+colon+1:])
-		}
-	}
-
-	return repoSlugFromPath(remoteURL)
+	return info.Slug, nil
 }
 
-func repoSlugFromPath(path string) (string, error) {
-	path = strings.Trim(path, "/")
-	parts := strings.Split(path, "/")
-	switch len(parts) {
-	case 2:
-		if parts[0] == "" || parts[1] == "" {
-			break
-		}
-		if !looksLikeOwner(parts[0]) || !looksLikeRepoName(parts[1]) {
-			break
-		}
-		return parts[0] + "/" + parts[1], nil
-	case 3:
-		if looksLikeHost(parts[0]) {
-			if parts[1] == "" || parts[2] == "" {
-				break
-			}
-			if !looksLikeOwner(parts[1]) || !looksLikeRepoName(parts[2]) {
-				break
-			}
-			return parts[1] + "/" + parts[2], nil
-		}
+func (g gitCLI) runLocal(ctx context.Context, args ...string) ([]byte, []byte, error) {
+	if g.run != nil {
+		return g.run(ctx, "git", args...)
 	}
-	return "", fmt.Errorf("expected owner/name repo slug, got %q", path)
+	return runGitWithEnv(ctx, processenv.GitLocalEnv(), args...)
 }
 
-func looksLikeHost(segment string) bool {
-	return strings.Contains(segment, ".") || strings.Contains(segment, ":") || segment == "github.com"
+func (g gitCLI) runNetwork(ctx context.Context, repoRoot string, args ...string) ([]byte, []byte, error) {
+	if g.run != nil {
+		return g.run(ctx, "git", args...)
+	}
+	remoteURL, err := g.originRemoteURL(ctx, repoRoot)
+	if err != nil {
+		return nil, nil, err
+	}
+	return runGitWithEnv(ctx, processenv.GitNetworkEnvForRemoteURL(remoteURL), args...)
 }
 
-func looksLikeOwner(segment string) bool {
-	return segment != "." && segment != ".." && !strings.Contains(segment, ".")
+func (g gitCLI) originRemoteURL(ctx context.Context, repoRoot string) (string, error) {
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "remote", "get-url", "origin")
+	if err != nil {
+		return "", formatCommandFailure(fmt.Sprintf("step10: git remote get-url origin (in %s)", repoRoot), err, out, stderr)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
-func looksLikeRepoName(segment string) bool {
-	return segment != "." && segment != ".."
+func runGitWithEnv(ctx context.Context, env []string, args ...string) ([]byte, []byte, error) {
+	cmd, err := processenv.TrustedCommandContext(ctx, "git", args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	cmd.Env = env
+	stdout, err := cmd.Output()
+	if err == nil {
+		return stdout, nil, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return stdout, exitErr.Stderr, err
+	}
+	return stdout, nil, err
 }
