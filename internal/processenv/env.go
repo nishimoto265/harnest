@@ -137,6 +137,24 @@ func SanitizeForNetworkExec(extra ...string) []string {
 	return sanitize(extra, networkAllowlist)
 }
 
+// SanitizeForAgentExec is the local subprocess profile plus an explicit Git
+// safety profile. Agents may invoke git themselves, so do not let them inherit
+// operator global/system git config or git extension-point env.
+func SanitizeForAgentExec(extra ...string) []string {
+	return appendSafeGitProfile(SanitizeForLocalExec(extra...))
+}
+
+// GitLocalEnv returns the hardened env for local harness git plumbing.
+func GitLocalEnv(extra ...string) []string {
+	return appendSafeGitProfile(SanitizeForLocalExec(extra...))
+}
+
+// GitNetworkEnv returns the hardened env for network-crossing harness git.
+// Network auth env allowed by SanitizeForNetworkExec is preserved.
+func GitNetworkEnv(extra ...string) []string {
+	return appendSafeGitProfile(SanitizeForNetworkExec(extra...))
+}
+
 func sanitize(extra []string, allow func(string) bool) []string {
 	env := os.Environ()
 	out := make([]string, 0, len(env)+len(extra))
@@ -203,4 +221,63 @@ func networkAllowlist(key string) bool {
 		return true
 	}
 	return false
+}
+
+func appendSafeGitProfile(env []string) []string {
+	filtered := make([]string, 0, len(env)+20)
+	for _, item := range env {
+		key, _, ok := strings.Cut(item, "=")
+		if !ok || safeGitProfileControlsKey(key) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+
+	config := []struct {
+		key   string
+		value string
+	}{
+		// Empty credential.helper resets helpers inherited from lower-priority
+		// config scopes without preventing explicit token/ssh-agent auth.
+		{key: "credential.helper", value: ""},
+		{key: "core.hooksPath", value: os.DevNull},
+		{key: "core.fsmonitor", value: "false"},
+		{key: "core.sshCommand", value: "ssh -F " + os.DevNull},
+		{key: "diff.external", value: ""},
+	}
+
+	filtered = append(filtered,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_COUNT="+fmt.Sprintf("%d", len(config)),
+	)
+	for i, entry := range config {
+		filtered = append(filtered,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, entry.key),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, entry.value),
+		)
+	}
+	filtered = append(filtered,
+		"GIT_SSH_COMMAND=ssh -F "+os.DevNull,
+		"GIT_ASKPASS=/bin/false",
+		"SSH_ASKPASS=/bin/false",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	return filtered
+}
+
+func safeGitProfileControlsKey(key string) bool {
+	switch key {
+	case "GIT_CONFIG_NOSYSTEM",
+		"GIT_CONFIG_GLOBAL",
+		"GIT_CONFIG_COUNT",
+		"GIT_SSH",
+		"GIT_SSH_COMMAND",
+		"GIT_ASKPASS",
+		"SSH_ASKPASS",
+		"GIT_TERMINAL_PROMPT":
+		return true
+	}
+	return strings.HasPrefix(key, "GIT_CONFIG_KEY_") ||
+		strings.HasPrefix(key, "GIT_CONFIG_VALUE_")
 }

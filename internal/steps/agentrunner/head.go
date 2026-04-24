@@ -44,7 +44,7 @@ func gitOutput(ctx context.Context, worktreePath, errPrefix string, args ...stri
 	if err != nil {
 		return nil, fmt.Errorf("%s: resolve git: %w", errPrefix, err)
 	}
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -62,7 +62,7 @@ func runGitCommand(ctx context.Context, worktreePath, errPrefix string, args ...
 	if err != nil {
 		return fmt.Errorf("%s: resolve git: %w", errPrefix, err)
 	}
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

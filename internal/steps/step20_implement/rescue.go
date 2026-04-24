@@ -519,7 +519,7 @@ func gitOutputBytes(worktreePath string, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("step20: resolve git: %w", err)
 	}
 	cmd.Dir = worktreePath
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("step20: git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -533,7 +533,7 @@ func gitOutputBytesContext(ctx context.Context, worktreePath string, args ...str
 		return nil, fmt.Errorf("step20: resolve git: %w", err)
 	}
 	cmd.Dir = worktreePath
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() != nil {

@@ -95,7 +95,7 @@ func StreamGitOutputWithLimit(ctx context.Context, worktreePath, errPrefix, dest
 	if err != nil {
 		return closeWithErr(fmt.Errorf("%s: resolve git: %w", errPrefix, err))
 	}
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return closeWithErr(err)

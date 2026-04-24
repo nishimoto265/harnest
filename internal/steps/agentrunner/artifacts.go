@@ -168,7 +168,7 @@ func gitOutputBytesContext(ctx context.Context, worktreePath, errPrefix string, 
 	if err != nil {
 		return nil, fmt.Errorf("%s: resolve git: %w", errPrefix, err)
 	}
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -194,7 +194,7 @@ func streamGitCommandContext(ctx context.Context, worktreePath, errPrefix string
 	if err != nil {
 		return fmt.Errorf("%s: resolve git: %w", errPrefix, err)
 	}
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	cmd.Stdout = writer
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -217,7 +217,7 @@ func streamGitNoIndexDiffContext(ctx context.Context, worktreePath, relativePath
 		return fmt.Errorf("%s: resolve git: %w", errPrefix, err)
 	}
 	cmd.Dir = worktreePath
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	cmd.Stdout = writer
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

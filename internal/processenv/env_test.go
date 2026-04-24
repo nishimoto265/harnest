@@ -28,7 +28,13 @@ func setSanitizeTestEnv(t *testing.T) {
 	t.Setenv("GIT_WORK_TREE", "/tmp/other")
 	t.Setenv("GIT_EXTERNAL_DIFF", "/tmp/ext-diff")
 	t.Setenv("GIT_CONFIG_GLOBAL", "/tmp/gitconfig")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "0")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+	t.Setenv("GIT_CONFIG_VALUE_0", "/tmp/hooks")
 	t.Setenv("GIT_SSH_COMMAND", "ssh -F /tmp/config")
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	t.Setenv("SSH_ASKPASS", "/tmp/ssh-askpass")
 	t.Setenv("BASH_ENV", "/tmp/bash_env")
 	t.Setenv("LD_PRELOAD", "/tmp/preload.so")
 }
@@ -59,7 +65,13 @@ func TestSanitize_UsesStrictAllowlistForBaseAndExtraEnv(t *testing.T) {
 	assert.NotContains(t, env, "GIT_WORK_TREE=/tmp/other")
 	assert.NotContains(t, env, "GIT_EXTERNAL_DIFF=/tmp/ext-diff")
 	assert.NotContains(t, env, "GIT_CONFIG_GLOBAL=/tmp/gitconfig")
+	assert.NotContains(t, env, "GIT_CONFIG_NOSYSTEM=0")
+	assert.NotContains(t, env, "GIT_CONFIG_COUNT=1")
+	assert.NotContains(t, env, "GIT_CONFIG_KEY_0=core.hooksPath")
+	assert.NotContains(t, env, "GIT_CONFIG_VALUE_0=/tmp/hooks")
 	assert.NotContains(t, env, "GIT_SSH_COMMAND=ssh -F /tmp/config")
+	assert.NotContains(t, env, "GIT_TERMINAL_PROMPT=1")
+	assert.NotContains(t, env, "SSH_ASKPASS=/tmp/ssh-askpass")
 	assert.NotContains(t, env, "BASH_ENV=/tmp/bash_env")
 	assert.NotContains(t, env, "BASH_ENV=/tmp/extra")
 	assert.NotContains(t, env, "LD_PRELOAD=/tmp/preload.so")
@@ -107,6 +119,61 @@ func TestSanitizeForNetworkExec_PreservesAuthEnvButBlocksHooks(t *testing.T) {
 	assert.NotContains(t, env, "GIT_ASKPASS=/usr/local/bin/gh-askpass")
 	// GH_REPO is not in the allowlist — callers pass --repo explicitly.
 	assert.NotContains(t, env, "GH_REPO=owner/repo")
+}
+
+func TestGitLocalEnv_AppendsSafeGitProfile(t *testing.T) {
+	setSanitizeTestEnv(t)
+
+	env := GitLocalEnv("AUTO_IMPROVE_STEP=20")
+
+	assert.Contains(t, env, "AUTO_IMPROVE_STEP=20")
+	assert.Contains(t, env, "PATH="+defaultTrustedPATH)
+	assert.Contains(t, env, "GIT_CONFIG_NOSYSTEM=1")
+	assert.Contains(t, env, "GIT_CONFIG_GLOBAL="+os.DevNull)
+	assert.Contains(t, env, "GIT_CONFIG_COUNT=5")
+	assert.Contains(t, env, "GIT_CONFIG_KEY_0=credential.helper")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_0=")
+	assert.Contains(t, env, "GIT_CONFIG_KEY_1=core.hooksPath")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_1="+os.DevNull)
+	assert.Contains(t, env, "GIT_CONFIG_KEY_2=core.fsmonitor")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_2=false")
+	assert.Contains(t, env, "GIT_CONFIG_KEY_3=core.sshCommand")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_3=ssh -F "+os.DevNull)
+	assert.Contains(t, env, "GIT_CONFIG_KEY_4=diff.external")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_4=")
+	assert.Contains(t, env, "GIT_SSH_COMMAND=ssh -F "+os.DevNull)
+	assert.Contains(t, env, "GIT_ASKPASS=/bin/false")
+	assert.Contains(t, env, "SSH_ASKPASS=/bin/false")
+	assert.Contains(t, env, "GIT_TERMINAL_PROMPT=0")
+
+	assert.NotContains(t, env, "SSH_AUTH_SOCK=/tmp/ssh.sock")
+	assert.NotContains(t, env, "GH_TOKEN=token")
+	assert.NotContains(t, env, "GIT_CONFIG_GLOBAL=/tmp/gitconfig")
+	assert.NotContains(t, env, "GIT_CONFIG_NOSYSTEM=0")
+	assert.NotContains(t, env, "GIT_CONFIG_COUNT=1")
+	assert.NotContains(t, env, "GIT_SSH_COMMAND=ssh -F /tmp/config")
+	assert.NotContains(t, env, "GIT_ASKPASS=/usr/local/bin/gh-askpass")
+	assert.NotContains(t, env, "SSH_ASKPASS=/tmp/ssh-askpass")
+}
+
+func TestGitNetworkEnv_PreservesNetworkAuthAndAppendsSafeGitProfile(t *testing.T) {
+	setSanitizeTestEnv(t)
+
+	env := GitNetworkEnv("GH_TOKEN=override")
+
+	assert.Contains(t, env, "SSH_AUTH_SOCK=/tmp/ssh.sock")
+	assert.Contains(t, env, "GH_TOKEN=override")
+	assert.Contains(t, env, "GITHUB_TOKEN=gh-pat")
+	assert.Contains(t, env, "GH_HOST=github.example.com")
+	assert.Contains(t, env, "GIT_CONFIG_NOSYSTEM=1")
+	assert.Contains(t, env, "GIT_CONFIG_GLOBAL="+os.DevNull)
+	assert.Contains(t, env, "GIT_SSH_COMMAND=ssh -F "+os.DevNull)
+	assert.Contains(t, env, "GIT_ASKPASS=/bin/false")
+
+	assert.NotContains(t, env, "GH_TOKEN=token")
+	assert.NotContains(t, env, "GIT_CONFIG_GLOBAL=/tmp/gitconfig")
+	assert.NotContains(t, env, "GIT_SSH_COMMAND=ssh -F /tmp/config")
+	assert.NotContains(t, env, "GIT_ASKPASS=/usr/local/bin/gh-askpass")
 }
 
 func TestTrustedLookPath_IgnoresParentPathShadow(t *testing.T) {

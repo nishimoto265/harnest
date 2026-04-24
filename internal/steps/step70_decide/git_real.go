@@ -24,8 +24,8 @@ func (g RealGitOps) RemoteHead(ctx context.Context, branch string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	// ls-remote hits the network; preserve SSH_AUTH_SOCK / GIT_ASKPASS / GH_TOKEN.
-	cmd.Env = processenv.SanitizeForNetworkExec()
+	// ls-remote hits the network; preserve ssh-agent/token auth while disabling git extension points.
+	cmd.Env = processenv.GitNetworkEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -48,8 +48,8 @@ func (g RealGitOps) PushForceWithLease(ctx context.Context, branch, targetSHA, e
 	if err != nil {
 		return err
 	}
-	// push hits the network; preserve SSH_AUTH_SOCK / GIT_ASKPASS / GH_TOKEN.
-	cmd.Env = processenv.SanitizeForNetworkExec()
+	// push hits the network; preserve ssh-agent/token auth while disabling git extension points.
+	cmd.Env = processenv.GitNetworkEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -83,7 +83,7 @@ func (g RealGitOps) RemoveWorktree(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -119,7 +119,7 @@ func (g RealGitOps) worktreeBelongsToRepo(ctx context.Context, path string) (boo
 	if err != nil {
 		return false, err
 	}
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

@@ -61,7 +61,7 @@ func ComputeDirtyFingerprint(ctx context.Context, worktreePath string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("agentrunner: resolve git: %w", err)
 	}
-	cmd.Env = processenv.Sanitize()
+	cmd.Env = processenv.GitLocalEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
