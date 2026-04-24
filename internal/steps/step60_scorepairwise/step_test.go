@@ -1440,8 +1440,9 @@ func TestRun_ComplianceSingleSideRuleKeepsRawProvenance(t *testing.T) {
 	rubricPath := writeEmptyRubric(t)
 
 	primary := scriptedJudge{
-		score:        80,
-		reasonPrefix: "primary",
+		score:            80,
+		reasonPrefix:     "primary",
+		strictCompliance: true,
 		compliance: map[string]contracts.ComplianceVerdict{
 			"shared": contracts.ComplianceVerdictCompliant,
 		},
@@ -1472,7 +1473,7 @@ func TestRun_ComplianceSingleSideRuleKeepsRawProvenance(t *testing.T) {
 		Arbiter:     arbiter,
 		Now:         func() time.Time { return time.Date(2026, 4, 21, 16, 0, 0, 0, time.UTC) },
 	})
-	require.ErrorContains(t, err, "rule-set mismatch")
+	require.ErrorIs(t, err, judges.ErrJudgeOutputUnexpectedCompliance)
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
@@ -1537,8 +1538,9 @@ func TestRun_ComplianceArbiterOnlyRuleFinalizesAsSingleSource(t *testing.T) {
 	rubricPath := writeEmptyRubric(t)
 
 	primary := scriptedJudge{
-		score:        80,
-		reasonPrefix: "primary",
+		score:            80,
+		reasonPrefix:     "primary",
+		strictCompliance: true,
 		compliance: map[string]contracts.ComplianceVerdict{
 			"only-primary": contracts.ComplianceVerdictViolated,
 		},
@@ -1567,7 +1569,7 @@ func TestRun_ComplianceArbiterOnlyRuleFinalizesAsSingleSource(t *testing.T) {
 		Arbiter:     arbiter,
 		Now:         func() time.Time { return time.Date(2026, 4, 21, 16, 30, 0, 0, time.UTC) },
 	})
-	require.ErrorContains(t, err, "rule-set mismatch")
+	require.ErrorIs(t, err, judges.ErrJudgeOutputUnexpectedCompliance)
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
@@ -1685,9 +1687,10 @@ func TestRun_FailsClosedOnComplianceRuleSetMismatch(t *testing.T) {
 		TaskPackage: &pkg,
 		RubricPath:  rubricPath,
 		Primary: scriptedJudge{
-			score:        80,
-			reasonPrefix: "primary",
-			compliance:   map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictViolated},
+			score:            80,
+			reasonPrefix:     "primary",
+			compliance:       map[string]contracts.ComplianceVerdict{"shared": contracts.ComplianceVerdictViolated},
+			strictCompliance: true,
 		},
 		Secondary: scriptedJudge{
 			score:        80,
@@ -1702,7 +1705,7 @@ func TestRun_FailsClosedOnComplianceRuleSetMismatch(t *testing.T) {
 		Now: func() time.Time { return time.Date(2026, 4, 21, 17, 45, 0, 0, time.UTC) },
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "rule-set mismatch")
+	assert.ErrorIs(t, err, judges.ErrJudgeOutputUnexpectedCompliance)
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
@@ -1759,7 +1762,7 @@ func TestNormalizeCompliance_RejectsDuplicateRuleIDs(t *testing.T) {
 	assert.ErrorIs(t, err, ErrDuplicateComplianceRuleID)
 }
 
-func TestRun_ToleratesArbiterOnlyComplianceRowsOutsideDisputedSet(t *testing.T) {
+func TestRun_RejectsArbiterOnlyComplianceRowsOutsideDisputedSet(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score:        true,
 		nonScorablePass2Agents: map[contracts.AgentID]bool{"a2": true, "a3": true},
@@ -1778,15 +1781,17 @@ func TestRun_ToleratesArbiterOnlyComplianceRowsOutsideDisputedSet(t *testing.T) 
 			compliance:   map[string]contracts.ComplianceVerdict{},
 		},
 		Arbiter: scriptedJudge{
-			score:        75,
-			reasonPrefix: "arbiter",
+			score:            75,
+			reasonPrefix:     "arbiter",
+			strictCompliance: true,
 			compliance: map[string]contracts.ComplianceVerdict{
 				"rule-x": contracts.ComplianceVerdictViolated,
 			},
 		},
 		Now: func() time.Time { return time.Date(2026, 4, 21, 17, 55, 0, 0, time.UTC) },
 	})
-	require.NoError(t, err)
+	require.ErrorIs(t, err, judges.ErrJudgeOutputUnexpectedCompliance)
+	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
 func TestRun_NormalizesRawResolvedAtToRunSnapshot(t *testing.T) {
@@ -2240,6 +2245,8 @@ func (j scriptedJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput)
 	}
 	if !j.strictCompliance && len(input.ExpectedComplianceRuleIDs) > 0 {
 		ruleIDs = append([]string(nil), input.ExpectedComplianceRuleIDs...)
+	} else if !j.strictCompliance && input.EnforceExpectedCompliance {
+		ruleIDs = nil
 	} else if !j.strictCompliance {
 		for _, ruleID := range input.ExpectedComplianceRuleIDs {
 			if _, ok := j.compliance[ruleID]; !ok {

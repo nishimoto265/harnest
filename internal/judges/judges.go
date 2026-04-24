@@ -60,6 +60,7 @@ type JudgeInput struct {
 	OutputPath                string          `json:"output_path"`
 	RubricPath                string          `json:"rubric_path"`
 	ExpectedComplianceRuleIDs []string        `json:"expected_compliance_rule_ids,omitempty"`
+	EnforceExpectedCompliance bool            `json:"enforce_expected_compliance,omitempty"`
 	CandidateRules            []CandidateRule `json:"candidate_rules,omitempty"`
 }
 
@@ -171,7 +172,7 @@ func (out JudgeOutput) ValidateFor(input JudgeInput) error {
 			return fmt.Errorf("%w: compliance rule_id=%s", ErrJudgeOutputMissingInput, compliance.RuleID)
 		}
 	}
-	if len(input.ExpectedComplianceRuleIDs) > 0 {
+	if input.EnforceExpectedCompliance || len(input.ExpectedComplianceRuleIDs) > 0 {
 		seen := make(map[string]struct{}, len(out.Compliance))
 		for _, compliance := range out.Compliance {
 			seen[compliance.RuleID] = struct{}{}
@@ -294,6 +295,9 @@ func (j stubJudge) ScoreOutput(ctx context.Context, input JudgeInput) (JudgeOutp
 func makeStubComplianceEntries(input JudgeInput, verdictPath contracts.VerdictPath, verdict contracts.ComplianceVerdict, rationale string, fallbackRuleID string) []contracts.ComplianceEntry {
 	ruleIDs := input.ExpectedComplianceRuleIDs
 	if len(ruleIDs) == 0 {
+		if input.EnforceExpectedCompliance {
+			return nil
+		}
 		ruleIDs = []string{fallbackRuleID}
 	}
 	entries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))

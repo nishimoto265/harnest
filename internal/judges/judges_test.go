@@ -115,3 +115,37 @@ func TestJudgeOutputValidateFor_RejectsUnexpectedExpectedComplianceRule(t *testi
 	assert.ErrorIs(t, err, ErrJudgeOutputUnexpectedCompliance)
 	assert.ErrorContains(t, err, "r2")
 }
+
+func TestJudgeOutputValidateFor_RejectsUnexpectedComplianceWhenExpectedSetIsEmpty(t *testing.T) {
+	input := JudgeInput{
+		RunID:                     "2026-04-21-PR1-deadbee",
+		Pass:                      1,
+		Agent:                     "a1",
+		OutputPath:                filepath.Join(t.TempDir(), "out.patch"),
+		RubricPath:                filepath.Join(t.TempDir(), "rubric.md"),
+		EnforceExpectedCompliance: true,
+	}
+	require.NoError(t, os.WriteFile(input.OutputPath, []byte("diff"), 0o644))
+	require.NoError(t, os.WriteFile(input.RubricPath, []byte("# rubric"), 0o644))
+
+	output, err := NewPrimaryStub().ScoreOutput(context.Background(), input)
+	require.NoError(t, err)
+	require.Empty(t, output.Compliance)
+
+	output.Compliance = []contracts.ComplianceEntry{{
+		SchemaVersion: "1",
+		RunID:         input.RunID,
+		Pass:          input.Pass,
+		Agent:         input.Agent,
+		RuleID:        "hallucinated-rule",
+		Verdict:       contracts.ComplianceVerdictCompliant,
+		Rationale:     "unexpected",
+		VerdictPath:   contracts.VerdictPathSingle,
+		RubricVersion: "default",
+		PromptVersion: "phase0-stub",
+		ResolvedAt:    time.Now().UTC(),
+	}}
+	err = output.ValidateFor(input)
+	assert.ErrorIs(t, err, ErrJudgeOutputUnexpectedCompliance)
+	assert.ErrorContains(t, err, "hallucinated-rule")
+}

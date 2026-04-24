@@ -225,6 +225,7 @@ func Run(ctx context.Context, in Input) error {
 		// — judges would be skipped and the stale evidence preserved.
 		expectedCompliance := expectedComplianceByAgent[run.Agent]
 		run.JudgeInput.ExpectedComplianceRuleIDs = sortedExpectedComplianceRuleIDs(expectedCompliance)
+		run.JudgeInput.EnforceExpectedCompliance = true
 		run.JudgeInput.CandidateRules = in.CandidateRules
 		if allowRawReuse {
 			if result, ok, err := tryReuseRawPanelResult(in.IO, rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion, expectedCompliance); err != nil {

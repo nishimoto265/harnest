@@ -35,6 +35,8 @@ Required compliance rule_ids:
 {{- range .ComplianceRuleIDs }}
 - {{ . }}
 {{- end }}
+{{- else if .EnforceExpectedCompliance }}
+No compliance rows are expected. Return an empty compliance array.
 {{- else }}
 No fixed compliance rule list was supplied. Read the rubric and emit compliance rows for the rules you can identify.
 {{- end }}

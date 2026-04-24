@@ -51,11 +51,12 @@ type modelJudgeResponse struct {
 }
 
 type cliJudgePromptData struct {
-	Role              Role
-	Input             JudgeInput
-	Dimensions        []string
-	ComplianceRuleIDs []string
-	CandidateRules    []CandidateRule
+	Role                      Role
+	Input                     JudgeInput
+	Dimensions                []string
+	ComplianceRuleIDs         []string
+	EnforceExpectedCompliance bool
+	CandidateRules            []CandidateRule
 }
 
 func NewCLIJudge(profile agents.Profile, role Role) Judge {
@@ -140,7 +141,7 @@ func renderCLIJudgePrompt(role Role, input JudgeInput) (string, error) {
 		dimensions = append(dimensions, string(dimension))
 	}
 	complianceRuleIDs := input.ExpectedComplianceRuleIDs
-	if len(complianceRuleIDs) == 0 {
+	if len(complianceRuleIDs) == 0 && !input.EnforceExpectedCompliance {
 		var err error
 		complianceRuleIDs, err = ExpectedComplianceRuleIDs(input.RubricPath)
 		if err != nil {
@@ -149,11 +150,12 @@ func renderCLIJudgePrompt(role Role, input JudgeInput) (string, error) {
 	}
 	var out strings.Builder
 	if err := tmpl.Execute(&out, cliJudgePromptData{
-		Role:              role,
-		Input:             input,
-		Dimensions:        dimensions,
-		ComplianceRuleIDs: complianceRuleIDs,
-		CandidateRules:    sanitizeCandidateRules(input.CandidateRules),
+		Role:                      role,
+		Input:                     input,
+		Dimensions:                dimensions,
+		ComplianceRuleIDs:         complianceRuleIDs,
+		EnforceExpectedCompliance: input.EnforceExpectedCompliance,
+		CandidateRules:            sanitizeCandidateRules(input.CandidateRules),
 	}); err != nil {
 		return "", err
 	}

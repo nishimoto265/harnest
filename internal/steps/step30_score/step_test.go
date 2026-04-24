@@ -206,9 +206,9 @@ func TestStep30Score_ResumeRerunsRolesWhenOutputSHAChanges(t *testing.T) {
 	require.NoError(t, err)
 	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](complianceRawPath)
 	require.NoError(t, err)
-	assert.Len(t, complianceRaw, 12)
-	assert.Equal(t, 3, countRawComplianceForAgentAndSHA(complianceRaw, contracts.AgentID("a1"), originalSHA))
-	assert.Equal(t, 3, countRawComplianceForAgentAndSHA(complianceRaw, contracts.AgentID("a1"), updatedSHA))
+	assert.Len(t, complianceRaw, 8)
+	assert.Equal(t, 2, countRawComplianceForAgentAndSHA(complianceRaw, contracts.AgentID("a1"), originalSHA))
+	assert.Equal(t, 2, countRawComplianceForAgentAndSHA(complianceRaw, contracts.AgentID("a1"), updatedSHA))
 }
 
 func TestStep30Score_ResumeRerunsWhenPromptVersionChanges(t *testing.T) {
@@ -402,9 +402,8 @@ func TestStep30Score_JudgeSeesPinnedSnapshotBytes(t *testing.T) {
 }
 
 // F5 disputed-only arbiter contract: primary/secondary disagree on rule-b,
-// arbiter covers only rule-a, so disputed-rule coverage fails and step30
-// must not write the done.marker. (Under the pre-r16 full-coverage contract
-// step30 also failed, but for a different — and stricter — reason.)
+// arbiter covers only rule-a, so the disputed-only expected set rejects the
+// incomplete arbiter output and step30 must not write the done.marker.
 func TestStep30Score_DoesNotWriteDoneMarkerOnIncompleteArbiterComplianceCoverage(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
 	provider := &fakePanelProvider{
@@ -434,13 +433,47 @@ func TestStep30Score_DoesNotWriteDoneMarkerOnIncompleteArbiterComplianceCoverage
 
 	step := New(WithPanelProvider(provider))
 	err := step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg})
-	require.ErrorIs(t, err, scorecore.ErrPanelArbiterRuleCoverage)
+	require.ErrorIs(t, err, judges.ErrJudgeOutputMissingCompliance)
 
 	markerPath, markerErr := runCtx.ResolveRunRelative("30/done.marker")
 	require.NoError(t, markerErr)
 	_, statErr := os.Stat(markerPath)
 	require.Error(t, statErr)
 	assert.True(t, os.IsNotExist(statErr))
+}
+
+func TestStep30Score_PassesOnlyDisputedComplianceRulesToArbiter(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	var arbiterExpected []string
+	var arbiterStrict bool
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			score := 80
+			rules := []ruleVerdict{
+				{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
+				{ruleID: "rule-b", verdict: contracts.ComplianceVerdictCompliant},
+			}
+			switch role {
+			case contracts.JudgeRoleSecondary:
+				rules = []ruleVerdict{
+					{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
+					{ruleID: "rule-b", verdict: contracts.ComplianceVerdictViolated},
+				}
+			case contracts.JudgeRoleArbiter:
+				score = 75
+				arbiterExpected = append([]string(nil), input.ExpectedComplianceRuleIDs...)
+				arbiterStrict = input.EnforceExpectedCompliance
+				rules = []ruleVerdict{{ruleID: "rule-b", verdict: contracts.ComplianceVerdictCompliant}}
+			}
+			return makeJudgeOutput(input, role, score, rules)
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	assert.Equal(t, []string{"rule-b"}, arbiterExpected)
+	assert.True(t, arbiterStrict)
 }
 
 // F5 regression: step30 under the disputed-only contract must accept an
@@ -759,11 +792,11 @@ type fakePanelJudge struct {
 	role     contracts.JudgeRole
 }
 
-func (j fakePanelJudge) ScoreOutput(_ context.Context, _ judges.JudgeInput) (judges.JudgeOutput, error) {
+func (j fakePanelJudge) ScoreOutput(_ context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {
 	j.provider.mu.Lock()
 	j.provider.calls[j.role]++
 	j.provider.mu.Unlock()
-	return j.provider.outputs(j.input, j.role), nil
+	return j.provider.outputs(input, j.role), nil
 }
 
 type ruleVerdict struct {
@@ -775,6 +808,9 @@ func makeJudgeOutput(input judges.JudgeInput, role contracts.JudgeRole, score in
 	verdictPath := contracts.VerdictPathSingle
 	if role == contracts.JudgeRoleArbiter {
 		verdictPath = contracts.VerdictPathArbitrated
+	}
+	if input.EnforceExpectedCompliance && len(input.ExpectedComplianceRuleIDs) == 0 {
+		verdicts = nil
 	}
 
 	scores := make([]contracts.ScoreEntry, 0, 5)

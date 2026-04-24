@@ -262,8 +262,12 @@ func (s *Step) Run(ctx context.Context, req Request) (err error) {
 			}
 		}
 		if secondary != nil && disagree && arbiter != nil {
-			if !agentState.arbiterCompleteFor(primaryCompliance, panelInput.OutputSha256, s.rubricVersion, promptVersion) {
-				if err := s.runRole(ctx, paths, panelInput, agentState, contracts.JudgeRoleArbiter, arbiter); err != nil {
+			arbiterExpectedRuleIDs := disputedComplianceRuleIDs(primaryCompliance, secondaryCompliance)
+			arbiterInput := panelInput
+			arbiterInput.JudgeInput.ExpectedComplianceRuleIDs = arbiterExpectedRuleIDs
+			arbiterInput.JudgeInput.EnforceExpectedCompliance = true
+			if !agentState.arbiterCompleteFor(arbiterExpectedRuleIDs, panelInput.OutputSha256, s.rubricVersion, promptVersion) {
+				if err := s.runRole(ctx, paths, arbiterInput, agentState, contracts.JudgeRoleArbiter, arbiter); err != nil {
 					return fmt.Errorf("step30_score: resolve arbiter agent=%s: %w", agent.agent, err)
 				}
 			}
@@ -667,7 +671,7 @@ func (s *resumeAgentState) expectedComplianceRuleIDs() map[string]struct{} {
 }
 
 func (s *resumeAgentState) arbiterCompleteFor(
-	primaryCompliance []contracts.RawComplianceEntry,
+	expectedRuleIDs []string,
 	outputSha, rubricVersion, promptVersion string,
 ) bool {
 	if !hasAllDimensions(s.rawScores[contracts.JudgeRoleArbiter]) {
@@ -679,15 +683,7 @@ func (s *resumeAgentState) arbiterCompleteFor(
 	if !s.roleVersionMatches(contracts.JudgeRoleArbiter, rubricVersion, promptVersion) {
 		return false
 	}
-	if len(s.rawCompliance[contracts.JudgeRoleArbiter]) != len(primaryCompliance) {
-		return false
-	}
-	for _, row := range primaryCompliance {
-		if _, ok := s.rawCompliance[contracts.JudgeRoleArbiter][row.RuleID]; !ok {
-			return false
-		}
-	}
-	return true
+	return s.roleComplianceCoverage(contracts.JudgeRoleArbiter, expectedComplianceRuleSet(expectedRuleIDs))
 }
 
 func (s *resumeAgentState) roleVersionMatches(role contracts.JudgeRole, rubricVersion, promptVersion string) bool {
@@ -742,6 +738,35 @@ func expectedComplianceRuleSet(ruleIDs []string) map[string]struct{} {
 		rules[ruleID] = struct{}{}
 	}
 	return rules
+}
+
+func disputedComplianceRuleIDs(primary, secondary []contracts.RawComplianceEntry) []string {
+	primaryByRule := make(map[string]contracts.ComplianceVerdict, len(primary))
+	for _, row := range primary {
+		primaryByRule[row.RuleID] = row.Verdict
+	}
+	secondaryByRule := make(map[string]contracts.ComplianceVerdict, len(secondary))
+	for _, row := range secondary {
+		secondaryByRule[row.RuleID] = row.Verdict
+	}
+	disputed := make(map[string]struct{})
+	for ruleID, primaryVerdict := range primaryByRule {
+		secondaryVerdict, ok := secondaryByRule[ruleID]
+		if !ok || secondaryVerdict != primaryVerdict {
+			disputed[ruleID] = struct{}{}
+		}
+	}
+	for ruleID := range secondaryByRule {
+		if _, ok := primaryByRule[ruleID]; !ok {
+			disputed[ruleID] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(disputed))
+	for ruleID := range disputed {
+		out = append(out, ruleID)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func appendExpectedFinalScores(paths stepPathsResult, state *resumeAgentState, result scorecore.PanelResult) error {

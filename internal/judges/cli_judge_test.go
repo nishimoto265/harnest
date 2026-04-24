@@ -125,6 +125,27 @@ func TestRenderCLIJudgePromptPass2IncludesCandidateRuleBodies(t *testing.T) {
 	assert.Contains(t, prompt, "When app/message.txt changes")
 }
 
+func TestRenderCLIJudgePromptPass2SupportsStrictEmptyComplianceSet(t *testing.T) {
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "output.patch")
+	rubricPath := filepath.Join(dir, "rubric.md")
+	require.NoError(t, os.WriteFile(outputPath, []byte("diff --git a/app/message.txt b/app/message.txt\n"), 0o644))
+	require.NoError(t, os.WriteFile(rubricPath, []byte("# rubric\n"), 0o644))
+
+	prompt, err := renderCLIJudgePrompt(RoleArbiter, JudgeInput{
+		RunID:                     "2026-04-23-PR1-abcdef0",
+		Pass:                      2,
+		Agent:                     "a1",
+		OutputPath:                outputPath,
+		RubricPath:                rubricPath,
+		EnforceExpectedCompliance: true,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "No compliance rows are expected")
+	assert.NotContains(t, prompt, "No fixed compliance rule list was supplied")
+	assert.NotContains(t, prompt, "stub-rubric-rule")
+}
+
 func mustNodePath(t *testing.T, binary string) string {
 	t.Helper()
 	path, _, err := agentrunner.PrepareProviderBinary(agents.ProviderClaude, binary)
