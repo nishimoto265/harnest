@@ -185,9 +185,9 @@ func (g gitCLI) FetchCommit(ctx context.Context, repoRoot, sha string) error {
 }
 
 func (g gitCLI) RepoSlug(ctx context.Context, repoRoot string) (string, error) {
-	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "remote", "get-url", "origin")
+	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "config", "--get", "remote.origin.url")
 	if err != nil {
-		return "", formatCommandFailure(fmt.Sprintf("step10: git remote get-url origin (in %s)", repoRoot), err, out, stderr)
+		return "", formatCommandFailure(fmt.Sprintf("step10: git config --get remote.origin.url (in %s)", repoRoot), err, out, stderr)
 	}
 	slug, err := repoSlugFromRemoteURL(strings.TrimSpace(string(out)))
 	if err != nil {

@@ -15,7 +15,9 @@ import (
 )
 
 // TestGitClient_RepoSlugParsesOriginURL verifies that repo discovery uses the
-// local git remote and returns the owner/name slug step10 should pass to gh.
+// configured local git remote and returns the owner/name slug step10 should pass
+// to gh. `git remote get-url` expands url.insteadOf rewrites, which can obscure
+// the operator-configured GitHub origin.
 func TestGitClient_RepoSlugParsesOriginURL(t *testing.T) {
 	repoRoot := "/tmp/auto-improve-r17-fake-repo"
 
@@ -24,7 +26,7 @@ func TestGitClient_RepoSlugParsesOriginURL(t *testing.T) {
 			if name != "git" {
 				return nil, nil, fmt.Errorf("unexpected binary: %s", name)
 			}
-			if len(args) == 5 && args[0] == "-C" && args[1] == repoRoot && args[2] == "remote" && args[3] == "get-url" && args[4] == "origin" {
+			if len(args) == 5 && args[0] == "-C" && args[1] == repoRoot && args[2] == "config" && args[3] == "--get" && args[4] == "remote.origin.url" {
 				return []byte("git@github.com:owner/repo.git\n"), nil, nil
 			}
 			return nil, nil, fmt.Errorf("unexpected git args: %v", args)
@@ -39,7 +41,7 @@ func TestGitClient_RepoSlugParsesOriginURL(t *testing.T) {
 func TestGitClient_RepoSlugRejectsSameSlugOnWrongHost(t *testing.T) {
 	git := gitCLI{
 		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
-			if len(args) == 5 && args[2] == "remote" && args[3] == "get-url" && args[4] == "origin" {
+			if len(args) == 5 && args[2] == "config" && args[3] == "--get" && args[4] == "remote.origin.url" {
 				return []byte("https://evil.example.com/owner/repo.git\n"), nil, nil
 			}
 			return nil, nil, fmt.Errorf("unexpected git args: %v", args)

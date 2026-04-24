@@ -2772,6 +2772,17 @@ subcmd="$1"
 shift
 
 case "$subcmd" in
+  config)
+    case "${1:-} ${2:-}" in
+      "--get remote.origin.url")
+        printf '%s\n' "git@github.com:owner/repo.git"
+        ;;
+      *)
+        echo "unsupported config args: $*" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   rev-parse)
     if [ "${1:-}" = "--verify" ]; then
       echo "${AUTO_IMPROVE_TEST_BEST_SHA}"
@@ -2898,6 +2909,17 @@ subcmd="$1"
 shift
 
 case "$subcmd" in
+  config)
+    case "${1:-} ${2:-}" in
+      "--get remote.origin.url")
+        printf '%s\n' "git@github.com:owner/repo.git"
+        ;;
+      *)
+        echo "unsupported config args: $*" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   rev-parse)
     if [ "${1:-}" = "--verify" ]; then
       echo "${AUTO_IMPROVE_TEST_BEST_SHA}"

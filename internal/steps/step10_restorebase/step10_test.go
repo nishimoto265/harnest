@@ -748,7 +748,7 @@ func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 		stat: os.Stat,
 		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 			switch {
-			case slices.Equal(args, []string{"-C", repoRoot, "remote", "get-url", "origin"}):
+			case slices.Equal(args, []string{"-C", repoRoot, "config", "--get", "remote.origin.url"}):
 				return []byte("git@github.com:owner/repo.git\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", testMergeCommitOID}):
 				return nil, nil, nil
@@ -795,7 +795,7 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 		stat: os.Stat,
 		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 			switch {
-			case slices.Equal(args, []string{"-C", repoRoot, "remote", "get-url", "origin"}):
+			case slices.Equal(args, []string{"-C", repoRoot, "config", "--get", "remote.origin.url"}):
 				return []byte("git@github.com:owner/repo.git\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", testMergeCommitOID}):
 				return nil, nil, nil
