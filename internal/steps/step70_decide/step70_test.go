@@ -538,7 +538,7 @@ func TestRun_DivergedSunsetMarkerBlocksExecution(t *testing.T) {
 	assert.Contains(t, err.Error(), sunsetMarkerFile+".diverged")
 }
 
-func TestNextRegistryVersionForRule_IsChainScoped(t *testing.T) {
+func TestNextRegistryVersion_UsesGlobalSequence(t *testing.T) {
 	lines := []registryLine{
 		{
 			Entry: contracts.RuleRegistryEntry{
@@ -582,10 +582,7 @@ func TestNextRegistryVersionForRule_IsChainScoped(t *testing.T) {
 		},
 	}
 
-	assert.EqualValues(t, 8, nextRegistryVersionForRule(lines, "rule-a"))
-	assert.EqualValues(t, 8, nextRegistryVersionForRule(lines, "rule-b"))
-	assert.EqualValues(t, 8, nextRegistryVersionForRule(lines, "rule-c"))
-	assert.EqualValues(t, 8, nextRegistryVersionForRule(lines, "rule-d"))
+	assert.EqualValues(t, 8, nextRegistryVersion(lines))
 }
 
 func TestRun_ResumeFromBranchPushed_IdempotencyHit(t *testing.T) {

@@ -245,20 +245,7 @@ func recoverMarkManualAbortUnlocked(runCtx internalio.RunContext, pr int, store 
 	if err := store.Save(*intention); err != nil {
 		return err
 	}
-	decision := contracts.Decision{
-		Action: contracts.DecisionActionRollback,
-		Value: contracts.DecisionRollback{
-			Action:         contracts.DecisionActionRollback,
-			SchemaVersion:  "1",
-			RunID:          runCtx.RunID,
-			IdempotencyKey: intention.IdempotencyKey,
-			RollbackReason: contracts.RollbackReasonManualAbortPendingCleanup,
-			FailedStep:     contracts.FailedStep70,
-			BestShaBefore:  intention.BestShaBefore,
-			TargetSha:      intention.TargetSha,
-			DecidedAt:      at,
-		},
-	}
+	decision := newRollbackDecision(runCtx, *intention, contracts.RollbackReasonManualAbortPendingCleanup, contracts.FailedStep70, at)
 	if err := writeDecision(runCtx, decision); err != nil {
 		return err
 	}
