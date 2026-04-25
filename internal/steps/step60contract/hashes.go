@@ -186,6 +186,18 @@ func FinalComplianceStateWithOverflowRefs(runIO internalio.RunContext, entries [
 }
 
 func FinalPairwiseState(entries []contracts.PairwiseEntry) (int, string, error) {
+	return finalPairwiseState(collapseFinalPairwise(entries))
+}
+
+func FinalPairwiseStateWithOverflowRefs(runIO internalio.RunContext, entries []contracts.PairwiseEntry) (int, string, error) {
+	collapsed := collapseFinalPairwise(entries)
+	if err := ValidatePairwiseOverflowRefs(runIO, collapsed); err != nil {
+		return 0, "", err
+	}
+	return finalPairwiseState(collapsed)
+}
+
+func collapseFinalPairwise(entries []contracts.PairwiseEntry) []contracts.PairwiseEntry {
 	collapsed := internalio.CollapseByKey(entries, func(entry contracts.PairwiseEntry) pairwiseKey {
 		return pairwiseKey{AgentA: entry.AgentA, AgentB: entry.AgentB}
 	})
@@ -195,6 +207,10 @@ func FinalPairwiseState(entries []contracts.PairwiseEntry) (int, string, error) 
 		}
 		return collapsed[i].AgentB < collapsed[j].AgentB
 	})
+	return collapsed
+}
+
+func finalPairwiseState(collapsed []contracts.PairwiseEntry) (int, string, error) {
 	hash, err := HashCanonicalRows(collapsed)
 	return len(collapsed), hash, err
 }
@@ -297,6 +313,18 @@ func ValidateRawComplianceOverflowRefs(runIO internalio.RunContext, rows []contr
 			continue
 		}
 		if _, err := internalio.ReadSidecar(runIO, *row.RationaleOverflowRef); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ValidatePairwiseOverflowRefs(runIO internalio.RunContext, rows []contracts.PairwiseEntry) error {
+	for _, row := range rows {
+		if row.JustificationOverflowRef == nil {
+			continue
+		}
+		if _, err := internalio.ReadSidecar(runIO, *row.JustificationOverflowRef); err != nil {
 			return err
 		}
 	}

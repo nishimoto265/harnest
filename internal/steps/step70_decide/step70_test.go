@@ -404,7 +404,7 @@ func TestVerifyStep60ArtifactSnapshot_AllowsNoComplianceRules(t *testing.T) {
 	require.NoError(t, err)
 	complianceCount, complianceHash, err := step70FinalComplianceState(runCtx, artifacts.Compliance)
 	require.NoError(t, err)
-	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(artifacts.Pairwise)
+	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(runCtx, artifacts.Pairwise)
 	require.NoError(t, err)
 
 	err = verifyStep60ArtifactSnapshot(runCtx, contracts.Step60DoneMarker{
@@ -477,6 +477,35 @@ func TestFilesystemResolver_RejectsMissingFinalScoreOverflowSidecar(t *testing.T
 	require.Error(t, err)
 	assert.False(t, ok)
 	assert.Contains(t, err.Error(), "hash step60 scores")
+}
+
+func TestFilesystemResolver_RejectsMissingPairwiseOverflowSidecar(t *testing.T) {
+	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
+	ref, sidecarPath := writeResolverReasonsSidecar(t, runCtx, "pairwise overflow sidecar contents\n")
+	pairwisePath, err := runCtx.ResolveRunRelative("60/pairwise.jsonl")
+	require.NoError(t, err)
+	require.NoError(t, internalio.AppendJSONL(pairwisePath, contracts.PairwiseEntry{
+		SchemaVersion:            "1",
+		RunID:                    runCtx.RunID,
+		AgentA:                   "a1",
+		AgentB:                   "a1",
+		Winner:                   contracts.PairwiseWinnerB,
+		Margin:                   contracts.PairwiseMarginClear,
+		Justification:            "",
+		JustificationOverflowRef: &ref,
+		VerdictPath:              contracts.VerdictPathAgreement,
+		RubricVersion:            "default",
+		PromptVersion:            "phase0-stub",
+		ResolvedAt:               time.Date(2026, 4, 21, 10, 3, 0, 0, time.UTC),
+	}))
+	writeStep60DoneMarkerForResolverFixture(t, runCtx)
+	require.NoError(t, os.Remove(sidecarPath))
+
+	resolver := FilesystemResolver{RepoDir: runCtx.RunsBase, Now: fixedNow()}
+	_, ok, err := resolver.Resolve(runCtx, pkg, candidates)
+	require.Error(t, err)
+	assert.False(t, ok)
+	assert.Contains(t, err.Error(), "hash step60 pairwise")
 }
 
 func TestFilesystemResolver_RejectsStep60InputsThatDoNotMatchDoneMarker(t *testing.T) {
@@ -3354,7 +3383,7 @@ func writeStep60DoneMarkerForResolverFixture(t *testing.T, runCtx internalio.Run
 	require.NoError(t, err)
 	complianceCount, complianceHash, err := step70FinalComplianceState(runCtx, artifacts.Compliance)
 	require.NoError(t, err)
-	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(artifacts.Pairwise)
+	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(runCtx, artifacts.Pairwise)
 	require.NoError(t, err)
 
 	pkg, err := internalio.ReadJSON[contracts.TaskPackage](runCtx.TaskPackagePath())

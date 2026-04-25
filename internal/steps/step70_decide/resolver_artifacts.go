@@ -83,7 +83,7 @@ func verifyStep60ArtifactSnapshot(runCtx internalio.RunContext, marker contracts
 	if err != nil {
 		return fmt.Errorf("step70: hash step60 compliance: %w", err)
 	}
-	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(artifacts.Pairwise)
+	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(runCtx, artifacts.Pairwise)
 	if err != nil {
 		return fmt.Errorf("step70: hash step60 pairwise: %w", err)
 	}
@@ -394,6 +394,6 @@ func step70FinalComplianceState(runCtx internalio.RunContext, rows []contracts.C
 	return step60contract.FinalComplianceStateWithOverflowRefs(runCtx, rows)
 }
 
-func step70FinalPairwiseState(rows []contracts.PairwiseEntry) (int, string, error) {
-	return step60contract.FinalPairwiseState(rows)
+func step70FinalPairwiseState(runCtx internalio.RunContext, rows []contracts.PairwiseEntry) (int, string, error) {
+	return step60contract.FinalPairwiseStateWithOverflowRefs(runCtx, rows)
 }

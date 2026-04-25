@@ -44,7 +44,7 @@ func doneMarkerMatchesCurrentState(runIO internalio.RunContext, paths step60Path
 		}
 		return false, inputsMatch, fmt.Errorf("step60: inspect compliance final: %w", err)
 	}
-	pairwiseCount, pairwiseHash, err := currentPairwiseState(paths.Pairwise)
+	pairwiseCount, pairwiseHash, err := currentPairwiseState(runIO, paths.Pairwise)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, inputsMatch, nil
@@ -134,19 +134,12 @@ func currentFinalComplianceState(runIO internalio.RunContext, path string) (int,
 	return step60contract.FinalComplianceStateWithOverflowRefs(runIO, rows)
 }
 
-func currentPairwiseState(path string) (int, string, error) {
+func currentPairwiseState(runIO internalio.RunContext, path string) (int, string, error) {
 	rows, err := internalio.ReadJSONL[contracts.PairwiseEntry](path)
 	if err != nil {
 		return 0, "", err
 	}
-	hash, err := hashFinalPairwise(rows)
-	if err != nil {
-		return 0, "", err
-	}
-	collapsed := internalio.CollapseByKey(rows, func(entry contracts.PairwiseEntry) complianceKey {
-		return complianceKey{Agent: entry.AgentA, RuleID: string(entry.AgentB)}
-	})
-	return len(collapsed), hash, nil
+	return step60contract.FinalPairwiseStateWithOverflowRefs(runIO, rows)
 }
 
 func resetStep60Outputs(paths step60Paths) error {
