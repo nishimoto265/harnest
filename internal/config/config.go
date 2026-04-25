@@ -47,6 +47,7 @@ type Config struct {
 	Agents     AgentsConfig     `yaml:"agents"`
 	Paths      PathsConfig      `yaml:"paths"`
 	TaskPrompt TaskPromptConfig `yaml:"task_prompt"`
+	Scoring    ScoringConfig    `yaml:"scoring"`
 
 	RunsBasePath              string         `yaml:"runs_base"`
 	WorktreeBasePath          string         `yaml:"worktree_base"`
@@ -91,6 +92,10 @@ type PathsConfig struct {
 
 type TaskPromptConfig struct {
 	Source string `yaml:"source"`
+}
+
+type ScoringConfig struct {
+	PairwiseMode string `yaml:"pairwise_mode"`
 }
 
 func LoadDefault() (Config, error) {
@@ -157,6 +162,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.TaskPrompt.Source == "" {
 		c.TaskPrompt.Source = "auto"
+	}
+	if c.Scoring.PairwiseMode == "" {
+		c.Scoring.PairwiseMode = "basic"
 	}
 	if c.RegistryHighThreshold == 0 {
 		c.RegistryHighThreshold = DefaultRegistryHighThreshold
@@ -393,6 +401,7 @@ func (c Config) Validate() error {
 		PreflightTimeoutSec       int    `validate:"omitempty,gt=0"`
 		RescueMaxRetries          int    `validate:"omitempty,gt=0"`
 		TaskPromptSource          string `validate:"required,oneof=auto issue"`
+		PairwiseMode              string `validate:"required,oneof=single basic strict"`
 	}
 	return validation.Instance().Struct(validationView{
 		RegistryHighThreshold:     c.RegistryHighThreshold,
@@ -400,6 +409,7 @@ func (c Config) Validate() error {
 		PreflightTimeoutSec:       c.PreflightTimeoutSec,
 		RescueMaxRetries:          c.RescueMaxRetries,
 		TaskPromptSource:          c.TaskPromptSource(),
+		PairwiseMode:              c.PairwiseMode(),
 	})
 }
 
@@ -408,6 +418,13 @@ func (c Config) TaskPromptSource() string {
 		return "auto"
 	}
 	return strings.TrimSpace(c.TaskPrompt.Source)
+}
+
+func (c Config) PairwiseMode() string {
+	if strings.TrimSpace(c.Scoring.PairwiseMode) == "" {
+		return "basic"
+	}
+	return strings.TrimSpace(c.Scoring.PairwiseMode)
 }
 
 func (c Config) TaskGeneratorProfile() (agents.Profile, bool, error) {

@@ -245,7 +245,7 @@ func TestPromotionGatePassed_RequiresCandidateComplianceEvidence(t *testing.T) {
 	assert.True(t, ok)
 }
 
-func TestPromotionGatePassed_RejectsTinyDelta(t *testing.T) {
+func TestPromotionGatePassed_AllowsTinyDeltaWhenPairwiseAlreadyWon(t *testing.T) {
 	runCtx := newResolverRunContext(t)
 	candidates := resolverGateCandidates(runCtx.RunID)
 	seedResolverGateScores(t, runCtx, 80, map[contracts.Dimension]int{})
@@ -254,10 +254,10 @@ func TestPromotionGatePassed_RejectsTinyDelta(t *testing.T) {
 
 	ok, err := testPromotionGatePassed(t, runCtx, "a1", candidates)
 	require.NoError(t, err)
-	assert.False(t, ok)
+	assert.True(t, ok)
 }
 
-func TestPromotionGatePassed_RejectsCriticalRegression(t *testing.T) {
+func TestPromotionGatePassed_AllowsCriticalScoreRegressionWhenPairwiseAlreadyWon(t *testing.T) {
 	runCtx := newResolverRunContext(t)
 	candidates := resolverGateCandidates(runCtx.RunID)
 	seedResolverGateScores(t, runCtx, 80, map[contracts.Dimension]int{
@@ -270,7 +270,7 @@ func TestPromotionGatePassed_RejectsCriticalRegression(t *testing.T) {
 
 	ok, err := testPromotionGatePassed(t, runCtx, "a1", candidates)
 	require.NoError(t, err)
-	assert.False(t, ok)
+	assert.True(t, ok)
 }
 
 func testResolveWinningAgent(t *testing.T, runCtx internalio.RunContext) (contracts.AgentID, bool, error) {

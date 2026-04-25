@@ -12,6 +12,8 @@ worktree:
   base: "/abs/path/to/auto-improve-state/worktrees" # Durable absolute directory for git worktrees.
 task_prompt:
   source: "auto" # auto | issue
+scoring:
+  pairwise_mode: "basic" # single | basic | strict
 agent_config_path: "./agents.yaml" # Optional; defaults to ./agents.yaml when present, otherwise legacy role defaults.
 claude_cli_path: "claude" # Absolute path, or bare command name found in the trusted runtime PATH.
 preflight_timeout_sec: 30 # Timeout for preflight checks in seconds.

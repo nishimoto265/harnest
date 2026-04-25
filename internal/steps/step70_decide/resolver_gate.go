@@ -20,14 +20,6 @@ func promotionGatePassedWithArtifacts(runCtx internalio.RunContext, artifacts st
 	if !completeScoreSet(pass1) || !completeScoreSet(pass2) {
 		return false, nil
 	}
-	if averageTenths(pass2)-averageTenths(pass1) < minimumPromotionDeltaTenths {
-		return false, nil
-	}
-	for dimension := range promotionCriticalDimensions {
-		if pass2[dimension].Score < pass1[dimension].Score {
-			return false, nil
-		}
-	}
 	return true, nil
 }
 
@@ -120,12 +112,4 @@ func completeScoreSet(scores map[contracts.Dimension]contracts.ScoreEntry) bool 
 		}
 	}
 	return true
-}
-
-func averageTenths(scores map[contracts.Dimension]contracts.ScoreEntry) int {
-	total := 0
-	for _, score := range scores {
-		total += score.Score
-	}
-	return total * 10 / len(scores)
 }

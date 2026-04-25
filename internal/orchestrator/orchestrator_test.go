@@ -3770,7 +3770,32 @@ while [ "$#" -gt 0 ]; do
   fi
   shift
 done
-cat > /dev/null
+prompt="$(mktemp)"
+cat > "$prompt"
+if grep -q "final decision judge for step60 pairwise" "$prompt"; then
+cat > "$out" <<'EOF'
+{"decision":"adopt","agent_decisions":[
+  {"agent":"a1","winner":"B","margin":"clear","justification":"pass2 wins"},
+  {"agent":"a2","winner":"B","margin":"clear","justification":"pass2 wins"},
+  {"agent":"a3","winner":"B","margin":"clear","justification":"pass2 wins"}
+],"justification":"fake pairwise decision"}
+EOF
+rm -f "$prompt"
+exit 0
+fi
+if grep -q "step60 true pairwise judge" "$prompt"; then
+cat > "$out" <<'EOF'
+{"winner":"B","margin":"clear","dimension_votes":[
+  {"dimension":"fidelity","winner":"B","reason":"better"},
+  {"dimension":"correctness","winner":"B","reason":"better"},
+  {"dimension":"maintainability","winner":"B","reason":"better"},
+  {"dimension":"discipline","winner":"B","reason":"better"},
+  {"dimension":"communication","winner":"B","reason":"better"}
+],"fatal_issues":[],"justification":"fake pairwise comparison"}
+EOF
+rm -f "$prompt"
+exit 0
+fi
 cat > "$out" <<'EOF'
 {"scores":[
   {"dimension":"fidelity","score":80,"reason":"r1"},
@@ -3782,6 +3807,7 @@ cat > "$out" <<'EOF'
   {"rule_id":"stub-rubric-rule","verdict":"compliant","rationale":"ok"}
 ]}
 EOF
+rm -f "$prompt"
 `), 0o755))
 	return path
 }

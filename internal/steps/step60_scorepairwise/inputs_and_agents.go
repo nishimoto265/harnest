@@ -36,6 +36,20 @@ func applyDefaults(in Input) (Input, error) {
 	if in.Arbiter == nil {
 		in.Arbiter = judges.NewArbiterStub()
 	}
+	if in.PairwiseMode == "" {
+		in.PairwiseMode = judges.PairwiseModeBasic
+	}
+	switch in.PairwiseMode {
+	case judges.PairwiseModeSingle, judges.PairwiseModeBasic, judges.PairwiseModeStrict:
+	default:
+		return Input{}, fmt.Errorf("step60: unsupported pairwise_mode=%q", in.PairwiseMode)
+	}
+	if in.PairwiseJudge == nil {
+		in.PairwiseJudge = judges.NewScoreDerivedPairwiseJudge()
+	}
+	if in.PairwiseDecisionJudge == nil {
+		in.PairwiseDecisionJudge = judges.NewScoreDerivedPairwiseDecisionJudge()
+	}
 	if in.RubricVersion == "" || in.PromptVersion == "" {
 		versions, ok, err := inferPass1ScoringVersions(in.IO)
 		if err != nil {
@@ -77,6 +91,9 @@ func applyDefaults(in Input) (Input, error) {
 		in.CandidateRules = candidateRules
 	}
 	in.PromptVersion = judges.PanelPromptVersion(in.PromptVersion, in.Primary, in.Secondary, in.Arbiter)
+	if in.PairwisePromptVersion == "" {
+		in.PairwisePromptVersion = judges.PairwisePanelPromptVersion(in.PromptVersion, in.PairwiseMode, in.PairwiseJudge, in.PairwiseDecisionJudge)
+	}
 	return in, nil
 }
 
@@ -232,7 +249,8 @@ func shouldSkipAgent(err error) bool {
 func collectScorableAgentRuns(in Input, agents []contracts.AgentID, explicit bool) ([]scorableAgentRun, error) {
 	runs := make([]scorableAgentRun, 0, len(agents))
 	for _, agent := range agents {
-		if _, err := internalio.LoadScorableManifest(in.IO, 1, agent); err != nil {
+		pass1Manifest, err := internalio.LoadScorableManifest(in.IO, 1, agent)
+		if err != nil {
 			if explicit && (shouldSkipAgent(err) || os.IsNotExist(err)) {
 				return nil, fmt.Errorf("step60: declared scorable agent missing pass1 scorable manifest: agent=%s: %w", agent, err)
 			}
@@ -253,6 +271,10 @@ func collectScorableAgentRuns(in Input, agents []contracts.AgentID, explicit boo
 				}
 			}
 			return nil, fmt.Errorf("step60: load pass1 scorable manifest for agent=%s: %w", agent, err)
+		}
+		pass1OutputPath, err := requireExistingManifestArtifact(in.IO, agent, pass1Manifest.DiffPath, "pass1 diff")
+		if err != nil {
+			return nil, err
 		}
 		manifest, err := internalio.LoadScorableManifest(in.IO, 2, agent)
 		if explicit && shouldSkipAgent(err) {
@@ -277,13 +299,19 @@ func collectScorableAgentRuns(in Input, agents []contracts.AgentID, explicit boo
 		if _, err := requireExistingManifestArtifact(in.IO, agent, manifest.ChecklistPath, "checklist"); err != nil {
 			return nil, err
 		}
+		pass1SnapshotPath, pass1OutputHash, err := snapshotAndHashPass1Diff(in.IO, agent, pass1OutputPath)
+		if err != nil {
+			return nil, fmt.Errorf("step60: snapshot pass1 diff agent=%s: %w", agent, err)
+		}
 		snapshotPath, outputHash, err := snapshotAndHashPass2Diff(in.IO, agent, outputPath)
 		if err != nil {
 			return nil, fmt.Errorf("step60: snapshot pass2 diff agent=%s: %w", agent, err)
 		}
 		runs = append(runs, scorableAgentRun{
-			Agent:        agent,
-			OutputSha256: outputHash,
+			Agent:             agent,
+			OutputSha256:      outputHash,
+			Pass1OutputPath:   pass1SnapshotPath,
+			Pass1OutputSha256: pass1OutputHash,
 			JudgeInput: judges.JudgeInput{
 				RunID:      in.TaskPackage.RunID,
 				Pass:       2,
