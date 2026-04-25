@@ -392,7 +392,7 @@ func (c Config) Validate() error {
 		RegistryCriticalThreshold int    `validate:"gt=0"`
 		PreflightTimeoutSec       int    `validate:"omitempty,gt=0"`
 		RescueMaxRetries          int    `validate:"omitempty,gt=0"`
-		TaskPromptSource          string `validate:"required,oneof=auto issue pr diff_synth"`
+		TaskPromptSource          string `validate:"required,oneof=auto issue"`
 	}
 	return validation.Instance().Struct(validationView{
 		RegistryHighThreshold:     c.RegistryHighThreshold,
@@ -407,7 +407,18 @@ func (c Config) TaskPromptSource() string {
 	if strings.TrimSpace(c.TaskPrompt.Source) == "" {
 		return "auto"
 	}
-	return c.TaskPrompt.Source
+	return strings.TrimSpace(c.TaskPrompt.Source)
+}
+
+func (c Config) TaskGeneratorProfile() (agents.Profile, bool, error) {
+	if strings.TrimSpace(c.AgentFile().Roles[agents.RoleTaskGenerator]) == "" {
+		return agents.Profile{}, false, nil
+	}
+	profile, err := c.AgentProfile(agents.RoleTaskGenerator)
+	if err != nil {
+		return agents.Profile{}, false, err
+	}
+	return profile, true, nil
 }
 
 func (c *Config) loadAgentFile() error {

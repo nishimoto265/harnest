@@ -52,9 +52,17 @@ Subprocess command names are resolved against the fixed trusted runtime PATH
 (`/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin`), not the
 caller shell's ambient `PATH`; use absolute paths for `claude` / `codex` if
 they are installed elsewhere.
-`task_prompt.source` controls how step10 synthesizes the shared task brief for
-pass1/pass2. The default `auto` mode prefers linked issues when present but
-still keeps changed tests/files and a diff excerpt as supporting context.
+`task_prompt.source` controls the shared task brief used by pass1/pass2. Use
+`auto` (default) to ask the optional `task_generator` agent to reconstruct an
+issue-like task description from PR title/body, linked issues, changed files,
+changed tests, and diff evidence. Use `issue` to force a usable linked issue as
+the task prompt; if no usable issue exists, it falls back to `auto`. Configure
+`roles.task_generator` in `agents.yaml` to use a Claude/Codex profile for this
+generation step. Without that role, step10 falls back to a deterministic
+best-effort task brief; transient generator failures also fall back to that
+deterministic path unless the run context itself was canceled. The source
+boundary is kept small so future providers such as Asana can feed the same
+`auto` generation path.
 
 `agents.yaml` controls which runtime provider each role uses. Implementer roles
 can use `claude` or `codex`; judge roles can stay `stub` or use CLI-backed

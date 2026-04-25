@@ -486,7 +486,9 @@ You are a code judge. Consider this task description:
 **処理**:
 - `gh pr view <num>` で base SHA / 本文 / linked issues 取得
 - **worktree 6個**(pass1/pass2 × 3agent)を一度に切る(手戻り削減)
-- `reconstructed_task_prompt` を生成
+- `task_prompt.source` に従って `reconstructed_task_prompt` を生成
+  (`auto`: task_generator が PR/linked issue/diff/test evidence から issue 相当のタスク文を復元、
+  `issue`: usable linked issue があればそれをそのまま使い、なければ `auto` に fallback。将来 Asana 等も auto 側の入力として追加する)
 - `processed.jsonl` に `started` event append(例外的に step 10 が自分でappendしてよい)
 
 **出力**:

@@ -19,6 +19,7 @@ const (
 	RoleJudgePrimary   Role = "judge_primary"
 	RoleJudgeSecondary Role = "judge_secondary"
 	RoleJudgeArbiter   Role = "judge_arbiter"
+	RoleTaskGenerator  Role = "task_generator"
 )
 
 type Provider string
@@ -165,6 +166,18 @@ func (f File) Validate() error {
 			return err
 		}
 	}
+	if profileName := strings.TrimSpace(f.Roles[RoleTaskGenerator]); profileName != "" {
+		profile, ok := f.Profiles[profileName]
+		if !ok {
+			return fmt.Errorf("agents: role %q references unknown profile %q", RoleTaskGenerator, profileName)
+		}
+		if err := ValidateProfileArgsForRole(RoleTaskGenerator, profile); err != nil {
+			return err
+		}
+		if profile.Provider != ProviderClaude && profile.Provider != ProviderCodex {
+			return fmt.Errorf("agents: role %q must use provider %q or %q, got %q", RoleTaskGenerator, ProviderClaude, ProviderCodex, profile.Provider)
+		}
+	}
 	implementer := f.Profiles[f.Roles[RoleImplementer]]
 	if implementer.Provider != ProviderClaude && implementer.Provider != ProviderCodex {
 		return fmt.Errorf("agents: role %q must use provider %q or %q, got %q", RoleImplementer, ProviderClaude, ProviderCodex, implementer.Provider)
@@ -186,7 +199,7 @@ func (f File) ProfileForRole(role Role) (Profile, error) {
 
 func ValidateProfileArgsForRole(role Role, profile Profile) error {
 	switch role {
-	case RoleJudgePrimary, RoleJudgeSecondary, RoleJudgeArbiter:
+	case RoleJudgePrimary, RoleJudgeSecondary, RoleJudgeArbiter, RoleTaskGenerator:
 		return ValidateJudgeProfileArgs(profile.Provider, profile.Args)
 	default:
 		return nil
