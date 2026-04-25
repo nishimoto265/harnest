@@ -8,12 +8,32 @@ intention_go="$repo_root/internal/contracts/intention.go"
 
 declare -a mismatches=()
 
+contains_ere() {
+  local pattern="$1"
+  local file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -q "$pattern" "$file"
+  else
+    grep -Eq "$pattern" "$file"
+  fi
+}
+
+extract_ere() {
+  local pattern="$1"
+  local file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -o "$pattern" "$file"
+  else
+    grep -Eo "$pattern" "$file"
+  fi
+}
+
 while IFS= read -r variant; do
   [[ -z "$variant" ]] && continue
-  if ! rg -q "type ${variant} struct" "$registry_go"; then
+  if ! contains_ere "type ${variant} struct" "$registry_go"; then
     mismatches+=("registry variant missing in code: ${variant}")
   fi
-done < <(rg -o 'RuleRegistry[A-Za-z]+' "$docs_file" | sort -u)
+done < <(extract_ere 'RuleRegistry[A-Za-z]+' "$docs_file" | sort -u)
 
 go_registry_variants="$(awk '
   /^func[[:space:]]*\(RuleRegistry[A-Za-z0-9_]+\)[[:space:]]+ruleRegistryVariant\(\)/ {
@@ -30,7 +50,7 @@ fi
 
 while IFS= read -r variant; do
   [[ -z "$variant" ]] && continue
-  if ! rg -q "\b${variant}\b" "$docs_file"; then
+  if ! contains_ere "(^|[^[:alnum:]_])${variant}([^[:alnum:]_]|$)" "$docs_file"; then
     mismatches+=("registry variant missing in docs: ${variant}")
   fi
 done <<<"$go_registry_variants"
@@ -50,7 +70,7 @@ fi
 
 while IFS= read -r kind; do
   [[ -z "$kind" ]] && continue
-  if ! rg -q "(^|[^[:alnum:]_])${kind}([^[:alnum:]_]|$)" "$docs_file"; then
+  if ! contains_ere "(^|[^[:alnum:]_])${kind}([^[:alnum:]_]|$)" "$docs_file"; then
     mismatches+=("registry kind missing in docs: ${kind}")
   fi
 done <<<"$go_registry_kinds"

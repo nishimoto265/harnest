@@ -26,6 +26,7 @@ roles:
   judge_primary: codex_judge
   judge_secondary: stub
   judge_arbiter: stub
+  task_generator: codex_judge
 `), 0o644))
 
 	cfg, err := Load(path)
@@ -35,6 +36,10 @@ roles:
 	require.NoError(t, err)
 	assert.Equal(t, ProviderClaude, impl.Provider)
 	assert.Equal(t, "claude", impl.Binary)
+
+	generator, err := cfg.ProfileForRole(RoleTaskGenerator)
+	require.NoError(t, err)
+	assert.Equal(t, ProviderCodex, generator.Provider)
 }
 
 func TestLegacyBuildsDefaultRoleMap(t *testing.T) {
@@ -205,4 +210,49 @@ func TestValidateAllowsUnsafeImplementerProfileArgs(t *testing.T) {
 	}
 
 	require.NoError(t, cfg.Validate())
+}
+
+func TestValidateRejectsUnsafeTaskGeneratorProfileArgs(t *testing.T) {
+	cfg := File{
+		Profiles: map[string]Profile{
+			"impl":      {Provider: ProviderCodex, Binary: "codex"},
+			"generator": {Provider: ProviderCodex, Binary: "codex", Args: []string{"--sandbox", "workspace-write"}},
+			"stub":      {Provider: ProviderStub},
+		},
+		Roles: map[Role]string{
+			RoleImplementer:    "impl",
+			RoleJudgePrimary:   "stub",
+			RoleJudgeSecondary: "stub",
+			RoleJudgeArbiter:   "stub",
+			RoleTaskGenerator:  "generator",
+		},
+	}
+
+	err := cfg.Validate()
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "codex judge profile arg")
+}
+
+func TestValidateRejectsStubTaskGeneratorProfile(t *testing.T) {
+	cfg := File{
+		Profiles: map[string]Profile{
+			"impl": {Provider: ProviderCodex, Binary: "codex"},
+			"stub": {Provider: ProviderStub},
+		},
+		Roles: map[Role]string{
+			RoleImplementer:    "impl",
+			RoleJudgePrimary:   "stub",
+			RoleJudgeSecondary: "stub",
+			RoleJudgeArbiter:   "stub",
+			RoleTaskGenerator:  "stub",
+		},
+	}
+
+	err := cfg.Validate()
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "task_generator")
+	assert.ErrorContains(t, err, "claude")
+	assert.ErrorContains(t, err, "codex")
 }

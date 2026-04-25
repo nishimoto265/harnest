@@ -386,6 +386,68 @@ worktree:
 	assert.Equal(t, "auto", cfg.TaskPromptSource())
 }
 
+func TestTaskGeneratorProfile_ReturnsFalseWhenRoleIsUnset(t *testing.T) {
+	path := writeConfigFixture(t, `
+repo:
+  github: "owner/repo"
+  root: "/tmp/auto-improve"
+  default_branch: "main"
+  best_branch: "auto-improve/best"
+paths:
+  runs: "/tmp/auto-improve/runs"
+worktree:
+  base: "/tmp/auto-improve/worktrees"
+`)
+
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+
+	_, ok, err := cfg.TaskGeneratorProfile()
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+func TestTaskGeneratorProfile_ReturnsConfiguredProfile(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	agentsPath := filepath.Join(dir, "agents.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+repo:
+  github: "owner/repo"
+  root: "/tmp/auto-improve"
+  default_branch: "main"
+  best_branch: "auto-improve/best"
+paths:
+  runs: "/tmp/auto-improve/runs"
+worktree:
+  base: "/tmp/auto-improve/worktrees"
+agent_config_path: "./agents.yaml"
+`), 0o644))
+	require.NoError(t, os.WriteFile(agentsPath, []byte(`
+profiles:
+  codex:
+    provider: codex
+    binary: codex
+  stub:
+    provider: stub
+roles:
+  implementer: codex
+  judge_primary: stub
+  judge_secondary: stub
+  judge_arbiter: stub
+  task_generator: codex
+`), 0o644))
+
+	cfg, err := LoadConfig(configPath)
+	require.NoError(t, err)
+
+	profile, ok, err := cfg.TaskGeneratorProfile()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, agents.ProviderCodex, profile.Provider)
+	assert.Equal(t, "codex", profile.Binary)
+}
+
 func TestLoadConfig_RejectsInvalidTaskPromptSource(t *testing.T) {
 	path := writeConfigFixture(t, `
 repo:

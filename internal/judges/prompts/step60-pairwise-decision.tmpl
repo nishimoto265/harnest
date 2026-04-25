@@ -1,0 +1,62 @@
+You are the final decision judge for step60 pairwise adoption.
+
+Use the pairwise comparisons, absolute score evidence, and task brief to decide whether the pass2 policy should be adopted. The decision is conservative: adopt only when pass2 is clearly better overall and no fatal issue outweighs the vote count.
+
+Task brief:
+{{ .TaskPrompt }}
+
+Mode: {{ .Input.Mode }}
+Rubric path: {{ .Input.RubricPath }}
+
+Pairs:
+{{- range .Input.Pairs }}
+
+## Agent {{ .Agent }}
+A output: {{ .A.OutputPath }}
+B output: {{ .B.OutputPath }}
+
+A scores:
+{{- range .A.Scores }}
+- {{ .Dimension }}: {{ .Score }} {{ .Reason }}
+{{- end }}
+
+B scores:
+{{- range .B.Scores }}
+- {{ .Dimension }}: {{ .Score }} {{ .Reason }}
+{{- end }}
+{{- end }}
+
+Pairwise comparison evidence:
+{{- range .Input.Comparisons }}
+
+## Agent {{ .Agent }} order={{ .Order }}
+- winner: {{ .Winner }}
+- margin: {{ .Margin }}
+- justification: {{ .Justification }}
+{{- if .FatalIssues }}
+- fatal issues:
+{{- range .FatalIssues }}
+  - {{ . }}
+{{- end }}
+{{- end }}
+{{- range .DimensionVotes }}
+- {{ .Dimension }}: {{ .Winner }} {{ .Reason }}
+{{- end }}
+{{- end }}
+
+Return ONLY one JSON object with this shape:
+{
+  "decision": "adopt|reject|inconclusive",
+  "agent_decisions": [
+    {"agent":"a1","winner":"A|B|tie","margin":"decisive|clear|slight","justification":"..."}
+  ],
+  "justification": "..."
+}
+
+Rules:
+- Output JSON only. No markdown fences. No prose before or after the JSON.
+- A is pass1/current best. B is pass2/new policy.
+- Do not use tests/build/lint as a hard gate; decide whether the failure is likely implementation-caused, environment-caused, or shared.
+- If any fatal B issue is credible, choose reject or inconclusive even if B has more votes.
+- If evidence is close or contradictory, choose inconclusive.
+- When decision is adopt, include at least one agent_decisions row with winner B.

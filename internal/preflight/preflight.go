@@ -246,7 +246,13 @@ func (c Checker) checkAgentBinaries(ctx context.Context, cfg config.Config) []Fa
 		agents.RoleJudgePrimary,
 		agents.RoleJudgeSecondary,
 		agents.RoleJudgeArbiter,
+		agents.RoleTaskGenerator,
 	} {
+		if role == agents.RoleTaskGenerator {
+			if strings.TrimSpace(cfg.AgentFile().Roles[role]) == "" {
+				continue
+			}
+		}
 		profile, err := cfg.AgentProfile(role)
 		if err != nil {
 			failures = append(failures, Failure{Name: string(role), Detail: err.Error()})

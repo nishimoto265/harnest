@@ -20,7 +20,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
-//go:embed prompts/step30-score.tmpl prompts/step60-score-pass2.tmpl
+//go:embed prompts/step30-score.tmpl prompts/step60-score-pass2.tmpl prompts/step60-pairwise.tmpl prompts/step60-pairwise-decision.tmpl
 var cliJudgePromptFS embed.FS
 
 const defaultCLIJudgeTimeout = 2 * time.Minute

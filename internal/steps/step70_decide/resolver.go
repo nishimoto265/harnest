@@ -12,14 +12,6 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 )
 
-const minimumPromotionDeltaTenths = 30
-
-var promotionCriticalDimensions = map[contracts.Dimension]struct{}{
-	contracts.DimensionFidelity:    {},
-	contracts.DimensionCorrectness: {},
-	contracts.DimensionDiscipline:  {},
-}
-
 var step70CanonicalDimensions = []contracts.Dimension{
 	contracts.DimensionFidelity,
 	contracts.DimensionCorrectness,

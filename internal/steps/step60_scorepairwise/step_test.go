@@ -68,7 +68,8 @@ func TestRun_HappyPath(t *testing.T) {
 		assert.Equal(t, contracts.PairwiseWinnerTie, entry.Winner)
 		assert.Equal(t, contracts.PairwiseMarginSlight, entry.Margin)
 		assert.Equal(t, contracts.VerdictPathSingle, entry.VerdictPath)
-		assert.Equal(t, "pass1_avg_tenths=820 pass2_avg_tenths=820", entry.Justification)
+		assert.Contains(t, entry.Justification, "mode=basic decision=inconclusive")
+		assert.Contains(t, entry.Justification, "A_avg_tenths=820 B_avg_tenths=820")
 		assert.Equal(t, now, entry.ResolvedAt)
 	}
 
@@ -88,6 +89,68 @@ func TestRun_HappyPath(t *testing.T) {
 	assert.Equal(t, marker.ContentHashes.PairwiseFinal, mustHashFinalPairwise(t, pairwise))
 	assert.Equal(t, marker.RawHashes.ScoresRaw, mustHashReducedRawScores(t, runIO))
 	assert.Equal(t, marker.RawHashes.ComplianceRaw, mustHashReducedRawCompliance(t, runIO))
+}
+
+func TestRun_PairwiseModesControlJudgeFanout(t *testing.T) {
+	tests := []struct {
+		name            string
+		mode            judges.PairwiseMode
+		wantComparisons int
+		wantOrders      []string
+	}{
+		{
+			name:            "single",
+			mode:            judges.PairwiseModeSingle,
+			wantComparisons: 0,
+		},
+		{
+			name:            "basic",
+			mode:            judges.PairwiseModeBasic,
+			wantComparisons: 3,
+			wantOrders:      []string{"a1:AB", "a2:AB", "a3:AB"},
+		},
+		{
+			name:            "strict",
+			mode:            judges.PairwiseModeStrict,
+			wantComparisons: 6,
+			wantOrders:      []string{"a1:AB", "a1:BA", "a2:AB", "a2:BA", "a3:AB", "a3:BA"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runIO, pkg := seedStep60Fixture(t, fixtureOptions{
+				agents:          []contracts.AgentID{"a1", "a2", "a3"},
+				writePass1Score: true,
+			})
+			pairwiseJudge := &recordingPairwiseJudge{}
+			decisionJudge := &recordingPairwiseDecisionJudge{}
+
+			require.NoError(t, Run(context.Background(), Input{
+				IO:                    runIO,
+				TaskPackage:           &pkg,
+				PairwiseMode:          tt.mode,
+				PairwiseJudge:         pairwiseJudge,
+				PairwiseDecisionJudge: decisionJudge,
+				Now:                   func() time.Time { return time.Date(2026, 4, 21, 15, 4, 5, 0, time.UTC) },
+			}))
+
+			assert.Equal(t, tt.wantOrders, pairwiseJudge.orders)
+			assert.Equal(t, 1, decisionJudge.calls)
+			assert.Equal(t, tt.mode, decisionJudge.mode)
+			assert.Equal(t, 3, decisionJudge.pairCount)
+			assert.Equal(t, tt.wantComparisons, decisionJudge.comparisonCount)
+
+			pairwise := mustReadJSONL[contracts.PairwiseEntry](t, runIO, "60/pairwise.jsonl")
+			require.Len(t, pairwise, 3)
+			for _, entry := range pairwise {
+				assert.Equal(t, contracts.PairwiseWinnerB, entry.Winner)
+				assert.Equal(t, contracts.PairwiseMarginClear, entry.Margin)
+				assert.Contains(t, entry.Justification, "mode="+string(tt.mode)+" decision=adopt")
+				assert.Contains(t, entry.Justification, "final=recorded final decision")
+			}
+		})
+	}
 }
 
 func TestRun_Pass2JudgeInputIncludesCandidateRules(t *testing.T) {
@@ -347,7 +410,7 @@ func TestRun_RebuildsWhenPass1ScoresChangeWithDoneMarker(t *testing.T) {
 		Now:         func() time.Time { return firstNow },
 	}))
 	beforeMarker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
-	require.Equal(t, "pass1_avg_tenths=820 pass2_avg_tenths=820", mustReadJSONL[contracts.PairwiseEntry](t, runIO, "60/pairwise.jsonl")[0].Justification)
+	require.Contains(t, mustReadJSONL[contracts.PairwiseEntry](t, runIO, "60/pairwise.jsonl")[0].Justification, "A_avg_tenths=820 B_avg_tenths=820")
 
 	appendPass1ScoresWithScore(t, runIO, pkg.RunID, []contracts.AgentID{"a1"}, 10)
 
@@ -370,7 +433,7 @@ func TestRun_RebuildsWhenPass1ScoresChangeWithDoneMarker(t *testing.T) {
 	assert.Greater(t, secondary.callCount(), int32(0))
 	assert.NotEqual(t, beforeMarker.InputHashes.Pass1Scores, afterMarker.InputHashes.Pass1Scores)
 	assert.Equal(t, later, afterMarker.ResolvedAt)
-	assert.Equal(t, "pass1_avg_tenths=100 pass2_avg_tenths=820", pairwise[0].Justification)
+	assert.Contains(t, pairwise[0].Justification, "A_avg_tenths=100 B_avg_tenths=820")
 	assert.Equal(t, contracts.PairwiseWinnerB, pairwise[0].Winner)
 }
 
@@ -2082,7 +2145,7 @@ func TestRun_GoldenHashes(t *testing.T) {
 	marker := mustReadJSON[contracts.Step60DoneMarker](t, mustResolve(t, runIO, "60/done.marker"))
 	assert.Equal(t, "f24957610c33e2667e3bc04cf8fae00992b05c42ea27f4e1f762c08351b7b4d0", marker.ContentHashes.ScoresFinal)
 	assert.Equal(t, "a7684f4f2d558b499008ea67464f3f3894da8fae81446ca276659efa97bfdfa4", marker.ContentHashes.ComplianceFinal)
-	assert.Equal(t, "c149fdcaf85dca93f7a473896ee7968be45a325f069b0d8c2ca523411481fd89", marker.ContentHashes.PairwiseFinal)
+	assert.Equal(t, "8bd0877ee9d11a879451f0c22f368f5373a34d657a7b61768b26a39e28b35621", marker.ContentHashes.PairwiseFinal)
 }
 
 func TestReduceRawScores_KeepsArbiterWhenRefsMatchRawEntryHashes(t *testing.T) {
@@ -2441,6 +2504,58 @@ type duplicateComplianceJudge struct{}
 type versionedJudge struct {
 	delegate judges.Judge
 	version  string
+}
+type recordingPairwiseJudge struct {
+	orders []string
+}
+type recordingPairwiseDecisionJudge struct {
+	calls           int
+	mode            judges.PairwiseMode
+	pairCount       int
+	comparisonCount int
+}
+
+func (j *recordingPairwiseJudge) ComparePairwise(_ context.Context, input judges.PairwiseInput) (judges.PairwiseComparison, error) {
+	j.orders = append(j.orders, fmt.Sprintf("%s:%s", input.Agent, input.Order))
+	winner := contracts.PairwiseWinnerB
+	if input.Order == "BA" {
+		// The step normalizes BA back to the canonical pass1/pass2 labels.
+		winner = contracts.PairwiseWinnerA
+	}
+	return judges.PairwiseComparison{
+		Agent:         input.Agent,
+		Order:         input.Order,
+		Winner:        winner,
+		Margin:        contracts.PairwiseMarginClear,
+		Justification: fmt.Sprintf("recorded %s comparison", input.Order),
+		DimensionVotes: []judges.PairwiseDimensionVote{{
+			Dimension: contracts.DimensionCorrectness,
+			Winner:    winner,
+			Reason:    "recorded dimension vote",
+		}},
+	}, nil
+}
+
+func (j *recordingPairwiseDecisionJudge) DecidePairwise(_ context.Context, input judges.PairwiseDecisionInput) (judges.PairwiseDecision, error) {
+	j.calls++
+	j.mode = input.Mode
+	j.pairCount = len(input.Pairs)
+	j.comparisonCount = len(input.Comparisons)
+
+	decisions := make([]judges.PairwiseAgentDecision, 0, len(input.Pairs))
+	for _, pair := range input.Pairs {
+		decisions = append(decisions, judges.PairwiseAgentDecision{
+			Agent:         pair.Agent,
+			Winner:        contracts.PairwiseWinnerB,
+			Margin:        contracts.PairwiseMarginClear,
+			Justification: "recorded agent decision",
+		})
+	}
+	return judges.PairwiseDecision{
+		Action:         judges.PairwiseDecisionAdopt,
+		Justification:  "recorded final decision",
+		AgentDecisions: decisions,
+	}, nil
 }
 
 func (j *echoExpectedComplianceJudge) ScoreOutput(ctx context.Context, input judges.JudgeInput) (judges.JudgeOutput, error) {

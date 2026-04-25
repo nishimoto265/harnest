@@ -15,6 +15,14 @@ import (
 // snapshot path so live manifest-diff mutations cannot split hash bytes from
 // score bytes.
 func snapshotAndHashPass2Diff(runIO internalio.RunContext, agent contracts.AgentID, diffAbs string) (string, string, error) {
+	return snapshotAndHashStep60Diff(runIO, "pass2-"+string(agent), diffAbs)
+}
+
+func snapshotAndHashPass1Diff(runIO internalio.RunContext, agent contracts.AgentID, diffAbs string) (string, string, error) {
+	return snapshotAndHashStep60Diff(runIO, "pass1-"+string(agent), diffAbs)
+}
+
+func snapshotAndHashStep60Diff(runIO internalio.RunContext, snapshotPrefix, diffAbs string) (string, string, error) {
 	if err := contracts.EnsureCleanAbsolutePath(diffAbs); err != nil {
 		return "", "", err
 	}
@@ -31,7 +39,7 @@ func snapshotAndHashPass2Diff(runIO internalio.RunContext, agent contracts.Agent
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		return "", "", err
 	}
-	fileName := fmt.Sprintf("%s-%s.patch", string(agent), hash)
+	fileName := fmt.Sprintf("%s-%s.patch", snapshotPrefix, hash)
 	snapshotPath := filepath.Join(snapshotDir, fileName)
 	if err := contracts.EnsureCleanAbsolutePath(snapshotPath); err != nil {
 		return "", "", err
@@ -41,7 +49,7 @@ func snapshotAndHashPass2Diff(runIO internalio.RunContext, agent contracts.Agent
 		return snapshotPath, hash, nil
 	}
 
-	tmp, err := os.CreateTemp(snapshotDir, string(agent)+"-snap-*.tmp")
+	tmp, err := os.CreateTemp(snapshotDir, snapshotPrefix+"-snap-*.tmp")
 	if err != nil {
 		return "", "", err
 	}
@@ -64,7 +72,7 @@ func snapshotAndHashPass2Diff(runIO internalio.RunContext, agent contracts.Agent
 	}
 
 	if entries, rerr := os.ReadDir(snapshotDir); rerr == nil {
-		prefix := string(agent) + "-"
+		prefix := snapshotPrefix + "-"
 		for _, entry := range entries {
 			name := entry.Name()
 			if entry.IsDir() || !strings.HasPrefix(name, prefix) || name == fileName {

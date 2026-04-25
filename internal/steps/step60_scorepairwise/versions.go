@@ -5,7 +5,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 )
 
-func step60VersionsMatch(paths step60Paths, rubricVersion, promptVersion string) (bool, error) {
+func step60VersionsMatch(paths step60Paths, rubricVersion, promptVersion, pairwisePromptVersion string) (bool, error) {
 	scoreRaw, err := readJSONLOrEmpty[contracts.RawScoreEntry](paths.ScoresRaw)
 	if err != nil {
 		return false, err
@@ -40,5 +40,5 @@ func step60VersionsMatch(paths step60Paths, rubricVersion, promptVersion string)
 		}, rubricVersion, promptVersion) &&
 		scorecore.RowsMatchVersion(pairwiseRows, func(row contracts.PairwiseEntry) (string, string) {
 			return row.RubricVersion, row.PromptVersion
-		}, rubricVersion, promptVersion), nil
+		}, rubricVersion, pairwisePromptVersion), nil
 }

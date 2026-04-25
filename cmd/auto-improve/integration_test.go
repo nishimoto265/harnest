@@ -847,6 +847,24 @@ if [ "${1:-}" = "--version" ]; then
 fi
 
 prompt="$(cat)"
+if printf '%s' "$prompt" | grep -q 'final decision judge for step60 pairwise'; then
+  printf '{"decision":"adopt","agent_decisions":['
+  printf '{"agent":"a1","winner":"B","margin":"clear","justification":"fake pass2 win"},'
+  printf '{"agent":"a2","winner":"B","margin":"clear","justification":"fake pass2 win"},'
+  printf '{"agent":"a3","winner":"B","margin":"clear","justification":"fake pass2 win"}'
+  printf '],"justification":"fake pairwise final decision"}\n'
+  exit 0
+fi
+if printf '%s' "$prompt" | grep -q 'step60 true pairwise judge'; then
+  printf '{"winner":"B","margin":"clear","dimension_votes":['
+  printf '{"dimension":"fidelity","winner":"B","reason":"fake pairwise vote"},'
+  printf '{"dimension":"correctness","winner":"B","reason":"fake pairwise vote"},'
+  printf '{"dimension":"maintainability","winner":"B","reason":"fake pairwise vote"},'
+  printf '{"dimension":"discipline","winner":"B","reason":"fake pairwise vote"},'
+  printf '{"dimension":"communication","winner":"B","reason":"fake pairwise vote"}'
+  printf '],"fatal_issues":[],"justification":"fake pairwise comparison"}\n'
+  exit 0
+fi
 if printf '%s' "$prompt" | grep -q 'step30 pass1'; then
   score=55
   verdict=violated

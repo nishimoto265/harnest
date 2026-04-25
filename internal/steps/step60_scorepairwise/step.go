@@ -15,17 +15,21 @@ import (
 )
 
 type Input struct {
-	IO             internalio.RunContext
-	TaskPackage    *contracts.TaskPackage
-	ScorableAgents []contracts.AgentID
-	RubricVersion  string
-	PromptVersion  string
-	RubricPath     string
-	Primary        judges.Judge
-	Secondary      judges.Judge
-	Arbiter        judges.Judge
-	CandidateRules []judges.CandidateRule
-	Now            func() time.Time
+	IO                    internalio.RunContext
+	TaskPackage           *contracts.TaskPackage
+	ScorableAgents        []contracts.AgentID
+	RubricVersion         string
+	PromptVersion         string
+	RubricPath            string
+	Primary               judges.Judge
+	Secondary             judges.Judge
+	Arbiter               judges.Judge
+	PairwiseMode          judges.PairwiseMode
+	PairwiseJudge         judges.PairwiseJudge
+	PairwiseDecisionJudge judges.PairwiseDecisionJudge
+	PairwisePromptVersion string
+	CandidateRules        []judges.CandidateRule
+	Now                   func() time.Time
 }
 
 var (
@@ -80,9 +84,11 @@ type step60RawReuseMarker struct {
 }
 
 type scorableAgentRun struct {
-	Agent        contracts.AgentID
-	JudgeInput   judges.JudgeInput
-	OutputSha256 string
+	Agent             contracts.AgentID
+	JudgeInput        judges.JudgeInput
+	OutputSha256      string
+	Pass1OutputPath   string
+	Pass1OutputSha256 string
 }
 
 type finalMetadata struct {
@@ -166,7 +172,7 @@ func Run(ctx context.Context, in Input) error {
 		if err != nil {
 			return err
 		}
-		versionsMatch, err := step60VersionsMatch(paths, in.RubricVersion, in.PromptVersion)
+		versionsMatch, err := step60VersionsMatch(paths, in.RubricVersion, in.PromptVersion, in.PairwisePromptVersion)
 		if err != nil {
 			return err
 		}
@@ -327,20 +333,14 @@ func Run(ctx context.Context, in Input) error {
 	}
 
 	pairwiseEntries := make([]contracts.PairwiseEntry, 0, len(completedAgents))
-	for _, agent := range completedAgents {
-		pass1AverageTenths, err := resolvePass1AverageTenths(in.IO, agent, pass1ScoresByAgent[agent])
-		if err != nil {
-			return err
-		}
-		pass2AverageTenths, err := averageScoresTenths(pass2ScoresByAgent[agent])
-		if err != nil {
-			return err
-		}
-		entry := makePairwiseEntry(in, agent, pass1AverageTenths, pass2AverageTenths, resolvedAt)
+	pairwiseEntries, err = makePairwiseEntries(ctx, in, completedRuns(scorableRuns, completedAgents), pass1ScoresByAgent, pass2ScoresByAgent, resolvedAt)
+	if err != nil {
+		return err
+	}
+	for _, entry := range pairwiseEntries {
 		if err := appendJSONLWithParentDirSync(paths.Pairwise, entry); err != nil {
-			return fmt.Errorf("step60: append pairwise row for agent=%s: %w", agent, err)
+			return fmt.Errorf("step60: append pairwise row for agent=%s: %w", entry.AgentA, err)
 		}
-		pairwiseEntries = append(pairwiseEntries, entry)
 	}
 
 	if len(finalScores) != len(completedAgents)*len(canonicalDimensions) {

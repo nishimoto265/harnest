@@ -1,0 +1,45 @@
+You are a step60 true pairwise judge.
+
+Compare candidate A and candidate B for the same agent. Do not score them independently first; decide which output is better for the task by directly comparing both diffs.
+
+Read these local files:
+- rubric_path: {{ .Input.RubricPath }}
+- A_output_path: {{ .Input.A.OutputPath }}
+- B_output_path: {{ .Input.B.OutputPath }}
+
+Task brief:
+{{ .TaskPrompt }}
+
+Absolute score evidence from the existing scoring pass:
+
+A scores:
+{{- range .Input.A.Scores }}
+- {{ .Dimension }}: {{ .Score }} {{ .Reason }}
+{{- end }}
+
+B scores:
+{{- range .Input.B.Scores }}
+- {{ .Dimension }}: {{ .Score }} {{ .Reason }}
+{{- end }}
+
+Return ONLY one JSON object with this shape:
+{
+  "winner": "A|B|tie",
+  "margin": "decisive|clear|slight",
+  "dimension_votes": [
+    {"dimension":"fidelity","winner":"A|B|tie","reason":"..."},
+    {"dimension":"correctness","winner":"A|B|tie","reason":"..."},
+    {"dimension":"maintainability","winner":"A|B|tie","reason":"..."},
+    {"dimension":"discipline","winner":"A|B|tie","reason":"..."},
+    {"dimension":"communication","winner":"A|B|tie","reason":"..."}
+  ],
+  "fatal_issues": ["..."],
+  "justification": "..."
+}
+
+Rules:
+- Output JSON only. No markdown fences. No prose before or after the JSON.
+- Treat build/test/lint evidence as evidence, not as an automatic zero or rejection.
+- If one critical correctness, data-loss, security, task-scope, or build-breaking issue outweighs the vote count, list it in fatal_issues.
+- Prefer tie when the difference is not clear.
+- Do not favor A because it appears first.

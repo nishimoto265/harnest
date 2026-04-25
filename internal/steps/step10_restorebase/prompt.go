@@ -1,6 +1,7 @@
 package step10restorebase
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -12,10 +13,8 @@ const diffExcerptMaxBytes = 24 * 1024
 type TaskPromptSource string
 
 const (
-	TaskPromptSourceAuto      TaskPromptSource = "auto"
-	TaskPromptSourceIssue     TaskPromptSource = "issue"
-	TaskPromptSourcePR        TaskPromptSource = "pr"
-	TaskPromptSourceDiffSynth TaskPromptSource = "diff_synth"
+	TaskPromptSourceAuto  TaskPromptSource = "auto"
+	TaskPromptSourceIssue TaskPromptSource = "issue"
 )
 
 type TaskBriefInput struct {
@@ -27,47 +26,25 @@ type TaskBriefInput struct {
 	Diff         string
 }
 
-// ReconstructTaskPrompt assembles the PR title, body and linked issue bodies
-// into the raw task prompt that will be persisted in task-package.json.
-//
-// The returned string is NOT sanitized: downstream prompt builders must call
-// internal/io.SanitizeForPromptEmbedding before embedding into an LLM prompt
-// (see io-contracts.md §5).
-//
-// Shape:
-//
-//	# PR #<num>: <title>
-//
-//	<body>
-//
-//	## Linked issues
-//
-//	### #<n>: <title>
-//	<body>
-//
-// Sections with empty body / zero linked issues are omitted. The returned
-// string always terminates with a single trailing newline.
-func ReconstructTaskPrompt(pr int, title, body string, issues []LinkedIssue) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# PR #%d: %s\n", pr, title)
-
-	if trimmed := strings.TrimRight(body, "\n"); trimmed != "" {
-		b.WriteString("\n")
-		b.WriteString(trimmed)
-		b.WriteString("\n")
+func GenerateTaskPrompt(ctx context.Context, source string, input TaskBriefInput, generator TaskBriefGenerator) (string, error) {
+	mode := normalizeTaskPromptSource(source)
+	usableIssues := usableLinkedIssues(input.Issues)
+	if mode == TaskPromptSourceIssue && len(usableIssues) > 0 {
+		return issueTaskBrief(usableIssues), nil
 	}
-
-	if len(issues) > 0 {
-		b.WriteString("\n## Linked issues\n")
-		for _, issue := range issues {
-			fmt.Fprintf(&b, "\n### #%d: %s\n", issue.Number, issue.Title)
-			if trimmed := strings.TrimRight(issue.Body, "\n"); trimmed != "" {
-				b.WriteString(trimmed)
-				b.WriteString("\n")
+	if generator != nil {
+		task, err := generator.GenerateTaskBrief(ctx, input)
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("step10: generate task brief: %w", err)
 			}
+			return SynthesizeTaskBrief(string(TaskPromptSourceAuto), input), nil
+		}
+		if strings.TrimSpace(task) != "" {
+			return ensureTrailingNewlineWithinLimit(truncateUTF8Bytes(strings.TrimSpace(task), reconstructedPromptMaxBytes), reconstructedPromptMaxBytes), nil
 		}
 	}
-	return ensureTrailingNewlineWithinLimit(truncateUTF8Bytes(b.String(), reconstructedPromptMaxBytes), reconstructedPromptMaxBytes)
+	return SynthesizeTaskBrief(string(TaskPromptSourceAuto), input), nil
 }
 
 func truncateUTF8Bytes(value string, maxBytes int) string {
@@ -98,50 +75,40 @@ func ensureTrailingNewlineWithinLimit(value string, maxBytes int) string {
 func SynthesizeTaskBrief(source string, input TaskBriefInput) string {
 	mode := normalizeTaskPromptSource(source)
 	usableIssues := usableLinkedIssues(input.Issues)
+	if mode == TaskPromptSourceIssue && len(usableIssues) > 0 {
+		return issueTaskBrief(usableIssues)
+	}
 	changedTests, changedNonTests := splitChangedFiles(input.ChangedFiles)
-	goal := synthesizeGoal(mode, input.Title, input.Body, usableIssues, changedTests, changedNonTests)
+	goal := synthesizeGoal(input.Title, input.Body, usableIssues, changedTests, changedNonTests)
 
 	var b strings.Builder
-	b.WriteString("# Task Brief\n\n")
-	b.WriteString("## Goal\n")
-	fmt.Fprintf(&b, "- %s\n", goal)
+	b.WriteString("# Task\n\n")
+	fmt.Fprintf(&b, "%s\n", goal)
 
-	b.WriteString("\n## Required behavior\n")
-	b.WriteString("- Implement the intended repository change described in the source context below.\n")
+	b.WriteString("\n## Background\n")
+	switch {
+	case len(usableIssues) > 0:
+		b.WriteString("Use the linked issue as the main task context, and supplement only the missing parts inferred from the PR evidence.\n")
+	case strings.TrimSpace(input.Body) != "":
+		b.WriteString("Use the PR body as the main task context, and supplement missing details inferred from the PR evidence.\n")
+	default:
+		b.WriteString("The original issue text is unavailable, so infer the task from the merged PR evidence.\n")
+	}
+
+	b.WriteString("\n## Task Content\n")
 	if len(changedTests) > 0 {
-		b.WriteString("- Treat the changed tests as the strongest signal for required behavior.\n")
+		b.WriteString("- Implement the behavior expected by the changed tests.\n")
 	}
 	if len(changedNonTests) > 0 {
-		b.WriteString("- Update the affected implementation files as needed to satisfy the task brief.\n")
+		b.WriteString("- Update the affected application code needed for that behavior.\n")
 	}
-	if includeIssues(mode, usableIssues) {
-		b.WriteString("- Preserve the user-visible behavior and constraints described by the linked issues.\n")
+	if len(changedTests) == 0 && len(changedNonTests) == 0 {
+		b.WriteString("- Implement the requested repository change while preserving unrelated behavior.\n")
 	}
-	if includeDiffContext(mode, usableIssues) {
-		b.WriteString("- Use the changed file list and diff excerpt as evidence of intended behavior, not as step-by-step instructions.\n")
-	}
-
-	b.WriteString("\n## Constraints\n")
-	b.WriteString("- Treat the PR title as supporting context only, not as the authoritative task definition.\n")
-	b.WriteString("- Do not copy the exact diff mechanically if another valid implementation satisfies the same behavior.\n")
-	b.WriteString("- Avoid unrelated refactors unless they are required to satisfy the task brief.\n")
-
-	b.WriteString("\n## Acceptance\n")
-	if len(changedTests) > 0 {
-		b.WriteString("- The changed tests and test expectations listed below should be satisfied.\n")
-	} else {
-		b.WriteString("- The resulting implementation should satisfy the behavior implied by the task brief and source context.\n")
-	}
-	b.WriteString("- The implementation should address the requested change without introducing unrelated behavioral drift.\n")
-
-	b.WriteString("\n## Non-goals\n")
-	b.WriteString(nonGoalScopeLine(mode, usableIssues, changedTests, changedNonTests))
-	if includeDiffContext(mode, usableIssues) {
-		b.WriteString("- Do not treat the provided diff as the only acceptable solution shape.\n")
-	}
+	b.WriteString("- Avoid unrelated refactors or behavior changes.\n")
 
 	b.WriteString("\n## Source Context\n")
-	if includeIssues(mode, usableIssues) {
+	if len(usableIssues) > 0 {
 		b.WriteString("\n### Linked Issues\n")
 		for _, issue := range usableIssues {
 			fmt.Fprintf(&b, "- #%d: %s\n", issue.Number, issue.Title)
@@ -150,88 +117,63 @@ func SynthesizeTaskBrief(source string, input TaskBriefInput) string {
 			}
 		}
 	}
-	if mode == TaskPromptSourceDiffSynth || mode == TaskPromptSourceIssue {
-		b.WriteString("\n### Weak Supporting PR Context\n")
-		if title := strings.TrimSpace(input.Title); title != "" {
-			fmt.Fprintf(&b, "- title: %s\n", title)
-		}
-		if trimmed := strings.TrimSpace(input.Body); trimmed != "" {
-			fmt.Fprintf(&b, "- body: %s\n", strings.ReplaceAll(strings.TrimRight(trimmed, "\n"), "\n", " "))
-		}
-	} else {
-		b.WriteString("\n### PR Title\n")
-		fmt.Fprintf(&b, "%s\n", strings.TrimSpace(input.Title))
-		if trimmed := strings.TrimSpace(input.Body); trimmed != "" {
-			b.WriteString("\n### PR Body\n")
-			b.WriteString(strings.TrimRight(trimmed, "\n"))
-			b.WriteString("\n")
+	b.WriteString("\n### PR Context\n")
+	if title := strings.TrimSpace(input.Title); title != "" {
+		fmt.Fprintf(&b, "- title: %s\n", title)
+	}
+	if trimmed := strings.TrimSpace(input.Body); trimmed != "" {
+		fmt.Fprintf(&b, "- body: %s\n", strings.ReplaceAll(strings.TrimRight(trimmed, "\n"), "\n", " "))
+	}
+	if len(changedTests) > 0 {
+		b.WriteString("\n### Changed Tests\n")
+		for _, file := range changedTests {
+			fmt.Fprintf(&b, "- %s\n", file)
 		}
 	}
-	if includeDiffContext(mode, usableIssues) {
-		if len(changedTests) > 0 {
-			b.WriteString("\n### Changed Tests\n")
-			for _, file := range changedTests {
-				fmt.Fprintf(&b, "- %s\n", file)
-			}
-		}
-		if len(changedNonTests) > 0 {
-			b.WriteString("\n### Changed Files\n")
-			for _, file := range changedNonTests {
-				fmt.Fprintf(&b, "- %s\n", file)
-			}
-		}
-		if trimmed := strings.TrimSpace(input.Diff); trimmed != "" {
-			b.WriteString(renderDiffExcerpt(trimmed, b.Len()))
+	if len(changedNonTests) > 0 {
+		b.WriteString("\n### Changed Files\n")
+		for _, file := range changedNonTests {
+			fmt.Fprintf(&b, "- %s\n", file)
 		}
 	}
 
 	return ensureTrailingNewlineWithinLimit(truncateUTF8Bytes(b.String(), reconstructedPromptMaxBytes), reconstructedPromptMaxBytes)
 }
 
-func nonGoalScopeLine(mode TaskPromptSource, issues []LinkedIssue, changedTests, changedNonTests []string) string {
-	parts := make([]string, 0, 4)
-	if includeIssues(mode, issues) {
-		parts = append(parts, "linked issues")
+func issueTaskBrief(issues []LinkedIssue) string {
+	var b strings.Builder
+	if len(issues) == 1 {
+		issue := issues[0]
+		fmt.Fprintf(&b, "# Issue #%d: %s\n", issue.Number, strings.TrimSpace(issue.Title))
+		if body := strings.TrimSpace(issue.Body); body != "" {
+			b.WriteString("\n")
+			b.WriteString(strings.TrimRight(body, "\n"))
+			b.WriteString("\n")
+		}
+		return ensureTrailingNewlineWithinLimit(truncateUTF8Bytes(b.String(), reconstructedPromptMaxBytes), reconstructedPromptMaxBytes)
 	}
-	if mode != TaskPromptSourceIssue {
-		parts = append(parts, "PR body")
+	b.WriteString("# Linked Issues\n")
+	for _, issue := range issues {
+		fmt.Fprintf(&b, "\n## #%d: %s\n", issue.Number, strings.TrimSpace(issue.Title))
+		if body := strings.TrimSpace(issue.Body); body != "" {
+			b.WriteString(strings.TrimRight(body, "\n"))
+			b.WriteString("\n")
+		}
 	}
-	if len(changedTests) > 0 {
-		parts = append(parts, "changed tests")
-	}
-	if len(changedNonTests) > 0 || includeDiffContext(mode, issues) {
-		parts = append(parts, "diff evidence")
-	}
-	if len(parts) == 0 {
-		parts = append(parts, "source context")
-	}
-	return "- Do not broaden scope beyond the affected behavior suggested by the " + strings.Join(parts, ", ") + ".\n"
+	return ensureTrailingNewlineWithinLimit(truncateUTF8Bytes(b.String(), reconstructedPromptMaxBytes), reconstructedPromptMaxBytes)
 }
 
 func normalizeTaskPromptSource(source string) TaskPromptSource {
 	switch TaskPromptSource(strings.TrimSpace(source)) {
-	case TaskPromptSourceIssue, TaskPromptSourcePR, TaskPromptSourceDiffSynth:
+	case TaskPromptSourceAuto, TaskPromptSourceIssue:
 		return TaskPromptSource(strings.TrimSpace(source))
 	default:
 		return TaskPromptSourceAuto
 	}
 }
 
-func includeIssues(source TaskPromptSource, issues []LinkedIssue) bool {
+func includeDiffContext(source TaskPromptSource) bool {
 	switch source {
-	case TaskPromptSourceIssue:
-		return len(issues) > 0
-	case TaskPromptSourceAuto:
-		return len(issues) > 0
-	default:
-		return false
-	}
-}
-
-func includeDiffContext(source TaskPromptSource, issues []LinkedIssue) bool {
-	switch source {
-	case TaskPromptSourceDiffSynth:
-		return true
 	case TaskPromptSourceAuto:
 		return true
 	default:
@@ -239,11 +181,8 @@ func includeDiffContext(source TaskPromptSource, issues []LinkedIssue) bool {
 	}
 }
 
-func synthesizeGoal(source TaskPromptSource, title, body string, issues []LinkedIssue, changedTests, changedNonTests []string) string {
-	if source == TaskPromptSourceDiffSynth {
-		return synthesizeDiffGoal(changedTests, changedNonTests)
-	}
-	if includeIssues(source, issues) && len(issues) > 0 {
+func synthesizeGoal(title, body string, issues []LinkedIssue, changedTests, changedNonTests []string) string {
+	if len(issues) > 0 {
 		for _, issue := range issues {
 			if goal := firstMeaningfulBodyLine(issue.Body); goal != "" {
 				return goal
@@ -253,29 +192,16 @@ func synthesizeGoal(source TaskPromptSource, title, body string, issues []Linked
 			}
 		}
 	}
-	return synthesizePRGoal(title, body)
-}
-
-func synthesizeDiffGoal(changedTests, changedNonTests []string) string {
-	switch {
-	case len(changedTests) > 0:
-		return "Recreate the intended behavior covered by the changed tests and merged diff evidence."
-	case len(changedNonTests) > 0:
-		return "Recreate the intended behavior shown by the changed files and merged diff evidence."
-	default:
-		return "Infer and implement the intended behavior from the merged diff evidence."
-	}
-}
-
-func synthesizePRGoal(title, body string) string {
 	if goal := firstMeaningfulBodyLine(body); goal != "" {
 		return goal
 	}
-	title = strings.TrimSpace(title)
-	if title == "" {
-		return "Implement the requested repository change."
+	if title = strings.TrimSpace(title); title != "" {
+		return title
 	}
-	return title
+	if len(changedTests) > 0 || len(changedNonTests) > 0 {
+		return "Reconstruct the original task from the merged PR evidence."
+	}
+	return "Implement the requested repository change."
 }
 
 func firstMeaningfulBodyLine(body string) string {
@@ -357,20 +283,4 @@ func looksLikeTestFile(path string) bool {
 	default:
 		return false
 	}
-}
-
-func renderDiffExcerpt(diff string, currentLen int) string {
-	const wrapperOverhead = len("\n### Diff Excerpt\n```diff\n\n```\n")
-	remaining := reconstructedPromptMaxBytes - currentLen - wrapperOverhead
-	if remaining <= 0 {
-		return ""
-	}
-	if remaining > diffExcerptMaxBytes {
-		remaining = diffExcerptMaxBytes
-	}
-	body := strings.TrimRight(truncateUTF8Bytes(diff, remaining), "\n")
-	if body == "" {
-		return ""
-	}
-	return "\n### Diff Excerpt\n```diff\n" + body + "\n```\n"
 }

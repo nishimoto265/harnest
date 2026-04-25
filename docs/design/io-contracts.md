@@ -486,7 +486,9 @@ You are a code judge. Consider this task description:
 **処理**:
 - `gh pr view <num>` で base SHA / 本文 / linked issues 取得
 - **worktree 6個**(pass1/pass2 × 3agent)を一度に切る(手戻り削減)
-- `reconstructed_task_prompt` を生成
+- `task_prompt.source` に従って `reconstructed_task_prompt` を生成
+  (`auto`: task_generator が PR/linked issue/diff/test evidence から issue 相当のタスク文を復元、
+  `issue`: usable linked issue があればそれをそのまま使い、なければ `auto` に fallback。将来 Asana 等も auto 側の入力として追加する)
 - `processed.jsonl` に `started` event append(例外的に step 10 が自分でappendしてよい)
 
 **出力**:
@@ -528,6 +530,8 @@ You are a code judge. Consider this task description:
 - Panel review: primary判定 + secondary判定 → 必要なら arbiter
 - 5次元スコア + 理由 + compliance audit(Discipline内包)
 - `verdict_path` に 解決モード(`single` / `agreement` / `arbitrated` / `arbiter_overruled`)を記録
+- step60 pairwise は same-agent の `pass1(A_i)` と `pass2(B_i)` だけを比較する。`scoring.pairwise_mode=single` は 1 final judge のみ、`basic` は 3 pairwise + 1 final judge、`strict` は AB/BA 反転込みの 6 pairwise + 1 final judge を実行する
+- pairwise の最終採用判断は final decision judge が正本であり、build/test/lint 失敗は hard gate ではなく evidence として渡す。致命的問題がある場合、final decision judge は vote 多数を上書きできる
 
 **出力**:
 - `<run>/30/scores-A.jsonl` または `60/scores-B.jsonl`

@@ -146,6 +146,12 @@ func (a step10Adapter) Run(ctx context.Context, run *StepRunContext) error {
 	if err != nil {
 		return err
 	}
+	var taskBriefGenerator step10restorebase.TaskBriefGenerator
+	if profile, ok, err := run.Config.TaskGeneratorProfile(); err != nil {
+		return err
+	} else if ok {
+		taskBriefGenerator = step10restorebase.NewCLITaskBriefGenerator(profile, repoRoot)
+	}
 	req := stepio.Step10Request{
 		PR:            run.PR,
 		BestBranch:    run.Config.Repo.BestBranch,
@@ -153,17 +159,18 @@ func (a step10Adapter) Run(ctx context.Context, run *StepRunContext) error {
 		HarnessFiles:  true,
 	}
 	result, err := a.runner.Run(ctx, step10restorebase.Input{
-		PR:               run.PR,
-		BestBranch:       run.Config.Repo.BestBranch,
-		PolicyBranch:     run.Config.Repo.PolicyBranch,
-		TaskPromptSource: run.Config.TaskPromptSource(),
-		HarnessFiles:     true,
-		ExpectedRunID:    run.IO.RunID,
-		RepoRoot:         repoRoot,
-		Repo:             run.Config.Repo.GitHub,
-		RunCtx:           run.IO,
-		Agents:           defaultAgents,
-		Logger:           run.Logger,
+		PR:                 run.PR,
+		BestBranch:         run.Config.Repo.BestBranch,
+		PolicyBranch:       run.Config.Repo.PolicyBranch,
+		TaskPromptSource:   run.Config.TaskPromptSource(),
+		TaskBriefGenerator: taskBriefGenerator,
+		HarnessFiles:       true,
+		ExpectedRunID:      run.IO.RunID,
+		RepoRoot:           repoRoot,
+		Repo:               run.Config.Repo.GitHub,
+		RunCtx:             run.IO,
+		Agents:             defaultAgents,
+		Logger:             run.Logger,
 	})
 	if err != nil {
 		return err
@@ -239,13 +246,24 @@ func (s step60Step) Run(ctx context.Context, run *StepRunContext) error {
 	if err != nil {
 		return err
 	}
+	pairwiseJudge, err := judges.NewPairwiseJudgeFromConfig(cfg)
+	if err != nil {
+		return err
+	}
+	pairwiseDecisionJudge, err := judges.NewPairwiseDecisionJudgeFromConfig(cfg)
+	if err != nil {
+		return err
+	}
 	if err := step60_scorepairwise.Run(ctx, step60_scorepairwise.Input{
-		IO:            run.IO,
-		TaskPackage:   run.TaskPackage,
-		RubricVersion: pass1RubricVersion,
-		Primary:       primary,
-		Secondary:     secondary,
-		Arbiter:       arbiter,
+		IO:                    run.IO,
+		TaskPackage:           run.TaskPackage,
+		RubricVersion:         pass1RubricVersion,
+		Primary:               primary,
+		Secondary:             secondary,
+		Arbiter:               arbiter,
+		PairwiseMode:          judges.PairwiseMode(cfg.PairwiseMode()),
+		PairwiseJudge:         pairwiseJudge,
+		PairwiseDecisionJudge: pairwiseDecisionJudge,
 	}); err != nil {
 		return err
 	}
@@ -342,19 +360,11 @@ func step60ScoringVersions(runIO internalio.RunContext) (scoringVersions, error)
 	if err != nil {
 		return scoringVersions{}, err
 	}
-	pairwisePath, err := runIO.ResolveRunRelative("60/pairwise.jsonl")
-	if err != nil {
-		return scoringVersions{}, err
-	}
 	scoreRows, err := internalio.ReadJSONL[contracts.ScoreEntry](scorePath)
 	if err != nil {
 		return scoringVersions{}, err
 	}
 	complianceRows, err := internalio.ReadJSONL[contracts.ComplianceEntry](compliancePath)
-	if err != nil {
-		return scoringVersions{}, err
-	}
-	pairwiseRows, err := internalio.ReadJSONL[contracts.PairwiseEntry](pairwisePath)
 	if err != nil {
 		return scoringVersions{}, err
 	}
@@ -365,12 +375,6 @@ func step60ScoringVersions(runIO internalio.RunContext) (scoringVersions, error)
 	versions, err = collectComplianceEntryVersions(scorecore.CollapseFinalCompliance(complianceRows), versions)
 	if err != nil {
 		return scoringVersions{}, fmt.Errorf("orchestrator: step60 compliance versions: %w", err)
-	}
-	for _, row := range pairwiseRows {
-		versions, err = collectScoringVersion(versions, row.RubricVersion, row.PromptVersion)
-		if err != nil {
-			return scoringVersions{}, fmt.Errorf("orchestrator: step60 pairwise versions: %w", err)
-		}
 	}
 	if versions.RubricVersion == "" || versions.PromptVersion == "" {
 		return scoringVersions{}, errors.New("orchestrator: step60 artifacts do not contain scoring versions")

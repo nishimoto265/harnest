@@ -260,7 +260,7 @@ func TestFilesystemResolver_SelectsNextPromotablePairwiseWinner(t *testing.T) {
 
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, strings.Repeat("3", 40), target.TargetSHA)
+	assert.Equal(t, strings.Repeat("2", 40), target.TargetSHA)
 }
 
 func TestFilesystemResolver_RejectsDuplicateUpdateTargetsBeforeBuildingRegistryEntries(t *testing.T) {

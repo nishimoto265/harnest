@@ -5,7 +5,7 @@
 //  1. Fetches PR metadata (title/body/merge commit/linked issues) via `gh`.
 //  2. Carves 6 git worktrees from the merge-base (pass1 × 3 agents + pass2 × 3
 //     agents).
-//  3. Reconstructs the raw task prompt (NOT sanitized; downstream sanitizes).
+//  3. Reconstructs the task prompt (NOT sanitized; downstream sanitizes).
 //  4. Atomically writes `<run>/task-package.json` and `<run>/base.sha`.
 //  5. Returns a validated Step10Response.
 //
@@ -39,18 +39,19 @@ var ErrTaskPromptSourceUnavailable = errors.New("step10: task prompt source unav
 
 // Input is the Runner entry point parameter set.
 type Input struct {
-	PR               int
-	BestBranch       string
-	PolicyBranch     string
-	TaskPromptSource string
-	HarnessFiles     bool
-	ExpectedRunID    contracts.RunID // optional; empty disables the guard
-	RepoRoot         string          // clean absolute path to the managed repo
-	Repo             string          // optional expected "owner/name"; validated against repoRoot remote
-	RunCtx           internalio.RunContext
-	Agents           []contracts.AgentID // defaults to DefaultAgents when empty
-	Now              func() time.Time    // test hook; defaults to time.Now().UTC()
-	Logger           *slog.Logger
+	PR                 int
+	BestBranch         string
+	PolicyBranch       string
+	TaskPromptSource   string
+	TaskBriefGenerator TaskBriefGenerator
+	HarnessFiles       bool
+	ExpectedRunID      contracts.RunID // optional; empty disables the guard
+	RepoRoot           string          // clean absolute path to the managed repo
+	Repo               string          // optional expected "owner/name"; validated against repoRoot remote
+	RunCtx             internalio.RunContext
+	Agents             []contracts.AgentID // defaults to DefaultAgents when empty
+	Now                func() time.Time    // test hook; defaults to time.Now().UTC()
+	Logger             *slog.Logger
 }
 
 // Result wraps the validated Step10Response.
@@ -115,26 +116,24 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 	}
 	mode := normalizeTaskPromptSource(in.TaskPromptSource)
 	usableIssues := usableLinkedIssues(pr.LinkedIssues)
+	effectiveMode := mode
 	if mode == TaskPromptSourceIssue && len(usableIssues) == 0 {
-		return Result{}, fmt.Errorf("%w: task_prompt.source=issue requires at least one usable linked issue", ErrTaskPromptSourceUnavailable)
+		effectiveMode = TaskPromptSourceAuto
 	}
 	var changedFiles []string
 	var diffText string
-	if includeDiffContext(mode, usableIssues) {
+	if includeDiffContext(effectiveMode) {
 		diffFrom, diffTo, ok := taskPromptDiffRange(pr, baseSHA)
 		if !ok {
-			if mode == TaskPromptSourceDiffSynth {
-				return Result{}, errors.New("step10: diff_synth requires an immutable merged diff source")
-			}
-		} else {
-			changedFiles, err = r.Git.ChangedFiles(ctx, in.RepoRoot, diffFrom, diffTo)
-			if err != nil {
-				return Result{}, fmt.Errorf("step10: changed files for task brief: %w", err)
-			}
-			diffText, err = r.Git.Diff(ctx, in.RepoRoot, diffFrom, diffTo)
-			if err != nil {
-				return Result{}, fmt.Errorf("step10: diff for task brief: %w", err)
-			}
+			return Result{}, fmt.Errorf("%w: task_prompt.source=auto requires an immutable merged diff source", ErrTaskPromptSourceUnavailable)
+		}
+		changedFiles, err = r.Git.ChangedFiles(ctx, in.RepoRoot, diffFrom, diffTo)
+		if err != nil {
+			return Result{}, fmt.Errorf("step10: changed files for task brief: %w", err)
+		}
+		diffText, err = r.Git.Diff(ctx, in.RepoRoot, diffFrom, diffTo)
+		if err != nil {
+			return Result{}, fmt.Errorf("step10: diff for task brief: %w", err)
 		}
 	}
 	if in.HarnessFiles {
@@ -151,14 +150,18 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	prompt := SynthesizeTaskBrief(in.TaskPromptSource, TaskBriefInput{
+	promptInput := TaskBriefInput{
 		PR:           pr.Number,
 		Title:        pr.Title,
 		Body:         pr.Body,
 		Issues:       pr.LinkedIssues,
 		ChangedFiles: changedFiles,
 		Diff:         diffText,
-	})
+	}
+	prompt, err := GenerateTaskPrompt(ctx, in.TaskPromptSource, promptInput, in.TaskBriefGenerator)
+	if err != nil {
+		return Result{}, err
+	}
 
 	pkg := contracts.TaskPackage{
 		SchemaVersion:           "1",
