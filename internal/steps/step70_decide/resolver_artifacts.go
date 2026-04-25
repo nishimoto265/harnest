@@ -1,8 +1,6 @@
 package step70_decide
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +12,7 @@ import (
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
+	"github.com/nishimoto265/auto-improve/internal/steps/step60contract"
 )
 
 func loadStep60Artifacts(runCtx internalio.RunContext) (step60ArtifactSnapshot, error) {
@@ -200,34 +199,11 @@ func currentStep60InputHashes(runCtx internalio.RunContext, pkg *contracts.TaskP
 		return contracts.Step60DoneInputHashes{}, nil, err
 	}
 	expectedComplianceByAgent := step70ExpectedComplianceRuleIDsByAgent(completedAgents, pass1ComplianceRules, activeRules, fallbackRules, candidateRules)
-
-	pass1ScoresHash, err := step70HashPass1Scores(pass1Scores)
+	inputHashes, err := step60contract.InputHashes(pass1Scores, pass1ComplianceRows, pass2OutputHashes, candidateRules, expectedComplianceByAgent)
 	if err != nil {
 		return contracts.Step60DoneInputHashes{}, nil, err
 	}
-	pass1ComplianceHash, err := step70HashFinalCompliance(pass1ComplianceRows)
-	if err != nil {
-		return contracts.Step60DoneInputHashes{}, nil, err
-	}
-	pass2OutputsHash, err := step70HashPass2OutputHashes(pass2OutputHashes)
-	if err != nil {
-		return contracts.Step60DoneInputHashes{}, nil, err
-	}
-	candidateRulesHash, err := step70HashCandidateRules(candidateRules)
-	if err != nil {
-		return contracts.Step60DoneInputHashes{}, nil, err
-	}
-	expectedComplianceHash, err := step70HashExpectedCompliance(expectedComplianceByAgent)
-	if err != nil {
-		return contracts.Step60DoneInputHashes{}, nil, err
-	}
-	return contracts.Step60DoneInputHashes{
-		Pass1Scores:        pass1ScoresHash,
-		Pass1Compliance:    pass1ComplianceHash,
-		Pass2Outputs:       pass2OutputsHash,
-		CandidateRules:     candidateRulesHash,
-		ExpectedCompliance: expectedComplianceHash,
-	}, completedAgents, nil
+	return inputHashes, completedAgents, nil
 }
 
 func step70Pass1ScoresState(runCtx internalio.RunContext) ([]contracts.ScoreEntry, error) {
@@ -269,11 +245,6 @@ func step70Pass1ComplianceState(runCtx internalio.RunContext) ([]contracts.Compl
 		byAgent[row.Agent][row.RuleID] = struct{}{}
 	}
 	return collapsed, byAgent, nil
-}
-
-type step70Pass2OutputHashState struct {
-	Agent        contracts.AgentID `json:"agent"`
-	OutputSha256 string            `json:"output_sha256"`
 }
 
 func step70Pass2OutputHashes(runCtx internalio.RunContext, pkg *contracts.TaskPackage) (map[contracts.AgentID]string, []contracts.AgentID, error) {
@@ -392,106 +363,7 @@ func step70ExpectedComplianceRuleIDsByAgent(
 	fallbackRules []string,
 	candidateRules []judges.CandidateRule,
 ) map[contracts.AgentID]map[string]struct{} {
-	byAgent := make(map[contracts.AgentID]map[string]struct{}, len(agents))
-	for _, agent := range agents {
-		rules := make(map[string]struct{})
-		for _, ruleID := range activeRules {
-			rules[ruleID] = struct{}{}
-		}
-		for ruleID := range pass1Rules[agent] {
-			rules[ruleID] = struct{}{}
-		}
-		for _, rule := range candidateRules {
-			rules[rule.ID] = struct{}{}
-		}
-		if len(rules) == 0 {
-			for _, ruleID := range fallbackRules {
-				rules[ruleID] = struct{}{}
-			}
-		}
-		byAgent[agent] = rules
-	}
-	return byAgent
-}
-
-func step70HashPass1Scores(rows []contracts.ScoreEntry) (string, error) {
-	sorted := append([]contracts.ScoreEntry(nil), rows...)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Agent != sorted[j].Agent {
-			return sorted[i].Agent < sorted[j].Agent
-		}
-		return sorted[i].Dimension < sorted[j].Dimension
-	})
-	return hashCanonicalRows(sorted)
-}
-
-func step70HashFinalCompliance(rows []contracts.ComplianceEntry) (string, error) {
-	sorted := append([]contracts.ComplianceEntry(nil), rows...)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Agent != sorted[j].Agent {
-			return sorted[i].Agent < sorted[j].Agent
-		}
-		return sorted[i].RuleID < sorted[j].RuleID
-	})
-	return hashCanonicalRows(sorted)
-}
-
-func step70HashPass2OutputHashes(hashes map[contracts.AgentID]string) (string, error) {
-	rows := make([]step70Pass2OutputHashState, 0, len(hashes))
-	for agent, outputHash := range hashes {
-		rows = append(rows, step70Pass2OutputHashState{Agent: agent, OutputSha256: outputHash})
-	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Agent < rows[j].Agent })
-	return hashCanonicalRows(rows)
-}
-
-func step70HashCandidateRules(rules []judges.CandidateRule) (string, error) {
-	copied := append([]judges.CandidateRule(nil), rules...)
-	sort.Slice(copied, func(i, j int) bool {
-		if copied[i].ID != copied[j].ID {
-			return copied[i].ID < copied[j].ID
-		}
-		if copied[i].Kind != copied[j].Kind {
-			return copied[i].Kind < copied[j].Kind
-		}
-		if copied[i].TargetRuleID != copied[j].TargetRuleID {
-			return copied[i].TargetRuleID < copied[j].TargetRuleID
-		}
-		if copied[i].Title != copied[j].Title {
-			return copied[i].Title < copied[j].Title
-		}
-		return copied[i].Body < copied[j].Body
-	})
-	return hashCanonicalRows(copied)
-}
-
-type step70ExpectedComplianceAgentState struct {
-	Agent   contracts.AgentID `json:"agent"`
-	RuleIDs []string          `json:"rule_ids"`
-}
-
-func step70HashExpectedCompliance(byAgent map[contracts.AgentID]map[string]struct{}) (string, error) {
-	rows := make([]step70ExpectedComplianceAgentState, 0, len(byAgent))
-	for agent, rules := range byAgent {
-		rows = append(rows, step70ExpectedComplianceAgentState{
-			Agent:   agent,
-			RuleIDs: step70SortedRuleIDs(rules),
-		})
-	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Agent < rows[j].Agent })
-	return hashCanonicalRows(rows)
-}
-
-func step70SortedRuleIDs(rules map[string]struct{}) []string {
-	if len(rules) == 0 {
-		return nil
-	}
-	ruleIDs := make([]string, 0, len(rules))
-	for ruleID := range rules {
-		ruleIDs = append(ruleIDs, ruleID)
-	}
-	sort.Strings(ruleIDs)
-	return ruleIDs
+	return step60contract.ExpectedComplianceRuleIDsByAgent(agents, pass1Rules, activeRules, fallbackRules, candidateRules)
 }
 
 func step70ReducedRawScoresHash(runCtx internalio.RunContext) (string, error) {
@@ -499,15 +371,7 @@ func step70ReducedRawScoresHash(runCtx internalio.RunContext) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	rows, err := internalio.ReadJSONL[contracts.RawScoreEntry](path)
-	if err != nil {
-		return "", err
-	}
-	reduced := scorecore.CollapseRawScores(rows)
-	if err := step70ValidateRawScoreOverflowRefs(runCtx, reduced); err != nil {
-		return "", err
-	}
-	return hashCanonicalRows(reduced)
+	return step60contract.HashReducedRawScoresFile(runCtx, path)
 }
 
 func step70ReducedRawComplianceHash(runCtx internalio.RunContext) (string, error) {
@@ -515,104 +379,21 @@ func step70ReducedRawComplianceHash(runCtx internalio.RunContext) (string, error
 	if err != nil {
 		return "", err
 	}
-	rows, err := internalio.ReadJSONL[contracts.RawComplianceEntry](path)
-	if err != nil {
-		return "", err
-	}
-	reduced := scorecore.CollapseRawCompliance(rows)
-	if err := step70ValidateRawComplianceOverflowRefs(runCtx, reduced); err != nil {
-		return "", err
-	}
-	return hashCanonicalRows(reduced)
-}
-
-func step70ValidateRawScoreOverflowRefs(runCtx internalio.RunContext, rows []contracts.RawScoreEntry) error {
-	for _, row := range rows {
-		if row.ReasonsOverflowRef == nil {
-			continue
-		}
-		if _, err := internalio.ReadSidecar(runCtx, *row.ReasonsOverflowRef); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func step70ValidateRawComplianceOverflowRefs(runCtx internalio.RunContext, rows []contracts.RawComplianceEntry) error {
-	for _, row := range rows {
-		if row.RationaleOverflowRef == nil {
-			continue
-		}
-		if _, err := internalio.ReadSidecar(runCtx, *row.RationaleOverflowRef); err != nil {
-			return err
-		}
-	}
-	return nil
+	return step60contract.HashReducedRawComplianceFile(runCtx, path)
 }
 
 func step70FileSHA256(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	return step60contract.FileSHA256(path)
 }
 
 func step70FinalScoresState(rows []contracts.ScoreEntry) (int, string, error) {
-	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ScoreEntry) step70ScoreKey {
-		return step70ScoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
-	})
-	sort.Slice(collapsed, func(i, j int) bool {
-		if collapsed[i].Agent != collapsed[j].Agent {
-			return collapsed[i].Agent < collapsed[j].Agent
-		}
-		return collapsed[i].Dimension < collapsed[j].Dimension
-	})
-	hash, err := hashCanonicalRows(collapsed)
-	return len(collapsed), hash, err
+	return step60contract.FinalScoresState(rows)
 }
 
 func step70FinalComplianceState(rows []contracts.ComplianceEntry) (int, string, error) {
-	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ComplianceEntry) step70ComplianceKey {
-		return step70ComplianceKey{Agent: entry.Agent, RuleID: entry.RuleID}
-	})
-	sort.Slice(collapsed, func(i, j int) bool {
-		if collapsed[i].Agent != collapsed[j].Agent {
-			return collapsed[i].Agent < collapsed[j].Agent
-		}
-		return collapsed[i].RuleID < collapsed[j].RuleID
-	})
-	hash, err := hashCanonicalRows(collapsed)
-	return len(collapsed), hash, err
+	return step60contract.FinalComplianceState(rows)
 }
 
 func step70FinalPairwiseState(rows []contracts.PairwiseEntry) (int, string, error) {
-	collapsed := internalio.CollapseByKey(rows, func(entry contracts.PairwiseEntry) step70ComplianceKey {
-		return step70ComplianceKey{Agent: entry.AgentA, RuleID: string(entry.AgentB)}
-	})
-	sort.Slice(collapsed, func(i, j int) bool {
-		if collapsed[i].AgentA != collapsed[j].AgentA {
-			return collapsed[i].AgentA < collapsed[j].AgentA
-		}
-		return collapsed[i].AgentB < collapsed[j].AgentB
-	})
-	hash, err := hashCanonicalRows(collapsed)
-	return len(collapsed), hash, err
-}
-
-func hashCanonicalRows[T any](rows []T) (string, error) {
-	joined := make([]byte, 0)
-	for i, row := range rows {
-		payload, err := contracts.CanonicalMarshal(row)
-		if err != nil {
-			return "", err
-		}
-		if i > 0 {
-			joined = append(joined, 0x00)
-		}
-		joined = append(joined, payload...)
-	}
-	sum := sha256.Sum256(joined)
-	return hex.EncodeToString(sum[:]), nil
+	return step60contract.FinalPairwiseState(rows)
 }

@@ -42,16 +42,6 @@ type step60ArtifactSnapshot struct {
 	Pairwise   []contracts.PairwiseEntry
 }
 
-type step70ScoreKey struct {
-	Agent     contracts.AgentID
-	Dimension contracts.Dimension
-}
-
-type step70ComplianceKey struct {
-	Agent  contracts.AgentID
-	RuleID string
-}
-
 func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates) (Target, bool, error) {
 	if pkg == nil || candidates == nil {
 		return Target{}, false, errors.New("step70: resolver requires task_package and candidates")
@@ -129,14 +119,6 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 		TargetSHA:     manifest.HeadSHA,
 		RulesToAppend: entries,
 	}, true, nil
-}
-
-func resolveWinningAgent(runCtx internalio.RunContext) (contracts.AgentID, bool, error) {
-	artifacts, err := loadStep60Artifacts(runCtx)
-	if err != nil {
-		return "", false, err
-	}
-	return resolveWinningAgentFromArtifacts(artifacts)
 }
 
 func resolveWinningAgentFromArtifacts(artifacts step60ArtifactSnapshot) (contracts.AgentID, bool, error) {

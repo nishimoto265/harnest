@@ -439,12 +439,3 @@ func persistedAdoptRecoveryIntention(runID contracts.RunID, intention *contracts
 		StartedAt:            adopt.DecidedAt,
 	}
 }
-
-// ---- Rollback ----
-
-// pushOwnershipKnown signals whether the caller has already confirmed this
-// intention owns the push. post-push rollbacks (driveRegistry, resumeBranch,
-// sentinel-triggered mid-promotion rollback) pass pushOwned; pre-push
-// rollbacks (driveAdopt after PushForceWithLease failed) pass pushUnknown so
-// the rollback path must verify ownership before reverting the branch.
-// ---- Noop / reject / decision helpers ----

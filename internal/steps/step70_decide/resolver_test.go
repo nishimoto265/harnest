@@ -102,7 +102,7 @@ func TestResolveWinningAgent_CollapsesLatestScoresAndPairwiseRows(t *testing.T) 
 		ResolvedAt:    time.Date(2026, 4, 21, 10, 5, 0, 0, time.UTC),
 	}))
 
-	winningAgent, ok, err := resolveWinningAgent(runCtx)
+	winningAgent, ok, err := testResolveWinningAgent(t, runCtx)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, contracts.AgentID("a2"), winningAgent)
@@ -230,17 +230,17 @@ func TestPromotionGatePassed_RequiresCandidateComplianceEvidence(t *testing.T) {
 	seedResolverGateScores(t, runCtx, 80, map[contracts.Dimension]int{})
 	seedResolverGateScoresPass2(t, runCtx, 90, map[contracts.Dimension]int{})
 
-	ok, err := promotionGatePassed(runCtx, "a1", candidates)
+	ok, err := testPromotionGatePassed(t, runCtx, "a1", candidates)
 	require.NoError(t, err)
 	assert.False(t, ok)
 
 	seedResolverGateCompliance(t, runCtx, "cand-1", contracts.ComplianceVerdictViolated)
-	ok, err = promotionGatePassed(runCtx, "a1", candidates)
+	ok, err = testPromotionGatePassed(t, runCtx, "a1", candidates)
 	require.NoError(t, err)
 	assert.False(t, ok)
 
 	seedResolverGateCompliance(t, runCtx, "cand-1", contracts.ComplianceVerdictCompliant)
-	ok, err = promotionGatePassed(runCtx, "a1", candidates)
+	ok, err = testPromotionGatePassed(t, runCtx, "a1", candidates)
 	require.NoError(t, err)
 	assert.True(t, ok)
 }
@@ -252,7 +252,7 @@ func TestPromotionGatePassed_RejectsTinyDelta(t *testing.T) {
 	seedResolverGateScoresPass2(t, runCtx, 82, map[contracts.Dimension]int{})
 	seedResolverGateCompliance(t, runCtx, "cand-1", contracts.ComplianceVerdictCompliant)
 
-	ok, err := promotionGatePassed(runCtx, "a1", candidates)
+	ok, err := testPromotionGatePassed(t, runCtx, "a1", candidates)
 	require.NoError(t, err)
 	assert.False(t, ok)
 }
@@ -268,9 +268,27 @@ func TestPromotionGatePassed_RejectsCriticalRegression(t *testing.T) {
 	})
 	seedResolverGateCompliance(t, runCtx, "cand-1", contracts.ComplianceVerdictCompliant)
 
-	ok, err := promotionGatePassed(runCtx, "a1", candidates)
+	ok, err := testPromotionGatePassed(t, runCtx, "a1", candidates)
 	require.NoError(t, err)
 	assert.False(t, ok)
+}
+
+func testResolveWinningAgent(t *testing.T, runCtx internalio.RunContext) (contracts.AgentID, bool, error) {
+	t.Helper()
+	artifacts, err := loadStep60Artifacts(runCtx)
+	if err != nil {
+		return "", false, err
+	}
+	return resolveWinningAgentFromArtifacts(artifacts)
+}
+
+func testPromotionGatePassed(t *testing.T, runCtx internalio.RunContext, agent contracts.AgentID, candidates *contracts.Candidates) (bool, error) {
+	t.Helper()
+	artifacts, err := loadStep60Artifacts(runCtx)
+	if err != nil {
+		return false, err
+	}
+	return promotionGatePassedWithArtifacts(runCtx, artifacts, agent, candidates)
 }
 
 func newResolverRunContext(t *testing.T) internalio.RunContext {

@@ -6,14 +6,6 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 )
 
-func promotionGatePassed(runCtx internalio.RunContext, agent contracts.AgentID, candidates *contracts.Candidates) (bool, error) {
-	artifacts, err := loadStep60Artifacts(runCtx)
-	if err != nil {
-		return false, err
-	}
-	return promotionGatePassedWithArtifacts(runCtx, artifacts, agent, candidates)
-}
-
 func promotionGatePassedWithArtifacts(runCtx internalio.RunContext, artifacts step60ArtifactSnapshot, agent contracts.AgentID, candidates *contracts.Candidates) (bool, error) {
 	if ok := hasCompliantCandidateEvidence(artifacts.Compliance, agent, candidates); !ok {
 		return false, nil

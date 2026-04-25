@@ -265,7 +265,7 @@ func (o *Orchestrator) validateImplementationBoundary(run *StepRunContext, pass 
 			TaskPackage:      *run.TaskPackage,
 			Agents:           append([]contracts.AgentID(nil), agents...),
 			TimeoutSeconds:   timeout,
-			CandidateRuleIDs: candidateRuleIDs(run.Candidates),
+			CandidateRuleIDs: actionableCandidateIDs(run.Candidates),
 		}
 		resp, err := stepio.NewStep50Response(results, nil, req)
 		if err != nil {
@@ -280,10 +280,6 @@ func (o *Orchestrator) validateImplementationBoundary(run *StepRunContext, pass 
 	default:
 		return fmt.Errorf("orchestrator: unsupported implementation pass=%d", pass)
 	}
-}
-
-func candidateRuleIDs(candidates *contracts.Candidates) []string {
-	return actionableCandidateIDs(candidates)
 }
 
 func actionableCandidateIDs(candidates *contracts.Candidates) []string {

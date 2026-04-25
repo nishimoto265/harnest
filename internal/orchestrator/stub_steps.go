@@ -671,9 +671,9 @@ func (s stubStep40) Run(ctx context.Context, run *StepRunContext) error {
 }
 
 // realStep70 is the production wiring for step70, delegating to
-// internal/steps/step70_decide. The resolver defaults to NoopResolver so that
-// pipeline runs without a promotion target emit a noop decision (matches the
-// prior stubStep70 behaviour for tests and empty-candidate flows).
+// internal/steps/step70_decide. The filesystem resolver returns no target when
+// there is nothing promotable, preserving the prior noop behavior for tests and
+// empty-candidate flows.
 type realStep70 struct {
 	cfg    *config.Config
 	decode func([]byte, any) (any, error)

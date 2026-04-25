@@ -9,6 +9,7 @@ import (
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/judges"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
+	"github.com/nishimoto265/auto-improve/internal/steps/step60contract"
 )
 
 func loadPass1Scores(runIO internalio.RunContext, rubricVersion, promptVersion string) (map[contracts.AgentID][]contracts.ScoreEntry, error) {
@@ -103,37 +104,11 @@ func expectedComplianceRuleIDsForAgent(
 	fallbackRules []string,
 	candidateRules []judges.CandidateRule,
 ) map[string]struct{} {
-	rules := make(map[string]struct{})
-	for _, ruleID := range activeRules {
-		rules[ruleID] = struct{}{}
-	}
-	for ruleID := range pass1Rules[agent] {
-		rules[ruleID] = struct{}{}
-	}
-	for _, rule := range candidateRules {
-		rules[rule.ID] = struct{}{}
-	}
-	if len(rules) == 0 {
-		for _, ruleID := range fallbackRules {
-			rules[ruleID] = struct{}{}
-		}
-	}
-	if len(rules) == 0 {
-		return nil
-	}
-	return rules
+	return step60contract.ExpectedComplianceRuleIDsForAgent(agent, pass1Rules, activeRules, fallbackRules, candidateRules)
 }
 
 func sortedExpectedComplianceRuleIDs(rules map[string]struct{}) []string {
-	if len(rules) == 0 {
-		return nil
-	}
-	ruleIDs := make([]string, 0, len(rules))
-	for ruleID := range rules {
-		ruleIDs = append(ruleIDs, ruleID)
-	}
-	sort.Strings(ruleIDs)
-	return ruleIDs
+	return step60contract.SortedRuleIDs(rules)
 }
 
 func expectedComplianceRuleIDsByAgent(
@@ -143,11 +118,7 @@ func expectedComplianceRuleIDsByAgent(
 	fallbackRules []string,
 	candidateRules []judges.CandidateRule,
 ) map[contracts.AgentID]map[string]struct{} {
-	byAgent := make(map[contracts.AgentID]map[string]struct{}, len(agents))
-	for _, agent := range agents {
-		byAgent[agent] = expectedComplianceRuleIDsForAgent(agent, pass1Rules, activeRules, fallbackRules, candidateRules)
-	}
-	return byAgent
+	return step60contract.ExpectedComplianceRuleIDsByAgent(agents, pass1Rules, activeRules, fallbackRules, candidateRules)
 }
 
 func pass2OutputHashesByAgent(runs []scorableAgentRun) (map[contracts.AgentID]string, error) {
