@@ -9,6 +9,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/steps/step60contract"
 )
 
 func doneMarkerMatchesCurrentState(runIO internalio.RunContext, paths step60Paths, expectedAgents []contracts.AgentID, inputHashes contracts.Step60DoneInputHashes) (bool, bool, error) {
@@ -122,17 +123,7 @@ func currentFinalScoresState(runIO internalio.RunContext, path string) (int, str
 	if err != nil {
 		return 0, "", err
 	}
-	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ScoreEntry) scoreKey {
-		return scoreKey{Agent: entry.Agent, Dimension: entry.Dimension}
-	})
-	if err := validateScoreOverflowRefs(runIO, collapsed); err != nil {
-		return 0, "", err
-	}
-	hash, err := hashFinalScores(collapsed)
-	if err != nil {
-		return 0, "", err
-	}
-	return len(collapsed), hash, nil
+	return step60contract.FinalScoresStateWithOverflowRefs(runIO, rows)
 }
 
 func currentFinalComplianceState(runIO internalio.RunContext, path string) (int, string, error) {
@@ -140,17 +131,7 @@ func currentFinalComplianceState(runIO internalio.RunContext, path string) (int,
 	if err != nil {
 		return 0, "", err
 	}
-	collapsed := internalio.CollapseByKey(rows, func(entry contracts.ComplianceEntry) complianceKey {
-		return complianceKey{Agent: entry.Agent, RuleID: entry.RuleID}
-	})
-	if err := validateComplianceOverflowRefs(runIO, collapsed); err != nil {
-		return 0, "", err
-	}
-	hash, err := hashFinalCompliance(collapsed)
-	if err != nil {
-		return 0, "", err
-	}
-	return len(collapsed), hash, nil
+	return step60contract.FinalComplianceStateWithOverflowRefs(runIO, rows)
 }
 
 func currentPairwiseState(path string) (int, string, error) {

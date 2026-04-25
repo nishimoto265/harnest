@@ -366,6 +366,8 @@ func TestFilesystemResolver_RejectsStep60ArtifactsThatDoNotMatchDoneMarker(t *te
 }
 
 func TestVerifyStep60ArtifactSnapshot_AllowsNoComplianceRules(t *testing.T) {
+	runCtx, err := internalio.NewRunContext("2026-04-21-PR430-abcdef0", realTempDir(t), realTempDir(t))
+	require.NoError(t, err)
 	artifacts := step60ArtifactSnapshot{
 		Scores: []contracts.ScoreEntry{
 			{
@@ -398,14 +400,14 @@ func TestVerifyStep60ArtifactSnapshot_AllowsNoComplianceRules(t *testing.T) {
 			},
 		},
 	}
-	scoresCount, scoresHash, err := step70FinalScoresState(artifacts.Scores)
+	scoresCount, scoresHash, err := step70FinalScoresState(runCtx, artifacts.Scores)
 	require.NoError(t, err)
-	complianceCount, complianceHash, err := step70FinalComplianceState(artifacts.Compliance)
+	complianceCount, complianceHash, err := step70FinalComplianceState(runCtx, artifacts.Compliance)
 	require.NoError(t, err)
 	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(artifacts.Pairwise)
 	require.NoError(t, err)
 
-	err = verifyStep60ArtifactSnapshot(contracts.Step60DoneMarker{
+	err = verifyStep60ArtifactSnapshot(runCtx, contracts.Step60DoneMarker{
 		CompletedAgents: []contracts.AgentID{"a1"},
 		Dimensions:      append([]contracts.Dimension(nil), step70CanonicalDimensions...),
 		ExpectedCounts: contracts.Step60ExpectedCounts{
@@ -446,6 +448,35 @@ func TestFilesystemResolver_RejectsStep60RawArtifactsThatDoNotMatchDoneMarker(t 
 	require.Error(t, err)
 	assert.False(t, ok)
 	assert.Contains(t, err.Error(), "raw hashes do not match")
+}
+
+func TestFilesystemResolver_RejectsMissingFinalScoreOverflowSidecar(t *testing.T) {
+	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
+	ref, sidecarPath := writeResolverReasonsSidecar(t, runCtx, "overflow sidecar contents\n")
+	scorePath, err := runCtx.ResolveRunRelative("60/scores-B.jsonl")
+	require.NoError(t, err)
+	require.NoError(t, internalio.AppendJSONL(scorePath, contracts.ScoreEntry{
+		SchemaVersion:      "1",
+		RunID:              runCtx.RunID,
+		Pass:               2,
+		Agent:              "a1",
+		Dimension:          contracts.DimensionFidelity,
+		Score:              90,
+		Reasons:            "",
+		ReasonsOverflowRef: &ref,
+		VerdictPath:        contracts.VerdictPathAgreement,
+		RubricVersion:      "default",
+		PromptVersion:      "phase0-stub",
+		ResolvedAt:         time.Date(2026, 4, 21, 10, 3, 0, 0, time.UTC),
+	}))
+	writeStep60DoneMarkerForResolverFixture(t, runCtx)
+	require.NoError(t, os.Remove(sidecarPath))
+
+	resolver := FilesystemResolver{RepoDir: runCtx.RunsBase, Now: fixedNow()}
+	_, ok, err := resolver.Resolve(runCtx, pkg, candidates)
+	require.Error(t, err)
+	assert.False(t, ok)
+	assert.Contains(t, err.Error(), "hash step60 scores")
 }
 
 func TestFilesystemResolver_RejectsStep60InputsThatDoNotMatchDoneMarker(t *testing.T) {
@@ -3319,9 +3350,9 @@ func writeStep60DoneMarkerForResolverFixture(t *testing.T, runCtx internalio.Run
 	t.Helper()
 	artifacts, err := loadStep60Artifacts(runCtx)
 	require.NoError(t, err)
-	scoresCount, scoresHash, err := step70FinalScoresState(artifacts.Scores)
+	scoresCount, scoresHash, err := step70FinalScoresState(runCtx, artifacts.Scores)
 	require.NoError(t, err)
-	complianceCount, complianceHash, err := step70FinalComplianceState(artifacts.Compliance)
+	complianceCount, complianceHash, err := step70FinalComplianceState(runCtx, artifacts.Compliance)
 	require.NoError(t, err)
 	pairwiseCount, pairwiseHash, err := step70FinalPairwiseState(artifacts.Pairwise)
 	require.NoError(t, err)
@@ -3364,6 +3395,18 @@ func writeStep60DoneMarkerForResolverFixture(t *testing.T, runCtx internalio.Run
 	markerPath, err := runCtx.ResolveRunRelative("60/done.marker")
 	require.NoError(t, err)
 	require.NoError(t, internalio.WriteJSONAtomic(markerPath, marker))
+}
+
+func writeResolverReasonsSidecar(t *testing.T, runCtx internalio.RunContext, content string) (contracts.OverflowRef, string) {
+	t.Helper()
+	sidecarDir := mustRunPath(t, runCtx, "60/reasons")
+	require.NoError(t, os.MkdirAll(sidecarDir, 0o755))
+	sum := sha256String(content)
+	sidecarPath, err := internalio.WriteSidecar(sidecarDir, sum, content)
+	require.NoError(t, err)
+	refPath, err := internalio.SidecarRefPath(runCtx.RunDir(), sidecarPath)
+	require.NoError(t, err)
+	return contracts.OverflowRef{Path: refPath, Sha256: sum}, sidecarPath
 }
 
 func resolverScoreDimensions() []contracts.Dimension {

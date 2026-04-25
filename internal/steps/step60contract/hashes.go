@@ -162,27 +162,27 @@ func HashFinalPairwise(entries []contracts.PairwiseEntry) (string, error) {
 }
 
 func FinalScoresState(entries []contracts.ScoreEntry) (int, string, error) {
-	collapsed := scorecore.CollapseFinalScores(entries)
-	sort.Slice(collapsed, func(i, j int) bool {
-		if collapsed[i].Agent != collapsed[j].Agent {
-			return collapsed[i].Agent < collapsed[j].Agent
-		}
-		return collapsed[i].Dimension < collapsed[j].Dimension
-	})
-	hash, err := HashCanonicalRows(collapsed)
-	return len(collapsed), hash, err
+	return finalScoresState(collapseFinalScores(entries))
+}
+
+func FinalScoresStateWithOverflowRefs(runIO internalio.RunContext, entries []contracts.ScoreEntry) (int, string, error) {
+	collapsed := collapseFinalScores(entries)
+	if err := ValidateScoreOverflowRefs(runIO, collapsed); err != nil {
+		return 0, "", err
+	}
+	return finalScoresState(collapsed)
 }
 
 func FinalComplianceState(entries []contracts.ComplianceEntry) (int, string, error) {
-	collapsed := scorecore.CollapseFinalCompliance(entries)
-	sort.Slice(collapsed, func(i, j int) bool {
-		if collapsed[i].Agent != collapsed[j].Agent {
-			return collapsed[i].Agent < collapsed[j].Agent
-		}
-		return collapsed[i].RuleID < collapsed[j].RuleID
-	})
-	hash, err := HashCanonicalRows(collapsed)
-	return len(collapsed), hash, err
+	return finalComplianceState(collapseFinalCompliance(entries))
+}
+
+func FinalComplianceStateWithOverflowRefs(runIO internalio.RunContext, entries []contracts.ComplianceEntry) (int, string, error) {
+	collapsed := collapseFinalCompliance(entries)
+	if err := ValidateComplianceOverflowRefs(runIO, collapsed); err != nil {
+		return 0, "", err
+	}
+	return finalComplianceState(collapsed)
 }
 
 func FinalPairwiseState(entries []contracts.PairwiseEntry) (int, string, error) {
@@ -195,6 +195,38 @@ func FinalPairwiseState(entries []contracts.PairwiseEntry) (int, string, error) 
 		}
 		return collapsed[i].AgentB < collapsed[j].AgentB
 	})
+	hash, err := HashCanonicalRows(collapsed)
+	return len(collapsed), hash, err
+}
+
+func collapseFinalScores(entries []contracts.ScoreEntry) []contracts.ScoreEntry {
+	collapsed := scorecore.CollapseFinalScores(entries)
+	sort.Slice(collapsed, func(i, j int) bool {
+		if collapsed[i].Agent != collapsed[j].Agent {
+			return collapsed[i].Agent < collapsed[j].Agent
+		}
+		return collapsed[i].Dimension < collapsed[j].Dimension
+	})
+	return collapsed
+}
+
+func finalScoresState(collapsed []contracts.ScoreEntry) (int, string, error) {
+	hash, err := HashCanonicalRows(collapsed)
+	return len(collapsed), hash, err
+}
+
+func collapseFinalCompliance(entries []contracts.ComplianceEntry) []contracts.ComplianceEntry {
+	collapsed := scorecore.CollapseFinalCompliance(entries)
+	sort.Slice(collapsed, func(i, j int) bool {
+		if collapsed[i].Agent != collapsed[j].Agent {
+			return collapsed[i].Agent < collapsed[j].Agent
+		}
+		return collapsed[i].RuleID < collapsed[j].RuleID
+	})
+	return collapsed
+}
+
+func finalComplianceState(collapsed []contracts.ComplianceEntry) (int, string, error) {
 	hash, err := HashCanonicalRows(collapsed)
 	return len(collapsed), hash, err
 }

@@ -62,7 +62,7 @@ func loadVerifiedStep60Artifacts(runCtx internalio.RunContext, pkg *contracts.Ta
 	if err != nil {
 		return step60ArtifactSnapshot{}, err
 	}
-	if err := verifyStep60ArtifactSnapshot(marker, artifacts); err != nil {
+	if err := verifyStep60ArtifactSnapshot(runCtx, marker, artifacts); err != nil {
 		return step60ArtifactSnapshot{}, err
 	}
 	if err := verifyStep60InputSnapshot(runCtx, pkg, marker); err != nil {
@@ -71,15 +71,15 @@ func loadVerifiedStep60Artifacts(runCtx internalio.RunContext, pkg *contracts.Ta
 	return artifacts, nil
 }
 
-func verifyStep60ArtifactSnapshot(marker contracts.Step60DoneMarker, artifacts step60ArtifactSnapshot) error {
+func verifyStep60ArtifactSnapshot(runCtx internalio.RunContext, marker contracts.Step60DoneMarker, artifacts step60ArtifactSnapshot) error {
 	if !slices.Equal(marker.Dimensions, step70CanonicalDimensions) {
 		return errors.New("step70: step60 done marker dimensions do not match current dimensions")
 	}
-	scoreCount, scoreHash, err := step70FinalScoresState(artifacts.Scores)
+	scoreCount, scoreHash, err := step70FinalScoresState(runCtx, artifacts.Scores)
 	if err != nil {
 		return fmt.Errorf("step70: hash step60 scores: %w", err)
 	}
-	complianceCount, complianceHash, err := step70FinalComplianceState(artifacts.Compliance)
+	complianceCount, complianceHash, err := step70FinalComplianceState(runCtx, artifacts.Compliance)
 	if err != nil {
 		return fmt.Errorf("step70: hash step60 compliance: %w", err)
 	}
@@ -386,12 +386,12 @@ func step70FileSHA256(path string) (string, error) {
 	return step60contract.FileSHA256(path)
 }
 
-func step70FinalScoresState(rows []contracts.ScoreEntry) (int, string, error) {
-	return step60contract.FinalScoresState(rows)
+func step70FinalScoresState(runCtx internalio.RunContext, rows []contracts.ScoreEntry) (int, string, error) {
+	return step60contract.FinalScoresStateWithOverflowRefs(runCtx, rows)
 }
 
-func step70FinalComplianceState(rows []contracts.ComplianceEntry) (int, string, error) {
-	return step60contract.FinalComplianceState(rows)
+func step70FinalComplianceState(runCtx internalio.RunContext, rows []contracts.ComplianceEntry) (int, string, error) {
+	return step60contract.FinalComplianceStateWithOverflowRefs(runCtx, rows)
 }
 
 func step70FinalPairwiseState(rows []contracts.PairwiseEntry) (int, string, error) {
