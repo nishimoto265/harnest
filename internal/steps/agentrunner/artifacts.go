@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/auto-improve/internal/policyartifact"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 )
 
@@ -46,6 +47,10 @@ func SuccessDiffBytes(ctx context.Context, worktreePath, baseSHA, errPrefix stri
 	return os.ReadFile(diffPath)
 }
 
+func successDiffShouldSkipUntracked(path string) bool {
+	return policyartifact.Is(path)
+}
+
 func WriteSuccessDiff(ctx context.Context, worktreePath, baseSHA, errPrefix, destPath string) error {
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return err
@@ -63,21 +68,9 @@ func WriteSuccessDiff(ctx context.Context, worktreePath, baseSHA, errPrefix, des
 		return err
 	}
 
-	if err := streamGitCommandContext(
-		ctx,
-		worktreePath,
-		errPrefix,
-		writer,
-		false,
-		"diff",
-		baseSHA,
-		"--binary",
-		"--no-ext-diff",
-		"--no-textconv",
-		"--",
-		".",
-		":(exclude)checklist-result.json",
-	); err != nil {
+	diffArgs := []string{"diff", baseSHA, "--binary", "--no-ext-diff", "--no-textconv", "--", "."}
+	diffArgs = append(diffArgs, policyartifact.GitExcludePathspecs()...)
+	if err := streamGitCommandContext(ctx, worktreePath, errPrefix, writer, false, diffArgs...); err != nil {
 		return closeWithErr(err)
 	}
 	if writer.truncated {
@@ -93,7 +86,7 @@ func WriteSuccessDiff(ctx context.Context, worktreePath, baseSHA, errPrefix, des
 		if entry == "" {
 			continue
 		}
-		if entry == "checklist-result.json" {
+		if successDiffShouldSkipUntracked(entry) {
 			continue
 		}
 		if err := contracts.EnsureCleanRelativePath(entry); err != nil {

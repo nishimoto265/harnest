@@ -14,15 +14,23 @@ Task
 - Follow the current learned rules listed below.
 
 Checklist artifact contract
-- `checklist-result.json` must be strict JSON with exactly these top-level keys:
+- `checklist-result.json` must be strict JSON.
+- Top-level keys must be exactly:
   - `schema_version`
   - `run_id`
   - `pass`
   - `agent`
   - `items`
+- Each `items[]` object must use this schema:
+  - `rule_id`: required string
+  - `verdict`: required string, one of `compliant`, `n_a`, or `exception`
+  - `rationale`: optional string for `compliant`/`n_a`; required and non-empty when `verdict` is `exception`
+  - `exception_reason`: optional string with extra detail when `verdict` is `exception`
+- Do not use item keys like `id`, `status`, `result`, `description`, `file`, or `files`.
+- Use `items: []` when no learned rule or checklist item applies.
 - Use this shape:
 ```json
-{"schema_version":"1","run_id":"{{ .TaskPackage.RunID }}","pass":1,"agent":"{{ .Agent }}","items":[]}
+{"schema_version":"1","run_id":"{{ .TaskPackage.RunID }}","pass":1,"agent":"{{ .Agent }}","items":[{"rule_id":"task-scope","verdict":"compliant","rationale":"Implemented the task scope."}]}
 ```
 - Do not add keys like `status`, `completed_checks`, or markdown wrappers.
 

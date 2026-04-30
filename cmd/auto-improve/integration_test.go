@@ -288,7 +288,9 @@ func TestIntegrationRunUsesRealGitWorktreesWhenFakeGitIsAbsent(t *testing.T) {
 			continue
 		}
 		manifest := readIntegrationManifest(t, runDirs[0], worktree.Pass, worktree.Agent)
-		assert.Equal(t, shas.base, manifest.BaseSHA)
+		assert.Equal(t, "commit", strings.TrimSpace(runIntegrationGit(t, repoRoot, "cat-file", "-t", manifest.BaseSHA)))
+		runIntegrationGit(t, repoRoot, "merge-base", "--is-ancestor", shas.base, manifest.BaseSHA)
+		runIntegrationGit(t, repoRoot, "merge-base", "--is-ancestor", manifest.BaseSHA, manifest.HeadSHA)
 		assert.Equal(t, "commit", strings.TrimSpace(runIntegrationGit(t, repoRoot, "cat-file", "-t", manifest.HeadSHA)))
 	}
 	worktreeList := runIntegrationGit(t, repoRoot, "worktree", "list", "--porcelain")
@@ -312,8 +314,10 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	require.NoError(t, os.MkdirAll(binDir, 0o755))
 
 	shas := seedRealGitIntegrationRepo(t, repoRoot)
+	seedIntegrationPolicyBranch(t, repoRoot, "auto-improve/policy")
 	writeIntegrationConfigForRepo(t, root, repoRoot, runsBase, worktreeBase)
 	ensureIntegrationRepoGitHubConfig(t, filepath.Join(root, "config.yaml"), "owner/repo")
+	appendPolicyBranchConfig(t, filepath.Join(root, "config.yaml"), "auto-improve/policy")
 	copyExecutable(t, filepath.Join(mustRepoRoot(t), "internal", "orchestrator", "testdata", "bin", "gh"), filepath.Join(binDir, "gh"))
 	installPreflightRuntimeToolsWithoutGit(t, binDir)
 	implementerPath := filepath.Join(binDir, "fake-implementer")
@@ -353,11 +357,13 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	require.Equal(t, contracts.DecisionActionAdopt, decision.Action)
 	adopt, ok := decision.Value.(contracts.DecisionAdopt)
 	require.True(t, ok)
+	require.True(t, adopt.PolicyOnly)
 
 	winnerManifest := readIntegrationManifest(t, runDir, 2, "a1")
-	assert.Equal(t, winnerManifest.HeadSHA, adopt.TargetSha)
-	remoteHead := strings.Fields(runIntegrationGit(t, repoRoot, "ls-remote", "origin", "auto-improve/best"))[0]
-	assert.Equal(t, adopt.TargetSha, remoteHead)
+	assert.NotEqual(t, winnerManifest.HeadSHA, adopt.TargetSha)
+	assert.Equal(t, shas.base, adopt.TargetSha)
+	remoteBestHead := strings.Fields(runIntegrationGit(t, repoRoot, "ls-remote", "origin", "auto-improve/best"))[0]
+	assert.Equal(t, shas.base, remoteBestHead)
 
 	lines, err := internalio.RegistryLines(filepath.Join(effectiveRunsBase, "rules-registry.jsonl"))
 	require.NoError(t, err)
@@ -368,6 +374,14 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	assert.NotEmpty(t, added.IdempotencyKey)
 	assert.Equal(t, adopt.RegistryAppendResult.Sha256, lines[0].Sha256)
 	assert.FileExists(t, filepath.Join(effectiveRunsBase, added.RulePath))
+	runIntegrationGit(t, repoRoot, "fetch", "origin", "+refs/heads/auto-improve/policy:refs/remotes/origin/auto-improve/policy")
+	policyRegistry := runIntegrationGit(t, repoRoot, "show", "origin/auto-improve/policy:auto-improve/rules-registry.jsonl")
+	assert.Equal(t, string(mustReadFile(t, filepath.Join(effectiveRunsBase, "rules-registry.jsonl"))), policyRegistry)
+	policyTree := runIntegrationGit(t, repoRoot, "ls-tree", "-r", "--name-only", "origin/auto-improve/policy")
+	assert.Contains(t, policyTree, "auto-improve/rules-registry.jsonl")
+	assert.Contains(t, policyTree, "auto-improve/"+added.RulePath)
+	assert.NotContains(t, policyTree, "app/message.txt")
+	firstPublishedRegistry := string(mustReadFile(t, filepath.Join(effectiveRunsBase, "rules-registry.jsonl")))
 
 	events, err := state.ScanEventsForRun(mustNewRunCtx(t, pkg.RunID, effectiveRunsBase, effectiveWorktreeBase), pkg.RunID)
 	require.NoError(t, err)
@@ -376,6 +390,30 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	for _, worktree := range pkg.Worktrees {
 		assert.NoDirExists(t, worktree.Path, "step70 cleanup should remove adopted real git worktrees")
 	}
+
+	cmd2 := exec.Command(bin, "run", "--pr", "78", "--with-preflight")
+	cmd2.Dir = root
+	cmd2.Env = cmd.Env
+	stdout.Reset()
+	stderr.Reset()
+	cmd2.Stdout = &stdout
+	cmd2.Stderr = &stderr
+	require.NoError(t, cmd2.Run(), "stdout=%s stderr=%s", stdout.String(), stderr.String())
+
+	secondRunDir := findIntegrationRunDir(t, effectiveRunsBase, "PR78")
+	secondSnapshotRegistry := string(mustReadFile(t, filepath.Join(secondRunDir, "policy", "rules-registry.jsonl")))
+	assert.Equal(t, firstPublishedRegistry, secondSnapshotRegistry)
+	secondDecision, err := internalio.ReadJSON[contracts.Decision](filepath.Join(secondRunDir, "70", "decision.json"))
+	require.NoError(t, err)
+	assert.Equal(t, contracts.DecisionActionNoop, secondDecision.Action)
+	secondLines, err := internalio.RegistryLines(filepath.Join(effectiveRunsBase, "rules-registry.jsonl"))
+	require.NoError(t, err)
+	require.Len(t, secondLines, 1)
+	runIntegrationGit(t, repoRoot, "fetch", "origin", "+refs/heads/auto-improve/policy:refs/remotes/origin/auto-improve/policy")
+	secondPolicyRegistry := runIntegrationGit(t, repoRoot, "show", "origin/auto-improve/policy:auto-improve/rules-registry.jsonl")
+	assert.Equal(t, string(mustReadFile(t, filepath.Join(effectiveRunsBase, "rules-registry.jsonl"))), secondPolicyRegistry)
+	remoteBestHead = strings.Fields(runIntegrationGit(t, repoRoot, "ls-remote", "origin", "auto-improve/best"))[0]
+	assert.Equal(t, shas.base, remoteBestHead)
 }
 
 func TestIntegrationSunsetSubprocessArchivesDeprecatedRule(t *testing.T) {
@@ -483,6 +521,17 @@ func (e cliIntegrationEnv) runDirs(t *testing.T) []string {
 	}
 	sort.Strings(dirs)
 	return dirs
+}
+
+func findIntegrationRunDir(t *testing.T, runsBase, contains string) string {
+	t.Helper()
+	for _, runDir := range (cliIntegrationEnv{runsBase: runsBase}).runDirs(t) {
+		if strings.Contains(filepath.Base(runDir), contains) {
+			return runDir
+		}
+	}
+	t.Fatalf("run dir containing %q not found under %s", contains, runsBase)
+	return ""
 }
 
 func buildIntegrationBinary(t *testing.T) string {
@@ -672,6 +721,19 @@ func seedRealGitIntegrationRepo(t *testing.T, repoRoot string) realGitIntegratio
 	return realGitIntegrationSHAs{base: baseSHA, head: headSHA, merge: mergeSHA}
 }
 
+func seedIntegrationPolicyBranch(t *testing.T, repoRoot, branch string) {
+	t.Helper()
+	current := strings.TrimSpace(runIntegrationGit(t, repoRoot, "rev-parse", "--abbrev-ref", "HEAD"))
+	runIntegrationGit(t, repoRoot, "checkout", "--orphan", "auto-improve-policy-seed")
+	runIntegrationGit(t, repoRoot, "rm", "-r", "-f", "--ignore-unmatch", ".")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, "auto-improve"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "auto-improve", "rules-registry.jsonl"), []byte(""), 0o644))
+	runIntegrationGit(t, repoRoot, "add", "auto-improve/rules-registry.jsonl")
+	runIntegrationGit(t, repoRoot, "commit", "-m", "seed policy")
+	runIntegrationGit(t, repoRoot, "push", "origin", "HEAD:refs/heads/"+branch)
+	runIntegrationGit(t, repoRoot, "checkout", current)
+}
+
 func writeIntegrationConfigForRepo(t *testing.T, root, repoRoot, runsBase, worktreeBase string) {
 	t.Helper()
 	content := "repo:\n" +
@@ -767,6 +829,13 @@ func runIntegrationGit(t *testing.T, dir string, args ...string) string {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 	return string(out)
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return data
 }
 
 func yamlDoubleQuote(value string) string {

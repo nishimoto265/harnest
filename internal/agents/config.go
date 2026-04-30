@@ -35,9 +35,10 @@ const (
 const AllowTestStubProvidersEnv = "AUTO_IMPROVE_ALLOW_TEST_STUB_PROVIDERS"
 
 type Profile struct {
-	Provider Provider `yaml:"provider"`
-	Binary   string   `yaml:"binary"`
-	Args     []string `yaml:"args"`
+	Provider   Provider `yaml:"provider"`
+	Binary     string   `yaml:"binary"`
+	NodeBinary string   `yaml:"node_binary"`
+	Args       []string `yaml:"args"`
 }
 
 type File struct {
@@ -152,6 +153,9 @@ func (f File) Validate() error {
 		case ProviderStub, ProviderStubViolation, ProviderStubAdopt:
 		default:
 			return fmt.Errorf("agents: unsupported provider %q for profile %q", profile.Provider, name)
+		}
+		if strings.TrimSpace(profile.NodeBinary) != "" && profile.Provider != ProviderClaude && profile.Provider != ProviderCodex {
+			return fmt.Errorf("agents: profile %q node_binary is only supported for provider %q or %q", name, ProviderClaude, ProviderCodex)
 		}
 	}
 	for _, role := range []Role{RoleImplementer, RoleJudgePrimary, RoleJudgeSecondary, RoleJudgeArbiter} {

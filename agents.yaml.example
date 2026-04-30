@@ -4,6 +4,9 @@ profiles:
   claude:
     provider: claude
     binary: claude
+    # Optional: use when the Claude wrapper is a Node shebang script that must
+    # run with a specific Node version.
+    # node_binary: /absolute/path/to/node
     args: ["-p"]
   codex:
     provider: codex

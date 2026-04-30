@@ -25,7 +25,7 @@ Rules:
 - If a compliance rule list is provided below, emit one row for each rule_id in that list.
 - When compliance rule_ids are listed, that list is exact: do not add, omit, rename, or substitute rule_ids.
 - When compliance rule_ids are listed, use the matching `## Active Rules` section in the rubric to decide each verdict.
-- Candidate rule IDs below refer to proposed rules from step40. Judge them against the pass2 output using the embedded candidate body.
+- Experiment lesson IDs below refer to proposed lessons from step40. Judge them against the pass2 output using the embedded lesson body.
 
 Required dimensions:
 {{- range .Dimensions }}
@@ -37,6 +37,7 @@ Required compliance rule_ids:
 {{- range .ComplianceRuleIDs }}
 - {{ . }}
 {{- end }}
+Return compliance rows for only these rule_ids. Do not include other active rules from the rubric.
 {{- else if .EnforceExpectedCompliance }}
 No compliance rows are expected. Return an empty compliance array.
 {{- else }}
@@ -45,7 +46,7 @@ No fixed compliance rule list was supplied. Read the rubric and emit compliance 
 
 {{- if .CandidateRules }}
 
-Candidate rule bodies to judge:
+Experiment lesson bodies to judge:
 {{- range .CandidateRules }}
 
 ### {{ .ID }}

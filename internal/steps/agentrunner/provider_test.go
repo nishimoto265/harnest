@@ -75,6 +75,63 @@ func TestImplementerCommandCodexDangerousBypassRequiresProfileOptIn(t *testing.T
 	}, args)
 }
 
+func TestPrepareProfileBinaryUsesConfiguredNodeBinaryForNodeShebang(t *testing.T) {
+	dir := t.TempDir()
+	claudePath := filepath.Join(dir, "claude")
+	nodePath := filepath.Join(dir, "node24")
+	require.NoError(t, os.WriteFile(claudePath, []byte("#!/usr/bin/env node\n"), 0o755))
+	require.NoError(t, os.WriteFile(nodePath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	binary, args, err := PrepareProfileBinary(agents.Profile{
+		Provider:   agents.ProviderClaude,
+		Binary:     claudePath,
+		NodeBinary: nodePath,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, nodePath, binary)
+	assert.Equal(t, []string{claudePath}, args)
+}
+
+func TestProfileEnvAddsNodenvVersionForNodenvNodeBinary(t *testing.T) {
+	env := ProfileEnv(agents.Profile{
+		Provider:   agents.ProviderClaude,
+		Binary:     "claude",
+		NodeBinary: "/Users/test/.nodenv/versions/24.0.0/bin/node",
+	})
+
+	assert.Equal(t, []string{"NODENV_VERSION=24.0.0"}, env)
+}
+
+func TestProfileEnvIgnoresNonNodenvNodeBinary(t *testing.T) {
+	env := ProfileEnv(agents.Profile{
+		Provider:   agents.ProviderClaude,
+		Binary:     "claude",
+		NodeBinary: "/opt/node24/bin/node",
+	})
+
+	assert.Empty(t, env)
+}
+
+func TestPrepareProfileBinaryRejectsNodeBinaryForNonNodeShebang(t *testing.T) {
+	dir := t.TempDir()
+	claudePath := filepath.Join(dir, "claude")
+	nodePath := filepath.Join(dir, "node24")
+	require.NoError(t, os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	require.NoError(t, os.WriteFile(nodePath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	binary, args, err := PrepareProfileBinary(agents.Profile{
+		Provider:   agents.ProviderClaude,
+		Binary:     claudePath,
+		NodeBinary: nodePath,
+	})
+
+	require.Error(t, err)
+	assert.Empty(t, binary)
+	assert.Empty(t, args)
+	assert.Contains(t, err.Error(), "node_binary is set")
+}
+
 func TestPrepareProviderBinary_IgnoresParentPathShadow(t *testing.T) {
 	shadowDir := t.TempDir()
 	shadowPath := filepath.Join(shadowDir, "shadow-agent")

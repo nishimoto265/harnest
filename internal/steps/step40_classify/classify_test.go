@@ -29,13 +29,239 @@ func TestRun_EmptyInputsFailClosed(t *testing.T) {
 
 func TestRun_ValidEmptyComplianceArtifactEmitsZeroCandidates(t *testing.T) {
 	cfg := newTestConfig(t)
-	writeScores(t, cfg.IO, testScoreEntries(cfg.IO.RunID)...)
+	now := time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC)
+	writeScores(t, cfg.IO, contracts.ScoreEntry{
+		SchemaVersion: "1",
+		RunID:         cfg.IO.RunID,
+		Pass:          1,
+		Agent:         "a1",
+		Dimension:     contracts.DimensionFidelity,
+		Score:         90,
+		Reasons:       "No material scoring concern.",
+		VerdictPath:   contracts.VerdictPathSingle,
+		RubricVersion: "default",
+		PromptVersion: "phase0",
+		ResolvedAt:    now,
+	})
 	writeCompliance(t, cfg.IO)
 
 	got, err := Run(context.Background(), cfg)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Empty(t, got.Candidates)
+}
+
+func TestRun_LowScoresWithoutComplianceViolationsProduceScoreConcernCandidates(t *testing.T) {
+	cfg := newTestConfig(t)
+	now := time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC)
+	writeScores(t, cfg.IO,
+		contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         cfg.IO.RunID,
+			Pass:          1,
+			Agent:         "a1",
+			Dimension:     contracts.DimensionCorrectness,
+			Score:         83,
+			Reasons:       "Client component meta tags may not render into the document head.",
+			VerdictPath:   contracts.VerdictPathSingle,
+			RubricVersion: "default",
+			PromptVersion: "phase0",
+			ResolvedAt:    now,
+		},
+		contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         cfg.IO.RunID,
+			Pass:          1,
+			Agent:         "a2",
+			Dimension:     contracts.DimensionMaintainability,
+			Score:         84,
+			Reasons:       "Route-group error handlers duplicate nearly identical implementation details.",
+			VerdictPath:   contracts.VerdictPathSingle,
+			RubricVersion: "default",
+			PromptVersion: "phase0",
+			ResolvedAt:    now,
+		},
+	)
+	writeCompliance(t, cfg.IO,
+		contracts.ComplianceEntry{
+			SchemaVersion: "1",
+			RunID:         cfg.IO.RunID,
+			Pass:          1,
+			Agent:         "a1",
+			RuleID:        "stub-rubric-rule",
+			Verdict:       contracts.ComplianceVerdictNA,
+			Rationale:     "No active rule applies.",
+			VerdictPath:   contracts.VerdictPathSingle,
+			RubricVersion: "default",
+			PromptVersion: "phase0",
+			ResolvedAt:    now,
+		},
+	)
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Len(t, got.Candidates, 2)
+
+	assert.Equal(t, "score-client-component-meta-tags", experimentLessonTitleID(got.Candidates[0].Title))
+	assert.Equal(t, "score-deduplicate-route-group-error-handlers", experimentLessonTitleID(got.Candidates[1].Title))
+	assertCandidateBodies(t, cfg.IO, got.Candidates)
+	assertExperimentChecklist(t, cfg.IO, "score-client-component-meta-tags", "score-deduplicate-route-group-error-handlers")
+
+	correctnessBodyPath, err := cfg.IO.ResolveRunRelative(got.Candidates[0].ProposedBodyPath)
+	require.NoError(t, err)
+	correctnessBody, err := os.ReadFile(correctnessBodyPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(correctnessBody), "a1/correctness score 83: Client component meta tags may not render into the document head.")
+
+	maintainabilityBodyPath, err := cfg.IO.ResolveRunRelative(got.Candidates[1].ProposedBodyPath)
+	require.NoError(t, err)
+	maintainabilityBody, err := os.ReadFile(maintainabilityBodyPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(maintainabilityBody), "a2/maintainability score 84: Route-group error handlers duplicate nearly identical implementation details.")
+}
+
+func TestRun_ExplicitIssuesProduceLessonsAndSuppressScoreConcernFallback(t *testing.T) {
+	cfg := newTestConfig(t)
+	now := time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC)
+	writeScores(t, cfg.IO,
+		contracts.ScoreEntry{
+			SchemaVersion: "1",
+			RunID:         cfg.IO.RunID,
+			Pass:          1,
+			Agent:         "a1",
+			Dimension:     contracts.DimensionCorrectness,
+			Score:         83,
+			Reasons:       "Client component meta tags may not render into the document head.",
+			VerdictPath:   contracts.VerdictPathSingle,
+			RubricVersion: "default",
+			PromptVersion: "phase0",
+			ResolvedAt:    now,
+		},
+	)
+	writeCompliance(t, cfg.IO)
+	writeIssues(t, cfg.IO,
+		contracts.IssueEntry{
+			SchemaVersion:  "1",
+			RunID:          cfg.IO.RunID,
+			Pass:           1,
+			Agent:          "a1",
+			JudgeRole:      contracts.JudgeRolePrimary,
+			IssueID:        "issue-1111111111111111",
+			Severity:       contracts.IssueSeverityHigh,
+			Category:       "routing",
+			Title:          "Extract proxy not-found matching",
+			Evidence:       "proxy.ts mixes request id injection with 404 rewrite pattern matching.",
+			ProposedLesson: "Keep route matching helpers separate from request mutation middleware.",
+			ChecklistItem:  "Separate proxy 404 matching logic from request mutation logic.",
+			OutputSha256:   strings.Repeat("a", 64),
+			RubricVersion:  "default",
+			PromptVersion:  "phase0",
+			ResolvedAt:     now,
+		},
+	)
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Len(t, got.Candidates, 1)
+	assert.Equal(t, "issue-routing-extract-proxy-not-found-matching", experimentLessonTitleID(got.Candidates[0].Title))
+	assertExperimentChecklist(t, cfg.IO, "issue-routing-extract-proxy-not-found-matching")
+
+	bodyPath, err := cfg.IO.ResolveRunRelative(got.Candidates[0].ProposedBodyPath)
+	require.NoError(t, err)
+	body, err := os.ReadFile(bodyPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "- issue: a1/primary/high: proxy.ts mixes request id injection with 404 rewrite pattern matching.")
+	assert.Contains(t, string(body), "Apply this proposed lesson: Keep route matching helpers separate from request mutation middleware.")
+	assert.NotContains(t, string(body), "Client component meta tags may not render into the document head.")
+}
+
+func TestRun_ExplicitIssuesMergesSimilarLessons(t *testing.T) {
+	cfg := newTestConfig(t)
+	now := time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC)
+	writeScores(t, cfg.IO, contracts.ScoreEntry{
+		SchemaVersion: "1",
+		RunID:         cfg.IO.RunID,
+		Pass:          1,
+		Agent:         "a1",
+		Dimension:     contracts.DimensionCorrectness,
+		Score:         83,
+		Reasons:       "Baseline score row required by step40.",
+		VerdictPath:   contracts.VerdictPathSingle,
+		RubricVersion: "default",
+		PromptVersion: "phase0",
+		ResolvedAt:    now,
+	})
+	writeCompliance(t, cfg.IO)
+	writeIssues(t, cfg.IO,
+		contracts.IssueEntry{
+			SchemaVersion:  "1",
+			RunID:          cfg.IO.RunID,
+			Pass:           1,
+			Agent:          "a1",
+			JudgeRole:      contracts.JudgeRolePrimary,
+			IssueID:        "issue-1111111111111111",
+			Severity:       contracts.IssueSeverityMedium,
+			Category:       "completeness",
+			Title:          "Only en.json locale file updated with Error translations",
+			Evidence:       "messages/en.json gets the new Error section but no other locale files are modified.",
+			ProposedLesson: "When adding i18n keys, verify all supported locale files are updated or confirm fallback behavior covers missing keys.",
+			ChecklistItem:  "Verify all locale files are updated when adding new translation keys.",
+			OutputSha256:   strings.Repeat("a", 64),
+			RubricVersion:  "default",
+			PromptVersion:  "phase0",
+			ResolvedAt:     now,
+		},
+		contracts.IssueEntry{
+			SchemaVersion:  "1",
+			RunID:          cfg.IO.RunID,
+			Pass:           1,
+			Agent:          "a2",
+			JudgeRole:      contracts.JudgeRoleSecondary,
+			IssueID:        "issue-2222222222222222",
+			Severity:       contracts.IssueSeverityLow,
+			Category:       "maintainability",
+			Title:          "Only en.json locale updated",
+			Evidence:       "The patch adds Error messages only to en.json.",
+			ProposedLesson: "Add new translation keys to all supported locale files, not just one.",
+			ChecklistItem:  "Add new translation keys to all supported locale files, not just one.",
+			OutputSha256:   strings.Repeat("b", 64),
+			RubricVersion:  "default",
+			PromptVersion:  "phase0",
+			ResolvedAt:     now,
+		},
+		contracts.IssueEntry{
+			SchemaVersion:  "1",
+			RunID:          cfg.IO.RunID,
+			Pass:           1,
+			Agent:          "a3",
+			JudgeRole:      contracts.JudgeRolePrimary,
+			IssueID:        "issue-3333333333333333",
+			Severity:       contracts.IssueSeverityLow,
+			Category:       "edge-case",
+			Title:          "Terms proxy rewrite does not handle trailing slash",
+			Evidence:       "The middleware compares /terms only and misses /terms/.",
+			ProposedLesson: "Normalize pathname trailing slashes before comparing middleware route guards.",
+			ChecklistItem:  "Verify path comparisons in middleware handle trailing slash variations.",
+			OutputSha256:   strings.Repeat("c", 64),
+			RubricVersion:  "default",
+			PromptVersion:  "phase0",
+			ResolvedAt:     now,
+		},
+	)
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Len(t, got.Candidates, 2)
+
+	assert.Equal(t, "issue-completeness-only-en-json-locale-file-updated-with-a957a83b1cd7", experimentLessonTitleID(got.Candidates[0].Title))
+	assert.Equal(t, "issue-edge-case-terms-proxy-rewrite-does-not-handle-trailing-slash", experimentLessonTitleID(got.Candidates[1].Title))
+
+	bodyPath, err := cfg.IO.ResolveRunRelative(got.Candidates[0].ProposedBodyPath)
+	require.NoError(t, err)
+	body, err := os.ReadFile(bodyPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "messages/en.json gets the new Error section")
+	assert.Contains(t, string(body), "The patch adds Error messages only to en.json")
 }
 
 func TestRun_ScaffoldOnlyEvidenceEmitsZeroCandidates(t *testing.T) {
@@ -87,16 +313,17 @@ func TestRun_ComplianceViolationsOnlyProduceNewCandidates(t *testing.T) {
 	require.Len(t, got.Candidates, 2)
 
 	assert.Equal(t, "cand-2026-04-21-PR42-abcdef0-001", got.Candidates[0].CandidateID)
-	assert.Equal(t, "rule-a", strings.TrimPrefix(got.Candidates[0].Title, "Rule candidate for "))
+	assert.Equal(t, "rule-a", experimentLessonTitleID(got.Candidates[0].Title))
 	assert.Equal(t, contracts.CandidateKindNew, got.Candidates[0].Kind)
 	assert.Empty(t, got.Candidates[0].TargetRuleID)
 
 	assert.Equal(t, "cand-2026-04-21-PR42-abcdef0-002", got.Candidates[1].CandidateID)
-	assert.Equal(t, "rule-b", strings.TrimPrefix(got.Candidates[1].Title, "Rule candidate for "))
+	assert.Equal(t, "rule-b", experimentLessonTitleID(got.Candidates[1].Title))
 	assert.Equal(t, contracts.CandidateKindNew, got.Candidates[1].Kind)
 	assert.Empty(t, got.Candidates[1].TargetRuleID)
 
 	assertCandidateBodies(t, cfg.IO, got.Candidates)
+	assertExperimentChecklist(t, cfg.IO, "rule-a", "rule-b")
 
 	stored := readCandidatesFile(t, cfg.IO)
 	assert.Equal(t, got.CandidatesHash, stored.CandidatesHash)
@@ -135,7 +362,7 @@ func TestRun_RegistryMatchesProduceMixedNewAndUpdateCandidates(t *testing.T) {
 	kinds := map[string]contracts.CandidateKind{}
 	targets := map[string]string{}
 	for _, candidate := range got.Candidates {
-		ruleID := strings.TrimPrefix(candidate.Title, "Rule candidate for ")
+		ruleID := experimentLessonTitleID(candidate.Title)
 		kinds[ruleID] = candidate.Kind
 		targets[ruleID] = candidate.TargetRuleID
 	}
@@ -151,7 +378,7 @@ func TestRun_RegistryMatchesProduceMixedNewAndUpdateCandidates(t *testing.T) {
 	classifications := readClassificationFile(t, cfg.IO)
 	require.Len(t, classifications, 4)
 	for _, entry := range classifications {
-		ruleID := strings.TrimPrefix(got.Candidates[indexOfCandidate(t, got.Candidates, entry.CandidateID)].Title, "Rule candidate for ")
+		ruleID := experimentLessonTitleID(got.Candidates[indexOfCandidate(t, got.Candidates, entry.CandidateID)].Title)
 		switch ruleID {
 		case "rule-active", "rule-restored":
 			assert.Equal(t, 90, entry.SimilarityScore)
@@ -238,8 +465,8 @@ func TestRun_IgnoresSupersededComplianceViolations(t *testing.T) {
 		Pass:          1,
 		Agent:         "a1",
 		Dimension:     contracts.DimensionFidelity,
-		Score:         80,
-		Reasons:       "Latest scoring still preserved a useful rationale.",
+		Score:         90,
+		Reasons:       "No material scoring concern.",
 		VerdictPath:   contracts.VerdictPathSingle,
 		RubricVersion: "default",
 		PromptVersion: "phase0",
@@ -367,7 +594,7 @@ func TestBuildCandidates_CollectsScoreEvidenceFromViolatingAgentsBeyondComplianc
 		{SchemaVersion: "1", RunID: cfg.IO.RunID, Pass: 1, Agent: "a4", RuleID: "rule-cap", Verdict: contracts.ComplianceVerdictViolated, Rationale: "placeholder", VerdictPath: contracts.VerdictPathSingle, RubricVersion: "default", PromptVersion: "phase0", ResolvedAt: now},
 	}
 
-	built, err := buildCandidates(cfg.IO, now, scores, compliance, nil, filepath.Dir(cfg.registryPath()))
+	built, err := buildCandidates(cfg.IO, now, scores, compliance, nil, nil, filepath.Dir(cfg.registryPath()))
 	require.NoError(t, err)
 	require.Len(t, built, 1)
 	assert.Contains(t, built[0].Body, "a4/fidelity: Fourth violating agent exposed the only useful score evidence for this rule.")
@@ -481,7 +708,7 @@ func TestRun_RegistryVariantsProduceExpectedCandidateKinds(t *testing.T) {
 	kinds := map[string]contracts.CandidateKind{}
 	targets := map[string]string{}
 	for _, candidate := range got.Candidates {
-		ruleID := strings.TrimPrefix(candidate.Title, "Rule candidate for ")
+		ruleID := experimentLessonTitleID(candidate.Title)
 		kinds[ruleID] = candidate.Kind
 		targets[ruleID] = candidate.TargetRuleID
 	}
@@ -504,10 +731,10 @@ func TestRun_ClassifiesDuplicateWhenExistingRuleBodyMatchesCandidate(t *testing.
 	body := candidateBodyMarkdownWithEvidence(contracts.Candidate{
 		CandidateID:      "cand-existing",
 		Kind:             contracts.CandidateKindNew,
-		Title:            "Rule candidate for rule-dup",
+		Title:            "Experiment lesson for rule-dup",
 		Problem:          "Pass1 recorded 1 violation(s) for rule rule-dup.",
 		Rationale:        "Derived from 1 compliance violation rationale(s) and 1 score reason(s) for rule-dup.",
-		ProposedBodyPath: "40/candidates/cand-existing.md",
+		ProposedBodyPath: "40/experiment/lessons/rule-dup.md",
 	}, candidateEvidence{
 		Compliance: []string{"Rule rule-dup was skipped when the implementation touched the guarded path."},
 		Scores:     []string{"a1/fidelity: Missing the guard lets regressions slip into the changed code path."},
@@ -597,10 +824,10 @@ func TestRun_DuplicateClassifierIgnoresRolledBackRuleBody(t *testing.T) {
 		CandidateID:      "cand-existing",
 		Kind:             contracts.CandidateKindUpdate,
 		TargetRuleID:     "rule-dup",
-		Title:            "Rule candidate for rule-dup",
+		Title:            "Experiment lesson for rule-dup",
 		Problem:          "problem",
 		Rationale:        "rationale",
-		ProposedBodyPath: "40/candidates/cand-existing.md",
+		ProposedBodyPath: "40/experiment/lessons/rule-dup.md",
 	}, candidateEvidence{})
 	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "rule-dup.md"), []byte(body), 0o644))
 	added := registryAdded("rule-dup", strings.Repeat("9", 64))
@@ -745,6 +972,13 @@ func writeCompliance(t *testing.T, runIO internalio.RunContext, entries ...contr
 	require.NoError(t, err)
 	writeJSONL(t, path, entries...)
 	refreshStep30Marker(t, runIO)
+}
+
+func writeIssues(t *testing.T, runIO internalio.RunContext, entries ...contracts.IssueEntry) {
+	t.Helper()
+	path, err := runIO.ResolveRunRelative(issuesPath)
+	require.NoError(t, err)
+	writeJSONL(t, path, entries...)
 }
 
 func writeRegistry(t *testing.T, path string, entries ...contracts.RuleRegistryEntry) {
@@ -1020,7 +1254,25 @@ func assertCandidateBodies(t *testing.T, runIO internalio.RunContext, candidates
 		data, err := os.ReadFile(path)
 		require.NoError(t, err)
 		assert.Equal(t, candidate.ProposedBodySha256, sha256String(string(data)))
+		assert.Contains(t, string(data), "# "+experimentLessonTitleID(candidate.Title))
 	}
+}
+
+func assertExperimentChecklist(t *testing.T, runIO internalio.RunContext, lessonIDs ...string) {
+	t.Helper()
+	path, err := runIO.ResolveRunRelative("40/experiment/checklist.md")
+	require.NoError(t, err)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	text := string(data)
+	assert.Contains(t, text, "# Checklist")
+	for _, lessonID := range lessonIDs {
+		assert.Contains(t, text, "`"+lessonID+"`")
+	}
+}
+
+func experimentLessonTitleID(title string) string {
+	return strings.TrimPrefix(title, "Experiment lesson for ")
 }
 
 func sha256String(content string) string {
@@ -1237,7 +1489,7 @@ func TestBestDuplicateMatch_IgnoresTemplateBoilerplate(t *testing.T) {
 	candidateBody := candidateBodyMarkdown(contracts.Candidate{
 		CandidateID:  "cand-1",
 		Kind:         contracts.CandidateKindNew,
-		Title:        "Rule candidate for rule-a",
+		Title:        "Experiment lesson for rule-a",
 		Problem:      "Pass1 recorded 3 violation(s) for rule rule-a.",
 		Rationale:    "Phase 0 deterministic classify generated one candidate from compliance-A.jsonl for rule-a.",
 		TargetRuleID: "",

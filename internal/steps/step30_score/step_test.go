@@ -115,6 +115,43 @@ func TestStep30Score_AllowsMultipleComplianceRowsPerAgent(t *testing.T) {
 	assert.Equal(t, int64(6), marker.ExpectedCounts.Compliance)
 }
 
+func TestStep30Score_WritesExplicitIssues(t *testing.T) {
+	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
+	provider := &fakePanelProvider{
+		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
+			out := makeJudgeOutput(input, role, 80, []ruleVerdict{{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant}})
+			if role == contracts.JudgeRolePrimary {
+				out.Issues = []judges.Issue{{
+					Severity:       contracts.IssueSeverityHigh,
+					Category:       "routing",
+					Title:          "Extract proxy not-found matching",
+					Evidence:       "proxy.ts mixes request id injection with 404 rewrite pattern matching.",
+					ProposedLesson: "Keep route matching helpers separate from request mutation middleware.",
+					ChecklistItem:  "Separate proxy 404 matching logic from request mutation logic.",
+				}}
+			}
+			return out
+		},
+	}
+
+	step := New(WithPanelProvider(provider))
+	setStepRubric(t, step, "rule-a")
+	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
+
+	issuesPath, err := runCtx.ResolveRunRelative("30/issues-A.jsonl")
+	require.NoError(t, err)
+	issues, err := internalio.ReadJSONL[contracts.IssueEntry](issuesPath)
+	require.NoError(t, err)
+	require.Len(t, issues, 3)
+	for _, issue := range issues {
+		assert.Equal(t, contracts.JudgeRolePrimary, issue.JudgeRole)
+		assert.Equal(t, contracts.IssueSeverityHigh, issue.Severity)
+		assert.Equal(t, "routing", issue.Category)
+		assert.NotEmpty(t, issue.IssueID)
+		assert.Len(t, issue.OutputSha256, 64)
+	}
+}
+
 func TestStep30Score_ResumeWithoutMarkerDoesNotRejudgeOrAppend(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
 	provider := &fakePanelProvider{

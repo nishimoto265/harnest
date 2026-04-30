@@ -79,6 +79,7 @@ type DecisionAdopt struct {
 	BestShaBefore  string         `json:"best_sha_before" validate:"required,sha1_hex"`
 	TargetSha      string         `json:"target_sha" validate:"required,sha1_hex"`
 	CandidatesHash string         `json:"candidates_hash" validate:"required,sha256_hex"`
+	PolicyOnly     bool           `json:"policy_only,omitempty"`
 
 	// RegistryAppendResult: step70 stage 4 で registry に append した結果.
 	RegistryAppendResult RegistryAppendResult `json:"registry_append_result" validate:"required"`

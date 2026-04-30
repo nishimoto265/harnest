@@ -66,6 +66,18 @@ case "$subcmd" in
       exit 0
     fi
     ;;
+  add)
+    exit 0
+    ;;
+  write-tree)
+    echo "0000000000000000000000000000000000000000"
+    ;;
+  commit-tree)
+    echo "${AUTO_IMPROVE_TEST_TARGET_SHA}"
+    ;;
+  update-ref|reset)
+    exit 0
+    ;;
   worktree)
     case "${1:-}" in
       add)
@@ -101,6 +113,9 @@ case "$subcmd" in
     esac
     ;;
   diff)
+    if [ "${1:-}" = "--cached" ] || [ "${1:-}" = "--name-only" ]; then
+      exit 0
+    fi
     for file in "$repo_dir"/generated-*; do
       [ -e "$file" ] || continue
       name="$(basename "$file")"

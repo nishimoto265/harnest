@@ -23,6 +23,13 @@ func CollapseFinalCompliance(rows []contracts.ComplianceEntry) []contracts.Compl
 	})
 }
 
+// CollapseIssues keeps only the latest issue row for each generated issue_id.
+func CollapseIssues(rows []contracts.IssueEntry) []contracts.IssueEntry {
+	return internalio.CollapseByKey(rows, func(e contracts.IssueEntry) string {
+		return e.IssueID
+	})
+}
+
 // CollapseRawScores reduces raw score rows and drops stale arbiter rows whose
 // refs no longer point at the latest primary/secondary rows.
 func CollapseRawScores(rows []contracts.RawScoreEntry) []contracts.RawScoreEntry {

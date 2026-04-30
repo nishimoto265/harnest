@@ -293,6 +293,17 @@ func TestChecklistResult_Reject_ExceptionWithoutRationale(t *testing.T) {
 	assert.ErrorIs(t, err, ErrChecklistExceptionRationaleRequired)
 }
 
+func TestChecklistResult_UnmarshalBackfillsExceptionRationale(t *testing.T) {
+	data := []byte(`{"schema_version":"1","run_id":"2026-04-20-PR42-abcdef0","pass":1,"agent":"a1","items":[{"rule_id":"r-1","verdict":"exception","exception_reason":"Next.js requires this exception."}]}`)
+
+	var cr ChecklistResult
+	require.NoError(t, cr.UnmarshalJSON(data))
+
+	require.Len(t, cr.Items, 1)
+	assert.Equal(t, "Next.js requires this exception.", cr.Items[0].Rationale)
+	assert.Equal(t, "Next.js requires this exception.", cr.Items[0].ExceptionReason)
+}
+
 // ScoreEntry / ComplianceEntry / PairwiseEntry 最小 validator 動作確認.
 func TestScoreEntry_Valid(t *testing.T) {
 	s := ScoreEntry{

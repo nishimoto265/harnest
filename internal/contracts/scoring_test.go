@@ -159,6 +159,34 @@ func TestRawComplianceEntry_Validate_RejectsOverflowRefOutsidePassPrefix(t *test
 	assert.ErrorIs(t, err, ErrOverflowRefPathPrefixMismatch)
 }
 
+func TestIssueEntry_RoundTrip(t *testing.T) {
+	entry := IssueEntry{
+		SchemaVersion:  "1",
+		RunID:          "2026-04-20-PR42-abcdef0",
+		Pass:           1,
+		Agent:          "a1",
+		JudgeRole:      JudgeRolePrimary,
+		IssueID:        "issue-abcdef1234567890",
+		Severity:       IssueSeverityHigh,
+		Category:       "routing",
+		Title:          "Extract proxy not-found matching",
+		Evidence:       "proxy.ts mixes request id injection with 404 rewrite pattern matching.",
+		ProposedLesson: "Keep route matching helpers separate from request mutation middleware.",
+		ChecklistItem:  "Separate proxy 404 matching logic from request mutation logic.",
+		OutputSha256:   "0000000000000000000000000000000000000000000000000000000000000004",
+		RubricVersion:  "v1",
+		PromptVersion:  "p1",
+		ResolvedAt:     time.Now(),
+	}
+	data, err := MarshalStrict(entry)
+	require.NoError(t, err)
+
+	var decoded IssueEntry
+	require.NoError(t, decodeStrict(data, &decoded))
+	assert.Equal(t, entry.IssueID, decoded.IssueID)
+	assert.Equal(t, entry.Severity, decoded.Severity)
+}
+
 func TestStep30DoneMarker_RoundTrip(t *testing.T) {
 	marker := Step30DoneMarker{
 		CompletedAgents: []AgentID{"a1", "a2", "a3"},

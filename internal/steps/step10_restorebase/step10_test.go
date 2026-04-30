@@ -24,6 +24,7 @@ import (
 const testBaseSHA = "0123456789abcdef0123456789abcdef01234567"
 const testMergeCommitOID = "89abcdef0123456789abcdef0123456789abcdef"
 const testBaseRefOID = "76543210fedcba9876543210fedcba9876543210"
+const testBestBranchSHA = "fedcba9876543210fedcba9876543210fedcba98"
 
 type stubGH struct {
 	info PRInfo
@@ -48,6 +49,7 @@ type stubGit struct {
 	resolvedBy        map[string]string
 	mergeBase         map[string]string
 	fetched           []string
+	fetchedBranches   []string
 	repoSlug          string
 	repoSlugErr       error
 	repoSlugByRoot    map[string]string
@@ -128,6 +130,13 @@ func (s *stubGit) FetchCommit(ctx context.Context, repoRoot, sha string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.fetched = append(s.fetched, repoRoot+"::"+sha)
+	return nil
+}
+
+func (s *stubGit) FetchBranch(ctx context.Context, repoRoot, branch string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fetchedBranches = append(s.fetchedBranches, repoRoot+"::"+branch)
 	return nil
 }
 
@@ -261,6 +270,43 @@ func TestRun_HappyPath_SixWorktrees(t *testing.T) {
 	assert.Contains(t, reloaded.ReconstructedTaskPrompt, "### PR Context")
 	assert.Contains(t, reloaded.ReconstructedTaskPrompt, "### Changed Tests")
 	assert.NotContains(t, reloaded.ReconstructedTaskPrompt, "### Diff Excerpt")
+}
+
+func TestRun_UsesCodeBaseForWorktreeBaseAndTaskDiff(t *testing.T) {
+	rc := newRunCtx(t)
+	repoRoot := t.TempDir()
+	git := newStubGit()
+	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
+	git.changedFiles = []string{"app/error.tsx"}
+	git.diffText = "diff --git a/app/error.tsx b/app/error.tsx\n+error UI\n"
+	runner := &Runner{
+		GH: stubGH{info: PRInfo{
+			Number:         42,
+			Title:          "improve error UI",
+			BaseRefOid:     testBaseRefOID,
+			HeadRefOid:     testBaseSHA,
+			MergeCommitOID: testMergeCommitOID,
+		}},
+		Git: git,
+	}
+
+	res, err := runner.Run(context.Background(), Input{
+		PR:               42,
+		BestBranch:       "auto-improve/best",
+		TaskPromptSource: string(TaskPromptSourceAuto),
+		RepoRoot:         repoRoot,
+		RunCtx:           rc,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, testBaseSHA, res.Response.BaseSHA)
+	for _, worktree := range res.Response.TaskPackage.Worktrees {
+		assert.Equal(t, testBaseSHA, worktree.BaseSHA)
+		assert.Equal(t, testBaseSHA, worktree.HeadSHA)
+	}
+	assert.Empty(t, git.fetchedBranches)
+	assert.Equal(t, 1, git.changedFilesCalls)
+	assert.Equal(t, 1, git.diffCalls)
 }
 
 func TestRun_NoPolicyBranchSnapshotsLocalPolicy(t *testing.T) {
@@ -758,10 +804,10 @@ func TestRun_PersistedBaseSHADrift(t *testing.T) {
 	_, err := runner.Run(context.Background(), in)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "persisted base.sha="+testBaseRefOID)
-	assert.Contains(t, err.Error(), "merge-base="+testBaseSHA)
+	assert.Contains(t, err.Error(), "code_base_sha="+testBaseSHA)
 }
 
-func TestRun_PersistedBaseSHAMatchesMergeBase(t *testing.T) {
+func TestRun_PersistedBaseSHAMatchesCodeBase(t *testing.T) {
 	rc := newRunCtx(t)
 	require.NoError(t, internalio.WriteAtomic(rc.BaseSHAPath(), []byte(testBaseSHA+"\n")))
 
@@ -798,6 +844,10 @@ func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", testMergeCommitOID}):
 				return nil, nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
+				return []byte(testBaseSHA + "\n"), nil, nil
+			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", "+refs/heads/auto-improve/best:refs/remotes/origin/auto-improve/best"}):
+				return nil, nil, nil
+			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", "origin/auto-improve/best"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", firstBranch, firstPath, testBaseSHA}):
 				return nil, []byte("fatal: a branch named '" + firstBranch + "' already exists\n"), errors.New("exit status 128")
@@ -850,6 +900,10 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", testMergeCommitOID}):
 				return nil, nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
+				return []byte(testBaseSHA + "\n"), nil, nil
+			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", "+refs/heads/auto-improve/best:refs/remotes/origin/auto-improve/best"}):
+				return nil, nil, nil
+			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", "origin/auto-improve/best"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "list", "--porcelain"}):
 				return []byte("worktree " + firstPath + "\n\n"), nil, nil
@@ -1386,6 +1440,18 @@ func TestReadTaskBriefGeneratorResponse_ClaudeWrapper(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "Wrapped task", got)
+}
+
+func TestClaudeTaskBriefGeneratorArgsUseReadOnlyToolsAndCommandWorkdir(t *testing.T) {
+	args, err := claudeTaskBriefGeneratorArgs([]string{"--model", "claude-sonnet-4-6"}, "/tmp/worktree")
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"-p",
+		"--output-format", "json",
+		"--allowedTools", "Read",
+		"--model", "claude-sonnet-4-6",
+	}, args)
 }
 
 func TestReadTaskBriefGeneratorResponse_RejectsMissingTask(t *testing.T) {

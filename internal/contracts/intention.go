@@ -47,6 +47,7 @@ type IntentionRecord struct {
 	BestShaBefore  string `json:"best_sha_before" validate:"required,sha1_hex"`
 	TargetSha      string `json:"target_sha" validate:"required,sha1_hex"`
 	CandidatesHash string `json:"candidates_hash" validate:"required,sha256_hex"`
+	PolicyOnly     bool   `json:"policy_only,omitempty"`
 
 	// RegistryHeadBefore: registry last-entry sha256 at planning time.
 	// rules-registry.jsonl が空の場合は `""` (empty string) を許容 (planning が

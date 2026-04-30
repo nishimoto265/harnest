@@ -28,6 +28,12 @@ func TestSanitizeForPromptEmbedding_PreservesPlainTextShape(t *testing.T) {
 	assert.True(t, strings.HasPrefix(got, "Goal\n- keep"))
 }
 
+func TestSanitizeForPromptEmbedding_ReplacesInvalidUTF8(t *testing.T) {
+	got := SanitizeForPromptEmbedding("ok " + string([]byte{0xff, 0xfe}) + " end")
+
+	assert.Contains(t, got, "ok \uFFFD end")
+}
+
 func TestSanitizeForPromptEmbedding_FencesUntrustedText(t *testing.T) {
 	got := SanitizeForPromptEmbedding("use this\n", SafeTextOptions{
 		Label: "task brief",

@@ -108,6 +108,43 @@ func TestResolveWinningAgent_CollapsesLatestScoresAndPairwiseRows(t *testing.T) 
 	assert.Equal(t, contracts.AgentID("a2"), winningAgent)
 }
 
+func TestFilesystemResolver_AllDuplicateCandidatesDoesNotRequireStep60Artifacts(t *testing.T) {
+	runCtx := newResolverRunContext(t)
+	items := []contracts.Candidate{{
+		CandidateID:        "cand-1",
+		Kind:               contracts.CandidateKindDuplicate,
+		TargetRuleID:       "r-existing",
+		Title:              "Duplicate existing lesson",
+		ProposedBodyPath:   "40/candidates/cand-1.md",
+		ProposedBodySha256: strings.Repeat("1", 64),
+	}}
+	candidates := &contracts.Candidates{
+		SchemaVersion:  "1",
+		RunID:          runCtx.RunID,
+		Candidates:     items,
+		CandidatesHash: contracts.CanonicalCandidatesHash(items),
+	}
+	pkg := &contracts.TaskPackage{
+		SchemaVersion:           "1",
+		RunID:                   runCtx.RunID,
+		PR:                      42,
+		Title:                   "test",
+		BaseSHA:                 strings.Repeat("a", 40),
+		BestBranch:              "auto-improve/best",
+		ReconstructedTaskPrompt: "test task",
+		Worktrees: []contracts.WorktreeAllocation{
+			{Agent: "a1", Pass: 1, Path: filepath.Join(runCtx.WorktreeBase, "p1-a1"), Branch: "b1", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},
+		},
+		CreatedAt: time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+	}
+
+	target, ok, err := (FilesystemResolver{}).Resolve(runCtx, pkg, candidates)
+
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Empty(t, target)
+}
+
 func TestLatestRuleSha256_UsesRollbackAwareEffectiveState(t *testing.T) {
 	lines := []registryLine{
 		{Entry: contracts.RuleRegistryEntry{
@@ -224,7 +261,7 @@ func TestGeneratedRuleID_IsValidAndDeterministic(t *testing.T) {
 	assert.True(t, strings.HasPrefix(id1, "r-"))
 }
 
-func TestPromotionGatePassed_RequiresCandidateComplianceEvidence(t *testing.T) {
+func TestPromotionGatePassed_DoesNotHardGateCandidateComplianceEvidence(t *testing.T) {
 	runCtx := newResolverRunContext(t)
 	candidates := resolverGateCandidates(runCtx.RunID)
 	seedResolverGateScores(t, runCtx, 80, map[contracts.Dimension]int{})
@@ -232,12 +269,12 @@ func TestPromotionGatePassed_RequiresCandidateComplianceEvidence(t *testing.T) {
 
 	ok, err := testPromotionGatePassed(t, runCtx, "a1", candidates)
 	require.NoError(t, err)
-	assert.False(t, ok)
+	assert.True(t, ok)
 
 	seedResolverGateCompliance(t, runCtx, "cand-1", contracts.ComplianceVerdictViolated)
 	ok, err = testPromotionGatePassed(t, runCtx, "a1", candidates)
 	require.NoError(t, err)
-	assert.False(t, ok)
+	assert.True(t, ok)
 
 	seedResolverGateCompliance(t, runCtx, "cand-1", contracts.ComplianceVerdictCompliant)
 	ok, err = testPromotionGatePassed(t, runCtx, "a1", candidates)

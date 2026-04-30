@@ -72,6 +72,15 @@ type CandidateRule struct {
 	Body         string `json:"body"`
 }
 
+type Issue struct {
+	Severity       contracts.IssueSeverity `json:"severity"`
+	Category       string                  `json:"category"`
+	Title          string                  `json:"title"`
+	Evidence       string                  `json:"evidence"`
+	ProposedLesson string                  `json:"proposed_lesson"`
+	ChecklistItem  string                  `json:"checklist_item"`
+}
+
 func (in JudgeInput) Validate() error {
 	if err := validation.Instance().Var(in.RunID, "required,run_id_fmt"); err != nil {
 		return err
@@ -105,6 +114,7 @@ type JudgeOutput struct {
 	Scores     []contracts.ScoreEntry      `json:"scores"`
 	Compliance []contracts.ComplianceEntry `json:"compliance"`
 	Arbiter    bool                        `json:"arbiter"`
+	Issues     []Issue                     `json:"issues,omitempty"`
 }
 
 func (out JudgeOutput) Validate() error {

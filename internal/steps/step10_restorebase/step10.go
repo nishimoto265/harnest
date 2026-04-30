@@ -3,11 +3,14 @@
 // step10 is the first step of an auto-improve run. For a merged PR it:
 //
 //  1. Fetches PR metadata (title/body/merge commit/linked issues) via `gh`.
-//  2. Carves 6 git worktrees from the merge-base (pass1 × 3 agents + pass2 × 3
-//     agents).
-//  3. Reconstructs the task prompt (NOT sanitized; downstream sanitizes).
-//  4. Atomically writes `<run>/task-package.json` and `<run>/base.sha`.
-//  5. Returns a validated Step10Response.
+//  2. Resolves the immutable PR code base used for implementation worktrees
+//     and task reconstruction.
+//  3. Carves 6 git worktrees from that code base (pass1 × 3 agents + pass2 ×
+//     3 agents). Harness/policy files are treated as evaluation overlay, not
+//     persistent implementation output.
+//  4. Reconstructs the task prompt (NOT sanitized; downstream sanitizes).
+//  5. Atomically writes `<run>/task-package.json` and `<run>/base.sha`.
+//  6. Returns a validated Step10Response.
 //
 // The orchestrator is responsible for appending the `started` event to
 // processed.jsonl before calling this step (see orchestrator.go:116). step10
@@ -103,14 +106,13 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("step10: gh pr view: %w", err)
 	}
-	derivedBaseSHA, err := r.deriveBaseSHA(ctx, in.RepoRoot, pr, in.Logger)
+	baseSHA, err := r.deriveBaseSHA(ctx, in.RepoRoot, pr, in.Logger)
 	if err != nil {
 		return Result{}, err
 	}
-	baseSHA := derivedBaseSHA
 	if hasPersistedBaseSHA {
-		if persistedBaseSHA != derivedBaseSHA {
-			return Result{}, fmt.Errorf("step10: persisted base.sha=%s disagrees with merge-base=%s", persistedBaseSHA, derivedBaseSHA)
+		if persistedBaseSHA != baseSHA {
+			return Result{}, fmt.Errorf("step10: persisted base.sha=%s disagrees with code_base_sha=%s", persistedBaseSHA, baseSHA)
 		}
 		baseSHA = persistedBaseSHA
 	}
@@ -138,7 +140,7 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 	}
 	if in.HarnessFiles {
 		if strings.TrimSpace(in.PolicyBranch) != "" {
-			if err := policyrepo.HydrateAndSnapshotFromBranch(ctx, in.RepoRoot, in.PolicyBranch, in.RunCtx.RunsBase, in.RunCtx.RunDir()); err != nil {
+			if err := policyrepo.HydrateAndSnapshotFromBranchOrSeed(ctx, in.RepoRoot, in.PolicyBranch, in.RunCtx.RunsBase, in.RunCtx.RunDir()); err != nil {
 				return Result{}, fmt.Errorf("step10: hydrate harness files from policy_branch=%s: %w", in.PolicyBranch, err)
 			}
 		} else if err := policyrepo.SnapshotLocalForRun(ctx, in.RunCtx.RunsBase, in.RunCtx.RunDir()); err != nil {

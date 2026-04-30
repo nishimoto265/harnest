@@ -15,6 +15,16 @@ Return ONLY one JSON object with this shape:
   ],
   "compliance": [
     {"rule_id":"...","verdict":"compliant|violated|valid_exception|invalid_exception|missed|n_a","rationale":"..."}
+  ],
+  "issues": [
+    {
+      "severity":"critical|high|medium|low",
+      "category":"...",
+      "title":"...",
+      "evidence":"...",
+      "proposed_lesson":"...",
+      "checklist_item":"..."
+    }
   ]
 }
 
@@ -24,6 +34,10 @@ Rules:
 - Use concise reasons and rationales.
 - If a compliance rule list is provided below, emit one row for each rule_id in that list.
 - When compliance rule_ids are listed, use the matching `## Active Rules` section in the rubric to decide each verdict.
+- Emit `issues` for actionable, repeatable pass1 failure modes worth turning into future lessons.
+- Do not put praise, uncertainty-only comments, one-off taste preferences, or "nothing to improve" into `issues`.
+- Keep each issue focused on one failure mode. Use `evidence` for what went wrong in this output, `proposed_lesson` for the future behavior to enforce, and `checklist_item` for a short checklist line.
+- If there are no actionable failure modes, return an empty `issues` array.
 
 Required dimensions:
 {{- range .Dimensions }}
@@ -35,6 +49,7 @@ Required compliance rule_ids:
 {{- range .ComplianceRuleIDs }}
 - {{ . }}
 {{- end }}
+Return compliance rows for only these rule_ids. Do not include other active rules from the rubric.
 {{- else if .EnforceExpectedCompliance }}
 No compliance rows are expected. Return an empty compliance array.
 {{- else }}

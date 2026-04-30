@@ -51,6 +51,43 @@ func TestSuccessDiffBytes_PreservesLeadingWhitespaceInUntrackedFilename(t *testi
 	assert.Contains(t, string(diff), "diff --git a/ leading.txt b/ leading.txt")
 }
 
+func TestSuccessDiffBytes_ExcludesOnlyPolicyOverlayArtifacts(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, "", "git", "init", "-b", "main", repoDir)
+	runGit(t, repoDir, "git", "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "git", "config", "user.name", "Agent Runner Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repoDir, "git", "add", "README.md")
+	runGit(t, repoDir, "git", "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(runGit(t, repoDir, "git", "rev-parse", "HEAD"))
+
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".auto-improve", "lessons"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "auto-improve", "rules"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "docs", "harness-eval", "checklists"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "docs", "frontend-rules"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "scripts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".auto-improve", "lessons", "local.md"), []byte("lesson\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "auto-improve", "rules-registry.jsonl"), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "auto-improve", "rules", "r-local.md"), []byte("rule\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "auto-improve", "app.go"), []byte("package autoimprove\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "docs", "harness-eval", "checklists", "rules-checklist.md"), []byte("checklist\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "docs", "frontend-rules", "rule.md"), []byte("frontend rule\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "scripts", "generate-checklist.sh"), []byte("#!/bin/sh\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "app.go"), []byte("package main\n"), 0o644))
+
+	diff, err := SuccessDiffBytes(context.Background(), repoDir, baseSHA, "test")
+	require.NoError(t, err)
+
+	text := string(diff)
+	assert.Contains(t, text, "app.go")
+	assert.Contains(t, text, "docs/harness-eval/checklists/rules-checklist.md")
+	assert.Contains(t, text, "docs/frontend-rules/rule.md")
+	assert.Contains(t, text, "scripts/generate-checklist.sh")
+	assert.Contains(t, text, "auto-improve/app.go")
+	assert.NotContains(t, text, ".auto-improve")
+	assert.NotContains(t, text, "auto-improve/rules")
+}
+
 func TestWriteSuccessDiff_CapsHugeUntrackedPatch(t *testing.T) {
 	repoDir := t.TempDir()
 	runGit(t, "", "git", "init", "-b", "main", repoDir)

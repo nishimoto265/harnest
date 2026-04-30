@@ -21,6 +21,7 @@ var (
 type RoleResult struct {
 	RawScores     []contracts.RawScoreEntry
 	RawCompliance []contracts.RawComplianceEntry
+	Issues        []contracts.IssueEntry
 }
 
 func (in PanelInput) validateCommon() error {
@@ -100,9 +101,14 @@ func (r *PanelResolver) ResolveRole(
 	if err != nil {
 		return RoleResult{}, err
 	}
+	issues, err := buildIssueEntries(out, in, role)
+	if err != nil {
+		return RoleResult{}, err
+	}
 	return RoleResult{
 		RawScores:     rawScores,
 		RawCompliance: rawCompliance,
+		Issues:        issues,
 	}, nil
 }
 

@@ -403,12 +403,13 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs_BlockedBySentinel(t *testing.T)
 	assert.Empty(t, events)
 }
 
-func TestRun_DefaultSteps_RealWiringWithFakeCLIs_NeedsManualRecovery(t *testing.T) {
+func TestRun_DefaultSteps_RealWiringWithFakeCLIs_PolicyOnlyAdoptIgnoresBestBranchPushFailure(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Repo.Root = repoRootFromTestFile(t)
 	binDir := installFakeCLI(t)
 	overwriteFakeGitScript(t, binDir, manualRecoveryGitScript())
-	t.Setenv("AUTO_IMPROVE_GIT_STATE_DIR", t.TempDir())
+	stateDir := t.TempDir()
+	t.Setenv("AUTO_IMPROVE_GIT_STATE_DIR", stateDir)
 	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
 
 	t.Setenv("AUTO_IMPROVE_TEST_BASE_SHA", strings.Repeat("a", 40))
@@ -426,22 +427,24 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs_NeedsManualRecovery(t *testing.
 
 	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
 	require.NoError(t, err)
-	assert.FileExists(t, filepath.Join(cfg.Paths.Runs, "needs-recovery", string(runID)+".json"))
+	assert.NoFileExists(t, filepath.Join(cfg.Paths.Runs, "needs-recovery", string(runID)+".json"))
+	assert.NoFileExists(t, filepath.Join(stateDir, "after-push"))
+	assert.FileExists(t, filepath.Join(cfg.Paths.Runs, string(runID), "70", "decision.json"))
 
 	events, err := state.ScanEventsForRun(runCtx, runID)
 	require.NoError(t, err)
 	require.NotEmpty(t, events)
-	assert.Equal(t, contracts.StateKindNeedsManualRecovery, events[len(events)-1].Kind)
-	assert.NoFileExists(t, filepath.Join(cfg.Paths.Runs, string(runID), "70", "decision.json"))
+	assert.Equal(t, contracts.StateKindPromoted, events[len(events)-1].Kind)
 }
 
-func TestRun_DefaultSteps_RealWiringWithFakeCLIs_PostPushRollback(t *testing.T) {
+func TestRun_DefaultSteps_RealWiringWithFakeCLIs_PolicyOnlyAdoptIgnoresPostPushSentinelScript(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Repo.Root = repoRootFromTestFile(t)
 	binDir := installFakeCLI(t)
 	sentinelPath := filepath.Join(cfg.Paths.Runs, "needs-recovery", "other-run.json")
 	overwriteFakeGitScript(t, binDir, postPushRollbackGitScript())
-	t.Setenv("AUTO_IMPROVE_GIT_STATE_DIR", t.TempDir())
+	stateDir := t.TempDir()
+	t.Setenv("AUTO_IMPROVE_GIT_STATE_DIR", stateDir)
 	t.Setenv("AUTO_IMPROVE_TEST_SENTINEL_PATH", sentinelPath)
 	cfg.ClaudeCLIPath = filepath.Join(binDir, "claude")
 
@@ -460,15 +463,18 @@ func TestRun_DefaultSteps_RealWiringWithFakeCLIs_PostPushRollback(t *testing.T) 
 
 	decision, err := internalio.ReadJSON[contracts.Decision](filepath.Join(cfg.Paths.Runs, string(runID), "70", "decision.json"))
 	require.NoError(t, err)
-	assert.Equal(t, contracts.DecisionActionRollback, decision.Action)
+	assert.Equal(t, contracts.DecisionActionAdopt, decision.Action)
 
 	runCtx, err := internalio.NewRunContext(runID, cfg.Paths.Runs, cfg.Worktree.Base)
 	require.NoError(t, err)
-	assert.NoFileExists(t, runCtx.RulesRegistryPath())
+	assert.FileExists(t, runCtx.RulesRegistryPath())
+	assert.NoFileExists(t, sentinelPath)
+	assert.NoFileExists(t, filepath.Join(stateDir, "pushed-target"))
 
 	events, err := state.ScanEventsForRun(runCtx, runID)
 	require.NoError(t, err)
-	assert.Contains(t, eventKinds(events), contracts.StateKindRollback)
+	assert.Contains(t, eventKinds(events), contracts.StateKindPromoted)
+	assert.NotContains(t, eventKinds(events), contracts.StateKindRollback)
 }
 
 func TestRun_DefaultSteps_RealWiringWithFakeCLIs_ResumesBranchPushedIntention(t *testing.T) {
@@ -2955,6 +2961,8 @@ func (s branchPushedCrashStep) Run(ctx context.Context, run *StepRunContext) err
 	require.True(s.t, ok)
 
 	bestSHA := os.Getenv("AUTO_IMPROVE_TEST_BEST_SHA")
+	target.TargetSHA = bestSHA
+	target.BestShaBefore = bestSHA
 	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(run.IO.RunID), target.TargetSHA, bestSHA, run.Candidates.CandidatesHash)
 	plannedEntries := make([]contracts.PlannedAdoptionEntry, 0, len(target.RulesToAppend))
 	for idx, entry := range target.RulesToAppend {
@@ -3132,6 +3140,18 @@ case "$subcmd" in
       exit 0
     fi
     ;;
+  add)
+    exit 0
+    ;;
+  write-tree)
+    echo "0000000000000000000000000000000000000000"
+    ;;
+  commit-tree)
+    echo "${AUTO_IMPROVE_TEST_TARGET_SHA}"
+    ;;
+  update-ref|reset)
+    exit 0
+    ;;
   worktree)
     case "${1:-}" in
       add)
@@ -3155,6 +3175,9 @@ case "$subcmd" in
     esac
     ;;
   diff)
+    if [ "${1:-}" = "--cached" ] || [ "${1:-}" = "--name-only" ]; then
+      exit 0
+    fi
     for file in "$repo_dir"/generated-*; do
       [ -e "$file" ] || continue
       name="$(basename "$file")"
@@ -3269,6 +3292,18 @@ case "$subcmd" in
       exit 0
     fi
     ;;
+  add)
+    exit 0
+    ;;
+  write-tree)
+    echo "0000000000000000000000000000000000000000"
+    ;;
+  commit-tree)
+    echo "${AUTO_IMPROVE_TEST_TARGET_SHA}"
+    ;;
+  update-ref|reset)
+    exit 0
+    ;;
   worktree)
     case "${1:-}" in
       add)
@@ -3292,6 +3327,9 @@ case "$subcmd" in
     esac
     ;;
   diff)
+    if [ "${1:-}" = "--cached" ] || [ "${1:-}" = "--name-only" ]; then
+      exit 0
+    fi
     for file in "$repo_dir"/generated-*; do
       [ -e "$file" ] || continue
       name="$(basename "$file")"

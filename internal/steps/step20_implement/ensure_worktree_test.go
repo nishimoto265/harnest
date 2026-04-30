@@ -160,3 +160,57 @@ func TestEnsureAllocationWorktree_Step20_ExistingDirWithAdvancedHeadFailsClosed(
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "allocation HEAD mismatch")
 }
+
+func TestEnsureAllocationWorktreeBeforeResume_Step20_AdoptsPolicyOnlyOverlayHeadWithoutState(t *testing.T) {
+	env := newEnsureEnv(t)
+	allocation, err := worktreeFor(&env.taskPackage, 1, "a1")
+	require.NoError(t, err)
+	agentDir, err := agentDir(env.runCtx.IO, 1, "a1")
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(allocation.Path, ".auto-improve", "lessons"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ".auto-improve", "lessons", "seed.md"), []byte("lesson\n"), 0o644))
+	runGit(t, allocation.Path, "add", ".auto-improve")
+	runGit(t, allocation.Path, "commit", "-m", "policy overlay")
+	overlayHead := strings.TrimSpace(runGit(t, allocation.Path, "rev-parse", "HEAD"))
+
+	updated, err := ensureAllocationWorktreeBeforeResume(context.Background(), env.runCtx, allocation, agentDir)
+	require.NoError(t, err)
+	assert.Equal(t, overlayHead, updated.BaseSHA)
+	assert.Equal(t, overlayHead, updated.HeadSHA)
+}
+
+func TestCommitPolicyOverlayBase_Step20_RejectsAdvancedImplementationHead(t *testing.T) {
+	env := newEnsureEnv(t)
+	allocation, err := worktreeFor(&env.taskPackage, 1, "a1")
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "implemented.txt"), []byte("implementation\n"), 0o644))
+	runGit(t, allocation.Path, "add", "implemented.txt")
+	runGit(t, allocation.Path, "commit", "-m", "implementation")
+
+	_, err = commitPolicyOverlayBase(context.Background(), allocation, env.runCtx.IO.RunID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "advanced implementation head")
+}
+
+func TestCommitPolicyOverlayBase_Step20_UnstagesPreStagedRepoPolicyArtifacts(t *testing.T) {
+	env := newEnsureEnv(t)
+	allocation, err := worktreeFor(&env.taskPackage, 1, "a1")
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(allocation.Path, ".auto-improve", "lessons"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(allocation.Path, "auto-improve", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ".auto-improve", "lessons", "overlay.md"), []byte("overlay\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "auto-improve", "rules-registry.jsonl"), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "auto-improve", "rules", "r.md"), []byte("rule\n"), 0o644))
+	runGit(t, allocation.Path, "add", "-A")
+
+	updated, err := commitPolicyOverlayBase(context.Background(), allocation, env.runCtx.IO.RunID)
+	require.NoError(t, err)
+
+	files := runGit(t, allocation.Path, "diff-tree", "--no-commit-id", "--name-only", "-r", updated.BaseSHA)
+	assert.Contains(t, files, ".auto-improve/lessons/overlay.md")
+	assert.NotContains(t, files, "auto-improve/rules-registry.jsonl")
+	assert.NotContains(t, files, "auto-improve/rules/r.md")
+}

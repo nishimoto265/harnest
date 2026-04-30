@@ -32,7 +32,7 @@ type Dependencies struct {
 	RunGitLocal           func(context.Context, string, ...string) ([]byte, error)
 	RunGitNetwork         func(context.Context, string, string, ...string) ([]byte, error)
 	RunProviderSmoke      func(context.Context, string, ...string) ([]byte, error)
-	PrepareProviderBinary func(agents.Provider, string) (string, []string, error)
+	PrepareProviderBinary func(agents.Profile) (string, []string, error)
 }
 
 type Checker struct {
@@ -87,7 +87,7 @@ func NewWithDependencies(deps Dependencies) Checker {
 		}
 	}
 	if deps.PrepareProviderBinary == nil {
-		deps.PrepareProviderBinary = agentrunner.PrepareProviderBinary
+		deps.PrepareProviderBinary = agentrunner.PrepareProfileBinary
 	}
 	return Checker{deps: deps}
 }
@@ -274,12 +274,12 @@ func (c Checker) checkAgentBinaries(ctx context.Context, cfg config.Config) []Fa
 		if profile.Provider == agents.ProviderStub || profile.Binary == "" {
 			continue
 		}
-		key := string(profile.Provider) + ":" + profile.Binary
+		key := string(profile.Provider) + ":" + profile.Binary + ":" + profile.NodeBinary
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
-		binary, prefixArgs, err := c.deps.PrepareProviderBinary(profile.Provider, profile.Binary)
+		binary, prefixArgs, err := c.deps.PrepareProviderBinary(profile)
 		if err != nil {
 			failures = append(failures, Failure{Name: profile.Binary, Detail: err.Error()})
 			continue

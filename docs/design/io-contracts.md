@@ -51,6 +51,7 @@
 │   ├── scores-A-raw.jsonl               # rev11: raw layer (primary/secondary/arbiter 別 verdict)
 │   ├── compliance-A.jsonl               # final layer
 │   ├── compliance-A-raw.jsonl           # rev11: raw layer
+│   ├── issues-A.jsonl                   # actionable pass1 judge findings for step40 lessons
 │   ├── done.marker                      # rev11: cardinality + content_hashes
 │   ├── reasons/                         # reasons overflow sidecar
 │   │   └── <sha256>.txt
@@ -314,6 +315,7 @@ scoring は 2 層:
    - **arbiter**: 追加で `primary_ref.sha256 / secondary_ref.sha256` が現在の最新 primary/secondary raw entries の sha256 と一致するもののみ valid(不一致は stale とみなし無視)
    - provenance-based invalidation のみ(旧 tombstone 方式は使用しない)
 2. **Final layer** (`scores-A.jsonl`, `compliance-A.jsonl`): panel 解決後の最終 verdict のみ append-only。`CollapseByKey(agent, dimension)` で最新勝ち(judge_role は final には持たない)
+3. **Issue layer** (`issues-A.jsonl`): step40 の lesson 化に使う actionable finding。`CollapseByKey(issue_id)` で最新勝ち。採点 cardinality ではないため `done.marker` の `expected_counts` / hash 対象には含めない
 
 **done.marker** の `expected_counts` と `content_hashes` は **final layer の CollapseByKey 結果**に対して計算(raw ではない)。
 
@@ -485,7 +487,8 @@ You are a code judge. Consider this task description:
 
 **処理**:
 - `gh pr view <num>` で base SHA / 本文 / linked issues 取得
-- **worktree 6個**(pass1/pass2 × 3agent)を一度に切る(手戻り削減)
+- 初回で `repo.policy_branch` が未作成の場合は repo-local の既存 harness/policy artifact を seed として snapshot し、以後は `repo.policy_branch` から hydrate する
+- **worktree 6個**(pass1/pass2 × 3agent)を切る。agent 実装 commit は評価用の一時出力であり、永続 branch へ昇格しない
 - `task_prompt.source` に従って `reconstructed_task_prompt` を生成
   (`auto`: task_generator が PR/linked issue/diff/test evidence から issue 相当のタスク文を復元、
   `issue`: usable linked issue があればそれをそのまま使い、なければ `auto` に fallback。将来 Asana 等も auto 側の入力として追加する)
@@ -501,11 +504,13 @@ You are a code judge. Consider this task description:
 
 **入力**:
 - `task-package.json`(`worktrees` から自分の pass の worktree dir を取得)
-- best設定(step 10 が適用済み) or best + 候補ルール(pass2)
+- current policy/harness snapshot(step 10 が適用済み) or current policy + 候補 lesson/rule(pass2)
 
 **処理**:
 - claude CLI を 3体並列起動
 - 各 agent は実装 + checklist記入 + commit
+- 実行直前に current policy snapshot を `.auto-improve/lessons/` と `.auto-improve/checklist.md` として worktree に overlay する。pass2 では experiment lesson も同じ overlay に追加する
+- `diff.patch` は対応する pass base からの実装差分のみを評価対象にし、policy/harness artifact path は除外する
 - 完了時に **atomic write** で `manifest.json` を出す(中身 = `ManifestSchema` 準拠)
 - timeout/error も manifest に記録(`kind`: `success` | `error` | `timeout` の discriminated union)
 
@@ -529,6 +534,7 @@ You are a code judge. Consider this task description:
 **処理**:
 - Panel review: primary判定 + secondary判定 → 必要なら arbiter
 - 5次元スコア + 理由 + compliance audit(Discipline内包)
+- step30 judge は、繰り返し lesson 化できる具体的な問題だけを `issues` として出す。賞賛、単なる不確実性、趣味、非actionableなコメントは含めない
 - `verdict_path` に 解決モード(`single` / `agreement` / `arbitrated` / `arbiter_overruled`)を記録
 - step60 pairwise は same-agent の `pass1(A_i)` と `pass2(B_i)` だけを比較する。`scoring.pairwise_mode=single` は 1 final judge のみ、`basic` は 3 pairwise + 1 final judge、`strict` は AB/BA 反転込みの 6 pairwise + 1 final judge を実行する
 - pairwise の最終採用判断は final decision judge が正本であり、build/test/lint 失敗は hard gate ではなく evidence として渡す。致命的問題がある場合、final decision judge は vote 多数を上書きできる
@@ -536,6 +542,7 @@ You are a code judge. Consider this task description:
 **出力**:
 - `<run>/30/scores-A.jsonl` または `60/scores-B.jsonl`
 - `<run>/30/compliance-A.jsonl` または `60/compliance-B.jsonl`
+- step 30 のみ: `<run>/30/issues-A.jsonl`
 - step 60 のみ: `<run>/60/pairwise.jsonl`
 
 ---
@@ -545,12 +552,13 @@ You are a code judge. Consider this task description:
 **入力**:
 - `30/scores-A.jsonl`(採点理由)
 - `30/compliance-A.jsonl`(違反ルール)
+- `30/issues-A.jsonl`(explicit issue。存在する場合は採点理由からの heuristic 抽出より優先)
 - pass1 `diff.patch` と 実PR diff の差分(sanitize 必須)
 - 既存 `rules-registry.jsonl`
 
 **処理**:
-- LLM(Claude)で問題点 → 候補ルール生成
-- 既存ルール群と類似度判定 → new / update / duplicate 分類
+- explicit issue / compliance violation / fallback score concern から experiment lesson を生成
+- 既存 lesson 群と類似度判定 → new / update / duplicate 分類
 
 **出力**:
 - `<run>/40/candidates.json` (`CandidatesSchema`)
@@ -583,7 +591,7 @@ You are a code judge. Consider this task description:
 **入力**:
 - `30/scores-A.jsonl`, `60/scores-B.jsonl`, `60/pairwise.jsonl`
 - `40/candidates.json`
-- 現行 `rules-registry.jsonl` + best_branch HEAD SHA
+- 現行 `rules-registry.jsonl` + policy snapshot + best_branch HEAD SHA
 - config(閾値)
 
 **処理**:
@@ -605,7 +613,7 @@ step70 の **live 排他は flock**、**needs_manual_recovery の block は dura
   - `candidates_hash` は `candidates[]` の **canonical JSON**(object key lexicographical sort / HTML escaping 無効 / deterministic number rendering)から再計算して一致しなければ reject
   - `decision.json` は outer `action` == inner variant type == inner `action` field を満たさなければ reject
   - adopt variant の `idempotency_key` は `sha256(run_id + target_sha + best_sha_before + candidates_hash)` と一致しなければ reject (`||` は separator 無しの文字列連結)
-- adopt の場合、**staged transaction + idempotent recovery**:
+- adopt の場合、**staged transaction + idempotent recovery**。Step60 final pairwise decision が採用 authority であり、Step70 は hidden compliance hard gate で上書きしない。永続出力は policy/harness artifact のみで、pass2 agent implementation commit は `best_branch` に push しない。
 
 **Stage 遷移(normal path)**:
 1. **planning**: `intention.json` atomic write `{schema_version, stage: 'planning', idempotency_key, run_id, best_sha_before, target_sha, candidates_hash, registry_head_before, started_at}`。
@@ -1107,6 +1115,27 @@ Persisted tagged union は **wrapper type を正本とする**。`ManifestSucces
 | `rubric_version` | `string` | yes | non-empty | `contracts.ComplianceEntry.RubricVersion` |
 | `prompt_version` | `string` | yes | non-empty | `contracts.ComplianceEntry.PromptVersion` |
 | `resolved_at` | `time.Time` | yes | RFC3339 timestamp | `contracts.ComplianceEntry.ResolvedAt` |
+
+`contracts.IssueEntry` (`30/issues-A.jsonl`)
+
+| field | type | required | constraints / notes | Go xref |
+|---|---|---|---|---|
+| `schema_version` | `string` | yes | `"1"` | `contracts.IssueEntry.SchemaVersion` |
+| `run_id` | `RunID` | yes | `run_id_fmt` | `contracts.IssueEntry.RunID` |
+| `pass` | `int` | yes | `1` | `contracts.IssueEntry.Pass` |
+| `agent` | `AgentID` | yes | `agent_id_fmt` | `contracts.IssueEntry.Agent` |
+| `judge_role` | `string` | yes | `primary | secondary | arbiter` | `contracts.IssueEntry.JudgeRole` |
+| `issue_id` | `string` | yes | generated stable id, `rule_id_fmt` | `contracts.IssueEntry.IssueID` |
+| `severity` | `string` | yes | `critical | high | medium | low` | `contracts.IssueEntry.Severity` |
+| `category` | `string` | yes | `max=80` | `contracts.IssueEntry.Category` |
+| `title` | `string` | yes | `max=160` | `contracts.IssueEntry.Title` |
+| `evidence` | `string` | yes | `max=700`; pass1 outputで何が悪かったか | `contracts.IssueEntry.Evidence` |
+| `proposed_lesson` | `string` | yes | `max=700`; 次回守るべき振る舞い | `contracts.IssueEntry.ProposedLesson` |
+| `checklist_item` | `string` | yes | `max=220`; checklist 用の短い文 | `contracts.IssueEntry.ChecklistItem` |
+| `output_sha256` | `string` | yes | `sha256_hex` | `contracts.IssueEntry.OutputSha256` |
+| `rubric_version` | `string` | yes | non-empty | `contracts.IssueEntry.RubricVersion` |
+| `prompt_version` | `string` | yes | non-empty | `contracts.IssueEntry.PromptVersion` |
+| `resolved_at` | `time.Time` | yes | RFC3339 timestamp | `contracts.IssueEntry.ResolvedAt` |
 
 `contracts.PairwiseEntry` (`60/pairwise.jsonl`)
 

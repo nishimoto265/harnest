@@ -15,13 +15,13 @@ import (
 func ImplementerCommand(profile agents.Profile, workdir string) (string, []string, error) {
 	switch profile.Provider {
 	case agents.ProviderClaude:
-		binary, prefixArgs, err := PrepareProviderBinary(profile.Provider, profile.Binary)
+		binary, prefixArgs, err := PrepareProfileBinary(profile)
 		if err != nil {
 			return "", nil, err
 		}
 		return binary, append(prefixArgs, profile.Args...), nil
 	case agents.ProviderCodex:
-		binary, prefixArgs, err := PrepareProviderBinary(profile.Provider, profile.Binary)
+		binary, prefixArgs, err := PrepareProfileBinary(profile)
 		if err != nil {
 			return "", nil, err
 		}
@@ -34,12 +34,27 @@ func ImplementerCommand(profile agents.Profile, workdir string) (string, []strin
 	}
 }
 
+func PrepareProfileBinary(profile agents.Profile) (string, []string, error) {
+	return PrepareProviderBinaryWithNode(profile.Provider, profile.Binary, profile.NodeBinary)
+}
+
+func ProfileEnv(profile agents.Profile) []string {
+	if version := nodenvVersionFromNodeBinary(profile.NodeBinary); version != "" {
+		return []string{"NODENV_VERSION=" + version}
+	}
+	return nil
+}
+
 func PrepareProviderBinary(provider agents.Provider, binary string) (string, []string, error) {
+	return PrepareProviderBinaryWithNode(provider, binary, "")
+}
+
+func PrepareProviderBinaryWithNode(provider agents.Provider, binary, nodeBinary string) (string, []string, error) {
 	switch provider {
 	case agents.ProviderClaude:
-		return prepareNodeShebangBinary(binary)
+		return prepareNodeShebangBinary(binary, nodeBinary)
 	case agents.ProviderCodex:
-		return prepareCodexBinary(binary)
+		return prepareCodexBinary(binary, nodeBinary)
 	default:
 		return binary, nil, nil
 	}
@@ -54,20 +69,30 @@ func CodexExecArgs(workdir string) []string {
 	}
 }
 
-func prepareCodexBinary(binary string) (string, []string, error) {
-	return prepareNodeShebangBinary(binary)
+func prepareCodexBinary(binary, nodeBinary string) (string, []string, error) {
+	return prepareNodeShebangBinary(binary, nodeBinary)
 }
 
-func prepareNodeShebangBinary(binary string) (string, []string, error) {
+func prepareNodeShebangBinary(binary, nodeBinary string) (string, []string, error) {
 	resolved, err := resolveBinary(binary)
 	if err != nil {
 		return "", nil, err
 	}
 	needsNode, err := scriptNeedsNode(resolved)
 	if err != nil || !needsNode {
+		if nodeBinary != "" && err == nil {
+			return "", nil, fmt.Errorf("agentrunner: node_binary is set but provider binary does not use a node shebang: %s", resolved)
+		}
 		return resolved, nil, err
 	}
-	nodeBinary, err := resolveNodeBinary(filepath.Dir(resolved))
+	if nodeBinary != "" {
+		node, err := resolveBinary(nodeBinary)
+		if err != nil {
+			return "", nil, err
+		}
+		return node, []string{resolved}, nil
+	}
+	nodeBinary, err = resolveNodeBinary(filepath.Dir(resolved))
 	if err != nil {
 		return "", nil, err
 	}
@@ -103,4 +128,24 @@ func resolveNodeBinary(binaryDir string) (string, error) {
 		return sibling, nil
 	}
 	return processenv.TrustedLookPath("node")
+}
+
+func nodenvVersionFromNodeBinary(nodeBinary string) string {
+	nodeBinary = strings.TrimSpace(nodeBinary)
+	if nodeBinary == "" {
+		return ""
+	}
+	clean := filepath.Clean(nodeBinary)
+	if filepath.Base(clean) != "node" {
+		return ""
+	}
+	binDir := filepath.Dir(clean)
+	if filepath.Base(binDir) != "bin" {
+		return ""
+	}
+	versionDir := filepath.Dir(binDir)
+	if filepath.Base(filepath.Dir(versionDir)) != "versions" {
+		return ""
+	}
+	return filepath.Base(versionDir)
 }

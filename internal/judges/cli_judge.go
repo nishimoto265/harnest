@@ -23,7 +23,7 @@ import (
 //go:embed prompts/step30-score.tmpl prompts/step60-score-pass2.tmpl prompts/step60-pairwise.tmpl prompts/step60-pairwise-decision.tmpl
 var cliJudgePromptFS embed.FS
 
-const defaultCLIJudgeTimeout = 2 * time.Minute
+const defaultCLIJudgeTimeout = 15 * time.Minute
 const cliJudgePromptVersion = "cli-judge-v1"
 
 type cliJudge struct {
@@ -45,9 +45,19 @@ type modelJudgeCompliance struct {
 	Rationale string `json:"rationale,omitempty"`
 }
 
+type modelJudgeIssue struct {
+	Severity       string `json:"severity"`
+	Category       string `json:"category"`
+	Title          string `json:"title"`
+	Evidence       string `json:"evidence"`
+	ProposedLesson string `json:"proposed_lesson"`
+	ChecklistItem  string `json:"checklist_item"`
+}
+
 type modelJudgeResponse struct {
 	Scores     []modelJudgeScore      `json:"scores"`
 	Compliance []modelJudgeCompliance `json:"compliance"`
+	Issues     []modelJudgeIssue      `json:"issues,omitempty"`
 }
 
 type cliJudgePromptData struct {
@@ -72,16 +82,21 @@ func (j cliJudge) ScoreOutput(ctx context.Context, input JudgeInput) (JudgeOutpu
 	if err := input.Validate(); err != nil {
 		return JudgeOutput{}, err
 	}
-	promptText, err := renderCLIJudgePrompt(j.role, input)
+	workspace, err := prepareCLIJudgeWorkspace(input, j.profile.Provider)
 	if err != nil {
 		return JudgeOutput{}, err
 	}
-	workdir := filepath.Dir(input.OutputPath)
-	binary, prefixArgs, err := agentrunner.PrepareProviderBinary(j.profile.Provider, j.profile.Binary)
+	defer workspace.cleanup()
+
+	promptText, err := renderCLIJudgePrompt(j.role, workspace.input)
 	if err != nil {
 		return JudgeOutput{}, err
 	}
-	responsePath, err := runCLIJudge(ctx, binary, prefixArgs, j.profile, workdir, promptText, j.timeout)
+	binary, prefixArgs, err := agentrunner.PrepareProfileBinary(j.profile)
+	if err != nil {
+		return JudgeOutput{}, err
+	}
+	responsePath, err := runCLIJudge(ctx, binary, prefixArgs, j.profile, workspace.workdir, promptText, j.timeout)
 	if err != nil {
 		return JudgeOutput{}, err
 	}
@@ -92,12 +107,61 @@ func (j cliJudge) ScoreOutput(ctx context.Context, input JudgeInput) (JudgeOutpu
 	return j.toJudgeOutput(input, response)
 }
 
+type cliJudgeWorkspace struct {
+	input   JudgeInput
+	workdir string
+	cleanup func()
+}
+
+func prepareCLIJudgeWorkspace(input JudgeInput, provider agents.Provider) (cliJudgeWorkspace, error) {
+	if provider != agents.ProviderCodex {
+		return cliJudgeWorkspace{
+			input:   input,
+			workdir: filepath.Dir(input.OutputPath),
+			cleanup: func() {},
+		}, nil
+	}
+	dir, err := os.MkdirTemp("", "auto-improve-judge-workdir-*")
+	if err != nil {
+		return cliJudgeWorkspace{}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	bundled := input
+	bundled.OutputPath = filepath.Join(dir, "output.patch")
+	bundled.RubricPath = filepath.Join(dir, "rubric.md")
+	if err := copyJudgeFile(input.OutputPath, bundled.OutputPath); err != nil {
+		cleanup()
+		return cliJudgeWorkspace{}, err
+	}
+	if err := copyJudgeFile(input.RubricPath, bundled.RubricPath); err != nil {
+		cleanup()
+		return cliJudgeWorkspace{}, err
+	}
+	return cliJudgeWorkspace{
+		input:   bundled,
+		workdir: dir,
+		cleanup: cleanup,
+	}, nil
+}
+
+func copyJudgeFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("judges: copy judge file read %s: %w", src, err)
+	}
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		return fmt.Errorf("judges: copy judge file write %s: %w", dst, err)
+	}
+	return nil
+}
+
 func (j cliJudge) JudgePromptVersion() string {
 	payload := struct {
 		PromptVersion string          `json:"prompt_version"`
 		Role          Role            `json:"role"`
 		Provider      agents.Provider `json:"provider"`
 		Binary        string          `json:"binary"`
+		NodeBinary    string          `json:"node_binary,omitempty"`
 		Args          []string        `json:"args"`
 		Step30Hash    string          `json:"step30_hash"`
 		Step60Hash    string          `json:"step60_hash"`
@@ -106,6 +170,7 @@ func (j cliJudge) JudgePromptVersion() string {
 		Role:          j.role,
 		Provider:      j.profile.Provider,
 		Binary:        j.profile.Binary,
+		NodeBinary:    j.profile.NodeBinary,
 		Args:          append([]string(nil), j.profile.Args...),
 		Step30Hash:    embeddedPromptHash("prompts/step30-score.tmpl"),
 		Step60Hash:    embeddedPromptHash("prompts/step60-score-pass2.tmpl"),
@@ -174,7 +239,7 @@ func sanitizeCandidateRules(rules []CandidateRule) []CandidateRule {
 			TargetRuleID: internalio.SanitizeForPromptEmbedding(rule.TargetRuleID),
 			Title:        internalio.SanitizeForPromptEmbedding(rule.Title),
 			Body: internalio.SanitizeForPromptEmbedding(rule.Body, internalio.SafeTextOptions{
-				Label: "candidate_rule",
+				Label: "experiment_lesson",
 				Fence: true,
 			}),
 		}
@@ -226,6 +291,7 @@ func runCLIJudge(ctx context.Context, binary string, prefixArgs []string, profil
 		Prompt:      promptText,
 		SessionPath: sessionPath,
 		Timeout:     timeout,
+		Env:         agentrunner.ProfileEnv(profile),
 		ErrPrefix:   "judge",
 	})
 	if err != nil {
@@ -270,6 +336,7 @@ func codexJudgeExecArgs(profileArgs []string, workdir, outputPath string) ([]str
 		"--sandbox", "read-only",
 		"--skip-git-repo-check",
 		"--ephemeral",
+		"-c", `web_search="disabled"`,
 		"-C", workdir,
 	}
 	args = append(args, profileArgs...)
@@ -277,7 +344,7 @@ func codexJudgeExecArgs(profileArgs []string, workdir, outputPath string) ([]str
 	return args, nil
 }
 
-func claudeJudgeExecArgs(profileArgs []string, workdir string) ([]string, error) {
+func claudeJudgeExecArgs(profileArgs []string, _ string) ([]string, error) {
 	if err := agents.ValidateJudgeProfileArgs(agents.ProviderClaude, profileArgs); err != nil {
 		return nil, err
 	}
@@ -285,7 +352,6 @@ func claudeJudgeExecArgs(profileArgs []string, workdir string) ([]string, error)
 		"-p",
 		"--output-format", "json",
 		"--allowedTools", "Read",
-		"--cwd", workdir,
 	}
 	args = append(args, profileArgs...)
 	return args, nil
@@ -359,7 +425,7 @@ func (j cliJudge) toJudgeOutput(input JudgeInput, response modelJudgeResponse) (
 			Agent:         input.Agent,
 			Dimension:     contracts.Dimension(score.Dimension),
 			Score:         score.Score,
-			Reasons:       score.Reason,
+			Reasons:       truncateRunes(strings.TrimSpace(score.Reason), 1000),
 			VerdictPath:   verdictPath,
 			RubricVersion: stubRubricVersion,
 			PromptVersion: cliJudgePromptVersion,
@@ -375,17 +441,122 @@ func (j cliJudge) toJudgeOutput(input JudgeInput, response modelJudgeResponse) (
 			Agent:         input.Agent,
 			RuleID:        row.RuleID,
 			Verdict:       contracts.ComplianceVerdict(row.Verdict),
-			Rationale:     row.Rationale,
+			Rationale:     truncateRunes(strings.TrimSpace(row.Rationale), 500),
 			VerdictPath:   verdictPath,
 			RubricVersion: stubRubricVersion,
 			PromptVersion: cliJudgePromptVersion,
 			ResolvedAt:    resolvedAt,
 		})
 	}
+	compliance = normalizeExpectedComplianceEntries(input, compliance, verdictPath, resolvedAt)
+	issues := make([]Issue, 0, len(response.Issues))
+	for _, row := range response.Issues {
+		issue, ok := normalizeModelJudgeIssue(row)
+		if !ok {
+			continue
+		}
+		issues = append(issues, issue)
+	}
 	output := JudgeOutput{
 		Scores:     scores,
 		Compliance: compliance,
 		Arbiter:    j.role == RoleArbiter,
+		Issues:     issues,
 	}
 	return output, output.ValidateFor(input)
+}
+
+func normalizeExpectedComplianceEntries(input JudgeInput, entries []contracts.ComplianceEntry, verdictPath contracts.VerdictPath, resolvedAt time.Time) []contracts.ComplianceEntry {
+	if len(input.ExpectedComplianceRuleIDs) == 0 {
+		return entries
+	}
+	expected := make(map[string]struct{}, len(input.ExpectedComplianceRuleIDs))
+	for _, ruleID := range input.ExpectedComplianceRuleIDs {
+		expected[ruleID] = struct{}{}
+	}
+	byRule := make(map[string][]contracts.ComplianceEntry, len(input.ExpectedComplianceRuleIDs))
+	for _, entry := range entries {
+		if _, ok := expected[entry.RuleID]; ok {
+			byRule[entry.RuleID] = append(byRule[entry.RuleID], entry)
+		}
+	}
+	out := make([]contracts.ComplianceEntry, 0, len(entries))
+	for _, ruleID := range input.ExpectedComplianceRuleIDs {
+		if rows := byRule[ruleID]; len(rows) > 0 {
+			out = append(out, rows...)
+			continue
+		}
+		out = append(out, contracts.ComplianceEntry{
+			SchemaVersion: "1",
+			RunID:         input.RunID,
+			Pass:          input.Pass,
+			Agent:         input.Agent,
+			RuleID:        ruleID,
+			Verdict:       contracts.ComplianceVerdictMissed,
+			Rationale:     "Judge omitted the required compliance row for this rule; treating it as missed coverage.",
+			VerdictPath:   verdictPath,
+			RubricVersion: stubRubricVersion,
+			PromptVersion: cliJudgePromptVersion,
+			ResolvedAt:    resolvedAt,
+		})
+	}
+	return out
+}
+
+func normalizeModelJudgeIssue(row modelJudgeIssue) (Issue, bool) {
+	severity, ok := normalizeIssueSeverity(row.Severity)
+	if !ok {
+		return Issue{}, false
+	}
+	title := truncateRunes(strings.TrimSpace(row.Title), 160)
+	evidence := truncateRunes(strings.TrimSpace(row.Evidence), 700)
+	if title == "" || evidence == "" {
+		return Issue{}, false
+	}
+	category := truncateRunes(strings.TrimSpace(row.Category), 80)
+	if category == "" {
+		category = "general"
+	}
+	proposedLesson := truncateRunes(strings.TrimSpace(row.ProposedLesson), 700)
+	if proposedLesson == "" {
+		proposedLesson = evidence
+	}
+	checklistItem := truncateRunes(strings.TrimSpace(row.ChecklistItem), 220)
+	if checklistItem == "" {
+		checklistItem = title
+	}
+	return Issue{
+		Severity:       severity,
+		Category:       category,
+		Title:          title,
+		Evidence:       evidence,
+		ProposedLesson: proposedLesson,
+		ChecklistItem:  checklistItem,
+	}, true
+}
+
+func normalizeIssueSeverity(value string) (contracts.IssueSeverity, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "critical", "crit":
+		return contracts.IssueSeverityCritical, true
+	case "high":
+		return contracts.IssueSeverityHigh, true
+	case "medium", "middle", "mid":
+		return contracts.IssueSeverityMedium, true
+	case "low":
+		return contracts.IssueSeverityLow, true
+	default:
+		return "", false
+	}
+}
+
+func truncateRunes(value string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	return string(runes[:max])
 }

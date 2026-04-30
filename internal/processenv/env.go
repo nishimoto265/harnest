@@ -233,6 +233,7 @@ func agentAllowlist(key string) bool {
 		"ANTHROPIC_AUTH_TOKEN",
 		"ANTHROPIC_BASE_URL",
 		"CLAUDE_CODE_OAUTH_TOKEN",
+		"NODENV_VERSION",
 		"OPENAI_API_KEY",
 		"OPENAI_BASE_URL",
 		"OPENAI_ORG_ID",

@@ -91,6 +91,33 @@ func TestRun_HappyPath(t *testing.T) {
 	assert.Equal(t, marker.RawHashes.ComplianceRaw, mustHashReducedRawCompliance(t, runIO))
 }
 
+func TestPairwiseEntriesFromDecision_NormalizesTieMargin(t *testing.T) {
+	runIO, pkg := seedStep60Fixture(t, fixtureOptions{agents: []contracts.AgentID{"a1", "a2", "a3"}})
+	resolvedAt := time.Date(2026, 4, 21, 15, 4, 5, 0, time.UTC)
+
+	entries, err := pairwiseEntriesFromDecision(Input{
+		IO:                    runIO,
+		TaskPackage:           &pkg,
+		PairwiseMode:          judges.PairwiseModeBasic,
+		RubricVersion:         "default",
+		PairwisePromptVersion: "pairwise-test",
+	}, []judges.PairwisePair{{
+		Agent: "a1",
+	}}, judges.PairwiseDecision{
+		Action: judges.PairwiseDecisionInconclusive,
+		AgentDecisions: []judges.PairwiseAgentDecision{{
+			Agent:         "a1",
+			Winner:        contracts.PairwiseWinnerB,
+			Margin:        contracts.PairwiseMarginDecisive,
+			Justification: "pass2 won local comparison",
+		}},
+	}, nil, resolvedAt)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, contracts.PairwiseWinnerTie, entries[0].Winner)
+	assert.Equal(t, contracts.PairwiseMarginSlight, entries[0].Margin)
+}
+
 func TestRun_PairwiseModesControlJudgeFanout(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -814,7 +841,7 @@ func TestRun_DeclaredScorableAgentsFailClosedWhenPass1ManifestMissing(t *testing
 		Now:            func() time.Time { return time.Date(2026, 4, 21, 12, 30, 0, 0, time.UTC) },
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "declared scorable agent missing pass1 scorable manifest")
+	assert.Contains(t, err.Error(), "pass2 scorable agent missing matching pass1 scorable manifest")
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
@@ -2323,7 +2350,7 @@ func TestRun_ValidatesPass2SessionAndChecklistManifestArtifactsBeforeSnapshot(t 
 	}
 }
 
-func TestRun_FailsClosedWhenPass2AgentIsNotPass1Scorable(t *testing.T) {
+func TestRun_SkipsPass2AgentWhenPass1IsNotScorable(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score:        true,
 		nonScorablePass1Agents: map[contracts.AgentID]bool{"a2": true},
@@ -2338,11 +2365,11 @@ func TestRun_FailsClosedWhenPass2AgentIsNotPass1Scorable(t *testing.T) {
 		Now:         func() time.Time { return time.Date(2026, 4, 21, 19, 30, 0, 0, time.UTC) },
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pass2 scorable agent missing pass1 scorable manifest")
+	assert.Contains(t, err.Error(), "pass2 scorable agent missing matching pass1 scorable manifest")
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 
-func TestRun_ImplicitScorableAgentsFailClosedWhenPass1ManifestMissing(t *testing.T) {
+func TestRun_FailsWhenPass2ScorableButPass1ManifestMissing(t *testing.T) {
 	runIO, pkg := seedStep60Fixture(t, fixtureOptions{
 		writePass1Score: true,
 	})
@@ -2360,7 +2387,7 @@ func TestRun_ImplicitScorableAgentsFailClosedWhenPass1ManifestMissing(t *testing
 		Now:         func() time.Time { return time.Date(2026, 4, 21, 19, 35, 0, 0, time.UTC) },
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pass2 scorable agent missing pass1 scorable manifest")
+	assert.Contains(t, err.Error(), "pass2 scorable agent missing matching pass1 scorable manifest")
 	assert.NoFileExists(t, mustResolve(t, runIO, "60/done.marker"))
 }
 

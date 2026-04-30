@@ -46,9 +46,13 @@ func recoverRollbackUnlocked(ctx context.Context, pr int, runCtx internalio.RunC
 	deps = applyDepDefaults(deps)
 	writer := state.NewWriter(runCtx)
 	target := targetFromIntention(pkg, *intention)
-	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
-	if err != nil {
-		return err
+	remoteHead := ""
+	if !target.PolicyOnly {
+		var err error
+		remoteHead, err = deps.Git.RemoteHead(ctx, target.BestBranch)
+		if err != nil {
+			return err
+		}
 	}
 	registryHead, idempotencyHit, err := recoverRegistryStatus(runCtx, *intention)
 	if err != nil {
@@ -63,6 +67,13 @@ func recoverRollbackUnlocked(ctx context.Context, pr int, runCtx internalio.RunC
 	}
 
 	switch {
+	case target.PolicyOnly &&
+		!idempotencyHit &&
+		registryHead == intention.RegistryHeadBefore &&
+		recoverRollbackNoopStageAllowed(intention.Stage):
+		if err := handleRollback(ctx, pr, runCtx, pkg, target, *intention, store, writer, deps, reason, pushUnknown); err != nil {
+			return err
+		}
 	case !idempotencyHit &&
 		registryHead == intention.RegistryHeadBefore &&
 		(remoteHeadMatchesRollbackBase(remoteHead, target.BestShaBefore)) &&
@@ -123,9 +134,13 @@ func recoverAdoptAnywayUnlocked(ctx context.Context, pr int, runCtx internalio.R
 	deps = applyDepDefaults(deps)
 	writer := state.NewWriter(runCtx)
 	target := targetFromIntention(pkg, *intention)
-	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
-	if err != nil {
-		return err
+	remoteHead := ""
+	if !target.PolicyOnly {
+		var err error
+		remoteHead, err = deps.Git.RemoteHead(ctx, target.BestBranch)
+		if err != nil {
+			return err
+		}
 	}
 	registryHead, idempotencyHit, err := recoverRegistryStatus(runCtx, *intention)
 	if err != nil {
@@ -157,7 +172,7 @@ func recoverAdoptAnywayUnlocked(ctx context.Context, pr int, runCtx internalio.R
 			}
 		}
 	}
-	if remoteHead != target.TargetSHA || !idempotencyHit {
+	if !idempotencyHit || (!target.PolicyOnly && remoteHead != target.TargetSHA) {
 		return &RecoverRefusalError{
 			Message: fmt.Sprintf(
 				"adopt-anyway safe matrix mismatch: stage=%s remote_head=%s registry_head=%s idempotency_hit=%t",

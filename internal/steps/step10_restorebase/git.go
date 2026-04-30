@@ -184,6 +184,16 @@ func (g gitCLI) FetchCommit(ctx context.Context, repoRoot, sha string) error {
 	return nil
 }
 
+func (g gitCLI) FetchBranch(ctx context.Context, repoRoot, branch string) error {
+	branch = strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/")
+	refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch)
+	out, stderr, err := g.runNetwork(ctx, repoRoot, "-C", repoRoot, "fetch", "--no-tags", "origin", refspec)
+	if err != nil {
+		return formatCommandFailure(fmt.Sprintf("step10: git fetch origin %s (in %s)", branch, repoRoot), err, out, stderr)
+	}
+	return nil
+}
+
 func (g gitCLI) RepoSlug(ctx context.Context, repoRoot string) (string, error) {
 	out, stderr, err := g.runLocal(ctx, "-C", repoRoot, "config", "--get", "remote.origin.url")
 	if err != nil {

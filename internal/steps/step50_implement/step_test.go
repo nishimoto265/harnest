@@ -218,6 +218,68 @@ func TestSynthesizeSuccessCommit_SetsIdentityUnderHardenedGitEnv(t *testing.T) {
 	require.Contains(t, commit, "committer auto-improve <auto-improve@example.invalid>")
 }
 
+func TestSynthesizeSuccessCommit_UnstagesPreStagedPolicyArtifacts(t *testing.T) {
+	repo := t.TempDir()
+	runCommand(t, "", "git", "init", "-b", "main", repo)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644))
+	runCommand(t, repo, "git", "add", "README.md")
+	runCommand(t, repo, "git", "-c", "user.name=Seed User", "-c", "user.email=seed@example.invalid", "commit", "-m", "base")
+	runCommand(t, repo, "git", "checkout", "-b", "auto-improve/test/pass2/a1")
+	baseSHA := strings.TrimSpace(runCommand(t, repo, "git", "rev-parse", "HEAD"))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".auto-improve", "lessons"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "auto-improve", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "implemented.txt"), []byte("implementation\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".auto-improve", "lessons", "r.md"), []byte("lesson\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "auto-improve", "rules-registry.jsonl"), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "auto-improve", "rules", "r.md"), []byte("rule\n"), 0o644))
+	runCommand(t, repo, "git", "add", "-A")
+
+	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
+	runIO, err := internalio.NewRunContext(runID, t.TempDir(), t.TempDir())
+	require.NoError(t, err)
+	allocation := contracts.WorktreeAllocation{
+		Agent:   "a1",
+		Pass:    2,
+		Path:    repo,
+		Branch:  "auto-improve/test/pass2/a1",
+		BaseSHA: baseSHA,
+		HeadSHA: baseSHA,
+	}
+
+	commitSHA, _, err := synthesizeSuccessCommit(context.Background(), allocation, RunContext{
+		IO:    runIO,
+		Agent: "a1",
+	})
+	require.NoError(t, err)
+
+	files := runCommand(t, repo, "git", "diff-tree", "--no-commit-id", "--name-only", "-r", commitSHA)
+	assert.Contains(t, files, "implemented.txt")
+	assert.NotContains(t, files, ".auto-improve")
+	assert.NotContains(t, files, "auto-improve/rules-registry.jsonl")
+	assert.NotContains(t, files, "auto-improve/rules/r.md")
+}
+
+func TestRejectCommittedPolicyArtifactChangesFailsClosed(t *testing.T) {
+	repo := t.TempDir()
+	runCommand(t, "", "git", "init", "-b", "main", repo)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644))
+	runCommand(t, repo, "git", "add", "README.md")
+	runCommand(t, repo, "git", "-c", "user.name=Seed User", "-c", "user.email=seed@example.invalid", "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(runCommand(t, repo, "git", "rev-parse", "HEAD"))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "auto-improve", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "auto-improve", "rules", "r.md"), []byte("mutated\n"), 0o644))
+	runCommand(t, repo, "git", "add", "auto-improve/rules/r.md")
+	runCommand(t, repo, "git", "-c", "user.name=Agent", "-c", "user.email=agent@example.invalid", "commit", "-m", "mutate policy")
+
+	err := rejectCommittedPolicyArtifactChanges(context.Background(), contracts.WorktreeAllocation{
+		Path:    repo,
+		BaseSHA: baseSHA,
+	})
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "committed policy artifact change is not allowed")
+}
+
 func TestStepRun_PersistsChildPIDAndPGIDInResumeState(t *testing.T) {
 	env := newStepTestEnv(t, "fake-claude-timeout.sh", 30)
 	t.Setenv("FAKE_SLEEP_SECONDS", "1")
@@ -626,9 +688,14 @@ func TestRenderPrompt_IncludesActiveRulesAndNoPass1FailureOracle(t *testing.T) {
 	assert.Contains(t, promptText, "Current Learned Rules")
 	assert.Contains(t, promptText, "r-existing")
 	assert.Contains(t, promptText, "Follow existing policy.")
-	assert.Contains(t, promptText, "Candidate Rules")
+	assert.Contains(t, promptText, "Experiment Lessons")
 	assert.Contains(t, promptText, "Keep companion files in sync.")
 	assert.Contains(t, promptText, "Write `checklist-result.json` at the worktree root.")
+	assert.Contains(t, promptText, "`rule_id`: required string")
+	assert.Contains(t, promptText, "`verdict`: required string, one of `compliant`, `n_a`, or `exception`")
+	assert.Contains(t, promptText, "`rationale`: optional string for `compliant`/`n_a`; required and non-empty when `verdict` is `exception`")
+	assert.Contains(t, promptText, "Do not use item keys like `id`, `status`, `result`, `description`, `file`, or `files`.")
+	assert.Contains(t, promptText, `"items":[{"rule_id":"task-scope","verdict":"compliant"`)
 	assert.NotContains(t, promptText, "make sure those pass1 failure statements are no longer true")
 	assert.NotContains(t, promptText, "A pass2 output that repeats the same violated condition from pass1 is incorrect")
 }
@@ -668,6 +735,23 @@ func TestStepRun_RecreatesDeletedPass2Worktree(t *testing.T) {
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
 	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
 	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(allocation.Path))
+
+	require.NoError(t, (Step{}).Run(context.Background(), env.run))
+	assert.FileExists(t, filepath.Join(allocation.Path, "implemented.txt"))
+}
+
+func TestStepRun_RecreatesDeletedPass2WorktreeWithInactiveResumeState(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	require.NoError(t, saveResumeState(agentDir, resumeState{
+		ExpectedBaseSHA: allocation.BaseSHA,
+		RetryCount:      1,
+	}))
 	require.NoError(t, os.RemoveAll(allocation.Path))
 
 	require.NoError(t, (Step{}).Run(context.Background(), env.run))
@@ -913,7 +997,7 @@ func TestStepRun_GitCommandsIgnoreInheritedGitDir(t *testing.T) {
 
 	manifest := readManifest(t, env.manifestPath)
 	success := manifest.Value.(contracts.ManifestSuccess)
-	assert.Equal(t, env.run.TaskPackage.BaseSHA, success.BaseSHA)
+	assert.NotEqual(t, env.run.TaskPackage.BaseSHA, success.BaseSHA)
 	assert.NotEqual(t, otherHead, success.HeadSHA)
 }
 
@@ -1190,6 +1274,28 @@ type stepTestEnv struct {
 	run          RunContext
 	manifestPath string
 	repoDir      string
+}
+
+func TestVerifyExistingAllocationWorktreeIgnoresPolicyOverlay(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "repo")
+	worktreePath := filepath.Join(root, "worktree")
+	baseSHA := initGitRepoWithWorktree(t, repoDir, worktreePath)
+
+	allocation := contracts.WorktreeAllocation{
+		Agent:   "a1",
+		Pass:    2,
+		Path:    worktreePath,
+		Branch:  "test/pass2/a1",
+		BaseSHA: baseSHA,
+		HeadSHA: baseSHA,
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(worktreePath, ".auto-improve"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, ".auto-improve", "checklist.md"), []byte("# Checklist\n"), 0o644))
+	require.NoError(t, verifyExistingAllocationWorktree(context.Background(), allocation))
+
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, "app.txt"), []byte("dirty\n"), 0o644))
+	require.ErrorContains(t, verifyExistingAllocationWorktree(context.Background(), allocation), "existing worktree is dirty")
 }
 
 func newStepTestEnv(t *testing.T, script string, timeoutSeconds int) stepTestEnv {

@@ -51,7 +51,8 @@ target repository instead of only under the local `runs` cache, also configure
 Subprocess command names are resolved against the fixed trusted runtime PATH
 (`/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin`), not the
 caller shell's ambient `PATH`; use absolute paths for `claude` / `codex` if
-they are installed elsewhere.
+they are installed elsewhere. If a provider binary is a Node shebang wrapper and
+must run with a specific Node runtime, set `node_binary` on that profile.
 `task_prompt.source` controls the shared task brief used by pass1/pass2. Use
 `auto` (default) to ask the optional `task_generator` agent to reconstruct an
 issue-like task description from PR title/body, linked issues, changed files,
@@ -100,6 +101,16 @@ issue.
   archived/deprecated lifecycle の sunset flow を手動実行する。
 - `auto-improve recover ...`
   step70 / sentinel / cleanup の recover flow を実行する。
+- `auto-improve lessons new <id> --checklist-item <text>`
+  `.auto-improve/lessons/<id>.md` の lesson skeleton を作成する。
+- `auto-improve lessons generate-checklist [--check]`
+  active lessons から `.auto-improve/checklist.md` を生成、または stale か確認する。
+- `auto-improve lessons prepare-checklist-result [--force]`
+  `.auto-improve/checklist.md` を `.auto-improve/work/checklist-result.md` にコピーする。
+- `auto-improve lessons verify-checklist-result`
+  作業用 checklist result が `[x]` / `[-]` / `[!]` で解決済みか確認する。
+- `auto-improve lessons install-guidance [--provider claude,codex]`
+  `CLAUDE.md` / `AGENTS.md` / provider hook 設定を managed block 方式で追加する。
 
 ## Install
 

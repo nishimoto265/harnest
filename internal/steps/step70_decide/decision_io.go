@@ -72,6 +72,9 @@ func loadDecisionIfExists(runCtx internalio.RunContext) (contracts.Decision, boo
 // ---- Git push staging ----
 
 func pushBranch(ctx context.Context, target Target, deps Deps) error {
+	if target.PolicyOnly && target.TargetSHA == target.BestShaBefore {
+		return nil
+	}
 	return deps.Git.PushForceWithLease(ctx, target.BestBranch, target.TargetSHA, target.BestShaBefore)
 }
 

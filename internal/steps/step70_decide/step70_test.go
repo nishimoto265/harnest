@@ -183,13 +183,8 @@ func TestDrivePolicyPublish_PolicyPublishingEmptyAfterAdoptsMatchingRemoteSnapsh
 	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
 }
 
-func TestFilesystemResolver_LeaseFailureLeavesCanonicalRuleUntouched(t *testing.T) {
+func TestFilesystemResolver_PolicyOnlyAdoptDoesNotPushImplementationCommit(t *testing.T) {
 	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
-	ruleID := generatedRuleID("cand-1")
-	rulePath := filepath.Join(runCtx.RunsBase, "rules", ruleID+".md")
-	require.NoError(t, os.MkdirAll(filepath.Dir(rulePath), 0o755))
-	require.NoError(t, os.WriteFile(rulePath, []byte("canonical-before\n"), 0o644))
-
 	resolver := FilesystemResolver{
 		RepoDir: runCtx.RunsBase,
 		Now:     fixedNow(),
@@ -198,22 +193,59 @@ func TestFilesystemResolver_LeaseFailureLeavesCanonicalRuleUntouched(t *testing.
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	before, err := os.ReadFile(rulePath)
-	require.NoError(t, err)
-	assert.Equal(t, "canonical-before\n", string(before))
-
 	store := newMemStore(intentionPath(t, runCtx))
-	git := &fakeGit{head: strings.Repeat("1", 40), pushErr: ErrLeaseFailure}
+	git := &fakeGit{head: strings.Repeat("1", 40)}
 	require.NoError(t, Run(context.Background(), 42, runCtx, pkg, candidates, store, Deps{
 		Git:      git,
 		Resolver: &fixtureResolver{target: target},
 		Now:      fixedNow(),
 	}))
 
-	after, err := os.ReadFile(rulePath)
-	require.NoError(t, err)
-	assert.Equal(t, before, after)
-	assert.NoFileExists(t, mustStagedRulePath(t, runCtx, filepath.Join("rules", ruleID+".md")))
+	assert.Empty(t, git.pushCalls)
+	decision := readDecision(t, runCtx).Value.(contracts.DecisionAdopt)
+	assert.Equal(t, strings.Repeat("1", 40), decision.BestShaBefore)
+	assert.Equal(t, strings.Repeat("1", 40), decision.TargetSha)
+}
+
+func TestHandleRollback_PolicyOnlyPreRegistryDoesNotRequirePushOwnership(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR421")
+	resolver.target.PolicyOnly = true
+	resolver.target.TargetSHA = resolver.target.BestShaBefore
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.PolicyOnly = true
+	writer := state.NewWriter(runCtx)
+
+	git := &fakeGit{head: resolver.target.BestShaBefore}
+	require.NoError(t, handleRollback(context.Background(), 421, runCtx, pkg, resolver.target, intention, noopStore{}, writer, Deps{
+		Git:      git,
+		Resolver: resolver,
+		Now:      fixedNow(),
+	}, contracts.RollbackReasonTransactionalFailure, pushUnknown))
+
+	assert.Empty(t, git.pushCalls)
+	assert.Equal(t, contracts.DecisionActionRollback, readDecision(t, runCtx).Action)
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
+}
+
+func TestHandleRollback_PolicyOnlyIgnoresUnrelatedBestBranchAdvancement(t *testing.T) {
+	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR425")
+	resolver.target.PolicyOnly = true
+	resolver.target.TargetSHA = resolver.target.BestShaBefore
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.PolicyOnly = true
+	writer := state.NewWriter(runCtx)
+
+	git := &fakeGit{head: strings.Repeat("9", 40)}
+	require.NoError(t, handleRollback(context.Background(), 425, runCtx, pkg, resolver.target, intention, noopStore{}, writer, Deps{
+		Git:      git,
+		Resolver: resolver,
+		Now:      fixedNow(),
+	}, contracts.RollbackReasonTransactionalFailure, pushUnknown))
+
+	assert.Empty(t, git.pushCalls)
+	assert.Zero(t, git.remoteHeadCalls)
+	assert.Equal(t, contracts.DecisionActionRollback, readDecision(t, runCtx).Action)
+	assert.NoFileExists(t, filepath.Join(runCtx.RunsBase, needsRecoveryDir, string(runCtx.RunID)+".json"))
 }
 
 func TestFilesystemResolver_AdoptPromotesExactSidecarBytes(t *testing.T) {
@@ -260,7 +292,69 @@ func TestFilesystemResolver_SelectsNextPromotablePairwiseWinner(t *testing.T) {
 
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, strings.Repeat("2", 40), target.TargetSHA)
+	assert.True(t, target.PolicyOnly)
+	assert.Empty(t, target.TargetSHA)
+}
+
+func TestStep70Pass2OutputHashesFailsWhenPass2ScorableButPass1IsNotScorable(t *testing.T) {
+	runCtx, pkg, _, _, _ := newFixture(t, "PR421")
+	seedAdditionalResolverAgent(t, runCtx, pkg, "a2", strings.Repeat("2", 40), 80, 90)
+
+	pass1ManifestPath, err := runCtx.ManifestPath(1, "a1")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(pass1ManifestPath, contracts.Manifest{
+		Kind: contracts.ManifestKindTimeout,
+		Value: contracts.ManifestTimeout{
+			Kind:           contracts.ManifestKindTimeout,
+			SchemaVersion:  "1",
+			RunID:          runCtx.RunID,
+			Pass:           1,
+			Agent:          "a1",
+			TimeoutSeconds: 60,
+			StartedAt:      time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+			FinishedAt:     time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC),
+		},
+	}))
+
+	pass2Branch := ""
+	for _, wt := range pkg.Worktrees {
+		if wt.Pass == 2 && wt.Agent == "a1" {
+			pass2Branch = wt.Branch
+			break
+		}
+	}
+	require.NotEmpty(t, pass2Branch)
+	pass2DiffPath := "50-pass2/a1/diff.patch"
+	pass2ManifestPath, err := runCtx.ManifestPath(2, "a1")
+	require.NoError(t, err)
+	require.NoError(t, internalio.WriteJSONAtomic(pass2ManifestPath, contracts.Manifest{
+		Kind: contracts.ManifestKindSuccess,
+		Value: contracts.ManifestSuccess{
+			Kind:          contracts.ManifestKindSuccess,
+			SchemaVersion: "1",
+			RunID:         runCtx.RunID,
+			Pass:          2,
+			Agent:         "a1",
+			BranchName:    pass2Branch,
+			HeadSHA:       strings.Repeat("3", 40),
+			BaseSHA:       strings.Repeat("a", 40),
+			DiffPath:      pass2DiffPath,
+			SessionPath:   "50-pass2/a1/session.jsonl",
+			ChecklistPath: "50-pass2/a1/checklist-result.json",
+			PromptVersion: "stub",
+			StartedAt:     time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC),
+			FinishedAt:    time.Date(2026, 4, 21, 10, 1, 0, 0, time.UTC),
+		},
+	}))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, pass2DiffPath), []byte("pass2 diff for a1\n")))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, "50-pass2/a1/session.jsonl"), []byte("{}\n")))
+	require.NoError(t, internalio.WriteAtomic(mustRunPath(t, runCtx, "50-pass2/a1/checklist-result.json"), []byte("{}\n")))
+
+	hashes, completedAgents, err := step70Pass2OutputHashes(runCtx, pkg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pass2 scorable agent missing matching pass1 scorable manifest")
+	assert.Nil(t, hashes)
+	assert.Nil(t, completedAgents)
 }
 
 func TestFilesystemResolver_RejectsDuplicateUpdateTargetsBeforeBuildingRegistryEntries(t *testing.T) {
@@ -1641,6 +1735,61 @@ func TestRecoverAdoptAnywayAllowsLaterRegistryProgress(t *testing.T) {
 	decision := readDecision(t, runCtx)
 	assert.Equal(t, contracts.DecisionActionAdopt, decision.Action)
 	assert.Contains(t, readStateKinds(t, runCtx), contracts.StateKindPromoted)
+	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
+func TestRecoverAdoptAnywayPolicyOnlyIgnoresBestBranchAdvancement(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR506")
+	resolver.target.PolicyOnly = true
+	resolver.target.TargetSHA = resolver.target.BestShaBefore
+	resolver.target.RulesToAppend = adoptAddedEntriesWithTarget(runCtx.RunID, candidates.CandidatesHash, resolver.target.TargetSHA, "policy-only-rule")
+	stageFixtureRuleSidecars(t, runCtx, resolver.target)
+	registryPath := runCtx.RulesRegistryPath()
+	appendResult, _ := seedRegistryAdd(t, registryPath, resolver, runCtx.RunID, candidates.CandidatesHash)
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.PolicyOnly = true
+	intention.Stage = contracts.IntentionStageNeedsManualRecovery
+	intention.RegistryAppendResult = &appendResult
+	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
+	intention.FailedStep = contracts.FailedStep70
+	require.NoError(t, store.Save(intention))
+
+	err := RecoverAdoptAnyway(context.Background(), 506, runCtx, pkg, candidates, store, Deps{
+		Git: &fakeGit{head: strings.Repeat("9", 40)},
+		Now: fixedNow(),
+	})
+	require.NoError(t, err)
+
+	decision := readDecision(t, runCtx)
+	adopt := mustDecisionAdopt(t, decision)
+	assert.True(t, adopt.PolicyOnly)
+	assert.Contains(t, readStateKinds(t, runCtx), contracts.StateKindPromoted)
+	assert.NoFileExists(t, intentionPath(t, runCtx))
+}
+
+func TestRecoverRollbackPolicyOnlyIgnoresBestBranchAdvancement(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR507")
+	resolver.target.PolicyOnly = true
+	resolver.target.TargetSHA = resolver.target.BestShaBefore
+
+	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
+	intention.PolicyOnly = true
+	intention.Stage = contracts.IntentionStageNeedsManualRecovery
+	intention.RecoveryReason = contracts.RollbackReasonTransactionalFailure
+	intention.FailedStep = contracts.FailedStep70
+	require.NoError(t, store.Save(intention))
+
+	git := &fakeGit{head: strings.Repeat("9", 40)}
+	err := RecoverRollback(context.Background(), 507, runCtx, pkg, store, Deps{
+		Git: git,
+		Now: fixedNow(),
+	})
+	require.NoError(t, err)
+
+	assert.Zero(t, git.remoteHeadCalls)
+	assert.Empty(t, git.pushCalls)
+	assert.Equal(t, contracts.DecisionActionRollback, readDecision(t, runCtx).Action)
 	assert.NoFileExists(t, intentionPath(t, runCtx))
 }
 

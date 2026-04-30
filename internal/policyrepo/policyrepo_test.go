@@ -246,6 +246,56 @@ func TestSnapshotLocalForRunCopiesLocalPolicyAndMetadata(t *testing.T) {
 	assert.NotEmpty(t, meta.RegistryHead)
 }
 
+func TestHydrateAndSnapshotFromBranchOrSeedSeedsRepoLocalPolicyWhenBranchMissing(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	runID := contracts.RunID("2026-04-23-PR4-feedbee")
+	runCtx, err := internalio.NewRunContext(runID, runsBase, filepath.Join(t.TempDir(), "worktrees"))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, RepoDirName, rulesLocalDirName), 0o755))
+	const localRule = "# Repo-local policy\n\nbody\n"
+	registry := "{\"kind\":\"added\",\"schema_version\":\"1\",\"rule_id\":\"r-local\",\"rule_path\":\"rules/r-local.md\",\"sha256\":\"" + sha256Hex([]byte(localRule)) + "\",\"idempotency_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_seq\":1,\"prev_hash\":\"\",\"by_run_id\":\"2026-04-23-PR1-feedbee\",\"at\":\"2026-04-23T08:00:00Z\"}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, RegistryRepoRelPath), []byte(registry), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, RepoDirName, rulesLocalDirName, "r-local.md"), []byte(localRule), 0o644))
+
+	require.NoError(t, HydrateAndSnapshotFromBranchOrSeed(context.Background(), repoRoot, "missing-policy", runsBase, runCtx.RunDir()))
+
+	registryBytes, err := os.ReadFile(filepath.Join(runCtx.RunDir(), "policy", registryLocalName))
+	require.NoError(t, err)
+	assert.Equal(t, registry, string(registryBytes))
+	ruleBytes, err := os.ReadFile(filepath.Join(runCtx.RunDir(), "policy", rulesLocalDirName, "r-local.md"))
+	require.NoError(t, err)
+	assert.Equal(t, localRule, string(ruleBytes))
+	meta, ok, err := LoadSnapshotMetadata(runCtx)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "missing-policy", meta.PolicyBranch)
+	assert.Empty(t, meta.PolicyHead)
+	assert.NotEmpty(t, meta.RegistryHead)
+}
+
+func TestPolicyBranchHydrationAllowsSeedRejectsGenericFetchFailures(t *testing.T) {
+	err := errors.New("policyrepo: fetch branch policy: exit status 128: fatal: Authentication failed")
+
+	assert.False(t, policyBranchHydrationAllowsSeed(err))
+}
+
+func TestLoadRepoLocalSnapshotRejectsSymlinkedRegistry(t *testing.T) {
+	repoRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, RepoDirName), 0o755))
+	outside := filepath.Join(t.TempDir(), "rules-registry.jsonl")
+	require.NoError(t, os.WriteFile(outside, []byte(""), 0o644))
+	linkPath := filepath.Join(repoRoot, RegistryRepoRelPath)
+	if err := os.Symlink(outside, linkPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	_, err := loadRepoLocalSnapshot(repoRoot)
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "repo-local registry path must be a regular file")
+}
+
 func TestPublishSnapshotPushesRunsBasePolicyToBranch(t *testing.T) {
 	repoRoot := newClonedRepoWithPolicyBranch(t)
 	runsBase := filepath.Join(t.TempDir(), "runs")
@@ -263,6 +313,31 @@ func TestPublishSnapshotPushesRunsBasePolicyToBranch(t *testing.T) {
 	mustGit(t, repoRoot, "fetch", "--no-tags", "origin", "policy")
 	body := string(mustGitOutput(t, repoRoot, "show", "origin/policy:"+RulesRepoDirRelPath+"/r-sync-message-details.md"))
 	assert.Contains(t, body, "# Updated rule")
+}
+
+func TestPublishSnapshotRemovesUnmanagedFilesFromPolicyBranch(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	mustGit(t, repoRoot, "checkout", "policy")
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "README.md"), []byte("must not persist\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, RepoDirName, "app.go"), []byte("package leak\n"), 0o644))
+	mustGit(t, repoRoot, "add", "README.md", filepath.Join(RepoDirName, "app.go"))
+	mustGit(t, repoRoot, "commit", "-m", "accidental implementation files")
+	mustGit(t, repoRoot, "push", "origin", "HEAD:policy")
+	mustGit(t, repoRoot, "fetch", "--no-tags", "origin", "policy")
+
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	require.NoError(t, HydrateFromBranch(context.Background(), repoRoot, "policy", runsBase))
+	headBefore := strings.TrimSpace(string(mustGitOutput(t, repoRoot, "rev-parse", "origin/policy")))
+	newHead, err := PublishSnapshot(context.Background(), repoRoot, "policy", headBefore, runsBase, "2026-04-23-PR2-adopt")
+	require.NoError(t, err)
+	assert.NotEqual(t, headBefore, newHead)
+
+	mustGit(t, repoRoot, "fetch", "--no-tags", "origin", "policy")
+	files := string(mustGitOutput(t, repoRoot, "ls-tree", "-r", "--name-only", "origin/policy"))
+	assert.Contains(t, files, RegistryRepoRelPath)
+	assert.Contains(t, files, RulesRepoDirRelPath+"/r-sync-message-details.md")
+	assert.NotContains(t, files, "README.md")
+	assert.NotContains(t, files, RepoDirName+"/app.go")
 }
 
 func TestPublishSnapshotRejectsSymlinkedLocalRule(t *testing.T) {

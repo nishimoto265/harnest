@@ -150,6 +150,40 @@ type ComplianceEntry struct {
 	ResolvedAt time.Time `json:"resolved_at" validate:"required"`
 }
 
+type IssueSeverity string
+
+const (
+	IssueSeverityCritical IssueSeverity = "critical"
+	IssueSeverityHigh     IssueSeverity = "high"
+	IssueSeverityMedium   IssueSeverity = "medium"
+	IssueSeverityLow      IssueSeverity = "low"
+)
+
+// IssueEntry is an actionable pass-1 judge finding appended to
+// `<run>/30/issues-A.jsonl`. Unlike scores/compliance, issues are advisory
+// learning material for step40; they do not participate in done.marker
+// cardinality.
+type IssueEntry struct {
+	SchemaVersion string    `json:"schema_version" validate:"required,oneof=1"`
+	RunID         RunID     `json:"run_id" validate:"required,run_id_fmt"`
+	Pass          int       `json:"pass" validate:"required,oneof=1"`
+	Agent         AgentID   `json:"agent" validate:"required,agent_id_fmt"`
+	JudgeRole     JudgeRole `json:"judge_role" validate:"required,oneof=primary secondary arbiter"`
+
+	IssueID        string        `json:"issue_id" validate:"required,rule_id_fmt"`
+	Severity       IssueSeverity `json:"severity" validate:"required,oneof=critical high medium low"`
+	Category       string        `json:"category" validate:"required,max=80"`
+	Title          string        `json:"title" validate:"required,max=160"`
+	Evidence       string        `json:"evidence" validate:"required,max=700"`
+	ProposedLesson string        `json:"proposed_lesson" validate:"required,max=700"`
+	ChecklistItem  string        `json:"checklist_item" validate:"required,max=220"`
+
+	OutputSha256  string    `json:"output_sha256" validate:"required,sha256_hex"`
+	RubricVersion string    `json:"rubric_version" validate:"required"`
+	PromptVersion string    `json:"prompt_version" validate:"required"`
+	ResolvedAt    time.Time `json:"resolved_at" validate:"required"`
+}
+
 // PairwiseWinner: A / B / tie (step60 pairwise.jsonl).
 type PairwiseWinner string
 
@@ -232,6 +266,10 @@ func (e ComplianceEntry) Validate() error {
 		return err
 	}
 	return validateOverflowRefUnderPrefix("rationale_overflow_ref", e.RationaleOverflowRef, overflowPrefixForPass(e.Pass))
+}
+
+func (e IssueEntry) Validate() error {
+	return validateStruct(e)
 }
 
 func (e PairwiseEntry) Validate() error {

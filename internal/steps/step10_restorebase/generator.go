@@ -36,7 +36,7 @@ func NewCLITaskBriefGenerator(profile agents.Profile, repoRoot string) CLITaskBr
 
 func (g CLITaskBriefGenerator) GenerateTaskBrief(ctx context.Context, input TaskBriefInput) (string, error) {
 	promptText := RenderTaskBriefGeneratorPrompt(input)
-	binary, prefixArgs, err := agentrunner.PrepareProviderBinary(g.Profile.Provider, g.Profile.Binary)
+	binary, prefixArgs, err := agentrunner.PrepareProfileBinary(g.Profile)
 	if err != nil {
 		return "", err
 	}
@@ -172,6 +172,7 @@ func runTaskBriefGeneratorCLI(ctx context.Context, binary string, prefixArgs []s
 		Prompt:      promptText,
 		SessionPath: sessionPath,
 		Timeout:     timeout,
+		Env:         agentrunner.ProfileEnv(profile),
 		ErrPrefix:   "step10 task brief generator",
 	})
 	if err != nil {
@@ -202,7 +203,7 @@ func codexTaskBriefGeneratorArgs(profileArgs []string, workdir, outputPath strin
 	return args, nil
 }
 
-func claudeTaskBriefGeneratorArgs(profileArgs []string, workdir string) ([]string, error) {
+func claudeTaskBriefGeneratorArgs(profileArgs []string, _ string) ([]string, error) {
 	if err := agents.ValidateJudgeProfileArgs(agents.ProviderClaude, profileArgs); err != nil {
 		return nil, err
 	}
@@ -210,7 +211,6 @@ func claudeTaskBriefGeneratorArgs(profileArgs []string, workdir string) ([]strin
 		"-p",
 		"--output-format", "json",
 		"--allowedTools", "Read",
-		"--cwd", workdir,
 	}
 	args = append(args, profileArgs...)
 	return args, nil

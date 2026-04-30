@@ -45,6 +45,7 @@ func newRootCmd() *cobra.Command {
 		newPreflightCmd(),
 		newDetectMergedCmd(),
 		newRunCmd(),
+		newLessonsCmd(),
 		newSunsetCmd(),
 		newRecoverCmd(),
 	)

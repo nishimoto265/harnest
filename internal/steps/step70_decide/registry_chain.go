@@ -135,6 +135,7 @@ func targetFromIntention(pkg *contracts.TaskPackage, intention contracts.Intenti
 		BestBranch:    bestBranch,
 		BestShaBefore: intention.BestShaBefore,
 		TargetSHA:     intention.TargetSha,
+		PolicyOnly:    intention.PolicyOnly,
 	}
 }
 

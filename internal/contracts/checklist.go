@@ -62,6 +62,14 @@ func (r *ChecklistResult) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*r = ChecklistResult(a)
+	for i := range r.Items {
+		item := &r.Items[i]
+		if item.Verdict == ChecklistItemException &&
+			strings.TrimSpace(item.Rationale) == "" &&
+			strings.TrimSpace(item.ExceptionReason) != "" {
+			item.Rationale = item.ExceptionReason
+		}
+	}
 	return r.Validate()
 }
 

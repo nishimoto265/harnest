@@ -223,14 +223,15 @@
     "best_sha_before": "dddddddddddddddddddddddddddddddddddddddd",
     "candidates_hash": "e5d731617df49c50f4c0d8a5e214bc626c3267edde9959110e6f8b28a15bdb40",
     "decided_at": "__TIME__",
-    "idempotency_key": "c718e69901653836acd32cdc04e1803f1ee3100d6830e76c325fd854c10a4ef6",
+    "idempotency_key": "62b050f47449b9fba87a95428473db94c36d0265285d1e86eea9e7578d8b10f6",
+    "policy_only": true,
     "registry_append_result": {
       "offset": 0,
       "sha256": "__HASH__"
     },
     "run_id": "2026-04-21-PR43-abcdeff",
     "schema_version": "1",
-    "target_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "target_sha": "dddddddddddddddddddddddddddddddddddddddd"
   },
   "processed.jsonl": [
     {
@@ -301,7 +302,7 @@
     {
       "at": "__TIME__",
       "by_run_id": "2026-04-21-PR43-abcdeff",
-      "idempotency_key": "82efefea447aec2c8a2a500b218b82b4a7d8321479ba1ed17d96ffe28f0632af",
+      "idempotency_key": "89974f9be0d14816288f4190b469b921b1fd4cedefa793fca83be00db649cee8",
       "kind": "added",
       "prev_hash": "",
       "rule_id": "r-bf1d22bf4a85",

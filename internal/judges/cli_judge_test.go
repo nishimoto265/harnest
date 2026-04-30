@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
@@ -44,6 +45,8 @@ cat > "$out" <<'EOF'
   {"dimension":"communication","score":84,"reason":"r5"}
 ],"compliance":[
   {"rule_id":"stub-rubric-rule","verdict":"compliant","rationale":"ok"}
+],"issues":[
+  {"severity":"high","category":"routing","title":"Proxy helper mixing","evidence":"proxy.ts mixes 404 matching with request mutation.","proposed_lesson":"Separate proxy matching helpers from mutation logic.","checklist_item":"Keep proxy matching helpers separate from mutation logic."}
 ]}
 EOF
 `), 0o755))
@@ -67,6 +70,9 @@ EOF
 	}))
 	assert.Len(t, output.Scores, 5)
 	assert.Len(t, output.Compliance, 1)
+	require.Len(t, output.Issues, 1)
+	assert.Equal(t, "routing", output.Issues[0].Category)
+	assert.Equal(t, "Proxy helper mixing", output.Issues[0].Title)
 }
 
 func TestCLIJudgeCodexScoreOutputRecordsArgvAndUsesManagedOutputPath(t *testing.T) {
@@ -74,6 +80,7 @@ func TestCLIJudgeCodexScoreOutputRecordsArgvAndUsesManagedOutputPath(t *testing.
 	outputPath := filepath.Join(dir, "output.patch")
 	rubricPath := filepath.Join(dir, "rubric.md")
 	argvPath := filepath.Join(dir, "argv.txt")
+	promptPath := filepath.Join(dir, "prompt.txt")
 	require.NoError(t, os.WriteFile(outputPath, []byte("diff --git a/app/message.txt b/app/message.txt\n"), 0o644))
 	require.NoError(t, os.WriteFile(rubricPath, []byte("# rubric\n"), 0o644))
 
@@ -91,10 +98,10 @@ while [ "$#" -gt 0 ]; do
       shift
       printf '%s\n' "$1" >> "$argv_out"
       ;;
-  esac
+	esac
   shift
 done
-cat > /dev/null
+cat > "${FAKE_CODEX_PROMPT_OUT}"
 cat > "$out" <<'EOF'
 {"scores":[
   {"dimension":"fidelity","score":80,"reason":"r1"},
@@ -109,6 +116,7 @@ EOF
 `), 0o755))
 
 	t.Setenv("FAKE_CODEX_ARGV_OUT", argvPath)
+	t.Setenv("FAKE_CODEX_PROMPT_OUT", promptPath)
 	judge := NewCLIJudge(agents.Profile{
 		Provider: agents.ProviderCodex,
 		Binary:   codexPath,
@@ -128,9 +136,128 @@ EOF
 	require.NoError(t, err)
 	argv := strings.Split(strings.TrimSpace(string(argvBytes)), "\n")
 	assert.Equal(t, "exec", argv[0])
-	assertArgValue(t, argv, "-C", dir)
+	workdir := argValue(t, argv, "-C")
+	assert.NotEqual(t, dir, workdir)
+	assert.Contains(t, filepath.Base(workdir), "auto-improve-judge-workdir-")
+	assertArgValue(t, argv, "-c", `web_search="disabled"`)
 	assertArgLastValueHasPrefix(t, argv, "-o", filepath.Join(os.TempDir(), "auto-improve-output-"))
 	assert.Equal(t, "-", argv[len(argv)-1])
+
+	promptBytes, err := os.ReadFile(promptPath)
+	require.NoError(t, err)
+	prompt := string(promptBytes)
+	assert.Contains(t, prompt, filepath.Join(workdir, "output.patch"))
+	assert.Contains(t, prompt, filepath.Join(workdir, "rubric.md"))
+	assert.NotContains(t, prompt, outputPath)
+	assert.NotContains(t, prompt, rubricPath)
+}
+
+func TestCLIJudgeFiltersUnexpectedComplianceRowsForExpectedSet(t *testing.T) {
+	judge := cliJudge{
+		role:    RoleArbiter,
+		profile: agents.Profile{Provider: agents.ProviderClaude, Binary: "claude"},
+		now:     func() time.Time { return time.Unix(0, 0).UTC() },
+	}
+	input := JudgeInput{
+		RunID:                     "2026-04-23-PR1-abcdef0",
+		Pass:                      1,
+		Agent:                     "a1",
+		OutputPath:                "/tmp/output.patch",
+		RubricPath:                "/tmp/rubric.md",
+		ExpectedComplianceRuleIDs: []string{"rule-b"},
+		EnforceExpectedCompliance: true,
+	}
+
+	output, err := judge.toJudgeOutput(input, modelJudgeResponse{
+		Scores: []modelJudgeScore{
+			{Dimension: "fidelity", Score: 80, Reason: "r1"},
+			{Dimension: "correctness", Score: 81, Reason: "r2"},
+			{Dimension: "maintainability", Score: 82, Reason: "r3"},
+			{Dimension: "discipline", Score: 83, Reason: "r4"},
+			{Dimension: "communication", Score: 84, Reason: "r5"},
+		},
+		Compliance: []modelJudgeCompliance{
+			{RuleID: "rule-a", Verdict: "compliant", Rationale: "extra"},
+			{RuleID: "rule-b", Verdict: "violated", Rationale: "expected"},
+		},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, output.Compliance, 1)
+	assert.Equal(t, "rule-b", output.Compliance[0].RuleID)
+	assert.Equal(t, "expected", output.Compliance[0].Rationale)
+}
+
+func TestCLIJudgeMarksMissingExpectedComplianceRowsAsMissed(t *testing.T) {
+	judge := cliJudge{
+		role:    RolePrimary,
+		profile: agents.Profile{Provider: agents.ProviderCodex, Binary: "codex"},
+		now:     func() time.Time { return time.Unix(0, 0).UTC() },
+	}
+	input := JudgeInput{
+		RunID:                     "2026-04-23-PR1-abcdef0",
+		Pass:                      1,
+		Agent:                     "a1",
+		OutputPath:                "/tmp/output.patch",
+		RubricPath:                "/tmp/rubric.md",
+		ExpectedComplianceRuleIDs: []string{"rule-a", "rule-b"},
+		EnforceExpectedCompliance: true,
+	}
+
+	output, err := judge.toJudgeOutput(input, modelJudgeResponse{
+		Scores: []modelJudgeScore{
+			{Dimension: "fidelity", Score: 80, Reason: "r1"},
+			{Dimension: "correctness", Score: 81, Reason: "r2"},
+			{Dimension: "maintainability", Score: 82, Reason: "r3"},
+			{Dimension: "discipline", Score: 83, Reason: "r4"},
+			{Dimension: "communication", Score: 84, Reason: "r5"},
+		},
+		Compliance: []modelJudgeCompliance{
+			{RuleID: "rule-a", Verdict: "compliant", Rationale: "expected"},
+		},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, output.Compliance, 2)
+	assert.Equal(t, "rule-a", output.Compliance[0].RuleID)
+	assert.Equal(t, "rule-b", output.Compliance[1].RuleID)
+	assert.Equal(t, "missed", string(output.Compliance[1].Verdict))
+	assert.Contains(t, output.Compliance[1].Rationale, "omitted")
+}
+
+func TestCLIJudgeTruncatesLongFreeTextFields(t *testing.T) {
+	judge := cliJudge{
+		role:    RolePrimary,
+		profile: agents.Profile{Provider: agents.ProviderClaude, Binary: "claude"},
+		now:     func() time.Time { return time.Unix(0, 0).UTC() },
+	}
+	input := JudgeInput{
+		RunID:                     "2026-04-23-PR1-abcdef0",
+		Pass:                      1,
+		Agent:                     "a1",
+		OutputPath:                "/tmp/output.patch",
+		RubricPath:                "/tmp/rubric.md",
+		ExpectedComplianceRuleIDs: []string{"rule-a"},
+		EnforceExpectedCompliance: true,
+	}
+
+	output, err := judge.toJudgeOutput(input, modelJudgeResponse{
+		Scores: []modelJudgeScore{
+			{Dimension: "fidelity", Score: 80, Reason: strings.Repeat("a", 1200)},
+			{Dimension: "correctness", Score: 81, Reason: "r2"},
+			{Dimension: "maintainability", Score: 82, Reason: "r3"},
+			{Dimension: "discipline", Score: 83, Reason: "r4"},
+			{Dimension: "communication", Score: 84, Reason: "r5"},
+		},
+		Compliance: []modelJudgeCompliance{
+			{RuleID: "rule-a", Verdict: "violated", Rationale: strings.Repeat("b", 700)},
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Len(t, []rune(output.Scores[0].Reasons), 1000)
+	require.Len(t, output.Compliance, 1)
+	assert.Len(t, []rune(output.Compliance[0].Rationale), 500)
 }
 
 func TestCLIJudgeCodexFailsClosedOnNonZeroExitEvenWithOutput(t *testing.T) {
@@ -241,6 +368,7 @@ func TestCodexJudgeExecArgsAreReadOnlyAndKeepSafeProfileArgs(t *testing.T) {
 		"--sandbox", "read-only",
 		"--skip-git-repo-check",
 		"--ephemeral",
+		"-c", `web_search="disabled"`,
 		"-C", "/tmp/worktree",
 		"--model", "gpt-5",
 		"--model=gpt-5-mini",
@@ -332,7 +460,6 @@ func TestClaudeJudgeExecArgsUseReadOnlyToolsAndKeepSafeProfileArgs(t *testing.T)
 		"-p",
 		"--output-format", "json",
 		"--allowedTools", "Read",
-		"--cwd", "/tmp/worktree",
 		"--model", "claude-3-5-sonnet",
 	}, args)
 }
@@ -379,13 +506,18 @@ func TestClaudeJudgeExecArgsRejectSafeArgMissingValue(t *testing.T) {
 
 func assertArgValue(t *testing.T, argv []string, flag, want string) {
 	t.Helper()
+	assert.Equal(t, want, argValue(t, argv, flag))
+}
+
+func argValue(t *testing.T, argv []string, flag string) string {
+	t.Helper()
 	for i := 0; i < len(argv)-1; i++ {
 		if argv[i] == flag {
-			assert.Equal(t, want, argv[i+1])
-			return
+			return argv[i+1]
 		}
 	}
 	t.Fatalf("missing %s in argv: %v", flag, argv)
+	return ""
 }
 
 func assertArgLastValueHasPrefix(t *testing.T, argv []string, flag, prefix string) {

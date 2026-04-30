@@ -67,11 +67,17 @@ func (j cliPairwiseJudge) ComparePairwise(ctx context.Context, input PairwiseInp
 	if err := validatePairwiseInput(input); err != nil {
 		return PairwiseComparison{}, err
 	}
-	promptText, err := renderCLIPairwisePrompt(input)
+	workspace, err := prepareCLIPairwiseWorkspace(input, j.profile.Provider)
 	if err != nil {
 		return PairwiseComparison{}, err
 	}
-	responsePath, err := j.run(ctx, input.A.OutputPath, promptText)
+	defer workspace.cleanup()
+
+	promptText, err := renderCLIPairwisePrompt(workspace.input)
+	if err != nil {
+		return PairwiseComparison{}, err
+	}
+	responsePath, err := j.run(ctx, workspace.workdir, promptText)
 	if err != nil {
 		return PairwiseComparison{}, err
 	}
@@ -86,15 +92,17 @@ func (j cliPairwiseJudge) DecidePairwise(ctx context.Context, input PairwiseDeci
 	if err := validatePairwiseDecisionInput(input); err != nil {
 		return PairwiseDecision{}, err
 	}
-	promptText, err := renderCLIPairwiseDecisionPrompt(input)
+	workspace, err := prepareCLIPairwiseDecisionWorkspace(input, j.profile.Provider)
 	if err != nil {
 		return PairwiseDecision{}, err
 	}
-	anchorPath := input.RubricPath
-	if len(input.Pairs) > 0 {
-		anchorPath = input.Pairs[0].A.OutputPath
+	defer workspace.cleanup()
+
+	promptText, err := renderCLIPairwiseDecisionPrompt(workspace.input)
+	if err != nil {
+		return PairwiseDecision{}, err
 	}
-	responsePath, err := j.run(ctx, anchorPath, promptText)
+	responsePath, err := j.run(ctx, workspace.workdir, promptText)
 	if err != nil {
 		return PairwiseDecision{}, err
 	}
@@ -111,6 +119,7 @@ func (j cliPairwiseJudge) PairwiseJudgePromptVersion() string {
 		Purpose       string          `json:"purpose"`
 		Provider      agents.Provider `json:"provider"`
 		Binary        string          `json:"binary"`
+		NodeBinary    string          `json:"node_binary,omitempty"`
 		Args          []string        `json:"args"`
 		PairwiseHash  string          `json:"pairwise_hash"`
 		DecisionHash  string          `json:"decision_hash"`
@@ -119,6 +128,7 @@ func (j cliPairwiseJudge) PairwiseJudgePromptVersion() string {
 		Purpose:       j.purpose,
 		Provider:      j.profile.Provider,
 		Binary:        j.profile.Binary,
+		NodeBinary:    j.profile.NodeBinary,
 		Args:          append([]string(nil), j.profile.Args...),
 		PairwiseHash:  embeddedPromptHash("prompts/step60-pairwise.tmpl"),
 		DecisionHash:  embeddedPromptHash("prompts/step60-pairwise-decision.tmpl"),
@@ -131,13 +141,88 @@ func (j cliPairwiseJudge) PairwiseJudgePromptVersion() string {
 	return fmt.Sprintf("%s-%s-%s", pairwisePromptVersion, j.profile.Provider, hex.EncodeToString(sum[:])[:12])
 }
 
-func (j cliPairwiseJudge) run(ctx context.Context, anchorPath, promptText string) (string, error) {
-	workdir := filepath.Dir(anchorPath)
-	binary, prefixArgs, err := agentrunner.PrepareProviderBinary(j.profile.Provider, j.profile.Binary)
+func (j cliPairwiseJudge) run(ctx context.Context, workdir, promptText string) (string, error) {
+	binary, prefixArgs, err := agentrunner.PrepareProfileBinary(j.profile)
 	if err != nil {
 		return "", err
 	}
 	return runCLIJudge(ctx, binary, prefixArgs, j.profile, workdir, promptText, j.timeout)
+}
+
+type cliPairwiseWorkspace struct {
+	input   PairwiseInput
+	workdir string
+	cleanup func()
+}
+
+type cliPairwiseDecisionWorkspace struct {
+	input   PairwiseDecisionInput
+	workdir string
+	cleanup func()
+}
+
+func prepareCLIPairwiseWorkspace(input PairwiseInput, provider agents.Provider) (cliPairwiseWorkspace, error) {
+	if provider != agents.ProviderCodex {
+		workdir := filepath.Dir(input.A.OutputPath)
+		return cliPairwiseWorkspace{input: input, workdir: workdir, cleanup: func() {}}, nil
+	}
+	dir, err := os.MkdirTemp("", "auto-improve-pairwise-workdir-*")
+	if err != nil {
+		return cliPairwiseWorkspace{}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	bundled := input
+	bundled.RubricPath = filepath.Join(dir, "rubric.md")
+	bundled.A.OutputPath = filepath.Join(dir, "A.patch")
+	bundled.B.OutputPath = filepath.Join(dir, "B.patch")
+	if err := copyJudgeFile(input.RubricPath, bundled.RubricPath); err != nil {
+		cleanup()
+		return cliPairwiseWorkspace{}, err
+	}
+	if err := copyJudgeFile(input.A.OutputPath, bundled.A.OutputPath); err != nil {
+		cleanup()
+		return cliPairwiseWorkspace{}, err
+	}
+	if err := copyJudgeFile(input.B.OutputPath, bundled.B.OutputPath); err != nil {
+		cleanup()
+		return cliPairwiseWorkspace{}, err
+	}
+	return cliPairwiseWorkspace{input: bundled, workdir: dir, cleanup: cleanup}, nil
+}
+
+func prepareCLIPairwiseDecisionWorkspace(input PairwiseDecisionInput, provider agents.Provider) (cliPairwiseDecisionWorkspace, error) {
+	if provider != agents.ProviderCodex {
+		workdir := filepath.Dir(input.RubricPath)
+		if len(input.Pairs) > 0 {
+			workdir = filepath.Dir(input.Pairs[0].A.OutputPath)
+		}
+		return cliPairwiseDecisionWorkspace{input: input, workdir: workdir, cleanup: func() {}}, nil
+	}
+	dir, err := os.MkdirTemp("", "auto-improve-pairwise-decision-workdir-*")
+	if err != nil {
+		return cliPairwiseDecisionWorkspace{}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	bundled := input
+	bundled.Pairs = append([]PairwisePair(nil), input.Pairs...)
+	bundled.RubricPath = filepath.Join(dir, "rubric.md")
+	if err := copyJudgeFile(input.RubricPath, bundled.RubricPath); err != nil {
+		cleanup()
+		return cliPairwiseDecisionWorkspace{}, err
+	}
+	for i := range bundled.Pairs {
+		bundled.Pairs[i].A.OutputPath = filepath.Join(dir, fmt.Sprintf("pair-%02d-A.patch", i+1))
+		bundled.Pairs[i].B.OutputPath = filepath.Join(dir, fmt.Sprintf("pair-%02d-B.patch", i+1))
+		if err := copyJudgeFile(input.Pairs[i].A.OutputPath, bundled.Pairs[i].A.OutputPath); err != nil {
+			cleanup()
+			return cliPairwiseDecisionWorkspace{}, err
+		}
+		if err := copyJudgeFile(input.Pairs[i].B.OutputPath, bundled.Pairs[i].B.OutputPath); err != nil {
+			cleanup()
+			return cliPairwiseDecisionWorkspace{}, err
+		}
+	}
+	return cliPairwiseDecisionWorkspace{input: bundled, workdir: dir, cleanup: cleanup}, nil
 }
 
 func renderCLIPairwisePrompt(input PairwiseInput) (string, error) {

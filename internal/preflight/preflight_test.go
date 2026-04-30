@@ -279,7 +279,8 @@ func fakeDependencies(t *testing.T, missing string) Dependencies {
 			}
 			return []byte(output), nil
 		},
-		PrepareProviderBinary: func(_ agents.Provider, binary string) (string, []string, error) {
+		PrepareProviderBinary: func(profile agents.Profile) (string, []string, error) {
+			binary := profile.Binary
 			if binary == missing {
 				return "", nil, fmt.Errorf("%s not found", binary)
 			}

@@ -20,6 +20,14 @@ func handleRollback(ctx context.Context, pr int, runCtx internalio.RunContext, p
 	intention.RecoveryReason = reason
 	intention.FailedStep = contracts.FailedStep70
 
+	if target.PolicyOnly {
+		intention.Stage = contracts.IntentionStageRollingBackBranchReverted
+		if err := store.Save(intention); err != nil {
+			return err
+		}
+		return completeRollbackAfterBranchReverted(ctx, pr, runCtx, pkg, intention, store, writer, deps, reason)
+	}
+
 	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -28,6 +36,9 @@ func handleRollback(ctx context.Context, pr int, runCtx internalio.RunContext, p
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, reason)
 	}
 	switch {
+	case target.PolicyOnly && remoteHeadMatchesRollbackBase(remoteHead, target.BestShaBefore):
+		// Policy-only adoption never mutates best_branch, so a remote still at
+		// the rollback base is already reverted even when target_sha equals it.
 	case remoteHead == target.TargetSHA:
 		// F11: only revert the branch when we can prove this intention owns
 		// the remote target_sha. Post-push callers (pushOwnership=pushOwned)
@@ -66,7 +77,10 @@ func handleRollback(ctx context.Context, pr int, runCtx internalio.RunContext, p
 	if err := store.Save(intention); err != nil {
 		return err
 	}
+	return completeRollbackAfterBranchReverted(ctx, pr, runCtx, pkg, intention, store, writer, deps, reason)
+}
 
+func completeRollbackAfterBranchReverted(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, reason contracts.RollbackReason) error {
 	rollbackResult, err := appendRegistryRollbacks(runCtx, intention, reason, deps.Now())
 	if err != nil {
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
@@ -143,6 +157,9 @@ func finalizeRollbackTerminal(ctx context.Context, pr int, runCtx internalio.Run
 
 func ensureRollbackBranchState(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
 	target := targetFromIntention(pkg, intention)
+	if target.PolicyOnly {
+		return nil
+	}
 	remoteHead, err := deps.Git.RemoteHead(ctx, target.BestBranch)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -151,6 +168,8 @@ func ensureRollbackBranchState(ctx context.Context, pr int, runCtx internalio.Ru
 		return markManualRecovery(pr, runCtx, intention, store, writer, deps, contracts.RollbackReasonTransactionalFailure)
 	}
 	switch {
+	case target.PolicyOnly && remoteHeadMatchesRollbackBase(remoteHead, target.BestShaBefore):
+		return nil
 	case remoteHead == target.TargetSHA:
 		// F11: ensureRollbackBranchState is only reached via
 		// rolling_back_branch_reverted resume, which means a prior tick

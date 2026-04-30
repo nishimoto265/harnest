@@ -49,6 +49,7 @@ type Target struct {
 	BestBranch    string
 	BestShaBefore string
 	TargetSHA     string
+	PolicyOnly    bool
 	// RulesToAppend is the list of rules-registry.jsonl entries to append as
 	// part of this adoption. Chain fields are derived at append time.
 	RulesToAppend []contracts.RuleRegistryEntry
@@ -204,6 +205,7 @@ func startFresh(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 		return err
 	}
 	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), target.TargetSHA, target.BestShaBefore, candidates.CandidatesHash)
+	target.RulesToAppend = rewriteRegistryEntryIdempotencyKeys(target.RulesToAppend, idempotencyKey)
 	plannedAdoption, err := plannedAdoptionFromRegistryEntries(idempotencyKey, target.RulesToAppend)
 	if err != nil {
 		return err
@@ -217,6 +219,7 @@ func startFresh(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *
 		BestShaBefore:      target.BestShaBefore,
 		TargetSha:          target.TargetSHA,
 		CandidatesHash:     candidates.CandidatesHash,
+		PolicyOnly:         target.PolicyOnly,
 		RegistryHeadBefore: registryHead,
 		PlannedAdoption:    plannedAdoption,
 		StartedAt:          now,
@@ -309,6 +312,7 @@ func driveDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pk
 			BestShaBefore:        intention.BestShaBefore,
 			TargetSha:            intention.TargetSha,
 			CandidatesHash:       intention.CandidatesHash,
+			PolicyOnly:           intention.PolicyOnly,
 			RegistryAppendResult: *intention.RegistryAppendResult,
 			DecidedAt:            now,
 		},
@@ -379,6 +383,10 @@ func finalizePersistedDecision(ctx context.Context, pr int, runCtx internalio.Ru
 }
 
 func verifyPersistedAdoptDecisionState(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention *contracts.IntentionRecord, adopt contracts.DecisionAdopt, store IntentionWriter, writer state.Writer, deps Deps) error {
+	policyOnly := adopt.PolicyOnly
+	if intention != nil {
+		policyOnly = intention.PolicyOnly
+	}
 	bestBranch := ""
 	if intention != nil {
 		bestBranch = targetFromIntention(pkg, *intention).BestBranch
@@ -386,19 +394,21 @@ func verifyPersistedAdoptDecisionState(ctx context.Context, pr int, runCtx inter
 	if bestBranch == "" && pkg != nil {
 		bestBranch = pkg.BestBranch
 	}
-	if bestBranch == "" {
+	if bestBranch == "" && !policyOnly {
 		return errors.New("step70: decision_written adopt requires best_branch")
 	}
 	recoveryIntention := persistedAdoptRecoveryIntention(runCtx.RunID, intention, adopt)
-	remoteHead, err := deps.Git.RemoteHead(ctx, bestBranch)
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	if !policyOnly {
+		remoteHead, err := deps.Git.RemoteHead(ctx, bestBranch)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "decision_written_remote_head_failure")
 		}
-		return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonTransactionalFailure, "decision_written_remote_head_failure")
-	}
-	if remoteHead != adopt.TargetSha {
-		return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonRemoteDivergence, "decision_written_remote_mismatch")
+		if remoteHead != adopt.TargetSha {
+			return markManualRecoveryWithDetail(pr, runCtx, recoveryIntention, store, writer, deps, contracts.RollbackReasonRemoteDivergence, "decision_written_remote_mismatch")
+		}
 	}
 	exists, err := registryPromotionAppendResultExists(runCtx, adopt.RegistryAppendResult, adopt.RunID)
 	if err != nil {
@@ -435,6 +445,7 @@ func persistedAdoptRecoveryIntention(runID contracts.RunID, intention *contracts
 		BestShaBefore:        adopt.BestShaBefore,
 		TargetSha:            adopt.TargetSha,
 		CandidatesHash:       adopt.CandidatesHash,
+		PolicyOnly:           adopt.PolicyOnly,
 		RegistryAppendResult: &adopt.RegistryAppendResult,
 		StartedAt:            adopt.DecidedAt,
 	}

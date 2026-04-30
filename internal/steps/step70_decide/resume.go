@@ -17,6 +17,12 @@ func resume(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *cont
 		if err != nil {
 			return err
 		}
+		if hasTarget {
+			target, err = resolveBestShaBefore(ctx, pkg, target, deps)
+			if err != nil {
+				return err
+			}
+		}
 		if restart, err := planningResumeNeedsRefresh(*intention, candidates.CandidatesHash, target, hasTarget); err != nil {
 			return err
 		} else if restart {
@@ -92,6 +98,25 @@ func resumeBranchPushed(ctx context.Context, pr int, runCtx internalio.RunContex
 }
 
 func planningDecision(ctx context.Context, pr int, runCtx internalio.RunContext, pkg *contracts.TaskPackage, candidates *contracts.Candidates, target Target, intention contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps) error {
+	if target.PolicyOnly {
+		currentHead, err := currentRegistryHead(runCtx.RulesRegistryPath())
+		if err != nil {
+			return err
+		}
+		if currentHead == intention.RegistryHeadBefore {
+			if err := appendStateOnce(runCtx, writer, contracts.StateKindInterrupted, interruptedEvent(pr, runCtx.RunID, contracts.InterruptedReasonPrePushCrash, "", deps.Now())); err != nil {
+				return err
+			}
+			return driveAdopt(ctx, pr, runCtx, pkg, target, intention, store, writer, deps)
+		}
+		if err := store.Delete(); err != nil {
+			return err
+		}
+		if err := appendStateOnce(runCtx, writer, contracts.StateKindInterrupted, interruptedEvent(pr, runCtx.RunID, contracts.InterruptedReasonPrePushCrash, "registry advanced during policy-only planning crash, snapshot refresh required", deps.Now())); err != nil {
+			return err
+		}
+		return startFresh(ctx, pr, runCtx, pkg, candidates, store, writer, deps)
+	}
 	if target.BestBranch == "" && pkg != nil {
 		target.BestBranch = pkg.BestBranch
 	}

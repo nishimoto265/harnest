@@ -12,8 +12,8 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/judges"
 )
 
-// RulePayload is the prompt-ready candidate rule body loaded from the run's 40/
-// sidecars.
+// RulePayload is the prompt-ready experiment lesson body loaded from the run's
+// step40 sidecars. The type name is kept for the existing step50/60 boundary.
 type RulePayload struct {
 	ID           string
 	Kind         string

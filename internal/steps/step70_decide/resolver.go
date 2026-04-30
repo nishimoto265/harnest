@@ -41,6 +41,9 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 	if len(candidates.Candidates) == 0 {
 		return Target{}, false, nil
 	}
+	if allCandidatesDuplicate(candidates) {
+		return Target{}, false, nil
+	}
 	now := r.Now
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
@@ -72,11 +75,7 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 		return Target{}, false, nil
 	}
 
-	manifest, err := internalio.LoadScorableManifest(runCtx, 2, winningAgent)
-	if err != nil {
-		return Target{}, false, err
-	}
-	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), manifest.HeadSHA, "", candidates.CandidatesHash)
+	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(runCtx.RunID), pkg.BaseSHA, "", candidates.CandidatesHash)
 
 	registryPath, err := policyrepo.RegistryPathForRun(runCtx)
 	if err != nil {
@@ -108,7 +107,8 @@ func (r FilesystemResolver) Resolve(runCtx internalio.RunContext, pkg *contracts
 	return Target{
 		BestBranch:    pkg.BestBranch,
 		BestShaBefore: "",
-		TargetSHA:     manifest.HeadSHA,
+		TargetSHA:     "",
+		PolicyOnly:    true,
 		RulesToAppend: entries,
 	}, true, nil
 }

@@ -16,6 +16,7 @@ profiles:
   claude_impl:
     provider: claude
     binary: claude
+    node_binary: /opt/node24/bin/node
   codex_judge:
     provider: codex
     binary: codex
@@ -36,6 +37,7 @@ roles:
 	require.NoError(t, err)
 	assert.Equal(t, ProviderClaude, impl.Provider)
 	assert.Equal(t, "claude", impl.Binary)
+	assert.Equal(t, "/opt/node24/bin/node", impl.NodeBinary)
 
 	generator, err := cfg.ProfileForRole(RoleTaskGenerator)
 	require.NoError(t, err)
@@ -146,6 +148,25 @@ func TestValidateAllowsStubJudgeProfiles(t *testing.T) {
 	}
 
 	require.NoError(t, cfg.Validate())
+}
+
+func TestValidateRejectsNodeBinaryForStubProfile(t *testing.T) {
+	cfg := File{
+		Profiles: map[string]Profile{
+			"impl": {Provider: ProviderClaude, Binary: "claude"},
+			"stub": {Provider: ProviderStub, NodeBinary: "/opt/node24/bin/node"},
+		},
+		Roles: map[Role]string{
+			RoleImplementer:    "impl",
+			RoleJudgePrimary:   "stub",
+			RoleJudgeSecondary: "stub",
+			RoleJudgeArbiter:   "stub",
+		},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "node_binary")
 }
 
 func TestValidateRejectsUnsafeJudgeProfileArgs(t *testing.T) {

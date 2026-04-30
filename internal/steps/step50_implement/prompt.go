@@ -82,7 +82,7 @@ func sanitizeRulePayloads(rulePayloads []candidaterules.RulePayload) []candidate
 			TargetRuleID: internalio.SanitizeForPromptEmbedding(rule.TargetRuleID),
 			Title:        internalio.SanitizeForPromptEmbedding(rule.Title),
 			ProposedBody: internalio.SanitizeForPromptEmbedding(rule.ProposedBody, internalio.SafeTextOptions{
-				Label: "candidate_rule",
+				Label: "experiment_lesson",
 				Fence: true,
 			}),
 		}

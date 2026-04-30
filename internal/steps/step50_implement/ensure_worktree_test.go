@@ -93,3 +93,57 @@ func TestEnsureAllocationWorktree_ExistingDirWithAdvancedHeadFailsClosed(t *test
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "allocation HEAD mismatch")
 }
+
+func TestEnsureAllocationWorktreeBeforeResume_AdoptsPolicyOnlyOverlayHeadWithoutState(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(allocation.Path, ".auto-improve", "lessons"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ".auto-improve", "lessons", "seed.md"), []byte("lesson\n"), 0o644))
+	runCommand(t, allocation.Path, "git", "add", ".auto-improve")
+	runCommand(t, allocation.Path, "git", "commit", "-m", "policy overlay")
+	overlayHead := strings.TrimSpace(runCommand(t, allocation.Path, "git", "rev-parse", "HEAD"))
+
+	updated, err := ensureAllocationWorktreeBeforeResume(context.Background(), env.run, allocation, agentDir)
+	require.NoError(t, err)
+	assert.Equal(t, overlayHead, updated.BaseSHA)
+	assert.Equal(t, overlayHead, updated.HeadSHA)
+}
+
+func TestCommitPolicyOverlayBase_RejectsAdvancedImplementationHead(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "implemented.txt"), []byte("implementation\n"), 0o644))
+	runCommand(t, allocation.Path, "git", "add", "implemented.txt")
+	runCommand(t, allocation.Path, "git", "commit", "-m", "implementation")
+
+	_, err = commitPolicyOverlayBase(context.Background(), allocation, env.run.TaskPackage.RunID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "advanced implementation head")
+}
+
+func TestCommitPolicyOverlayBase_UnstagesPreStagedRepoPolicyArtifacts(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(allocation.Path, ".auto-improve", "lessons"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(allocation.Path, "auto-improve", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ".auto-improve", "lessons", "overlay.md"), []byte("overlay\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "auto-improve", "rules-registry.jsonl"), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "auto-improve", "rules", "r.md"), []byte("rule\n"), 0o644))
+	runCommand(t, allocation.Path, "git", "add", "-A")
+
+	updated, err := commitPolicyOverlayBase(context.Background(), allocation, env.run.TaskPackage.RunID)
+	require.NoError(t, err)
+
+	files := runCommand(t, allocation.Path, "git", "diff-tree", "--no-commit-id", "--name-only", "-r", updated.BaseSHA)
+	assert.Contains(t, files, ".auto-improve/lessons/overlay.md")
+	assert.NotContains(t, files, "auto-improve/rules-registry.jsonl")
+	assert.NotContains(t, files, "auto-improve/rules/r.md")
+}

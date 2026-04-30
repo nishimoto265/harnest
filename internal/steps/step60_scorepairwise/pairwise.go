@@ -175,13 +175,17 @@ func pairwiseEntriesFromDecision(
 	for _, pair := range pairs {
 		agentDecision := agentDecisions[pair.Agent]
 		winner := winnerForFinalAction(decision.Action, agentDecision.Winner)
+		margin := agentDecision.Margin
+		if winner == contracts.PairwiseWinnerTie {
+			margin = contracts.PairwiseMarginSlight
+		}
 		entry := contracts.PairwiseEntry{
 			SchemaVersion: "1",
 			RunID:         in.TaskPackage.RunID,
 			AgentA:        pair.Agent,
 			AgentB:        pair.Agent,
 			Winner:        winner,
-			Margin:        agentDecision.Margin,
+			Margin:        margin,
 			Justification: pairwiseJustification(in.PairwiseMode, decision, agentDecision),
 			VerdictPath:   contracts.VerdictPathSingle,
 			RubricVersion: in.RubricVersion,

@@ -955,6 +955,68 @@ func TestSynthesizeSuccessCommit_SetsIdentityUnderHardenedGitEnv(t *testing.T) {
 	require.Contains(t, commit, "committer auto-improve <auto-improve@example.invalid>")
 }
 
+func TestSynthesizeSuccessCommit_UnstagesPreStagedPolicyArtifacts(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repo, "add", "README.md")
+	runGit(t, repo, "-c", "user.name=Seed User", "-c", "user.email=seed@example.invalid", "commit", "-m", "base")
+	runGit(t, repo, "checkout", "-b", "auto-improve/test/pass1/a1")
+	baseSHA := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".auto-improve", "lessons"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "auto-improve", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "implemented.txt"), []byte("implementation\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".auto-improve", "lessons", "r.md"), []byte("lesson\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "auto-improve", "rules-registry.jsonl"), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "auto-improve", "rules", "r.md"), []byte("rule\n"), 0o644))
+	runGit(t, repo, "add", "-A")
+
+	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
+	runIO, err := internalio.NewRunContext(runID, t.TempDir(), t.TempDir())
+	require.NoError(t, err)
+	allocation := contracts.WorktreeAllocation{
+		Agent:   "a1",
+		Pass:    1,
+		Path:    repo,
+		Branch:  "auto-improve/test/pass1/a1",
+		BaseSHA: baseSHA,
+		HeadSHA: baseSHA,
+	}
+
+	commitSHA, _, err := synthesizeSuccessCommit(context.Background(), allocation, RunContext{
+		IO:    runIO,
+		Agent: "a1",
+	})
+	require.NoError(t, err)
+
+	files := runGit(t, repo, "diff-tree", "--no-commit-id", "--name-only", "-r", commitSHA)
+	assert.Contains(t, files, "implemented.txt")
+	assert.NotContains(t, files, ".auto-improve")
+	assert.NotContains(t, files, "auto-improve/rules-registry.jsonl")
+	assert.NotContains(t, files, "auto-improve/rules/r.md")
+}
+
+func TestRejectCommittedPolicyArtifactChangesFailsClosed(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repo, "add", "README.md")
+	runGit(t, repo, "-c", "user.name=Seed User", "-c", "user.email=seed@example.invalid", "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".auto-improve", "lessons"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".auto-improve", "lessons", "r.md"), []byte("mutated\n"), 0o644))
+	runGit(t, repo, "add", ".auto-improve/lessons/r.md")
+	runGit(t, repo, "-c", "user.name=Agent", "-c", "user.email=agent@example.invalid", "commit", "-m", "mutate policy")
+
+	err := rejectCommittedPolicyArtifactChanges(context.Background(), contracts.WorktreeAllocation{
+		Path:    repo,
+		BaseSHA: baseSHA,
+	})
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "committed policy artifact change is not allowed")
+}
+
 func TestStepRunMissingChecklistFailsClosed(t *testing.T) {
 	t.Setenv("FAKE_SKIP_CHECKLIST", "1")
 
@@ -1612,6 +1674,98 @@ func TestStepRun_RecreatesMissingWorktreeBeforeLaunch(t *testing.T) {
 	assert.Equal(t, contracts.ManifestKindSuccess, manifest.Kind)
 }
 
+func TestStepRun_RecreatesMissingWorktreeWithInactiveResumeState(t *testing.T) {
+	root := t.TempDir()
+	runsBase := filepath.Join(root, "runs")
+	worktreeBase := filepath.Join(root, "worktrees")
+	repoDir := filepath.Join(root, "repo")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.MkdirAll(worktreeBase, 0o755))
+	require.NoError(t, os.MkdirAll(repoDir, 0o755))
+
+	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
+	runGit(t, repoDir, "init", "-b", "main")
+	runGit(t, repoDir, "config", "user.name", "Test User")
+	runGit(t, repoDir, "config", "user.email", "test@example.com")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repoDir, "add", "README.md")
+	runGit(t, repoDir, "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	worktreePath := filepath.Join(worktreeBase, string(runID)+"-pass1-a1")
+	branch := "auto-improve/" + string(runID) + "/pass1/a1"
+	runGit(t, repoDir, "worktree", "add", "-b", branch, worktreePath, baseSHA)
+	runIO, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
+	require.NoError(t, err)
+	pkg := buildTaskPackage(t, runID, worktreeBase, worktreePath, baseSHA)
+	scriptPath := writeFakeClaudeScript(t, root)
+	cfg := &config.Config{
+		Repo: config.RepoConfig{
+			Root:          repoDir,
+			DefaultBranch: "main",
+			BestBranch:    "best",
+		},
+		Worktree:      config.WorktreeConfig{Base: worktreeBase},
+		Paths:         config.PathsConfig{Runs: runsBase},
+		ClaudeCLIPath: scriptPath,
+		StepTimeouts: map[string]int{
+			"step20": 5,
+		},
+	}
+	run := RunContext{
+		Config:      cfg,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PR:          42,
+		Pass:        1,
+		Agent:       "a1",
+		IO:          runIO,
+		TaskPackage: &pkg,
+	}
+	agentDir, err := agentDir(runIO, 1, "a1")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	require.NoError(t, saveResumeState(agentDir, resumeState{
+		ExpectedBaseSHA: baseSHA,
+		RetryCount:      1,
+	}))
+	require.NoError(t, os.RemoveAll(worktreePath))
+	t.Setenv("FAKE_CLAUDE_WRITE_FILE", filepath.Join(worktreePath, "recreated.txt"))
+
+	require.NoError(t, newStep(cfg, stepOptions{now: time.Now, heartbeatInterval: 10 * time.Millisecond, staleAfter: time.Second}).Run(context.Background(), run))
+	assert.FileExists(t, filepath.Join(worktreePath, "recreated.txt"))
+}
+
+func TestVerifyExistingAllocationWorktreeIgnoresPolicyOverlay(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "repo")
+	worktreePath := filepath.Join(root, "worktree")
+	require.NoError(t, os.MkdirAll(repoDir, 0o755))
+
+	runGit(t, repoDir, "init", "-b", "main")
+	runGit(t, repoDir, "config", "user.name", "Test User")
+	runGit(t, repoDir, "config", "user.email", "test@example.com")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repoDir, "add", "README.md")
+	runGit(t, repoDir, "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	branch := "auto-improve/2026-04-21-PR42-abcdef0/pass1/a1"
+	runGit(t, repoDir, "worktree", "add", "-b", branch, worktreePath, baseSHA)
+
+	allocation := contracts.WorktreeAllocation{
+		Agent:   "a1",
+		Pass:    1,
+		Path:    worktreePath,
+		Branch:  branch,
+		BaseSHA: baseSHA,
+		HeadSHA: baseSHA,
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(worktreePath, ".auto-improve"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, ".auto-improve", "checklist.md"), []byte("# Checklist\n"), 0o644))
+	require.NoError(t, verifyExistingAllocationWorktree(context.Background(), allocation))
+
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, "app.txt"), []byte("dirty\n"), 0o644))
+	require.ErrorContains(t, verifyExistingAllocationWorktree(context.Background(), allocation), "existing worktree is dirty")
+}
+
 func TestRenderPrompt_UsesChecklistAtWorktreeRoot(t *testing.T) {
 	fx := newTestFixture(t, 5)
 	promptText, err := renderPrompt(fx.cfg, promptData{
@@ -1628,6 +1782,11 @@ func TestRenderPrompt_UsesChecklistAtWorktreeRoot(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, promptText, "checklist_output_path: checklist-result.json")
 	assert.Contains(t, promptText, "Write `checklist-result.json` at the worktree root.")
+	assert.Contains(t, promptText, "`rule_id`: required string")
+	assert.Contains(t, promptText, "`verdict`: required string, one of `compliant`, `n_a`, or `exception`")
+	assert.Contains(t, promptText, "`rationale`: optional string for `compliant`/`n_a`; required and non-empty when `verdict` is `exception`")
+	assert.Contains(t, promptText, "Do not use item keys like `id`, `status`, `result`, `description`, `file`, or `files`.")
+	assert.Contains(t, promptText, `"items":[{"rule_id":"task-scope","verdict":"compliant"`)
 	assert.Contains(t, promptText, "Do not create or overwrite `manifest.json`, `session.jsonl`, or `diff.patch` yourself.")
 	assert.Contains(t, promptText, "Current Learned Rules")
 	assert.Contains(t, promptText, "r-existing")

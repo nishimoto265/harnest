@@ -252,30 +252,18 @@ func step70Pass2OutputHashes(runCtx internalio.RunContext, pkg *contracts.TaskPa
 	hashes := make(map[contracts.AgentID]string, len(agents))
 	completedAgents := make([]contracts.AgentID, 0, len(agents))
 	for _, agent := range agents {
+		manifest, err := internalio.LoadScorableManifest(runCtx, 2, agent)
+		if err != nil {
+			if errors.Is(err, internalio.ErrNotScorable) || os.IsNotExist(err) {
+				continue
+			}
+			return nil, nil, fmt.Errorf("step70: load pass2 manifest for agent=%s: %w", agent, err)
+		}
 		if _, err := internalio.LoadScorableManifest(runCtx, 1, agent); err != nil {
 			if errors.Is(err, internalio.ErrNotScorable) || os.IsNotExist(err) {
-				pass2Manifest, pass2Err := internalio.LoadScorableManifest(runCtx, 2, agent)
-				switch {
-				case errors.Is(pass2Err, internalio.ErrNotScorable):
-					continue
-				case os.IsNotExist(pass2Err):
-					continue
-				case pass2Err != nil:
-					return nil, nil, fmt.Errorf("step70: load pass2 manifest for agent=%s: %w", agent, pass2Err)
-				case pass2Manifest != nil:
-					return nil, nil, fmt.Errorf("step70: pass2 scorable agent missing pass1 scorable manifest: agent=%s: %w", agent, err)
-				default:
-					continue
-				}
+				return nil, nil, fmt.Errorf("step70: pass2 scorable agent missing matching pass1 scorable manifest: agent=%s: %w", agent, err)
 			}
 			return nil, nil, fmt.Errorf("step70: load pass1 scorable manifest for agent=%s: %w", agent, err)
-		}
-		manifest, err := internalio.LoadScorableManifest(runCtx, 2, agent)
-		if errors.Is(err, internalio.ErrNotScorable) {
-			continue
-		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("step70: load pass2 manifest for agent=%s: %w", agent, err)
 		}
 		outputPath, ok, err := step70ResolveExistingRunArtifact(runCtx, manifest.DiffPath)
 		if err != nil {

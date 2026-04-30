@@ -249,45 +249,38 @@ func shouldSkipAgent(err error) bool {
 func collectScorableAgentRuns(in Input, agents []contracts.AgentID, explicit bool) ([]scorableAgentRun, error) {
 	runs := make([]scorableAgentRun, 0, len(agents))
 	for _, agent := range agents {
+		manifest, err := internalio.LoadScorableManifest(in.IO, 2, agent)
+		if err != nil {
+			if explicit && shouldSkipAgent(err) {
+				return nil, fmt.Errorf("step60: declared scorable agent missing pass2 scorable manifest: agent=%s: %w", agent, err)
+			}
+			if explicit && os.IsNotExist(err) {
+				return nil, fmt.Errorf("step60: declared scorable agent missing pass2 manifest: agent=%s: %w", agent, err)
+			}
+			if shouldSkipAgent(err) {
+				continue
+			}
+			if os.IsNotExist(err) {
+				if _, pass1Err := internalio.LoadScorableManifest(in.IO, 1, agent); pass1Err == nil {
+					return nil, fmt.Errorf("step60: pass1 scorable agent missing matching pass2 manifest: agent=%s: %w", agent, err)
+				} else if shouldSkipAgent(pass1Err) || os.IsNotExist(pass1Err) {
+					continue
+				} else {
+					return nil, fmt.Errorf("step60: load pass1 scorable manifest for agent=%s: %w", agent, pass1Err)
+				}
+			}
+			return nil, fmt.Errorf("step60: load pass2 manifest for agent=%s: %w", agent, err)
+		}
 		pass1Manifest, err := internalio.LoadScorableManifest(in.IO, 1, agent)
 		if err != nil {
-			if explicit && (shouldSkipAgent(err) || os.IsNotExist(err)) {
-				return nil, fmt.Errorf("step60: declared scorable agent missing pass1 scorable manifest: agent=%s: %w", agent, err)
-			}
 			if shouldSkipAgent(err) || os.IsNotExist(err) {
-				pass2Manifest, pass2Err := internalio.LoadScorableManifest(in.IO, 2, agent)
-				switch {
-				case shouldSkipAgent(pass2Err):
-					continue
-				case pass2Err != nil:
-					if explicit && os.IsNotExist(pass2Err) {
-						return nil, fmt.Errorf("step60: declared scorable agent missing pass2 manifest: agent=%s: %w", agent, pass2Err)
-					}
-					return nil, fmt.Errorf("step60: load pass2 manifest for agent=%s: %w", agent, pass2Err)
-				case pass2Manifest != nil:
-					return nil, fmt.Errorf("step60: pass2 scorable agent missing pass1 scorable manifest: agent=%s: %w", agent, err)
-				default:
-					continue
-				}
+				return nil, fmt.Errorf("step60: pass2 scorable agent missing matching pass1 scorable manifest: agent=%s: %w", agent, err)
 			}
 			return nil, fmt.Errorf("step60: load pass1 scorable manifest for agent=%s: %w", agent, err)
 		}
 		pass1OutputPath, err := requireExistingManifestArtifact(in.IO, agent, pass1Manifest.DiffPath, "pass1 diff")
 		if err != nil {
 			return nil, err
-		}
-		manifest, err := internalio.LoadScorableManifest(in.IO, 2, agent)
-		if explicit && shouldSkipAgent(err) {
-			return nil, fmt.Errorf("step60: declared scorable agent missing pass2 scorable manifest: agent=%s: %w", agent, err)
-		}
-		if shouldSkipAgent(err) {
-			continue
-		}
-		if err != nil {
-			if explicit && os.IsNotExist(err) {
-				return nil, fmt.Errorf("step60: declared scorable agent missing pass2 manifest: agent=%s: %w", agent, err)
-			}
-			return nil, fmt.Errorf("step60: load pass2 manifest for agent=%s: %w", agent, err)
 		}
 		outputPath, err := requireExistingManifestArtifact(in.IO, agent, manifest.DiffPath, "diff")
 		if err != nil {

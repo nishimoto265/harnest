@@ -193,6 +193,9 @@ func resolveBestShaBefore(ctx context.Context, pkg *contracts.TaskPackage, targe
 		return Target{}, fmt.Errorf("step70: best_branch %q has no remote HEAD", target.BestBranch)
 	}
 	target.BestShaBefore = bestShaBefore
+	if target.PolicyOnly && target.TargetSHA == "" {
+		target.TargetSHA = bestShaBefore
+	}
 	return target, nil
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/gitremote"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyartifact"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/registryview"
 )
@@ -31,6 +32,12 @@ const (
 	idempotencyLocalName = "rules-idempotency-index.jsonl"
 	rulesLocalDirName    = "rules"
 )
+
+// IsPolicyArtifactPath reports whether a repository-relative path is owned by
+// auto-improve policy/harness state rather than task implementation code.
+func IsPolicyArtifactPath(path string) bool {
+	return policyartifact.Is(path)
+}
 
 var runGit = func(ctx context.Context, env []string, args ...string) ([]byte, error) {
 	cmd, err := processenv.TrustedCommandContext(ctx, "git", args...)
@@ -80,6 +87,58 @@ func HydrateFromBranch(ctx context.Context, repoRoot, branch, runsBase string) e
 func HydrateAndSnapshotFromBranch(ctx context.Context, repoRoot, branch, runsBase, runDir string) error {
 	_, err := hydrateSnapshotFromBranch(ctx, repoRoot, branch, runsBase, runDir)
 	return err
+}
+
+func HydrateAndSnapshotFromBranchOrSeed(ctx context.Context, repoRoot, branch, runsBase, runDir string) error {
+	_, err := hydrateSnapshotFromBranch(ctx, repoRoot, branch, runsBase, runDir)
+	if err == nil {
+		return nil
+	}
+	if !policyBranchHydrationAllowsSeed(err) {
+		return err
+	}
+	seed, seedErr := loadRepoLocalSnapshot(repoRoot)
+	if seedErr != nil {
+		if errors.Is(seedErr, os.ErrNotExist) {
+			return err
+		}
+		return fmt.Errorf("policyrepo: seed repo-local policy after hydrate failure: %w", seedErr)
+	}
+	lock, lockErr := internalio.AcquireFileLockContext(ctx, filepath.Join(runsBase, "promotion.lock"))
+	if lockErr != nil {
+		return lockErr
+	}
+	defer func() { _ = lock.Unlock() }()
+	if strings.TrimSpace(runDir) != "" {
+		if applyErr := applySnapshotToRunDir(runDir, seed); applyErr != nil {
+			return applyErr
+		}
+		registryHead, headErr := registryHead(filepath.Join(runDir, "policy", registryLocalName))
+		if headErr != nil {
+			return headErr
+		}
+		policyHead, _ := branchHead(ctx, repoRoot, branch)
+		if metaErr := writeSnapshotMetadata(runDir, SnapshotMetadata{
+			SchemaVersion: "1",
+			PolicyBranch:  branch,
+			PolicyHead:    policyHead,
+			RegistryHead:  registryHead,
+		}); metaErr != nil {
+			return metaErr
+		}
+	}
+	return applySnapshot(runsBase, seed)
+}
+
+func policyBranchHydrationAllowsSeed(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "couldn't find remote ref") ||
+		strings.Contains(msg, "could not find remote ref") ||
+		strings.Contains(msg, "has no managed policy files") ||
+		strings.Contains(msg, "is missing "+RegistryRepoRelPath)
 }
 
 func SnapshotLocalForRun(ctx context.Context, runsBase, runDir string) error {
@@ -194,6 +253,10 @@ func PrepareSnapshotPublish(ctx context.Context, repoRoot, branch, expectedHead,
 		return nil, err
 	}
 
+	if _, err := gitText(ctx, tmpDir, "rm", "-r", "--ignore-unmatch", "--", "."); err != nil {
+		_ = plan.Cleanup()
+		return nil, err
+	}
 	if err := syncSnapshotToWorktree(tmpDir, snap); err != nil {
 		_ = plan.Cleanup()
 		return nil, err
@@ -540,6 +603,75 @@ func loadOptionalLocalSnapshot(runsBase string) (snapshot, error) {
 	return snapshot{rules: map[string][]byte{}}, nil
 }
 
+func loadRepoLocalSnapshot(repoRoot string) (snapshot, error) {
+	registryPath := filepath.Join(repoRoot, RegistryRepoRelPath)
+	registryInfo, err := os.Lstat(registryPath)
+	if err != nil {
+		return snapshot{}, err
+	}
+	if registryInfo.Mode()&os.ModeSymlink != 0 || !registryInfo.Mode().IsRegular() {
+		return snapshot{}, fmt.Errorf("policyrepo: repo-local registry path must be a regular file: %s", registryPath)
+	}
+	registryBytes, err := os.ReadFile(registryPath)
+	if err != nil {
+		return snapshot{}, err
+	}
+	snap := snapshot{
+		registry:        registryBytes,
+		registryPresent: true,
+		rules:           map[string][]byte{},
+	}
+	rulesSrc := filepath.Join(repoRoot, RulesRepoDirRelPath)
+	info, err := os.Lstat(rulesSrc)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if err := validateSnapshot(snap); err != nil {
+				return snapshot{}, err
+			}
+			return snap, nil
+		}
+		return snapshot{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return snapshot{}, fmt.Errorf("policyrepo: repo-local rules path must be a real directory: %s", rulesSrc)
+	}
+	err = filepath.WalkDir(rulesSrc, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(rulesSrc, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." || d.IsDir() {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("policyrepo: repo-local rule path must not be a symlink: %s", path)
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("policyrepo: repo-local rule path must be a regular file: %s", path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		snap.rules[filepath.ToSlash(filepath.Join(rulesLocalDirName, rel))] = data
+		return nil
+	})
+	if err != nil {
+		return snapshot{}, err
+	}
+	if err := validateSnapshot(snap); err != nil {
+		return snapshot{}, err
+	}
+	return snap, nil
+}
+
 func writeSnapshotMetadata(runDir string, meta SnapshotMetadata) error {
 	path := filepath.Join(runDir, "policy", metadataLocalName)
 	return internalio.WriteJSONAtomic(path, meta)
@@ -731,9 +863,9 @@ func fetchBranch(ctx context.Context, repoRoot, branch string) error {
 		return err
 	}
 	refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch)
-	_, err = runGit(ctx, processenv.GitNetworkEnvForRemoteURL(remoteURL), "-C", repoRoot, "fetch", "--no-tags", "origin", refspec)
+	out, err := runGit(ctx, processenv.GitNetworkEnvForRemoteURL(remoteURL), "-C", repoRoot, "fetch", "--no-tags", "origin", refspec)
 	if err != nil {
-		return fmt.Errorf("policyrepo: fetch branch %s: %w", branch, err)
+		return fmt.Errorf("policyrepo: fetch branch %s: %w: %s", branch, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -779,7 +911,7 @@ func gitText(ctx context.Context, repoRoot string, args ...string) ([]byte, erro
 }
 
 func hasStagedDiff(ctx context.Context, repoRoot string) (bool, error) {
-	_, err := runGit(ctx, processenv.GitLocalEnv(), "-C", repoRoot, "diff", "--no-ext-diff", "--cached", "--quiet", "--", RepoDirName)
+	_, err := runGit(ctx, processenv.GitLocalEnv(), "-C", repoRoot, "diff", "--no-ext-diff", "--cached", "--quiet", "--", ".")
 	if err == nil {
 		return false, nil
 	}
@@ -787,7 +919,7 @@ func hasStagedDiff(ctx context.Context, repoRoot string) (bool, error) {
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 		return true, nil
 	}
-	return false, fmt.Errorf("policyrepo: git diff --cached --quiet -- %s: %w", RepoDirName, err)
+	return false, fmt.Errorf("policyrepo: git diff --cached --quiet -- .: %w", err)
 }
 
 func sha256Hex(data []byte) string {

@@ -7,9 +7,6 @@ import (
 )
 
 func promotionGatePassedWithArtifacts(runCtx internalio.RunContext, artifacts step60ArtifactSnapshot, agent contracts.AgentID, candidates *contracts.Candidates) (bool, error) {
-	if ok := hasCompliantCandidateEvidence(artifacts.Compliance, agent, candidates); !ok {
-		return false, nil
-	}
 	pass1Scores, err := loadCollapsedScores(runCtx, "30/scores-A.jsonl")
 	if err != nil {
 		return false, err
@@ -35,41 +32,6 @@ func hasDuplicateUpdateTarget(candidates []contracts.Candidate) bool {
 		seen[candidate.TargetRuleID] = struct{}{}
 	}
 	return false
-}
-
-func hasCompliantCandidateEvidence(rows []contracts.ComplianceEntry, agent contracts.AgentID, candidates *contracts.Candidates) bool {
-	required := requiredCandidateComplianceRuleIDs(candidates)
-	if len(required) == 0 {
-		return true
-	}
-	collapsed := scorecore.CollapseFinalCompliance(rows)
-	byRule := make(map[string]contracts.ComplianceEntry, len(collapsed))
-	for _, row := range collapsed {
-		if row.Agent == agent {
-			byRule[row.RuleID] = row
-		}
-	}
-	for _, ruleID := range required {
-		row, ok := byRule[ruleID]
-		if !ok || row.Verdict != contracts.ComplianceVerdictCompliant {
-			return false
-		}
-	}
-	return true
-}
-
-func requiredCandidateComplianceRuleIDs(candidates *contracts.Candidates) []string {
-	if candidates == nil {
-		return nil
-	}
-	ruleIDs := make([]string, 0, len(candidates.Candidates))
-	for _, candidate := range candidates.Candidates {
-		switch candidate.Kind {
-		case contracts.CandidateKindNew, contracts.CandidateKindUpdate:
-			ruleIDs = append(ruleIDs, candidate.CandidateID)
-		}
-	}
-	return ruleIDs
 }
 
 func loadCollapsedScores(runCtx internalio.RunContext, rel string) (map[contracts.AgentID]map[contracts.Dimension]contracts.ScoreEntry, error) {

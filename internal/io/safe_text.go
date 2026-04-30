@@ -18,6 +18,7 @@ var (
 // SanitizeForPromptEmbedding removes NUL bytes and normalizes line endings
 // before external text is embedded into prompts.
 func SanitizeForPromptEmbedding(s string, opts ...SafeTextOptions) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	s = strings.ReplaceAll(s, "\x00", "")
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")

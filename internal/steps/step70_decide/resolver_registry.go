@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -15,7 +16,7 @@ import (
 func (r FilesystemResolver) buildRegistryEntry(runCtx internalio.RunContext, candidate contracts.Candidate, registryLines []registryLine, idempotencyKey string, at time.Time) (contracts.RuleRegistryEntry, error) {
 	ruleID := candidate.TargetRuleID
 	if candidate.Kind == contracts.CandidateKindNew {
-		ruleID = generatedRuleID(candidate.CandidateID)
+		ruleID = generatedRuleIDForCandidate(candidate)
 	}
 	if ruleID == "" {
 		return contracts.RuleRegistryEntry{}, fmt.Errorf("step70: missing rule_id for candidate %s", candidate.CandidateID)
@@ -74,6 +75,36 @@ func (r FilesystemResolver) buildRegistryEntry(runCtx internalio.RunContext, can
 func generatedRuleID(candidateID string) string {
 	sum := sha256.Sum256([]byte(candidateID))
 	return "r-" + hex.EncodeToString(sum[:])[:12]
+}
+
+func generatedRuleIDForCandidate(candidate contracts.Candidate) string {
+	const experimentLessonPrefix = "40/experiment/lessons/"
+	if rel := filepath.ToSlash(candidate.ProposedBodyPath); strings.HasPrefix(rel, experimentLessonPrefix) {
+		id := strings.TrimSuffix(strings.TrimPrefix(rel, experimentLessonPrefix), ".md")
+		if !strings.Contains(id, "/") && contracts.ValidateRuleID(id) == nil {
+			return id
+		}
+	}
+	return generatedRuleID(candidate.CandidateID)
+}
+
+func rewriteRegistryEntryIdempotencyKeys(entries []contracts.RuleRegistryEntry, idempotencyKey string) []contracts.RuleRegistryEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]contracts.RuleRegistryEntry, len(entries))
+	for i, entry := range entries {
+		switch v := entry.Value.(type) {
+		case contracts.RuleRegistryAdded:
+			v.IdempotencyKey = idempotencyKey
+			entry.Value = v
+		case contracts.RuleRegistryUpdated:
+			v.IdempotencyKey = idempotencyKey
+			entry.Value = v
+		}
+		out[i] = entry
+	}
+	return out
 }
 
 func latestRuleSha256(lines []registryLine, ruleID string) (string, error) {

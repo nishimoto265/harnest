@@ -441,6 +441,9 @@ func (s *Step) runRole(
 			return err
 		}
 	}
+	if err := appendIssueEntries(paths, result.Issues); err != nil {
+		return err
+	}
 	agentState.replaceRawScores(role, result.RawScores)
 	agentState.replaceRawCompliance(role, result.RawCompliance)
 	if role == contracts.JudgeRolePrimary || role == contracts.JudgeRoleSecondary {
@@ -504,6 +507,7 @@ type stepPathsResult struct {
 	LockPath        string
 	ScoreFinal      string
 	ComplianceFinal string
+	IssueFinal      string
 	ScoreRaw        string
 	ComplianceRaw   string
 	MarkerPaths     scorecore.Step30MarkerPaths
@@ -526,6 +530,10 @@ func stepPaths(runCtx internalio.RunContext) (stepPathsResult, error) {
 	if err != nil {
 		return stepPathsResult{}, err
 	}
+	issueFinal, err := runCtx.ResolveRunRelative("30/issues-A.jsonl")
+	if err != nil {
+		return stepPathsResult{}, err
+	}
 	scoreRaw, err := runCtx.ResolveRunRelative("30/scores-A-raw.jsonl")
 	if err != nil {
 		return stepPathsResult{}, err
@@ -539,6 +547,7 @@ func stepPaths(runCtx internalio.RunContext) (stepPathsResult, error) {
 		LockPath:        lockPath,
 		ScoreFinal:      scoreFinal,
 		ComplianceFinal: complianceFinal,
+		IssueFinal:      issueFinal,
 		ScoreRaw:        scoreRaw,
 		ComplianceRaw:   complianceRaw,
 		MarkerPaths: scorecore.Step30MarkerPaths{
@@ -909,11 +918,44 @@ func appendExpectedFinalCompliance(paths stepPathsResult, state *resumeAgentStat
 	return nil
 }
 
+func appendIssueEntries(paths stepPathsResult, rows []contracts.IssueEntry) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	existingRows, err := internalio.ReadJSONL[contracts.IssueEntry](paths.IssueFinal)
+	if err != nil {
+		return err
+	}
+	existingByID := make(map[string]contracts.IssueEntry, len(existingRows))
+	for _, row := range existingRows {
+		existingByID[row.IssueID] = row
+	}
+	for _, row := range rows {
+		if current, ok := existingByID[row.IssueID]; ok {
+			same, err := sameCanonicalJSON(current, row)
+			if err != nil {
+				return err
+			}
+			if same {
+				continue
+			}
+		}
+		if err := internalio.AppendJSONL(paths.IssueFinal, row); err != nil {
+			return err
+		}
+		existingByID[row.IssueID] = row
+	}
+	return nil
+}
+
 func resetStep30FinalFiles(paths stepPathsResult) error {
 	if err := rewriteJSONL[contracts.ScoreEntry](paths.ScoreFinal, nil); err != nil {
 		return err
 	}
-	return rewriteJSONL[contracts.ComplianceEntry](paths.ComplianceFinal, nil)
+	if err := rewriteJSONL[contracts.ComplianceEntry](paths.ComplianceFinal, nil); err != nil {
+		return err
+	}
+	return rewriteJSONL[contracts.IssueEntry](paths.IssueFinal, nil)
 }
 
 func rewriteJSONL[T any](path string, rows []T) error {

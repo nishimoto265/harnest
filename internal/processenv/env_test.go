@@ -130,13 +130,14 @@ func TestSanitizeForNetworkExec_PreservesAuthEnvButBlocksHooks(t *testing.T) {
 func TestSanitizeForAgentExec_PreservesProviderAuthButBlocksGitHooks(t *testing.T) {
 	setSanitizeTestEnv(t)
 
-	env := SanitizeForAgentExec("OPENAI_API_KEY=override")
+	env := SanitizeForAgentExec("OPENAI_API_KEY=override", "NODENV_VERSION=24.0.0")
 	falsePath := trustedFalsePath()
 
 	assert.Contains(t, env, "HOME=/tmp/home")
 	assert.Contains(t, env, "PATH="+defaultTrustedPATH)
 	assert.Contains(t, env, "ANTHROPIC_API_KEY=anthropic-key")
 	assert.Contains(t, env, "CLAUDE_CODE_OAUTH_TOKEN=claude-oauth")
+	assert.Contains(t, env, "NODENV_VERSION=24.0.0")
 	assert.Contains(t, env, "OPENAI_API_KEY=override")
 	assert.Contains(t, env, "OPENAI_PROJECT=openai-project")
 	assert.NotContains(t, env, "OPENAI_API_KEY=openai-key")
