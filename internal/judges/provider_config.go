@@ -16,12 +16,8 @@ func NewJudgeFromConfig(cfg *config.Config, role contracts.JudgeRole) (Judge, er
 	switch role {
 	case contracts.JudgeRolePrimary:
 		agentRole = agents.RoleJudgePrimary
-	case contracts.JudgeRoleSecondary:
-		agentRole = agents.RoleJudgeSecondary
-	case contracts.JudgeRoleArbiter:
-		agentRole = agents.RoleJudgeArbiter
 	default:
-		return nil, fmt.Errorf("judges: unsupported judge role %q", role)
+		return nil, fmt.Errorf("judges: only primary judge role is supported by runtime config, got %q", role)
 	}
 	profile, err := cfg.AgentProfile(agentRole)
 	if err != nil {

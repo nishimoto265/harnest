@@ -175,7 +175,7 @@ func TestRun_ExplicitIssuesProduceLessonsAndSuppressScoreConcernFallback(t *test
 	assert.NotContains(t, string(body), "Client component meta tags may not render into the document head.")
 }
 
-func TestRun_ExplicitIssuesMergesSimilarLessons(t *testing.T) {
+func TestRun_ExplicitIssuesKeepDistinctLessonsWithoutSimilarityBuckets(t *testing.T) {
 	cfg := newTestConfig(t)
 	now := time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC)
 	writeScores(t, cfg.IO, contracts.ScoreEntry{
@@ -251,17 +251,18 @@ func TestRun_ExplicitIssuesMergesSimilarLessons(t *testing.T) {
 
 	got, err := Run(context.Background(), cfg)
 	require.NoError(t, err)
-	require.Len(t, got.Candidates, 2)
+	require.Len(t, got.Candidates, 3)
 
 	assert.Equal(t, "issue-completeness-only-en-json-locale-file-updated-with-a957a83b1cd7", experimentLessonTitleID(got.Candidates[0].Title))
 	assert.Equal(t, "issue-edge-case-terms-proxy-rewrite-does-not-handle-trailing-slash", experimentLessonTitleID(got.Candidates[1].Title))
+	assert.Equal(t, "issue-maintainability-only-en-json-locale-updated", experimentLessonTitleID(got.Candidates[2].Title))
 
 	bodyPath, err := cfg.IO.ResolveRunRelative(got.Candidates[0].ProposedBodyPath)
 	require.NoError(t, err)
 	body, err := os.ReadFile(bodyPath)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "messages/en.json gets the new Error section")
-	assert.Contains(t, string(body), "The patch adds Error messages only to en.json")
+	assert.NotContains(t, string(body), "The patch adds Error messages only to en.json")
 }
 
 func TestRun_ScaffoldOnlyEvidenceEmitsZeroCandidates(t *testing.T) {

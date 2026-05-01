@@ -166,8 +166,7 @@ func testConfig(t *testing.T) config.Config {
 			Base: worktreeBase,
 		},
 		Agents: config.AgentsConfig{
-			Implementer:    "claude",
-			JudgeSecondary: "codex",
+			Implementer: "claude",
 		},
 		Paths: config.PathsConfig{
 			Runs: runsBase,
@@ -197,15 +196,9 @@ profiles:
     binary: claude
   judge-primary:
     provider: %s
-  judge-secondary:
-    provider: stub
-  judge-arbiter:
-    provider: stub
 roles:
   implementer: claude
   judge_primary: judge-primary
-  judge_secondary: judge-secondary
-  judge_arbiter: judge-arbiter
 `, provider)), 0o644))
 
 	cfg, err := config.Load(filepath.Join(dir, "config.yaml"))

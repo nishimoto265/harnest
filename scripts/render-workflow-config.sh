@@ -31,7 +31,7 @@ profile_for_role() {
   local provider="${2}"
   case "${role}" in
     implementer) printf '%s-implementer' "${provider}" ;;
-    judge_primary|judge_secondary|judge_arbiter) printf '%s-judge' "${provider}" ;;
+    judge_primary) printf '%s-judge' "${provider}" ;;
     *) echo "unsupported role: ${role}" >&2; exit 1 ;;
   esac
 }
@@ -54,8 +54,6 @@ profile_for_role() {
   printf 'roles:\n'
   printf '  implementer: %s\n' "$(yaml_quote "$(profile_for_role implementer "${INPUT_IMPLEMENTER_PROVIDER}")")"
   printf '  judge_primary: %s\n' "$(yaml_quote "$(profile_for_role judge_primary "${INPUT_JUDGE_PRIMARY_PROVIDER}")")"
-  printf '  judge_secondary: %s\n' "$(yaml_quote "$(profile_for_role judge_secondary "${INPUT_JUDGE_SECONDARY_PROVIDER}")")"
-  printf '  judge_arbiter: %s\n' "$(yaml_quote "$(profile_for_role judge_arbiter "${INPUT_JUDGE_ARBITER_PROVIDER}")")"
 } > "${output_dir}/agents.yaml"
 
 {

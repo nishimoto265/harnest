@@ -37,8 +37,6 @@ func TestWorkflowRenderConfigSeparatesClaudeImplementerAndJudgeProfiles(t *testi
 		"INPUT_CODEX_CLI_PATH=/tmp/fake-codex",
 		"INPUT_IMPLEMENTER_PROVIDER=claude",
 		"INPUT_JUDGE_PRIMARY_PROVIDER=claude",
-		"INPUT_JUDGE_SECONDARY_PROVIDER=codex",
-		"INPUT_JUDGE_ARBITER_PROVIDER=claude",
 	)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
@@ -52,8 +50,8 @@ func TestWorkflowRenderConfigSeparatesClaudeImplementerAndJudgeProfiles(t *testi
 	assert.Equal(t, []string{"-p"}, generatedAgents.Profiles["claude-implementer"].Args)
 	assert.Equal(t, "claude-judge", generatedAgents.Roles[agents.RoleJudgePrimary])
 	assert.Empty(t, generatedAgents.Profiles["claude-judge"].Args)
-	assert.Equal(t, "codex-judge", generatedAgents.Roles[agents.RoleJudgeSecondary])
-	assert.Equal(t, "claude-judge", generatedAgents.Roles[agents.RoleJudgeArbiter])
+	assert.NotContains(t, generatedAgents.Roles, agents.Role("judge_secondary"))
+	assert.NotContains(t, generatedAgents.Roles, agents.Role("judge_arbiter"))
 	assert.Equal(t, "owner/repo", generatedConfig.Repo.GitHub)
 	assert.Equal(t, repoRoot, generatedConfig.Repo.Root)
 	assert.Equal(t, "main", generatedConfig.Repo.DefaultBranch)

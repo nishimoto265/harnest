@@ -69,22 +69,6 @@ on:
         options:
           - claude
           - codex
-      judge_secondary_provider:
-        description: "Provider profile for secondary judge role"
-        required: true
-        type: choice
-        default: codex
-        options:
-          - claude
-          - codex
-      judge_arbiter_provider:
-        description: "Provider profile for arbiter judge role"
-        required: true
-        type: choice
-        default: codex
-        options:
-          - claude
-          - codex
 
 concurrency:
   group: auto-improve-prod
@@ -128,8 +112,6 @@ jobs:
           INPUT_CODEX_CLI_PATH: ${{ inputs.codex_cli_path }}
           INPUT_IMPLEMENTER_PROVIDER: ${{ inputs.implementer_provider }}
           INPUT_JUDGE_PRIMARY_PROVIDER: ${{ inputs.judge_primary_provider }}
-          INPUT_JUDGE_SECONDARY_PROVIDER: ${{ inputs.judge_secondary_provider }}
-          INPUT_JUDGE_ARBITER_PROVIDER: ${{ inputs.judge_arbiter_provider }}
           REPOSITORY_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail

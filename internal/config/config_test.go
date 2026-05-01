@@ -242,8 +242,6 @@ profiles:
 roles:
   implementer: codex
   judge_primary: stub
-  judge_secondary: stub
-  judge_arbiter: stub
 `), 0o644))
 
 	cfg, err := LoadConfig(configPath)
@@ -280,8 +278,6 @@ agent_file_snapshot:
   roles:
     implementer: codex_impl
     judge_primary: stub
-    judge_secondary: stub
-    judge_arbiter: stub
 `), 0o644))
 
 	cfg, err := LoadConfig(configPath)
@@ -315,8 +311,6 @@ profiles:
 roles:
   implementer: stub
   judge_primary: stub
-  judge_secondary: stub
-  judge_arbiter: stub
 `), 0o644))
 
 	_, err := LoadConfig(configPath)
@@ -357,8 +351,6 @@ profiles:
 roles:
   implementer: codex
   judge_primary: judge
-  judge_secondary: stub
-  judge_arbiter: stub
 `), 0o644))
 
 	_, err := LoadConfig(configPath)
@@ -433,8 +425,6 @@ profiles:
 roles:
   implementer: codex
   judge_primary: stub
-  judge_secondary: stub
-  judge_arbiter: stub
   task_generator: codex
 `), 0o644))
 

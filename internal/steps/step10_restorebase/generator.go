@@ -36,17 +36,11 @@ func NewCLITaskBriefGenerator(profile agents.Profile, repoRoot string) CLITaskBr
 
 func (g CLITaskBriefGenerator) GenerateTaskBrief(ctx context.Context, input TaskBriefInput) (string, error) {
 	promptText := RenderTaskBriefGeneratorPrompt(input)
-	binary, prefixArgs, err := agentrunner.PrepareProfileBinary(g.Profile)
+	responsePath, err := runTaskBriefGeneratorCLI(ctx, g.Profile, g.RepoRoot, promptText, g.timeout())
 	if err != nil {
 		return "", err
 	}
-	responsePath, cleanup, err := runTaskBriefGeneratorCLI(ctx, binary, prefixArgs, g.Profile, g.RepoRoot, promptText, g.timeout())
-	if cleanup != nil {
-		defer cleanup()
-	}
-	if err != nil {
-		return "", err
-	}
+	defer os.Remove(responsePath)
 	task, err := readTaskBriefGeneratorResponse(responsePath)
 	if err != nil {
 		return "", err
@@ -132,88 +126,30 @@ func sanitizeGeneratorLine(value string) string {
 	return internalio.SanitizeForPromptEmbedding(value)
 }
 
-func runTaskBriefGeneratorCLI(ctx context.Context, binary string, prefixArgs []string, profile agents.Profile, workdir, promptText string, timeout time.Duration) (string, func(), error) {
-	sessionPath, err := tempTaskBriefGeneratorFile("session")
+func runTaskBriefGeneratorCLI(ctx context.Context, profile agents.Profile, workdir, promptText string, timeout time.Duration) (string, error) {
+	command, err := agentrunner.PrepareReadOnlyCommand(profile, workdir)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
-	outputPath, err := tempTaskBriefGeneratorFile("output")
-	if err != nil {
-		_ = os.Remove(sessionPath)
-		return "", nil, err
-	}
-	cleanup := func() {
-		_ = os.Remove(sessionPath)
-		_ = os.Remove(outputPath)
-	}
-
-	args := append([]string{}, prefixArgs...)
-	switch profile.Provider {
-	case agents.ProviderCodex:
-		codexArgs, err := codexTaskBriefGeneratorArgs(profile.Args, workdir, outputPath)
-		if err != nil {
-			return "", cleanup, err
-		}
-		args = append(args, codexArgs...)
-	case agents.ProviderClaude:
-		claudeArgs, err := claudeTaskBriefGeneratorArgs(profile.Args, workdir)
-		if err != nil {
-			return "", cleanup, err
-		}
-		args = append(args, claudeArgs...)
-	default:
-		return "", cleanup, fmt.Errorf("step10: task brief generator provider %q is not implemented", profile.Provider)
-	}
+	defer command.Cleanup()
 
 	result, err := agentrunner.RunCommand(ctx, agentrunner.CommandRequest{
-		Binary:      binary,
-		Args:        args,
-		Workdir:     workdir,
+		Binary:      command.Binary,
+		Args:        command.Args,
+		Workdir:     command.Workdir,
 		Prompt:      promptText,
-		SessionPath: sessionPath,
+		SessionPath: command.SessionPath,
 		Timeout:     timeout,
-		Env:         agentrunner.ProfileEnv(profile),
+		Env:         command.Env,
 		ErrPrefix:   "step10 task brief generator",
 	})
 	if err != nil {
-		return "", cleanup, err
+		return "", err
 	}
 	if err := validateTaskBriefGeneratorResult(result); err != nil {
-		return "", cleanup, err
+		return "", err
 	}
-	if profile.Provider == agents.ProviderCodex {
-		return outputPath, cleanup, nil
-	}
-	return sessionPath, cleanup, nil
-}
-
-func codexTaskBriefGeneratorArgs(profileArgs []string, workdir, outputPath string) ([]string, error) {
-	if err := agents.ValidateJudgeProfileArgs(agents.ProviderCodex, profileArgs); err != nil {
-		return nil, err
-	}
-	args := []string{
-		"exec",
-		"--sandbox", "read-only",
-		"--skip-git-repo-check",
-		"--ephemeral",
-		"-C", workdir,
-	}
-	args = append(args, profileArgs...)
-	args = append(args, "-o", outputPath, "-")
-	return args, nil
-}
-
-func claudeTaskBriefGeneratorArgs(profileArgs []string, _ string) ([]string, error) {
-	if err := agents.ValidateJudgeProfileArgs(agents.ProviderClaude, profileArgs); err != nil {
-		return nil, err
-	}
-	args := []string{
-		"-p",
-		"--output-format", "json",
-		"--allowedTools", "Read",
-	}
-	args = append(args, profileArgs...)
-	return args, nil
+	return command.ResponsePath, nil
 }
 
 func validateTaskBriefGeneratorResult(result agentrunner.CommandResult) error {
@@ -266,18 +202,6 @@ func extractGeneratorJSONObject(data []byte) []byte {
 		return []byte(text[start : end+1])
 	}
 	return []byte(text)
-}
-
-func tempTaskBriefGeneratorFile(prefix string) (string, error) {
-	file, err := os.CreateTemp("", "auto-improve-task-brief-"+prefix+"-*.json")
-	if err != nil {
-		return "", err
-	}
-	path := file.Name()
-	if err := file.Close(); err != nil {
-		return "", err
-	}
-	return path, nil
 }
 
 func renderDiffExcerptForGenerator(diff string, currentLen int) string {

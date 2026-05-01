@@ -92,14 +92,11 @@ func (j cliJudge) ScoreOutput(ctx context.Context, input JudgeInput) (JudgeOutpu
 	if err != nil {
 		return JudgeOutput{}, err
 	}
-	binary, prefixArgs, err := agentrunner.PrepareProfileBinary(j.profile)
+	responsePath, err := runCLIJudge(ctx, j.profile, workspace.workdir, promptText, j.timeout)
 	if err != nil {
 		return JudgeOutput{}, err
 	}
-	responsePath, err := runCLIJudge(ctx, binary, prefixArgs, j.profile, workspace.workdir, promptText, j.timeout)
-	if err != nil {
-		return JudgeOutput{}, err
-	}
+	defer os.Remove(responsePath)
 	response, err := readModelJudgeResponse(responsePath)
 	if err != nil {
 		return JudgeOutput{}, err
@@ -114,45 +111,21 @@ type cliJudgeWorkspace struct {
 }
 
 func prepareCLIJudgeWorkspace(input JudgeInput, provider agents.Provider) (cliJudgeWorkspace, error) {
-	if provider != agents.ProviderCodex {
-		return cliJudgeWorkspace{
-			input:   input,
-			workdir: filepath.Dir(input.OutputPath),
-			cleanup: func() {},
-		}, nil
-	}
-	dir, err := os.MkdirTemp("", "auto-improve-judge-workdir-*")
+	workspace, err := agentrunner.PrepareReadOnlyWorkspace(provider, filepath.Dir(input.OutputPath), "auto-improve-judge-workdir-*", []agentrunner.WorkspaceFile{
+		{Key: "output", SourcePath: input.OutputPath, TargetName: "output.patch"},
+		{Key: "rubric", SourcePath: input.RubricPath, TargetName: "rubric.md"},
+	})
 	if err != nil {
 		return cliJudgeWorkspace{}, err
 	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
 	bundled := input
-	bundled.OutputPath = filepath.Join(dir, "output.patch")
-	bundled.RubricPath = filepath.Join(dir, "rubric.md")
-	if err := copyJudgeFile(input.OutputPath, bundled.OutputPath); err != nil {
-		cleanup()
-		return cliJudgeWorkspace{}, err
-	}
-	if err := copyJudgeFile(input.RubricPath, bundled.RubricPath); err != nil {
-		cleanup()
-		return cliJudgeWorkspace{}, err
-	}
+	bundled.OutputPath = workspace.Files["output"]
+	bundled.RubricPath = workspace.Files["rubric"]
 	return cliJudgeWorkspace{
 		input:   bundled,
-		workdir: dir,
-		cleanup: cleanup,
+		workdir: workspace.Workdir,
+		cleanup: workspace.Cleanup,
 	}, nil
-}
-
-func copyJudgeFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return fmt.Errorf("judges: copy judge file read %s: %w", src, err)
-	}
-	if err := os.WriteFile(dst, data, 0o600); err != nil {
-		return fmt.Errorf("judges: copy judge file write %s: %w", dst, err)
-	}
-	return nil
 }
 
 func (j cliJudge) JudgePromptVersion() string {
@@ -247,51 +220,23 @@ func sanitizeCandidateRules(rules []CandidateRule) []CandidateRule {
 	return out
 }
 
-func runCLIJudge(ctx context.Context, binary string, prefixArgs []string, profile agents.Profile, workdir, promptText string, timeout time.Duration) (string, error) {
-	sessionPath, err := tempJudgeFile("session")
+func runCLIJudge(ctx context.Context, profile agents.Profile, workdir, promptText string, timeout time.Duration) (string, error) {
+	command, err := agentrunner.PrepareReadOnlyCommand(profile, workdir)
 	if err != nil {
 		return "", err
 	}
-	outputPath, err := tempJudgeFile("output")
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if profile.Provider != agents.ProviderClaude {
-			_ = os.Remove(sessionPath)
-		}
-		if profile.Provider != agents.ProviderCodex {
-			_ = os.Remove(outputPath)
-		}
-	}()
+	defer command.Cleanup()
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	args := append([]string{}, prefixArgs...)
-	switch profile.Provider {
-	case agents.ProviderCodex:
-		codexArgs, err := codexJudgeExecArgs(profile.Args, workdir, outputPath)
-		if err != nil {
-			return "", err
-		}
-		args = append(args, codexArgs...)
-	case agents.ProviderClaude:
-		claudeArgs, err := claudeJudgeExecArgs(profile.Args, workdir)
-		if err != nil {
-			return "", err
-		}
-		args = append(args, claudeArgs...)
-	default:
-		return "", fmt.Errorf("judges: CLI provider %q is not implemented yet", profile.Provider)
-	}
 	result, err := agentrunner.RunCommand(timeoutCtx, agentrunner.CommandRequest{
-		Binary:      binary,
-		Args:        args,
-		Workdir:     workdir,
+		Binary:      command.Binary,
+		Args:        command.Args,
+		Workdir:     command.Workdir,
 		Prompt:      promptText,
-		SessionPath: sessionPath,
+		SessionPath: command.SessionPath,
 		Timeout:     timeout,
-		Env:         agentrunner.ProfileEnv(profile),
+		Env:         command.Env,
 		ErrPrefix:   "judge",
 	})
 	if err != nil {
@@ -300,14 +245,7 @@ func runCLIJudge(ctx context.Context, binary string, prefixArgs []string, profil
 	if err := validateCLIJudgeCommandResult(result); err != nil {
 		return "", err
 	}
-	switch profile.Provider {
-	case agents.ProviderCodex:
-		return outputPath, nil
-	case agents.ProviderClaude:
-		return sessionPath, nil
-	default:
-		return "", fmt.Errorf("judges: CLI provider %q is not implemented yet", profile.Provider)
-	}
+	return command.ResponsePath, nil
 }
 
 func validateCLIJudgeCommandResult(result agentrunner.CommandResult) error {
@@ -325,36 +263,6 @@ func validateCLIJudgeCommandResult(result agentrunner.CommandResult) error {
 
 func snippetForError(value []byte) string {
 	return strings.TrimSpace(string(value))
-}
-
-func codexJudgeExecArgs(profileArgs []string, workdir, outputPath string) ([]string, error) {
-	if err := agents.ValidateJudgeProfileArgs(agents.ProviderCodex, profileArgs); err != nil {
-		return nil, err
-	}
-	args := []string{
-		"exec",
-		"--sandbox", "read-only",
-		"--skip-git-repo-check",
-		"--ephemeral",
-		"-c", `web_search="disabled"`,
-		"-C", workdir,
-	}
-	args = append(args, profileArgs...)
-	args = append(args, "-o", outputPath, "-")
-	return args, nil
-}
-
-func claudeJudgeExecArgs(profileArgs []string, _ string) ([]string, error) {
-	if err := agents.ValidateJudgeProfileArgs(agents.ProviderClaude, profileArgs); err != nil {
-		return nil, err
-	}
-	args := []string{
-		"-p",
-		"--output-format", "json",
-		"--allowedTools", "Read",
-	}
-	args = append(args, profileArgs...)
-	return args, nil
 }
 
 func readModelJudgeResponse(path string) (modelJudgeResponse, error) {
@@ -396,18 +304,6 @@ func extractJSONObject(data []byte) []byte {
 		return []byte(text[start : end+1])
 	}
 	return []byte(text)
-}
-
-func tempJudgeFile(prefix string) (string, error) {
-	file, err := os.CreateTemp("", "auto-improve-"+prefix+"-*.json")
-	if err != nil {
-		return "", err
-	}
-	path := file.Name()
-	if err := file.Close(); err != nil {
-		return "", err
-	}
-	return path, nil
 }
 
 func (j cliJudge) toJudgeOutput(input JudgeInput, response modelJudgeResponse) (JudgeOutput, error) {

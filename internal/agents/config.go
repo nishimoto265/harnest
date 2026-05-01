@@ -15,11 +15,9 @@ import (
 type Role string
 
 const (
-	RoleImplementer    Role = "implementer"
-	RoleJudgePrimary   Role = "judge_primary"
-	RoleJudgeSecondary Role = "judge_secondary"
-	RoleJudgeArbiter   Role = "judge_arbiter"
-	RoleTaskGenerator  Role = "task_generator"
+	RoleImplementer   Role = "implementer"
+	RoleJudgePrimary  Role = "judge_primary"
+	RoleTaskGenerator Role = "task_generator"
 )
 
 type Provider string
@@ -100,16 +98,12 @@ func Legacy(defaults LegacyDefaults) File {
 	}
 	return File{
 		Profiles: map[string]Profile{
-			"claude":          {Provider: implementerProvider, Binary: defaults.ImplementerBinary, Args: implementerArgs},
-			"judge-primary":   {Provider: ProviderStub},
-			"judge-secondary": {Provider: ProviderStub},
-			"judge-arbiter":   {Provider: ProviderStub},
+			"claude":        {Provider: implementerProvider, Binary: defaults.ImplementerBinary, Args: implementerArgs},
+			"judge-primary": {Provider: ProviderStub},
 		},
 		Roles: map[Role]string{
-			RoleImplementer:    "claude",
-			RoleJudgePrimary:   "judge-primary",
-			RoleJudgeSecondary: "judge-secondary",
-			RoleJudgeArbiter:   "judge-arbiter",
+			RoleImplementer:  "claude",
+			RoleJudgePrimary: "judge-primary",
 		},
 	}
 }
@@ -170,19 +164,6 @@ func (f File) Validate() error {
 			return err
 		}
 	}
-	for _, role := range []Role{RoleJudgeSecondary, RoleJudgeArbiter} {
-		profileName := strings.TrimSpace(f.Roles[role])
-		if profileName == "" {
-			continue
-		}
-		profile, ok := f.Profiles[profileName]
-		if !ok {
-			return fmt.Errorf("agents: role %q references unknown profile %q", role, profileName)
-		}
-		if err := ValidateProfileArgsForRole(role, profile); err != nil {
-			return err
-		}
-	}
 	if profileName := strings.TrimSpace(f.Roles[RoleTaskGenerator]); profileName != "" {
 		profile, ok := f.Profiles[profileName]
 		if !ok {
@@ -216,7 +197,7 @@ func (f File) ProfileForRole(role Role) (Profile, error) {
 
 func ValidateProfileArgsForRole(role Role, profile Profile) error {
 	switch role {
-	case RoleJudgePrimary, RoleJudgeSecondary, RoleJudgeArbiter, RoleTaskGenerator:
+	case RoleJudgePrimary, RoleTaskGenerator:
 		return ValidateJudgeProfileArgs(profile.Provider, profile.Args)
 	default:
 		return nil

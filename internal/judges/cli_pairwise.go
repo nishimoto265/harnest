@@ -81,6 +81,7 @@ func (j cliPairwiseJudge) ComparePairwise(ctx context.Context, input PairwiseInp
 	if err != nil {
 		return PairwiseComparison{}, err
 	}
+	defer os.Remove(responsePath)
 	response, err := readModelPairwiseResponse(responsePath)
 	if err != nil {
 		return PairwiseComparison{}, err
@@ -106,6 +107,7 @@ func (j cliPairwiseJudge) DecidePairwise(ctx context.Context, input PairwiseDeci
 	if err != nil {
 		return PairwiseDecision{}, err
 	}
+	defer os.Remove(responsePath)
 	response, err := readModelPairwiseDecisionResponse(responsePath)
 	if err != nil {
 		return PairwiseDecision{}, err
@@ -142,11 +144,7 @@ func (j cliPairwiseJudge) PairwiseJudgePromptVersion() string {
 }
 
 func (j cliPairwiseJudge) run(ctx context.Context, workdir, promptText string) (string, error) {
-	binary, prefixArgs, err := agentrunner.PrepareProfileBinary(j.profile)
-	if err != nil {
-		return "", err
-	}
-	return runCLIJudge(ctx, binary, prefixArgs, j.profile, workdir, promptText, j.timeout)
+	return runCLIJudge(ctx, j.profile, workdir, promptText, j.timeout)
 }
 
 type cliPairwiseWorkspace struct {
@@ -162,67 +160,45 @@ type cliPairwiseDecisionWorkspace struct {
 }
 
 func prepareCLIPairwiseWorkspace(input PairwiseInput, provider agents.Provider) (cliPairwiseWorkspace, error) {
-	if provider != agents.ProviderCodex {
-		workdir := filepath.Dir(input.A.OutputPath)
-		return cliPairwiseWorkspace{input: input, workdir: workdir, cleanup: func() {}}, nil
-	}
-	dir, err := os.MkdirTemp("", "auto-improve-pairwise-workdir-*")
+	workspace, err := agentrunner.PrepareReadOnlyWorkspace(provider, filepath.Dir(input.A.OutputPath), "auto-improve-pairwise-workdir-*", []agentrunner.WorkspaceFile{
+		{Key: "rubric", SourcePath: input.RubricPath, TargetName: "rubric.md"},
+		{Key: "A", SourcePath: input.A.OutputPath, TargetName: "A.patch"},
+		{Key: "B", SourcePath: input.B.OutputPath, TargetName: "B.patch"},
+	})
 	if err != nil {
 		return cliPairwiseWorkspace{}, err
 	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
 	bundled := input
-	bundled.RubricPath = filepath.Join(dir, "rubric.md")
-	bundled.A.OutputPath = filepath.Join(dir, "A.patch")
-	bundled.B.OutputPath = filepath.Join(dir, "B.patch")
-	if err := copyJudgeFile(input.RubricPath, bundled.RubricPath); err != nil {
-		cleanup()
-		return cliPairwiseWorkspace{}, err
-	}
-	if err := copyJudgeFile(input.A.OutputPath, bundled.A.OutputPath); err != nil {
-		cleanup()
-		return cliPairwiseWorkspace{}, err
-	}
-	if err := copyJudgeFile(input.B.OutputPath, bundled.B.OutputPath); err != nil {
-		cleanup()
-		return cliPairwiseWorkspace{}, err
-	}
-	return cliPairwiseWorkspace{input: bundled, workdir: dir, cleanup: cleanup}, nil
+	bundled.RubricPath = workspace.Files["rubric"]
+	bundled.A.OutputPath = workspace.Files["A"]
+	bundled.B.OutputPath = workspace.Files["B"]
+	return cliPairwiseWorkspace{input: bundled, workdir: workspace.Workdir, cleanup: workspace.Cleanup}, nil
 }
 
 func prepareCLIPairwiseDecisionWorkspace(input PairwiseDecisionInput, provider agents.Provider) (cliPairwiseDecisionWorkspace, error) {
-	if provider != agents.ProviderCodex {
-		workdir := filepath.Dir(input.RubricPath)
-		if len(input.Pairs) > 0 {
-			workdir = filepath.Dir(input.Pairs[0].A.OutputPath)
-		}
-		return cliPairwiseDecisionWorkspace{input: input, workdir: workdir, cleanup: func() {}}, nil
+	defaultWorkdir := filepath.Dir(input.RubricPath)
+	if len(input.Pairs) > 0 {
+		defaultWorkdir = filepath.Dir(input.Pairs[0].A.OutputPath)
 	}
-	dir, err := os.MkdirTemp("", "auto-improve-pairwise-decision-workdir-*")
+	files := []agentrunner.WorkspaceFile{{Key: "rubric", SourcePath: input.RubricPath, TargetName: "rubric.md"}}
+	for i, pair := range input.Pairs {
+		files = append(files,
+			agentrunner.WorkspaceFile{Key: fmt.Sprintf("pair-%02d-A", i+1), SourcePath: pair.A.OutputPath, TargetName: fmt.Sprintf("pair-%02d-A.patch", i+1)},
+			agentrunner.WorkspaceFile{Key: fmt.Sprintf("pair-%02d-B", i+1), SourcePath: pair.B.OutputPath, TargetName: fmt.Sprintf("pair-%02d-B.patch", i+1)},
+		)
+	}
+	workspace, err := agentrunner.PrepareReadOnlyWorkspace(provider, defaultWorkdir, "auto-improve-pairwise-decision-workdir-*", files)
 	if err != nil {
 		return cliPairwiseDecisionWorkspace{}, err
 	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
 	bundled := input
 	bundled.Pairs = append([]PairwisePair(nil), input.Pairs...)
-	bundled.RubricPath = filepath.Join(dir, "rubric.md")
-	if err := copyJudgeFile(input.RubricPath, bundled.RubricPath); err != nil {
-		cleanup()
-		return cliPairwiseDecisionWorkspace{}, err
-	}
+	bundled.RubricPath = workspace.Files["rubric"]
 	for i := range bundled.Pairs {
-		bundled.Pairs[i].A.OutputPath = filepath.Join(dir, fmt.Sprintf("pair-%02d-A.patch", i+1))
-		bundled.Pairs[i].B.OutputPath = filepath.Join(dir, fmt.Sprintf("pair-%02d-B.patch", i+1))
-		if err := copyJudgeFile(input.Pairs[i].A.OutputPath, bundled.Pairs[i].A.OutputPath); err != nil {
-			cleanup()
-			return cliPairwiseDecisionWorkspace{}, err
-		}
-		if err := copyJudgeFile(input.Pairs[i].B.OutputPath, bundled.Pairs[i].B.OutputPath); err != nil {
-			cleanup()
-			return cliPairwiseDecisionWorkspace{}, err
-		}
+		bundled.Pairs[i].A.OutputPath = workspace.Files[fmt.Sprintf("pair-%02d-A", i+1)]
+		bundled.Pairs[i].B.OutputPath = workspace.Files[fmt.Sprintf("pair-%02d-B", i+1)]
 	}
-	return cliPairwiseDecisionWorkspace{input: bundled, workdir: dir, cleanup: cleanup}, nil
+	return cliPairwiseDecisionWorkspace{input: bundled, workdir: workspace.Workdir, cleanup: workspace.Cleanup}, nil
 }
 
 func renderCLIPairwisePrompt(input PairwiseInput) (string, error) {

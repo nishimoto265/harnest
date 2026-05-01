@@ -165,8 +165,6 @@ profiles:
 roles:
   implementer: claude_impl
   judge_primary: stub
-  judge_secondary: stub
-  judge_arbiter: stub
 `), 0o644))
 		},
 		"deleted": func(t *testing.T, path string) {
@@ -202,8 +200,6 @@ profiles:
 roles:
   implementer: codex_impl
   judge_primary: stub
-  judge_secondary: stub
-  judge_arbiter: stub
 `), 0o644))
 			cfg, err := config.LoadConfig(filepath.Join(repoRoot, "config.yaml"))
 			require.NoError(t, err)
@@ -3781,8 +3777,6 @@ profiles:
 roles:
   implementer: fake-implementer
   judge_primary: codex-judge
-  judge_secondary: codex-judge
-  judge_arbiter: codex-judge
 `, implementerPath, codexPath)), 0o644))
 	cfg, err := config.LoadConfig(configPath)
 	require.NoError(t, err)

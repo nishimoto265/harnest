@@ -627,15 +627,9 @@ func writeIntegrationAgentsConfig(t *testing.T, root, claudePath string) {
 		"    args: [\"-p\"]\n" +
 		"  judge-primary:\n" +
 		"    provider: stub\n" +
-		"  judge-secondary:\n" +
-		"    provider: stub\n" +
-		"  judge-arbiter:\n" +
-		"    provider: stub\n" +
 		"roles:\n" +
 		"  implementer: fake-claude\n" +
-		"  judge_primary: judge-primary\n" +
-		"  judge_secondary: judge-secondary\n" +
-		"  judge_arbiter: judge-arbiter\n"
+		"  judge_primary: judge-primary\n"
 	require.NoError(t, os.WriteFile(filepath.Join(root, "agents.yaml"), []byte(content), 0o644))
 
 	configPath := filepath.Join(root, "config.yaml")
@@ -657,17 +651,9 @@ func writeIntegrationAdoptAgentsConfig(t *testing.T, root, implementerPath, judg
 		"  fake-judge-primary:\n" +
 		"    provider: claude\n" +
 		"    binary: " + yamlDoubleQuote(judgePath) + "\n" +
-		"  fake-judge-secondary:\n" +
-		"    provider: claude\n" +
-		"    binary: " + yamlDoubleQuote(judgePath) + "\n" +
-		"  fake-judge-arbiter:\n" +
-		"    provider: claude\n" +
-		"    binary: " + yamlDoubleQuote(judgePath) + "\n" +
 		"roles:\n" +
 		"  implementer: fake-implementer\n" +
-		"  judge_primary: fake-judge-primary\n" +
-		"  judge_secondary: fake-judge-secondary\n" +
-		"  judge_arbiter: fake-judge-arbiter\n"
+		"  judge_primary: fake-judge-primary\n"
 	require.NoError(t, os.WriteFile(filepath.Join(root, "agents.yaml"), []byte(content), 0o644))
 
 	configPath := filepath.Join(root, "config.yaml")

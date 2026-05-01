@@ -62,6 +62,20 @@ func TestNewJudgeFromConfigRejectsNilConfig(t *testing.T) {
 	assert.ErrorContains(t, err, "config is required")
 }
 
+func TestNewJudgeFromConfigRejectsNonPrimaryRuntimeRoles(t *testing.T) {
+	cfg := loadJudgeProviderConfig(t, agents.ProviderStub)
+
+	for _, role := range []contracts.JudgeRole{contracts.JudgeRoleSecondary, contracts.JudgeRoleArbiter} {
+		t.Run(string(role), func(t *testing.T) {
+			judge, err := NewJudgeFromConfig(&cfg, role)
+
+			require.Error(t, err)
+			assert.Nil(t, judge)
+			assert.ErrorContains(t, err, "only primary judge role is supported")
+		})
+	}
+}
+
 func loadJudgeProviderConfig(t *testing.T, provider agents.Provider) config.Config {
 	t.Helper()
 
@@ -79,15 +93,9 @@ profiles:
     binary: claude
   judge-primary:
     provider: %s
-  judge-secondary:
-    provider: stub
-  judge-arbiter:
-    provider: stub
 roles:
   implementer: claude
   judge_primary: judge-primary
-  judge_secondary: judge-secondary
-  judge_arbiter: judge-arbiter
 `, provider)), 0o644))
 
 	cfg, err := config.Load(filepath.Join(dir, "config.yaml"))

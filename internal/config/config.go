@@ -79,9 +79,8 @@ type WorktreeConfig struct {
 }
 
 type AgentsConfig struct {
-	Implementer    string `yaml:"implementer"`
-	JudgePrimary   string `yaml:"judge_primary"`
-	JudgeSecondary string `yaml:"judge_secondary"`
+	Implementer  string `yaml:"implementer"`
+	JudgePrimary string `yaml:"judge_primary"`
 }
 
 type PathsConfig struct {
@@ -156,9 +155,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Agents.JudgePrimary == "" {
 		c.Agents.JudgePrimary = "claude"
-	}
-	if c.Agents.JudgeSecondary == "" {
-		c.Agents.JudgeSecondary = "codex"
 	}
 	if c.TaskPrompt.Source == "" {
 		c.TaskPrompt.Source = "auto"

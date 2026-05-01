@@ -25,8 +25,6 @@ profiles:
 roles:
   implementer: claude_impl
   judge_primary: codex_judge
-  judge_secondary: stub
-  judge_arbiter: stub
   task_generator: codex_judge
 `), 0o644))
 
@@ -56,9 +54,9 @@ func TestLegacyBuildsDefaultRoleMap(t *testing.T) {
 	assert.Equal(t, ProviderClaude, impl.Provider)
 	assert.Equal(t, []string{"-p"}, impl.Args)
 
-	arbiter, err := cfg.ProfileForRole(RoleJudgeArbiter)
+	primary, err := cfg.ProfileForRole(RoleJudgePrimary)
 	require.NoError(t, err)
-	assert.Equal(t, ProviderStub, arbiter.Provider)
+	assert.Equal(t, ProviderStub, primary.Provider)
 }
 
 func TestLegacyInfersCodexImplementerProviderFromBinary(t *testing.T) {
@@ -93,10 +91,8 @@ func TestValidateRejectsUnknownProfileReference(t *testing.T) {
 			"claude": {Provider: ProviderClaude, Binary: "claude"},
 		},
 		Roles: map[Role]string{
-			RoleImplementer:    "claude",
-			RoleJudgePrimary:   "missing",
-			RoleJudgeSecondary: "claude",
-			RoleJudgeArbiter:   "claude",
+			RoleImplementer:  "claude",
+			RoleJudgePrimary: "missing",
 		},
 	}
 
@@ -114,10 +110,8 @@ func TestValidateRejectsStubImplementerProfiles(t *testing.T) {
 					"stub": {Provider: ProviderStub},
 				},
 				Roles: map[Role]string{
-					RoleImplementer:    "impl",
-					RoleJudgePrimary:   "stub",
-					RoleJudgeSecondary: "stub",
-					RoleJudgeArbiter:   "stub",
+					RoleImplementer:  "impl",
+					RoleJudgePrimary: "stub",
 				},
 			}
 
@@ -140,10 +134,8 @@ func TestValidateAllowsStubJudgeProfiles(t *testing.T) {
 			"stub-adopt":     {Provider: ProviderStubAdopt},
 		},
 		Roles: map[Role]string{
-			RoleImplementer:    "impl",
-			RoleJudgePrimary:   "stub",
-			RoleJudgeSecondary: "stub-violation",
-			RoleJudgeArbiter:   "stub-adopt",
+			RoleImplementer:  "impl",
+			RoleJudgePrimary: "stub",
 		},
 	}
 
@@ -157,10 +149,8 @@ func TestValidateRejectsNodeBinaryForStubProfile(t *testing.T) {
 			"stub": {Provider: ProviderStub, NodeBinary: "/opt/node24/bin/node"},
 		},
 		Roles: map[Role]string{
-			RoleImplementer:    "impl",
-			RoleJudgePrimary:   "stub",
-			RoleJudgeSecondary: "stub",
-			RoleJudgeArbiter:   "stub",
+			RoleImplementer:  "impl",
+			RoleJudgePrimary: "stub",
 		},
 	}
 
@@ -201,10 +191,8 @@ func TestValidateRejectsUnsafeJudgeProfileArgs(t *testing.T) {
 					"stub":  {Provider: ProviderStub},
 				},
 				Roles: map[Role]string{
-					RoleImplementer:    "impl",
-					RoleJudgePrimary:   "judge",
-					RoleJudgeSecondary: "stub",
-					RoleJudgeArbiter:   "stub",
+					RoleImplementer:  "impl",
+					RoleJudgePrimary: "judge",
 				},
 			}
 
@@ -223,10 +211,8 @@ func TestValidateAllowsUnsafeImplementerProfileArgs(t *testing.T) {
 			"stub": {Provider: ProviderStub},
 		},
 		Roles: map[Role]string{
-			RoleImplementer:    "impl",
-			RoleJudgePrimary:   "stub",
-			RoleJudgeSecondary: "stub",
-			RoleJudgeArbiter:   "stub",
+			RoleImplementer:  "impl",
+			RoleJudgePrimary: "stub",
 		},
 	}
 
@@ -241,11 +227,9 @@ func TestValidateRejectsUnsafeTaskGeneratorProfileArgs(t *testing.T) {
 			"stub":      {Provider: ProviderStub},
 		},
 		Roles: map[Role]string{
-			RoleImplementer:    "impl",
-			RoleJudgePrimary:   "stub",
-			RoleJudgeSecondary: "stub",
-			RoleJudgeArbiter:   "stub",
-			RoleTaskGenerator:  "generator",
+			RoleImplementer:   "impl",
+			RoleJudgePrimary:  "stub",
+			RoleTaskGenerator: "generator",
 		},
 	}
 
@@ -262,11 +246,9 @@ func TestValidateRejectsStubTaskGeneratorProfile(t *testing.T) {
 			"stub": {Provider: ProviderStub},
 		},
 		Roles: map[Role]string{
-			RoleImplementer:    "impl",
-			RoleJudgePrimary:   "stub",
-			RoleJudgeSecondary: "stub",
-			RoleJudgeArbiter:   "stub",
-			RoleTaskGenerator:  "stub",
+			RoleImplementer:   "impl",
+			RoleJudgePrimary:  "stub",
+			RoleTaskGenerator: "stub",
 		},
 	}
 

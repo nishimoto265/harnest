@@ -162,8 +162,6 @@ profiles:
 roles:
   implementer: codex_impl
   judge_primary: stub
-  judge_secondary: stub
-  judge_arbiter: stub
 `, scriptPath)), 0o644))
 
 	cfg, err := config.LoadConfig(configPath)

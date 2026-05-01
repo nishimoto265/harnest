@@ -13,29 +13,27 @@ import (
 )
 
 func ImplementerCommand(profile agents.Profile, workdir string) (string, []string, error) {
-	switch profile.Provider {
-	case agents.ProviderClaude:
-		binary, prefixArgs, err := PrepareProfileBinary(profile)
-		if err != nil {
-			return "", nil, err
-		}
-		return binary, append(prefixArgs, profile.Args...), nil
-	case agents.ProviderCodex:
-		binary, prefixArgs, err := PrepareProfileBinary(profile)
-		if err != nil {
-			return "", nil, err
-		}
-		args := append([]string{}, CodexExecArgs(workdir)...)
-		args = append(args, profile.Args...)
-		args = append(args, "-")
-		return binary, append(prefixArgs, args...), nil
-	default:
+	runtime, err := runtimeForProvider(profile.Provider)
+	if err != nil {
 		return "", nil, fmt.Errorf("agentrunner: unsupported implementer provider %q", profile.Provider)
 	}
+	binary, prefixArgs, err := runtime.PrepareBinary(profile)
+	if err != nil {
+		return "", nil, err
+	}
+	args, err := runtime.ImplementerArgs(profile, workdir)
+	if err != nil {
+		return "", nil, err
+	}
+	return binary, append(prefixArgs, args...), nil
 }
 
 func PrepareProfileBinary(profile agents.Profile) (string, []string, error) {
-	return PrepareProviderBinaryWithNode(profile.Provider, profile.Binary, profile.NodeBinary)
+	runtime, err := runtimeForProvider(profile.Provider)
+	if err != nil {
+		return "", nil, err
+	}
+	return runtime.PrepareBinary(profile)
 }
 
 func ProfileEnv(profile agents.Profile) []string {
@@ -50,14 +48,15 @@ func PrepareProviderBinary(provider agents.Provider, binary string) (string, []s
 }
 
 func PrepareProviderBinaryWithNode(provider agents.Provider, binary, nodeBinary string) (string, []string, error) {
-	switch provider {
-	case agents.ProviderClaude:
-		return prepareNodeShebangBinary(binary, nodeBinary)
-	case agents.ProviderCodex:
-		return prepareCodexBinary(binary, nodeBinary)
-	default:
+	runtime, err := runtimeForProvider(provider)
+	if err != nil {
 		return binary, nil, nil
 	}
+	return runtime.PrepareBinary(agents.Profile{
+		Provider:   provider,
+		Binary:     binary,
+		NodeBinary: nodeBinary,
+	})
 }
 
 func CodexExecArgs(workdir string) []string {

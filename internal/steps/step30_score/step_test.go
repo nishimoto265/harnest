@@ -231,24 +231,24 @@ func TestStep30Score_ResumeRerunsRolesWhenOutputSHAChanges(t *testing.T) {
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	assert.Equal(t, 1, provider.calls[contracts.JudgeRolePrimary])
-	assert.Equal(t, 1, provider.calls[contracts.JudgeRoleSecondary])
-	assert.Equal(t, 1, provider.calls[contracts.JudgeRoleArbiter])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleArbiter])
 
 	scoreRawPath, err := runCtx.ResolveRunRelative("30/scores-A-raw.jsonl")
 	require.NoError(t, err)
 	scoreRaw, err := internalio.ReadJSONL[contracts.RawScoreEntry](scoreRawPath)
 	require.NoError(t, err)
-	assert.Len(t, scoreRaw, 60)
-	assert.Equal(t, 15, countRawScoresForAgentAndSHA(scoreRaw, contracts.AgentID("a1"), originalSHA))
-	assert.Equal(t, 15, countRawScoresForAgentAndSHA(scoreRaw, contracts.AgentID("a1"), updatedSHA))
+	assert.Len(t, scoreRaw, 20)
+	assert.Equal(t, 5, countRawScoresForAgentAndSHA(scoreRaw, contracts.AgentID("a1"), originalSHA))
+	assert.Equal(t, 5, countRawScoresForAgentAndSHA(scoreRaw, contracts.AgentID("a1"), updatedSHA))
 
 	complianceRawPath, err := runCtx.ResolveRunRelative("30/compliance-A-raw.jsonl")
 	require.NoError(t, err)
 	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](complianceRawPath)
 	require.NoError(t, err)
-	assert.Len(t, complianceRaw, 8)
-	assert.Equal(t, 2, countRawComplianceForAgentAndSHA(complianceRaw, contracts.AgentID("a1"), originalSHA))
-	assert.Equal(t, 2, countRawComplianceForAgentAndSHA(complianceRaw, contracts.AgentID("a1"), updatedSHA))
+	assert.Len(t, complianceRaw, 4)
+	assert.Equal(t, 1, countRawComplianceForAgentAndSHA(complianceRaw, contracts.AgentID("a1"), originalSHA))
+	assert.Equal(t, 1, countRawComplianceForAgentAndSHA(complianceRaw, contracts.AgentID("a1"), updatedSHA))
 }
 
 func TestStep30Score_ResumeRerunsWhenPromptVersionChanges(t *testing.T) {
@@ -273,7 +273,7 @@ func TestStep30Score_ResumeRerunsWhenPromptVersionChanges(t *testing.T) {
 	require.NoError(t, second.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
-	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
 }
 
 // step30 appends new version rows without truncating old rows, so a valid
@@ -300,7 +300,7 @@ func TestStep30Score_IgnoresHistoricalOldVersionsAfterAppendOnlyRerun(t *testing
 	setStepRubric(t, second, "rule-a")
 	require.NoError(t, second.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
-	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
 
 	provider.reset()
 	third := New(WithPanelProvider(provider), WithPromptVersion("prompt-v2"))
@@ -347,10 +347,10 @@ func TestStep30Score_ResumeRerunsWhenRawComplianceIsMissing(t *testing.T) {
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
-	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
 }
 
-func TestStep30Score_AllowsEmptyComplianceAcrossPanel(t *testing.T) {
+func TestStep30Score_AllowsEmptyComplianceWithSingleJudge(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
 	rubricPath := filepath.Join(t.TempDir(), "rubric.md")
 	require.NoError(t, os.WriteFile(rubricPath, []byte("# custom rubric without compliance rules\n"), 0o644))
@@ -379,7 +379,7 @@ func TestStep30Score_AllowsEmptyComplianceAcrossPanel(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(15), marker.ExpectedCounts.Scores)
 	assert.Equal(t, int64(0), marker.ExpectedCounts.Compliance)
-	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleArbiter])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleArbiter])
 
 	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
 	require.NoError(t, err)
@@ -474,121 +474,7 @@ func TestStep30Score_JudgeSeesPinnedSnapshotBytes(t *testing.T) {
 	assert.Equal(t, liveBefore, snapshotBytes, "post-run snapshot must be unaffected by live-diff mutation")
 }
 
-// F5 disputed-only arbiter contract: primary/secondary disagree on rule-b,
-// arbiter covers only rule-a, so the disputed-only expected set rejects the
-// incomplete arbiter output and step30 must not write the done.marker.
-func TestStep30Score_DoesNotWriteDoneMarkerOnIncompleteArbiterComplianceCoverage(t *testing.T) {
-	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
-	provider := &fakePanelProvider{
-		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
-			score := 80
-			rules := []ruleVerdict{
-				{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
-				{ruleID: "rule-b", verdict: contracts.ComplianceVerdictCompliant},
-			}
-			switch role {
-			case contracts.JudgeRoleSecondary:
-				score = 60
-				rules = []ruleVerdict{
-					{ruleID: "rule-a", verdict: contracts.ComplianceVerdictViolated},
-					{ruleID: "rule-b", verdict: contracts.ComplianceVerdictViolated},
-				}
-			case contracts.JudgeRoleArbiter:
-				score = 75
-				// Arbiter misses rule-b even though it is disputed.
-				rules = []ruleVerdict{
-					{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
-				}
-			}
-			return makeJudgeOutput(input, role, score, rules)
-		},
-	}
-
-	step := New(WithPanelProvider(provider))
-	setStepRubric(t, step, "rule-a", "rule-b")
-	err := step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg})
-	require.ErrorIs(t, err, judges.ErrJudgeOutputMissingCompliance)
-
-	markerPath, markerErr := runCtx.ResolveRunRelative("30/done.marker")
-	require.NoError(t, markerErr)
-	_, statErr := os.Stat(markerPath)
-	require.Error(t, statErr)
-	assert.True(t, os.IsNotExist(statErr))
-}
-
-func TestStep30Score_PassesOnlyDisputedComplianceRulesToArbiter(t *testing.T) {
-	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
-	var arbiterExpected []string
-	var arbiterStrict bool
-	provider := &fakePanelProvider{
-		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
-			score := 80
-			rules := []ruleVerdict{
-				{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
-				{ruleID: "rule-b", verdict: contracts.ComplianceVerdictCompliant},
-			}
-			switch role {
-			case contracts.JudgeRoleSecondary:
-				rules = []ruleVerdict{
-					{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
-					{ruleID: "rule-b", verdict: contracts.ComplianceVerdictViolated},
-				}
-			case contracts.JudgeRoleArbiter:
-				score = 75
-				arbiterExpected = append([]string(nil), input.ExpectedComplianceRuleIDs...)
-				arbiterStrict = input.EnforceExpectedCompliance
-				rules = []ruleVerdict{{ruleID: "rule-b", verdict: contracts.ComplianceVerdictCompliant}}
-			}
-			return makeJudgeOutput(input, role, score, rules)
-		},
-	}
-
-	step := New(WithPanelProvider(provider))
-	setStepRubric(t, step, "rule-a", "rule-b")
-	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
-
-	assert.Equal(t, []string{"rule-b"}, arbiterExpected)
-	assert.True(t, arbiterStrict)
-}
-
-// F5 regression: step30 under the disputed-only contract must accept an
-// arbiter that returns only the disputed subset (or even zero rows when no
-// rules are disputed, as here) and still emit the done.marker. This
-// exercises the shared step30 / step60 contract.
-func TestStep30Score_AcceptsArbiterCoveringOnlyDisputedRules(t *testing.T) {
-	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
-	provider := &fakePanelProvider{
-		outputs: func(input judges.JudgeInput, role contracts.JudgeRole) judges.JudgeOutput {
-			score := 80
-			rules := []ruleVerdict{
-				{ruleID: "rule-a", verdict: contracts.ComplianceVerdictCompliant},
-				{ruleID: "rule-b", verdict: contracts.ComplianceVerdictCompliant},
-			}
-			switch role {
-			case contracts.JudgeRoleSecondary:
-				// Score disagrees but compliance agrees — disputed set is empty.
-				score = 60
-			case contracts.JudgeRoleArbiter:
-				score = 75
-				// Arbiter is free to return an empty or narrow compliance
-				// set when nothing is actually disputed.
-				rules = []ruleVerdict{}
-			}
-			return makeJudgeOutput(input, role, score, rules)
-		},
-	}
-
-	step := New(WithPanelProvider(provider))
-	setStepRubric(t, step, "rule-a", "rule-b")
-	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
-
-	markerPath, err := runCtx.ResolveRunRelative("30/done.marker")
-	require.NoError(t, err)
-	_, err = os.Stat(markerPath)
-	require.NoError(t, err)
-}
-
-func TestStep30Score_DiscardsStaleArbiterComplianceWhenRebuildIsStrictEmpty(t *testing.T) {
+func TestStep30Score_DiscardsStaleFinalComplianceWhenRebuildIsStrictEmpty(t *testing.T) {
 	runCtx, pkg := seedStep30Fixtures(t, []contracts.AgentID{"a1", "a2", "a3"})
 	rubricPath := filepath.Join(t.TempDir(), "rubric.md")
 	require.NoError(t, os.WriteFile(rubricPath, []byte("## Active Rule IDs\n- rule-a\n"), 0o644))
@@ -639,8 +525,8 @@ func TestStep30Score_DiscardsStaleArbiterComplianceWhenRebuildIsStrictEmpty(t *t
 
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
-	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
-	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleArbiter])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleArbiter])
 
 	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
 	require.NoError(t, err)
@@ -687,7 +573,7 @@ func TestStep30Score_RerunsWhenRubricContentChanges(t *testing.T) {
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
-	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
 }
 
 func TestStep30Score_DiscardsStaleFinalComplianceAfterInvalidMarkerRuleShrink(t *testing.T) {
@@ -728,7 +614,7 @@ func TestStep30Score_DiscardsStaleFinalComplianceAfterInvalidMarkerRuleShrink(t 
 
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
-	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
 
 	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
 	require.NoError(t, err)
@@ -748,12 +634,12 @@ func TestStep30Score_DiscardsStaleFinalComplianceAfterInvalidMarkerRuleShrink(t 
 	require.NoError(t, err)
 	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](complianceRawPath)
 	require.NoError(t, err)
-	require.Len(t, complianceRaw, 18)
+	require.Len(t, complianceRaw, 9)
 	rawRuleCounts := map[string]int{}
 	for _, row := range complianceRaw {
 		rawRuleCounts[row.RuleID]++
 	}
-	assert.Equal(t, map[string]int{"rule-a": 12, "rule-b": 6}, rawRuleCounts)
+	assert.Equal(t, map[string]int{"rule-a": 6, "rule-b": 3}, rawRuleCounts)
 
 	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
 	require.NoError(t, err)
@@ -801,7 +687,7 @@ func TestStep30Score_DiscardsStaleFinalComplianceAfterMarkerlessRuleShrink(t *te
 
 	require.NoError(t, step.Run(context.Background(), Request{RunContext: runCtx, TaskPackage: &pkg}))
 	assert.Equal(t, 3, provider.calls[contracts.JudgeRolePrimary])
-	assert.Equal(t, 3, provider.calls[contracts.JudgeRoleSecondary])
+	assert.Zero(t, provider.calls[contracts.JudgeRoleSecondary])
 
 	complianceFinalPath, err := runCtx.ResolveRunRelative("30/compliance-A.jsonl")
 	require.NoError(t, err)
@@ -814,8 +700,8 @@ func TestStep30Score_DiscardsStaleFinalComplianceAfterMarkerlessRuleShrink(t *te
 	require.NoError(t, err)
 	complianceRaw, err := internalio.ReadJSONL[contracts.RawComplianceEntry](complianceRawPath)
 	require.NoError(t, err)
-	require.Len(t, complianceRaw, 18)
-	assert.Equal(t, map[string]int{"rule-a": 12, "rule-b": 6}, rawComplianceRuleCounts(complianceRaw))
+	require.Len(t, complianceRaw, 9)
+	assert.Equal(t, map[string]int{"rule-a": 6, "rule-b": 3}, rawComplianceRuleCounts(complianceRaw))
 
 	marker, err := internalio.ReadJSON[contracts.Step30DoneMarker](markerPath)
 	require.NoError(t, err)
@@ -931,14 +817,14 @@ func TestStep30Score_RunSerializesConcurrentWriters(t *testing.T) {
 	require.NoError(t, <-errCh)
 
 	assert.Equal(t, 3, provider.callCount(contracts.JudgeRolePrimary))
-	assert.Equal(t, 3, provider.callCount(contracts.JudgeRoleSecondary))
+	assert.Equal(t, 0, provider.callCount(contracts.JudgeRoleSecondary))
 	assert.Equal(t, 0, provider.callCount(contracts.JudgeRoleArbiter))
 
 	scoreRawPath, err := runCtx.ResolveRunRelative("30/scores-A-raw.jsonl")
 	require.NoError(t, err)
 	scoreRaw, err := internalio.ReadJSONL[contracts.RawScoreEntry](scoreRawPath)
 	require.NoError(t, err)
-	assert.Len(t, scoreRaw, 30)
+	assert.Len(t, scoreRaw, 15)
 }
 
 func TestStep30Score_UsesBundledRubricPathWithoutTouchingLegacySymlink(t *testing.T) {
@@ -1098,16 +984,13 @@ type fakePanelProvider struct {
 	calls   map[contracts.JudgeRole]int
 }
 
-func (p *fakePanelProvider) Judges(input judges.JudgeInput) (judges.Judge, judges.Judge, judges.Judge, error) {
+func (p *fakePanelProvider) Judge(input judges.JudgeInput) (judges.Judge, error) {
 	p.mu.Lock()
 	if p.calls == nil {
 		p.calls = make(map[contracts.JudgeRole]int)
 	}
 	p.mu.Unlock()
-	return fakePanelJudge{provider: p, input: input, role: contracts.JudgeRolePrimary},
-		fakePanelJudge{provider: p, input: input, role: contracts.JudgeRoleSecondary},
-		fakePanelJudge{provider: p, input: input, role: contracts.JudgeRoleArbiter},
-		nil
+	return fakePanelJudge{provider: p, role: contracts.JudgeRolePrimary}, nil
 }
 
 func (p *fakePanelProvider) reset() {
@@ -1124,7 +1007,6 @@ func (p *fakePanelProvider) callCount(role contracts.JudgeRole) int {
 
 type fakePanelJudge struct {
 	provider *fakePanelProvider
-	input    judges.JudgeInput
 	role     contracts.JudgeRole
 }
 

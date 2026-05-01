@@ -17,7 +17,5 @@ profiles:
 roles:
   implementer: claude
   judge_primary: stub
-  judge_secondary: stub
-  judge_arbiter: stub
   # Optional: enable AI task brief generation. Omit to use deterministic fallback.
   # task_generator: codex

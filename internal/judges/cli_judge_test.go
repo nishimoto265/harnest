@@ -360,8 +360,18 @@ func TestValidateCLIJudgeCommandResultFailsClosed(t *testing.T) {
 }
 
 func TestCodexJudgeExecArgsAreReadOnlyAndKeepSafeProfileArgs(t *testing.T) {
-	args, err := codexJudgeExecArgs([]string{"--model", "gpt-5", "--model=gpt-5-mini", "-m", "gpt-5"}, "/tmp/worktree", "/tmp/output.json")
+	dir := t.TempDir()
+	codexPath := filepath.Join(dir, "codex")
+	require.NoError(t, os.WriteFile(codexPath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	command, err := agentrunner.PrepareReadOnlyCommand(agents.Profile{
+		Provider: agents.ProviderCodex,
+		Binary:   codexPath,
+		Args:     []string{"--model", "gpt-5", "--model=gpt-5-mini", "-m", "gpt-5"},
+	}, "/tmp/worktree")
 	require.NoError(t, err)
+	defer command.Cleanup()
+	defer os.Remove(command.ResponsePath)
 
 	assert.Equal(t, []string{
 		"exec",
@@ -373,11 +383,13 @@ func TestCodexJudgeExecArgsAreReadOnlyAndKeepSafeProfileArgs(t *testing.T) {
 		"--model", "gpt-5",
 		"--model=gpt-5-mini",
 		"-m", "gpt-5",
-		"-o", "/tmp/output.json",
+		"-o", command.ResponsePath,
 		"-",
-	}, args)
-	assert.NotContains(t, args, "--full-auto")
-	assert.NotContains(t, args, "--dangerously-bypass-approvals-and-sandbox")
+	}, command.Args)
+	assert.Equal(t, codexPath, command.Binary)
+	assert.Equal(t, "/tmp/worktree", command.Workdir)
+	assert.NotContains(t, command.Args, "--full-auto")
+	assert.NotContains(t, command.Args, "--dangerously-bypass-approvals-and-sandbox")
 }
 
 func TestCodexJudgeExecArgsRejectUnsafeProfileArgs(t *testing.T) {
@@ -415,9 +427,17 @@ func TestCodexJudgeExecArgsRejectUnsafeProfileArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			args, err := codexJudgeExecArgs(tt.args, "/tmp/worktree", "/tmp/output.json")
+			dir := t.TempDir()
+			codexPath := filepath.Join(dir, "codex")
+			require.NoError(t, os.WriteFile(codexPath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+			command, err := agentrunner.PrepareReadOnlyCommand(agents.Profile{
+				Provider: agents.ProviderCodex,
+				Binary:   codexPath,
+				Args:     tt.args,
+			}, "/tmp/worktree")
 			require.Error(t, err)
-			assert.Nil(t, args)
+			assert.Empty(t, command.Args)
 		})
 	}
 }
@@ -453,15 +473,27 @@ EOF
 }
 
 func TestClaudeJudgeExecArgsUseReadOnlyToolsAndKeepSafeProfileArgs(t *testing.T) {
-	args, err := claudeJudgeExecArgs([]string{"--model", "claude-3-5-sonnet"}, "/tmp/worktree")
+	dir := t.TempDir()
+	claudePath := filepath.Join(dir, "claude")
+	require.NoError(t, os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	command, err := agentrunner.PrepareReadOnlyCommand(agents.Profile{
+		Provider: agents.ProviderClaude,
+		Binary:   claudePath,
+		Args:     []string{"--model", "claude-3-5-sonnet"},
+	}, "/tmp/worktree")
 	require.NoError(t, err)
+	defer command.Cleanup()
+	defer os.Remove(command.ResponsePath)
 
 	assert.Equal(t, []string{
 		"-p",
 		"--output-format", "json",
 		"--allowedTools", "Read",
 		"--model", "claude-3-5-sonnet",
-	}, args)
+	}, command.Args)
+	assert.Equal(t, claudePath, command.Binary)
+	assert.Equal(t, "/tmp/worktree", command.Workdir)
 }
 
 func TestClaudeJudgeExecArgsRejectUnsafeProfileArgs(t *testing.T) {
@@ -490,18 +522,34 @@ func TestClaudeJudgeExecArgsRejectUnsafeProfileArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			args, err := claudeJudgeExecArgs(tt.args, "/tmp/worktree")
+			dir := t.TempDir()
+			claudePath := filepath.Join(dir, "claude")
+			require.NoError(t, os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+			command, err := agentrunner.PrepareReadOnlyCommand(agents.Profile{
+				Provider: agents.ProviderClaude,
+				Binary:   claudePath,
+				Args:     tt.args,
+			}, "/tmp/worktree")
 			require.Error(t, err)
-			assert.Nil(t, args)
+			assert.Empty(t, command.Args)
 		})
 	}
 }
 
 func TestClaudeJudgeExecArgsRejectSafeArgMissingValue(t *testing.T) {
-	args, err := claudeJudgeExecArgs([]string{"--model"}, "/tmp/worktree")
+	dir := t.TempDir()
+	claudePath := filepath.Join(dir, "claude")
+	require.NoError(t, os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	command, err := agentrunner.PrepareReadOnlyCommand(agents.Profile{
+		Provider: agents.ProviderClaude,
+		Binary:   claudePath,
+		Args:     []string{"--model"},
+	}, "/tmp/worktree")
 
 	require.Error(t, err)
-	assert.Nil(t, args)
+	assert.Empty(t, command.Args)
 }
 
 func assertArgValue(t *testing.T, argv []string, flag, want string) {

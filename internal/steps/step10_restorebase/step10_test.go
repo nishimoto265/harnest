@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/stretchr/testify/assert"
@@ -1442,10 +1443,38 @@ func TestReadTaskBriefGeneratorResponse_ClaudeWrapper(t *testing.T) {
 	assert.Equal(t, "Wrapped task", got)
 }
 
-func TestClaudeTaskBriefGeneratorArgsUseReadOnlyToolsAndCommandWorkdir(t *testing.T) {
-	args, err := claudeTaskBriefGeneratorArgs([]string{"--model", "claude-sonnet-4-6"}, "/tmp/worktree")
+func TestRunTaskBriefGeneratorCLIClaudeUsesReadOnlyCommand(t *testing.T) {
+	dir := t.TempDir()
+	claudePath := filepath.Join(dir, "claude")
+	argvPath := filepath.Join(dir, "argv.txt")
+	require.NoError(t, os.WriteFile(claudePath, []byte(`#!/bin/sh
+set -eu
+: > "$FAKE_CLAUDE_ARGV_OUT"
+for arg in "$@"; do
+  printf '%s\n' "$arg" >> "$FAKE_CLAUDE_ARGV_OUT"
+done
+cat > /dev/null
+cat <<'EOF'
+{"result":"{\"task\":\"Generated task\"}"}
+EOF
+`), 0o755))
+	t.Setenv("FAKE_CLAUDE_ARGV_OUT", argvPath)
 
+	responsePath, err := runTaskBriefGeneratorCLI(context.Background(), agents.Profile{
+		Provider: agents.ProviderClaude,
+		Binary:   claudePath,
+		Args:     []string{"--model", "claude-sonnet-4-6"},
+	}, dir, "Generate a task.", time.Minute)
 	require.NoError(t, err)
+	defer os.Remove(responsePath)
+
+	got, err := readTaskBriefGeneratorResponse(responsePath)
+	require.NoError(t, err)
+	assert.Equal(t, "Generated task", got)
+
+	argvBytes, err := os.ReadFile(argvPath)
+	require.NoError(t, err)
+	args := strings.Split(strings.TrimSpace(string(argvBytes)), "\n")
 	assert.Equal(t, []string{
 		"-p",
 		"--output-format", "json",
