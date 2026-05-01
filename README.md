@@ -77,7 +77,10 @@ run with `codex exec --sandbox read-only --skip-git-repo-check --ephemeral`.
 The dangerous `--dangerously-bypass-approvals-and-sandbox` mode is never
 injected by default and must be an explicit implementer profile `args` opt-in if
 an externally sandboxed environment requires it.
-`scoring.pairwise_mode` controls step60's true pairwise judge fanout. Use
+Absolute scoring in step30 and step60 uses the single `judge_primary` profile.
+`judge_secondary` / `judge_arbiter` profiles are legacy/optional compatibility
+roles and are not called by the normal pipeline. `scoring.pairwise_mode`
+controls step60's true pairwise judge fanout. Use
 `single` for one final judge over all pass1/pass2 pairs, `basic` for one
 same-agent comparison per pair plus a final decision judge, or `strict` for
 AB/BA order reversal per pair plus a final decision judge. Build, test, and

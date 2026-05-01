@@ -3086,6 +3086,7 @@ set -eu
 
 state_dir="${AUTO_IMPROVE_GIT_STATE_DIR}"
 mkdir -p "$state_dir"
+: >> "$state_dir/worktrees.list"
 
 if [ "${1:-}" = "-C" ]; then
   repo_dir="$2"
@@ -3238,6 +3239,7 @@ set -eu
 
 state_dir="${AUTO_IMPROVE_GIT_STATE_DIR}"
 mkdir -p "$state_dir"
+: >> "$state_dir/worktrees.list"
 
 if [ "${1:-}" = "-C" ]; then
   repo_dir="$2"
@@ -3854,11 +3856,7 @@ func configJudgePanelPromptVersion(t *testing.T, cfg *config.Config) string {
 	t.Helper()
 	primary, err := judges.NewJudgeFromConfig(cfg, contracts.JudgeRolePrimary)
 	require.NoError(t, err)
-	secondary, err := judges.NewJudgeFromConfig(cfg, contracts.JudgeRoleSecondary)
-	require.NoError(t, err)
-	arbiter, err := judges.NewJudgeFromConfig(cfg, contracts.JudgeRoleArbiter)
-	require.NoError(t, err)
-	return judges.PanelPromptVersion("phase0-stub", primary, secondary, arbiter)
+	return judges.PanelPromptVersion("phase0-stub", primary, nil, nil)
 }
 
 func repoRootFromTestFile(t *testing.T) string {

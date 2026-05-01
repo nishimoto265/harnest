@@ -30,12 +30,6 @@ func applyDefaults(in Input) (Input, error) {
 	if in.Primary == nil {
 		in.Primary = judges.NewPrimaryStub()
 	}
-	if in.Secondary == nil {
-		in.Secondary = judges.NewSecondaryStub()
-	}
-	if in.Arbiter == nil {
-		in.Arbiter = judges.NewArbiterStub()
-	}
 	if in.PairwiseMode == "" {
 		in.PairwiseMode = judges.PairwiseModeBasic
 	}

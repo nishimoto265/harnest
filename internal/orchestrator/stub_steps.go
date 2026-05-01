@@ -238,14 +238,6 @@ func (s step60Step) Run(ctx context.Context, run *StepRunContext) error {
 	if err != nil {
 		return err
 	}
-	secondary, err := judges.NewJudgeFromConfig(cfg, contracts.JudgeRoleSecondary)
-	if err != nil {
-		return err
-	}
-	arbiter, err := judges.NewJudgeFromConfig(cfg, contracts.JudgeRoleArbiter)
-	if err != nil {
-		return err
-	}
 	pairwiseJudge, err := judges.NewPairwiseJudgeFromConfig(cfg)
 	if err != nil {
 		return err
@@ -259,8 +251,6 @@ func (s step60Step) Run(ctx context.Context, run *StepRunContext) error {
 		TaskPackage:           run.TaskPackage,
 		RubricVersion:         pass1RubricVersion,
 		Primary:               primary,
-		Secondary:             secondary,
-		Arbiter:               arbiter,
 		PairwiseMode:          judges.PairwiseMode(cfg.PairwiseMode()),
 		PairwiseJudge:         pairwiseJudge,
 		PairwiseDecisionJudge: pairwiseDecisionJudge,

@@ -1002,6 +1002,7 @@ func TestRun_RerunWithoutMarker_RebuildsFromRawWithoutRejudging(t *testing.T) {
 		"default",
 		"phase0-stub",
 		map[string]struct{}{"stub-rubric-rule": {}},
+		true,
 	)
 	require.NoError(t, err)
 	require.True(t, reusable)

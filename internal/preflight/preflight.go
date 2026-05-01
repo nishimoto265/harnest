@@ -244,8 +244,6 @@ func (c Checker) checkAgentBinaries(ctx context.Context, cfg config.Config) []Fa
 	for _, role := range []agents.Role{
 		agents.RoleImplementer,
 		agents.RoleJudgePrimary,
-		agents.RoleJudgeSecondary,
-		agents.RoleJudgeArbiter,
 		agents.RoleTaskGenerator,
 	} {
 		if role == agents.RoleTaskGenerator {

@@ -5,18 +5,17 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/judges"
 )
 
-// defaultPanelProvider returns the Phase 0 stub panel (primary + secondary +
-// arbiter). With the default threshold of 5 the stubs resolve to "agreement"
-// since primary and secondary differ by exactly 1 per dimension.
+// defaultPanelProvider returns the single default judge used for absolute
+// scoring. Secondary/arbiter panel support remains in scorecore for tests and
+// compatibility, but the normal harness path intentionally uses one judge.
 type defaultPanelProvider struct{}
 
 // DefaultPanelProvider is the stub-backed provider used by the orchestrator
-// when it wires Step via step30_score.New(). Phase 1 will swap this for a
-// config-driven LLM panel.
+// when it wires Step via step30_score.New().
 func DefaultPanelProvider() PanelProvider { return defaultPanelProvider{} }
 
 func (defaultPanelProvider) Judges(_ judges.JudgeInput) (judges.Judge, judges.Judge, judges.Judge, error) {
-	return judges.NewPrimaryStub(), judges.NewSecondaryStub(), judges.NewArbiterStub(), nil
+	return judges.NewPrimaryStub(), nil, nil, nil
 }
 
 func (defaultPanelProvider) PanelPromptVersion(base string) string {
@@ -40,15 +39,7 @@ func (p configPanelProvider) Judges(_ judges.JudgeInput) (judges.Judge, judges.J
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	secondary, err := judges.NewJudgeFromConfig(p.cfg, judges.RoleSecondary)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	arbiter, err := judges.NewJudgeFromConfig(p.cfg, judges.RoleArbiter)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return primary, secondary, arbiter, nil
+	return primary, nil, nil, nil
 }
 
 func (p configPanelProvider) PanelPromptVersion(base string) string {

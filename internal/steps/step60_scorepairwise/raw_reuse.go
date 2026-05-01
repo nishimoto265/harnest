@@ -102,29 +102,62 @@ func tryReuseRawPanelResult(
 	agent contracts.AgentID,
 	outputHash, rubricVersion, promptVersion string,
 	expectedCompliance map[string]struct{},
+	secondaryPresent bool,
 ) (scorecore.PanelResult, bool, error) {
 	primaryScores := state.scoreRows(agent, contracts.JudgeRolePrimary)
-	secondaryScores := state.scoreRows(agent, contracts.JudgeRoleSecondary)
 	primaryCompliance := state.complianceRows(agent, contracts.JudgeRolePrimary)
-	secondaryCompliance := state.complianceRows(agent, contracts.JudgeRoleSecondary)
-	if !rawRoleUsable(primaryScores, outputHash, rubricVersion, promptVersion) || !rawRoleUsable(secondaryScores, outputHash, rubricVersion, promptVersion) {
+	if !rawRoleUsable(primaryScores, outputHash, rubricVersion, promptVersion) {
 		return scorecore.PanelResult{}, false, nil
 	}
-	arbiterScores := state.scoreRows(agent, contracts.JudgeRoleArbiter)
-	arbiterCompliance := state.complianceRows(agent, contracts.JudgeRoleArbiter)
-	if len(expectedCompliance) == 0 && (len(primaryCompliance) > 0 || len(secondaryCompliance) > 0 || len(arbiterCompliance) > 0) {
+	if len(expectedCompliance) == 0 && len(primaryCompliance) > 0 {
 		return scorecore.PanelResult{}, false, nil
 	}
-	if !rawComplianceUsable(primaryCompliance, expectedCompliance, outputHash, rubricVersion, promptVersion) || !rawComplianceUsable(secondaryCompliance, expectedCompliance, outputHash, rubricVersion, promptVersion) {
+	if !rawComplianceUsable(primaryCompliance, expectedCompliance, outputHash, rubricVersion, promptVersion) {
 		return scorecore.PanelResult{}, false, nil
 	}
 	if err := validateRawScoreOverflowRefs(runIO, primaryScores); err != nil {
 		return scorecore.PanelResult{}, false, nil
 	}
-	if err := validateRawScoreOverflowRefs(runIO, secondaryScores); err != nil {
+	if err := validateRawComplianceOverflowRefs(runIO, primaryCompliance); err != nil {
 		return scorecore.PanelResult{}, false, nil
 	}
-	if err := validateRawComplianceOverflowRefs(runIO, primaryCompliance); err != nil {
+
+	var secondaryScores []contracts.RawScoreEntry
+	var secondaryCompliance []contracts.RawComplianceEntry
+	var arbiterScores []contracts.RawScoreEntry
+	var arbiterCompliance []contracts.RawComplianceEntry
+	if !secondaryPresent {
+		result, err := rebuildFinalResultFromRaw(
+			primaryScores,
+			nil,
+			nil,
+			primaryCompliance,
+			nil,
+			nil,
+			defaultDisagreementThreshold,
+			false,
+			false,
+		)
+		if err != nil {
+			return scorecore.PanelResult{}, false, nil
+		}
+		return result, true, nil
+	}
+
+	secondaryScores = state.scoreRows(agent, contracts.JudgeRoleSecondary)
+	secondaryCompliance = state.complianceRows(agent, contracts.JudgeRoleSecondary)
+	arbiterScores = state.scoreRows(agent, contracts.JudgeRoleArbiter)
+	arbiterCompliance = state.complianceRows(agent, contracts.JudgeRoleArbiter)
+	if !rawRoleUsable(secondaryScores, outputHash, rubricVersion, promptVersion) {
+		return scorecore.PanelResult{}, false, nil
+	}
+	if len(expectedCompliance) == 0 && (len(secondaryCompliance) > 0 || len(arbiterCompliance) > 0) {
+		return scorecore.PanelResult{}, false, nil
+	}
+	if !rawComplianceUsable(secondaryCompliance, expectedCompliance, outputHash, rubricVersion, promptVersion) {
+		return scorecore.PanelResult{}, false, nil
+	}
+	if err := validateRawScoreOverflowRefs(runIO, secondaryScores); err != nil {
 		return scorecore.PanelResult{}, false, nil
 	}
 	if err := validateRawComplianceOverflowRefs(runIO, secondaryCompliance); err != nil {

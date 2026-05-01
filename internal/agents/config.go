@@ -158,7 +158,7 @@ func (f File) Validate() error {
 			return fmt.Errorf("agents: profile %q node_binary is only supported for provider %q or %q", name, ProviderClaude, ProviderCodex)
 		}
 	}
-	for _, role := range []Role{RoleImplementer, RoleJudgePrimary, RoleJudgeSecondary, RoleJudgeArbiter} {
+	for _, role := range []Role{RoleImplementer, RoleJudgePrimary} {
 		profileName, ok := f.Roles[role]
 		if !ok || strings.TrimSpace(profileName) == "" {
 			return fmt.Errorf("agents: role %q is required", role)
@@ -167,6 +167,19 @@ func (f File) Validate() error {
 			return fmt.Errorf("agents: role %q references unknown profile %q", role, profileName)
 		}
 		if err := ValidateProfileArgsForRole(role, f.Profiles[profileName]); err != nil {
+			return err
+		}
+	}
+	for _, role := range []Role{RoleJudgeSecondary, RoleJudgeArbiter} {
+		profileName := strings.TrimSpace(f.Roles[role])
+		if profileName == "" {
+			continue
+		}
+		profile, ok := f.Profiles[profileName]
+		if !ok {
+			return fmt.Errorf("agents: role %q references unknown profile %q", role, profileName)
+		}
+		if err := ValidateProfileArgsForRole(role, profile); err != nil {
 			return err
 		}
 	}

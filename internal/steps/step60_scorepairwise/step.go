@@ -239,7 +239,7 @@ func Run(ctx context.Context, in Input) error {
 		run.JudgeInput.EnforceExpectedCompliance = true
 		run.JudgeInput.CandidateRules = in.CandidateRules
 		if allowRawReuse {
-			if result, ok, err := tryReuseRawPanelResult(in.IO, rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion, expectedCompliance); err != nil {
+			if result, ok, err := tryReuseRawPanelResult(in.IO, rawState, run.Agent, outputHash, in.RubricVersion, in.PromptVersion, expectedCompliance, in.Secondary != nil); err != nil {
 				return err
 			} else if ok {
 				agentScores, agentCompliance, err := appendPanelFinals(paths, meta, result)
@@ -258,16 +258,8 @@ func Run(ctx context.Context, in Input) error {
 		if err != nil {
 			return err
 		}
-		secondaryOutput, err := scoreJudgeOutput(ctx, "secondary", in.Secondary, run.JudgeInput)
-		if err != nil {
-			return err
-		}
 
 		primaryScores, err := normalizeScores(in.IO, primaryOutput.Scores, in.RubricVersion, in.PromptVersion)
-		if err != nil {
-			return err
-		}
-		secondaryScores, err := normalizeScores(in.IO, secondaryOutput.Scores, in.RubricVersion, in.PromptVersion)
 		if err != nil {
 			return err
 		}
@@ -275,41 +267,55 @@ func Run(ctx context.Context, in Input) error {
 		if err != nil {
 			return err
 		}
-		secondaryCompliance, err := normalizeCompliance(in.IO, secondaryOutput.Compliance, in.RubricVersion, in.PromptVersion)
-		if err != nil {
-			return err
-		}
-
-		complianceDisagreements := disputedComplianceRuleIDs(primaryCompliance, secondaryCompliance)
 		primaryRawScores, primaryScoreRefs, err := buildRawScores(primaryScores, outputHash, contracts.JudgeRolePrimary, nil, nil, meta.ResolvedAt)
 		if err != nil {
 			return err
 		}
-		secondaryRawScores, secondaryScoreRefs, err := buildRawScores(secondaryScores, outputHash, contracts.JudgeRoleSecondary, nil, nil, meta.ResolvedAt)
-		if err != nil {
-			return err
-		}
-		scoreNeedsArbiter, err := scorecore.PanelDisagrees(primaryRawScores, secondaryRawScores, nil, nil, defaultDisagreementThreshold)
-		if err != nil {
-			return err
-		}
 
+		var secondaryScores map[contracts.Dimension]contracts.ScoreEntry
+		var secondaryCompliance map[string]contracts.ComplianceEntry
+		var secondaryRawScores []contracts.RawScoreEntry
+		var secondaryScoreRefs map[contracts.Dimension]*contracts.RawJudgeRef
 		var arbiterScores map[contracts.Dimension]contracts.ScoreEntry
 		var arbiterCompliance map[string]contracts.ComplianceEntry
-		if scoreNeedsArbiter || len(complianceDisagreements) > 0 {
-			arbiterInput := run.JudgeInput
-			arbiterInput.ExpectedComplianceRuleIDs = append([]string(nil), complianceDisagreements...)
-			arbiterOutput, err := scoreJudgeOutput(ctx, "arbiter", in.Arbiter, arbiterInput)
+		if in.Secondary != nil {
+			secondaryOutput, err := scoreJudgeOutput(ctx, "secondary", in.Secondary, run.JudgeInput)
 			if err != nil {
 				return err
 			}
-			arbiterScores, err = normalizeScores(in.IO, arbiterOutput.Scores, in.RubricVersion, in.PromptVersion)
+			secondaryScores, err = normalizeScores(in.IO, secondaryOutput.Scores, in.RubricVersion, in.PromptVersion)
 			if err != nil {
 				return err
 			}
-			arbiterCompliance, err = normalizeCompliance(in.IO, arbiterOutput.Compliance, in.RubricVersion, in.PromptVersion)
+			secondaryCompliance, err = normalizeCompliance(in.IO, secondaryOutput.Compliance, in.RubricVersion, in.PromptVersion)
 			if err != nil {
 				return err
+			}
+			secondaryRawScores, secondaryScoreRefs, err = buildRawScores(secondaryScores, outputHash, contracts.JudgeRoleSecondary, nil, nil, meta.ResolvedAt)
+			if err != nil {
+				return err
+			}
+
+			complianceDisagreements := disputedComplianceRuleIDs(primaryCompliance, secondaryCompliance)
+			scoreNeedsArbiter, err := scorecore.PanelDisagrees(primaryRawScores, secondaryRawScores, nil, nil, defaultDisagreementThreshold)
+			if err != nil {
+				return err
+			}
+			if in.Arbiter != nil && (scoreNeedsArbiter || len(complianceDisagreements) > 0) {
+				arbiterInput := run.JudgeInput
+				arbiterInput.ExpectedComplianceRuleIDs = append([]string(nil), complianceDisagreements...)
+				arbiterOutput, err := scoreJudgeOutput(ctx, "arbiter", in.Arbiter, arbiterInput)
+				if err != nil {
+					return err
+				}
+				arbiterScores, err = normalizeScores(in.IO, arbiterOutput.Scores, in.RubricVersion, in.PromptVersion)
+				if err != nil {
+					return err
+				}
+				arbiterCompliance, err = normalizeCompliance(in.IO, arbiterOutput.Compliance, in.RubricVersion, in.PromptVersion)
+				if err != nil {
+					return err
+				}
 			}
 		}
 

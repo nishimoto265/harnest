@@ -110,6 +110,10 @@ func emitScores(
 	primaryRefs map[contracts.Dimension]*contracts.RawJudgeRef,
 	secondaryRefs map[contracts.Dimension]*contracts.RawJudgeRef,
 ) ([]contracts.ScoreEntry, error) {
+	if secondary == nil {
+		return emitSingleJudgeScores(paths, meta, agent, primaryRaw)
+	}
+
 	arbiterRaw := make([]contracts.RawScoreEntry, 0, len(canonicalDimensions))
 	if len(arbiter) > 0 {
 		var err error
@@ -152,6 +156,42 @@ func emitScores(
 	return finalScores, nil
 }
 
+func emitSingleJudgeScores(
+	paths step60Paths,
+	meta finalMetadata,
+	agent contracts.AgentID,
+	primaryRaw []contracts.RawScoreEntry,
+) ([]contracts.ScoreEntry, error) {
+	result, err := scorecore.BuildFinalResultFromRaw(
+		primaryRaw,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		defaultDisagreementThreshold,
+		false,
+		false,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range result.RawScores {
+		if err := appendJSONLWithParentDirSync(paths.ScoresRaw, row); err != nil {
+			return nil, fmt.Errorf("step60: append raw score agent=%s: %w", agent, err)
+		}
+	}
+	finalScores := make([]contracts.ScoreEntry, 0, len(result.FinalScores))
+	for _, row := range result.FinalScores {
+		finalScore := finalizeScore(meta, row, contracts.VerdictPathSingle)
+		if err := appendJSONLWithParentDirSync(paths.ScoresFinal, finalScore); err != nil {
+			return nil, fmt.Errorf("step60: append final score agent=%s: %w", agent, err)
+		}
+		finalScores = append(finalScores, finalScore)
+	}
+	return finalScores, nil
+}
+
 func emitCompliance(
 	paths step60Paths,
 	meta finalMetadata,
@@ -161,6 +201,10 @@ func emitCompliance(
 	secondary map[string]contracts.ComplianceEntry,
 	arbiter map[string]contracts.ComplianceEntry,
 ) ([]contracts.ComplianceEntry, error) {
+	if secondary == nil {
+		return emitSingleJudgeCompliance(paths, meta, agent, outputHash, primary)
+	}
+
 	if !complianceRuleSetsMatch(primary, secondary) {
 		return nil, fmt.Errorf("step60: compliance rule-set mismatch agent=%s", agent)
 	}
@@ -231,6 +275,30 @@ func emitCompliance(
 			finalEntry = finalizeCompliance(meta, arbiterEntry, complianceVerdictPath(primaryDecision, secondaryDecision, arbiterEntry))
 		}
 
+		if err := appendJSONLWithParentDirSync(paths.ComplianceFinal, finalEntry); err != nil {
+			return nil, fmt.Errorf("step60: append final compliance rule=%s agent=%s: %w", ruleID, agent, err)
+		}
+		finalEntries = append(finalEntries, finalEntry)
+	}
+	return finalEntries, nil
+}
+
+func emitSingleJudgeCompliance(
+	paths step60Paths,
+	meta finalMetadata,
+	agent contracts.AgentID,
+	outputHash string,
+	primary map[string]contracts.ComplianceEntry,
+) ([]contracts.ComplianceEntry, error) {
+	ruleIDs := sortedComplianceRuleIDs(primary)
+	finalEntries := make([]contracts.ComplianceEntry, 0, len(ruleIDs))
+	for _, ruleID := range ruleIDs {
+		primaryEntry := primary[ruleID]
+		rawPrimary := makeRawComplianceEntry(primaryEntry, contracts.JudgeRolePrimary, outputHash, nil, nil, meta.ResolvedAt)
+		if err := appendJSONLWithParentDirSync(paths.ComplianceRaw, rawPrimary); err != nil {
+			return nil, fmt.Errorf("step60: append primary raw compliance rule=%s agent=%s: %w", ruleID, agent, err)
+		}
+		finalEntry := finalizeCompliance(meta, primaryEntry, contracts.VerdictPathSingle)
 		if err := appendJSONLWithParentDirSync(paths.ComplianceFinal, finalEntry); err != nil {
 			return nil, fmt.Errorf("step60: append final compliance rule=%s agent=%s: %w", ruleID, agent, err)
 		}
