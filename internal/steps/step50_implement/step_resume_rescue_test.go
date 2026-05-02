@@ -36,7 +36,7 @@ func TestStepRun_PersistsChildPIDAndPGIDInResumeState(t *testing.T) {
 			return false
 		}
 		return state.Pid > 0 && state.Pgid > 0 && state.LeaderStartTime != ""
-	}, time.Second, 10*time.Millisecond)
+	}, processTestEventuallyTimeout, 10*time.Millisecond)
 
 	state, ok, err := loadResumeState(agentDir)
 	require.NoError(t, err)

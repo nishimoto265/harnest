@@ -187,7 +187,7 @@ func TestStepRunReturnsLeaseContendedDuringConcurrentStartup(t *testing.T) {
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(fx.sessionPath())
 		return err == nil
-	}, time.Second, 10*time.Millisecond)
+	}, processTestEventuallyTimeout, 10*time.Millisecond)
 
 	err := fx.step.Run(context.Background(), fx.run)
 	require.ErrorIs(t, err, ErrAgentLeaseContended)
@@ -270,7 +270,7 @@ func TestStepRunSerializesWorktreeRecreationUnderRescueLock(t *testing.T) {
 			return false
 		}
 		return strings.Contains(string(logBytes), "worktree add")
-	}, 3*time.Second, 10*time.Millisecond)
+	}, processTestEventuallyTimeout, 10*time.Millisecond)
 
 	err = step.Run(context.Background(), run)
 	require.ErrorIs(t, err, ErrAgentLeaseContended)
@@ -307,7 +307,7 @@ func TestStepRunRescueHonorsContextCancellationBeforeReset(t *testing.T) {
 			return false
 		}
 		return strings.Contains(string(logBytes), "diff HEAD --binary --no-ext-diff --no-textconv")
-	}, 3*time.Second, 10*time.Millisecond)
+	}, processTestEventuallyTimeout, 10*time.Millisecond)
 
 	cancel()
 
@@ -618,7 +618,7 @@ func TestStepRunResumeStatePersistsChildPIDAndPGID(t *testing.T) {
 			return false
 		}
 		return state.Pid > 0 && state.Pgid > 0 && state.LeaderStartTime != ""
-	}, time.Second, 10*time.Millisecond)
+	}, processTestEventuallyTimeout, 10*time.Millisecond)
 
 	state, ok, err := loadResumeState(fx.agentDir)
 	require.NoError(t, err)

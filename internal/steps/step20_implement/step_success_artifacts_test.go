@@ -288,7 +288,7 @@ func TestStepRunSuccessArtifactsHonorContextCancellation(t *testing.T) {
 			return false
 		}
 		return strings.Contains(string(logBytes), "rev-parse HEAD")
-	}, 3*time.Second, 10*time.Millisecond)
+	}, processTestEventuallyTimeout, 10*time.Millisecond)
 
 	cancel()
 

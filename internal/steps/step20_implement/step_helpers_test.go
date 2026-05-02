@@ -21,6 +21,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const processTestEventuallyTimeout = 10 * time.Second
+
 type testFixture struct {
 	step     *Step
 	run      RunContext

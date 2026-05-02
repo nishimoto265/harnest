@@ -25,6 +25,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const processTestEventuallyTimeout = 10 * time.Second
+
 func requireProcessInspection(t *testing.T) {
 	t.Helper()
 	startTime, err := agentrunner.LookupProcessStartTime(os.Getpid())

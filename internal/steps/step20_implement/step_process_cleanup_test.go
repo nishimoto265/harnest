@@ -76,7 +76,7 @@ func TestStepRunCancelsChildProcessGroupOnContextCancellation(t *testing.T) {
 			return false
 		}
 		return bytes.Count(sessionBytes, []byte("{\"event\":\"child-process\"}\n")) >= 2
-	}, time.Second, 10*time.Millisecond)
+	}, processTestEventuallyTimeout, 10*time.Millisecond)
 
 	cancel()
 
