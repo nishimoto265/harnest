@@ -339,6 +339,41 @@ func TestPublishSnapshotPushesRunsBasePolicyToBranch(t *testing.T) {
 	assert.Contains(t, body, "# Updated rule")
 }
 
+func TestPublishSnapshotRegeneratesChecklistFromActiveRules(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	require.NoError(t, os.MkdirAll(filepath.Join(runsBase, rulesLocalDirName), 0o755))
+	const ruleID = "r-checklist-generation"
+	const ruleBody = `---
+status: active
+severity: high
+confidence: medium
+category: test
+---
+
+# r-checklist-generation
+
+## Checklist Item
+
+Use the generated checklist from the active rule.
+
+## Problem
+
+The policy branch checklist can go stale after a rule is adopted.
+`
+	registry := "{\"kind\":\"added\",\"schema_version\":\"1\",\"rule_id\":\"" + ruleID + "\",\"rule_path\":\"rules/" + ruleID + ".md\",\"sha256\":\"" + sha256Hex([]byte(ruleBody)) + "\",\"idempotency_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_seq\":1,\"prev_hash\":\"\",\"by_run_id\":\"2026-04-23-PR1-feedbee\",\"at\":\"2026-04-23T08:00:00Z\"}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, registryLocalName), []byte(registry), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, rulesLocalDirName, ruleID+".md"), []byte(ruleBody), 0o644))
+	headBefore := strings.TrimSpace(string(mustGitOutput(t, repoRoot, "rev-parse", "origin/policy")))
+
+	_, err := PublishSnapshot(context.Background(), repoRoot, "policy", headBefore, runsBase, "2026-04-23-PR2-checklist")
+	require.NoError(t, err)
+
+	mustGit(t, repoRoot, "fetch", "--no-tags", "origin", "policy")
+	checklist := string(mustGitOutput(t, repoRoot, "show", "origin/policy:"+OverlayRepoDirPath+"/checklist.md"))
+	assert.Contains(t, checklist, "- [ ] `r-checklist-generation` Use the generated checklist from the active rule.")
+}
+
 func TestPublishSnapshotCreatesMissingPolicyBranch(t *testing.T) {
 	repoRoot := newClonedRepoWithPolicyBranch(t)
 	mustGit(t, repoRoot, "checkout", "main")

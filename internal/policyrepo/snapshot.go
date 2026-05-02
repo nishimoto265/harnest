@@ -13,6 +13,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/harnessinstall"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/lessons"
 	"github.com/nishimoto265/auto-improve/internal/registryview"
 )
 
@@ -25,6 +26,14 @@ func BranchSnapshotMatchesLocal(ctx context.Context, repoRoot, branch, runsBase 
 		return false, err
 	}
 	local, err := loadLocalSnapshot(runsBase)
+	if err != nil {
+		return false, err
+	}
+	remote, err = snapshotWithGeneratedChecklist(remote)
+	if err != nil {
+		return false, err
+	}
+	local, err = snapshotWithGeneratedChecklist(local)
 	if err != nil {
 		return false, err
 	}
@@ -57,6 +66,11 @@ func applySnapshotToRunDir(runDir string, snap snapshot) error {
 }
 
 func syncSnapshotToWorktree(worktreeDir string, snap snapshot) error {
+	normalized, err := snapshotWithGeneratedChecklist(snap)
+	if err != nil {
+		return err
+	}
+	snap = normalized
 	repoRootDir := filepath.Join(worktreeDir, RepoDirName)
 	for _, rel := range []string{RegistryRepoRelPath, RulesRepoDirRelPath, GuidanceRepoDirPath, OverlayRepoDirPath} {
 		if err := os.RemoveAll(filepath.Join(worktreeDir, rel)); err != nil && !os.IsNotExist(err) {
@@ -434,6 +448,11 @@ func applySnapshot(runsBase string, snap snapshot) error {
 }
 
 func stageSnapshot(stageDir string, snap snapshot) error {
+	normalized, err := snapshotWithGeneratedChecklist(snap)
+	if err != nil {
+		return err
+	}
+	snap = normalized
 	if snap.registryPresent {
 		if err := internalio.WriteAtomic(filepath.Join(stageDir, registryLocalName), snap.registry); err != nil {
 			return err
@@ -456,6 +475,77 @@ func stageSnapshot(stageDir string, snap snapshot) error {
 		}
 	}
 	return nil
+}
+
+func snapshotWithGeneratedChecklist(snap snapshot) (snapshot, error) {
+	items, err := checklistLessonsForSnapshot(snap)
+	if err != nil {
+		return snapshot{}, err
+	}
+	files := make(map[string][]byte, len(snap.files)+1)
+	for rel, data := range snap.files {
+		files[rel] = data
+	}
+	files[OverlayRepoDirPath+"/checklist.md"] = []byte(lessons.RenderChecklist(items))
+	snap.files = files
+	return snap, nil
+}
+
+func checklistLessonsForSnapshot(snap snapshot) ([]lessons.Lesson, error) {
+	if !snap.registryPresent || len(strings.TrimSpace(string(snap.registry))) == 0 {
+		return nil, nil
+	}
+	entries, err := decodeRegistryEntries(snap.registry)
+	if err != nil {
+		return nil, err
+	}
+	states, err := registryview.Build(entries)
+	if err != nil {
+		return nil, err
+	}
+	active := registryview.Active(states)
+	items := make([]lessons.Lesson, 0, len(active))
+	for ruleID, state := range active {
+		body, ok := snap.rules[state.RulePath]
+		if !ok {
+			return nil, fmt.Errorf("policyrepo: active rule body missing for checklist: rule_id=%s rule_path=%s", ruleID, state.RulePath)
+		}
+		item, err := lessons.ParseLessonMarkdown(state.RulePath, ruleID, body)
+		if err != nil {
+			item = fallbackChecklistLesson(ruleID, state.RulePath, body)
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func fallbackChecklistLesson(ruleID, rulePath string, body []byte) lessons.Lesson {
+	item := firstMarkdownHeading(body)
+	if item == "" {
+		item = "Review " + ruleID
+	}
+	return lessons.Lesson{
+		ID:   ruleID,
+		Path: rulePath,
+		Metadata: lessons.Metadata{
+			Status:     lessons.StatusActive,
+			Severity:   lessons.SeverityMedium,
+			Confidence: lessons.ConfidenceMedium,
+			Category:   "general",
+		},
+		ChecklistItem: item,
+	}
+}
+
+func firstMarkdownHeading(body []byte) string {
+	lines := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "# ") {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, "# "))
+		}
+	}
+	return ""
 }
 
 func moveCurrentPolicyToBackup(runsBase, backupDir string) (func() error, error) {

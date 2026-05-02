@@ -103,7 +103,6 @@ var (
 	ErrIntentionMissingRegistryHeadBefore    = errors.New("contracts: intention: registry_head_before field is required")
 	ErrIntentionMissingPlannedAdoption       = errors.New("contracts: intention: planned_adoption is required for this stage")
 	ErrIntentionMissingPolicyBranch          = errors.New("contracts: intention: policy_branch is required for this stage")
-	ErrIntentionMissingPolicyHeadBefore      = errors.New("contracts: intention: policy_head_before is required for this stage")
 	ErrIntentionMissingPolicyHeadAfter       = errors.New("contracts: intention: policy_head_after is required for this stage")
 	ErrIntentionIdempotencyKeyMismatch       = errors.New("contracts: intention: idempotency_key does not match derived value")
 	ErrPlannedAdoptionEmpty                  = errors.New("contracts: intention: planned_adoption.entries must contain at least one entry")
@@ -279,9 +278,6 @@ func (r IntentionRecord) Validate() error {
 		IntentionStagePolicyPublished:
 		if strings.TrimSpace(r.PolicyBranch) == "" {
 			return ErrIntentionMissingPolicyBranch
-		}
-		if r.PolicyHeadBefore == "" {
-			return ErrIntentionMissingPolicyHeadBefore
 		}
 	}
 	if r.Stage == IntentionStagePolicyPublished && r.PolicyHeadAfter == "" {

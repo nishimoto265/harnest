@@ -247,6 +247,10 @@ func Load(root string) ([]Lesson, error) {
 	return out, nil
 }
 
+func ParseLessonMarkdown(path, id string, data []byte) (Lesson, error) {
+	return parseLessonMarkdown(path, id, data)
+}
+
 func RenderChecklist(items []Lesson) string {
 	active := make([]Lesson, 0, len(items))
 	for _, item := range items {
@@ -414,6 +418,10 @@ func parseLesson(path, id string) (Lesson, error) {
 	if err != nil {
 		return Lesson{}, err
 	}
+	return parseLessonMarkdown(path, id, data)
+}
+
+func parseLessonMarkdown(path, id string, data []byte) (Lesson, error) {
 	meta, body, err := splitFrontMatter(data)
 	if err != nil {
 		return Lesson{}, fmt.Errorf("lessons: parse %s: %w", path, err)

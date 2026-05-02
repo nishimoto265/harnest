@@ -102,7 +102,7 @@ func TestIntentionRecord_Validate_RegistryAppended_RequiresAppendResult(t *testi
 	assert.NoError(t, r.Validate())
 }
 
-func TestIntentionRecord_Validate_PolicyPublishing_RequiresAppendResultAndPolicyMetadata(t *testing.T) {
+func TestIntentionRecord_Validate_PolicyPublishing_RequiresAppendResultAndPolicyBranch(t *testing.T) {
 	r := validIntentionBase()
 	r.Stage = IntentionStagePolicyPublishing
 	err := r.Validate()
@@ -115,9 +115,7 @@ func TestIntentionRecord_Validate_PolicyPublishing_RequiresAppendResultAndPolicy
 	assert.ErrorIs(t, err, ErrIntentionMissingPolicyBranch)
 
 	r.PolicyBranch = "auto-improve/policy"
-	err = r.Validate()
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrIntentionMissingPolicyHeadBefore)
+	assert.NoError(t, r.Validate(), "empty policy_head_before means bootstrap a missing policy branch")
 
 	r.PolicyHeadBefore = "1111111111111111111111111111111111111111"
 	assert.NoError(t, r.Validate())
