@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: all build test integration-test lint tidy check-sync script-test
+.PHONY: all build test integration-test lint tidy size-report check-sync script-test
 
 all: build test lint check-sync script-test
 
@@ -20,11 +20,14 @@ lint:
 tidy:
 	go mod tidy
 
+size-report:
+	bash scripts/size-report.sh
+
 check-sync:
 	bash scripts/check-contracts-sync.sh
 
 script-test:
-	bash -n scripts/install.sh scripts/install-launchd.sh scripts/launchd-common.sh scripts/install-migration-test.sh scripts/check-contracts-sync.sh scripts/check-contracts-sync_test.sh scripts/render-workflow-config.sh
+	bash -n scripts/install.sh scripts/install-launchd.sh scripts/launchd-common.sh scripts/install-migration-test.sh scripts/check-contracts-sync.sh scripts/check-contracts-sync_test.sh scripts/render-workflow-config.sh scripts/size-report.sh
 	bash scripts/install-migration-test.sh
 	bash scripts/check-contracts-sync_test.sh
 
