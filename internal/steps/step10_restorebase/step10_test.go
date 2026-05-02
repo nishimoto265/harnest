@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRun_HappyPath_SixWorktrees(t *testing.T) {
+func TestRun_HappyPath_PassBaseFanout(t *testing.T) {
 	rc := newRunCtx(t)
 	git := newStubGit()
 	git.resolvedBy[testMergeCommitOID+"^1"] = testBaseSHA
@@ -48,10 +48,13 @@ func TestRun_HappyPath_SixWorktrees(t *testing.T) {
 
 	resp := res.Response
 	require.NoError(t, resp.Validate())
-	assert.Equal(t, 6, resp.WorktreesCreated)
+	assert.Equal(t, 4, resp.WorktreesCreated)
 	assert.Equal(t, testBaseSHA, resp.BaseSHA)
 	assert.Equal(t, rc.RunID, resp.RunID)
 	assert.Len(t, resp.TaskPackage.Worktrees, 6)
+	assert.Len(t, resp.TaskPackage.PassBases, 2)
+	assert.Equal(t, "auto-improve/"+string(rc.RunID)+"/pass1/base", resp.TaskPackage.PassBases[0].Branch)
+	assert.Equal(t, "auto-improve/"+string(rc.RunID)+"/pass2/base", resp.TaskPackage.PassBases[1].Branch)
 
 	// Uniqueness (path + branch) is a TaskPackage invariant; also confirm here.
 	paths := map[string]struct{}{}
@@ -192,7 +195,7 @@ func TestRun_Resume_NoNewWorktrees(t *testing.T) {
 	}
 	first, err := runner.Run(context.Background(), in)
 	require.NoError(t, err)
-	require.Equal(t, 6, first.Response.WorktreesCreated)
+	require.Equal(t, 4, first.Response.WorktreesCreated)
 
 	// Second run with the same stub sees existing paths and reports 0 new.
 	second, err := runner.Run(context.Background(), in)

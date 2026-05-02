@@ -24,10 +24,16 @@ func commitPolicyOverlayBase(ctx context.Context, allocation contracts.WorktreeA
 	if err := unstagePolicyArtifacts(ctx, allocation); err != nil {
 		return allocation, err
 	}
-	if _, err := gitOutputContext(ctx, identity, allocation.Path, "add", "-A", "-f", "--", policyartifact.OverlayDir); err != nil {
+	policyPathspecs := policyartifact.ExistingPolicyBasePathspecs(allocation.Path)
+	if len(policyPathspecs) == 0 {
+		return adoptExistingPolicyOverlayHead(ctx, allocation)
+	}
+	addArgs := append([]string{"add", "-A", "-f", "--"}, policyPathspecs...)
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, addArgs...); err != nil {
 		return allocation, err
 	}
-	staged, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "diff", "--cached", "--name-only", "--", policyartifact.OverlayDir)
+	diffArgs := append([]string{"diff", "--cached", "--name-only", "--"}, policyPathspecs...)
+	staged, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, diffArgs...)
 	if err != nil {
 		return allocation, err
 	}
@@ -65,6 +71,65 @@ func commitPolicyOverlayBase(ctx context.Context, allocation contracts.WorktreeA
 	return allocation, nil
 }
 
+func commitPolicyOverlayPassBase(ctx context.Context, allocation contracts.PassBaseAllocation, runID contracts.RunID) (contracts.PassBaseAllocation, error) {
+	if err := unstagePolicyArtifactsPath(ctx, allocation.Path); err != nil {
+		return allocation, err
+	}
+	policyPathspecs := policyartifact.ExistingPolicyBasePathspecs(allocation.Path)
+	if len(policyPathspecs) == 0 {
+		head, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
+		if err != nil {
+			return allocation, err
+		}
+		allocation.HeadSHA = head
+		return allocation, nil
+	}
+	addArgs := append([]string{"add", "-A", "-f", "--"}, policyPathspecs...)
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, addArgs...); err != nil {
+		return allocation, err
+	}
+	diffArgs := append([]string{"diff", "--cached", "--name-only", "--"}, policyPathspecs...)
+	staged, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, diffArgs...)
+	if err != nil {
+		return allocation, err
+	}
+	if staged == "" {
+		head, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "rev-parse", "HEAD")
+		if err != nil {
+			return allocation, err
+		}
+		allocation.HeadSHA = head
+		return allocation, nil
+	}
+	tree, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "write-tree")
+	if err != nil {
+		return allocation, err
+	}
+	commitSHA, err := gitOutputContextWithEnv(
+		ctx,
+		strings.TrimSpace,
+		allocation.Path,
+		syntheticCommitEnv(),
+		"commit-tree",
+		tree,
+		"-p",
+		allocation.BaseSHA,
+		"-m",
+		fmt.Sprintf("auto-improve: prepare pass%d policy base for %s", allocation.Pass, runID),
+	)
+	if err != nil {
+		return allocation, err
+	}
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "update-ref", "refs/heads/"+allocation.Branch, commitSHA); err != nil {
+		return allocation, err
+	}
+	if _, err := gitOutputContext(ctx, identity, allocation.Path, "reset", "--hard", commitSHA); err != nil {
+		return allocation, err
+	}
+	allocation.HeadSHA = commitSHA
+	return allocation, nil
+}
+
 func adoptExistingPolicyOverlayHead(ctx context.Context, allocation contracts.WorktreeAllocation) (contracts.WorktreeAllocation, error) {
 	out, err := gitOutputContext(ctx, identity, allocation.Path, "diff", "--name-only", "-z", allocation.BaseSHA, "HEAD", "--")
 	if err != nil {
@@ -78,7 +143,7 @@ func adoptExistingPolicyOverlayHead(ctx context.Context, allocation contracts.Wo
 		if entry == "" {
 			continue
 		}
-		if !policyartifact.Is(entry) || entry == policyartifact.ChecklistResultFile {
+		if !policyartifact.IsPolicyBasePath(entry) || entry == policyartifact.ChecklistResultFile {
 			return allocation, fmt.Errorf("step50: cannot prepare policy overlay on advanced implementation head: %s", entry)
 		}
 	}
@@ -134,18 +199,17 @@ func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeA
 }
 
 func unstagePolicyArtifacts(ctx context.Context, allocation contracts.WorktreeAllocation) error {
+	return unstagePolicyArtifactsPath(ctx, allocation.Path)
+}
+
+func unstagePolicyArtifactsPath(ctx context.Context, worktreePath string) error {
 	resetArgs := append([]string{"reset", "--quiet", "--"}, implementationCommitExcludedPathspecsForReset()...)
-	_, err := gitOutputContext(ctx, identity, allocation.Path, resetArgs...)
+	_, err := gitOutputContext(ctx, identity, worktreePath, resetArgs...)
 	return err
 }
 
 func implementationCommitExcludedPathspecsForReset() []string {
-	return []string{
-		policyartifact.ChecklistResultFile,
-		policyartifact.OverlayDir,
-		policyartifact.RepoRegistryFile,
-		policyartifact.RepoRulesDir,
-	}
+	return policyartifact.GitResetPathspecs()
 }
 
 func rejectCommittedPolicyArtifactChanges(ctx context.Context, allocation contracts.WorktreeAllocation) error {

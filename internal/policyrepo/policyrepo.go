@@ -6,6 +6,8 @@ const (
 	RepoDirName          = "auto-improve"
 	RegistryRepoRelPath  = "auto-improve/rules-registry.jsonl"
 	RulesRepoDirRelPath  = "auto-improve/rules"
+	GuidanceRepoDirPath  = "auto-improve/guidance"
+	OverlayRepoDirPath   = ".auto-improve"
 	registryLocalName    = "rules-registry.jsonl"
 	metadataLocalName    = "snapshot.json"
 	idempotencyLocalName = "rules-idempotency-index.jsonl"

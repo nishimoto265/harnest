@@ -95,6 +95,51 @@ func TestTaskPackage_Validate_Valid(t *testing.T) {
 	assert.NoError(t, validTaskPackage().Validate())
 }
 
+func TestTaskPackage_Validate_AcceptsCompletePassBases(t *testing.T) {
+	pkg := validTaskPackage()
+	pkg.PassBases = []PassBaseAllocation{
+		{Pass: 1, Path: "/tmp/wt/pass1-base", Branch: "b-pass1-base", BaseSHA: "1111111111111111111111111111111111111111", HeadSHA: "1111111111111111111111111111111111111111"},
+		{Pass: 2, Path: "/tmp/wt/pass2-base", Branch: "b-pass2-base", BaseSHA: "1111111111111111111111111111111111111111", HeadSHA: "1111111111111111111111111111111111111111"},
+	}
+
+	assert.NoError(t, pkg.Validate())
+}
+
+func TestTaskPackage_Validate_RejectsIncompletePassBases(t *testing.T) {
+	pkg := validTaskPackage()
+	pkg.PassBases = []PassBaseAllocation{
+		{Pass: 1, Path: "/tmp/wt/pass1-base", Branch: "b-pass1-base", BaseSHA: "1111111111111111111111111111111111111111", HeadSHA: "1111111111111111111111111111111111111111"},
+	}
+
+	err := pkg.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTaskPackagePassBaseSet)
+}
+
+func TestTaskPackage_Validate_RejectsPassBaseWorktreePathCollision(t *testing.T) {
+	pkg := validTaskPackage()
+	pkg.PassBases = []PassBaseAllocation{
+		{Pass: 1, Path: pkg.Worktrees[0].Path, Branch: "b-pass1-base", BaseSHA: "1111111111111111111111111111111111111111", HeadSHA: "1111111111111111111111111111111111111111"},
+		{Pass: 2, Path: "/tmp/wt/pass2-base", Branch: "b-pass2-base", BaseSHA: "1111111111111111111111111111111111111111", HeadSHA: "1111111111111111111111111111111111111111"},
+	}
+
+	err := pkg.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTaskPackageDuplicatePath)
+}
+
+func TestTaskPackage_Validate_RejectsPassBaseWorktreeBranchCollision(t *testing.T) {
+	pkg := validTaskPackage()
+	pkg.PassBases = []PassBaseAllocation{
+		{Pass: 1, Path: "/tmp/wt/pass1-base", Branch: pkg.Worktrees[0].Branch, BaseSHA: "1111111111111111111111111111111111111111", HeadSHA: "1111111111111111111111111111111111111111"},
+		{Pass: 2, Path: "/tmp/wt/pass2-base", Branch: "b-pass2-base", BaseSHA: "1111111111111111111111111111111111111111", HeadSHA: "1111111111111111111111111111111111111111"},
+	}
+
+	err := pkg.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTaskPackageDuplicateBranch)
+}
+
 func TestTaskPackage_Validate_RejectsRelativeWorktreePath(t *testing.T) {
 	pkg := validTaskPackage()
 	pkg.Worktrees[0].Path = "tmp/wt/pass1-a1"

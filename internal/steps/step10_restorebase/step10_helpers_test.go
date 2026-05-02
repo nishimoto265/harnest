@@ -13,6 +13,8 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
+	"github.com/nishimoto265/auto-improve/internal/steps/policyoverlay"
 	"github.com/stretchr/testify/require"
 )
 
@@ -98,6 +100,10 @@ func (s *stubGit) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha s
 	s.known[path] = sha
 	s.createdBy = append(s.createdBy, path)
 	return true, nil
+}
+
+func (s *stubGit) PreparePassBase(ctx context.Context, allocation contracts.PassBaseAllocation, runID contracts.RunID, policySnapshotDir string, activeRules []policyrepo.ActiveRule, experimentLessons []policyoverlay.ExperimentLesson) (contracts.PassBaseAllocation, error) {
+	return allocation, nil
 }
 
 func (s *stubGit) ResolveRef(ctx context.Context, repoRoot, ref string) (string, error) {

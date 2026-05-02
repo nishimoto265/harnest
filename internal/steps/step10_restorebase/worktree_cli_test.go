@@ -16,6 +16,8 @@ import (
 func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 	rc := newRunCtx(t)
 	repoRoot := t.TempDir()
+	basePath := filepath.Join(rc.WorktreeBase, fmt.Sprintf("%s-pass1-base", rc.RunID))
+	baseBranch := fmt.Sprintf("auto-improve/%s/pass1/base", rc.RunID)
 	firstPath := filepath.Join(rc.WorktreeBase, fmt.Sprintf("%s-pass1-a1", rc.RunID))
 	firstBranch := fmt.Sprintf("auto-improve/%s/pass1/%s", rc.RunID, DefaultAgents[0])
 
@@ -33,6 +35,8 @@ func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 				return nil, nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", "origin/auto-improve/best"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", baseBranch, basePath, testBaseSHA}):
+				return []byte("Preparing base worktree\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", firstBranch, firstPath, testBaseSHA}):
 				return nil, []byte("fatal: a branch named '" + firstBranch + "' already exists\n"), errors.New("exit status 128")
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", firstPath, firstBranch}):
@@ -72,6 +76,8 @@ func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 	rc := newRunCtx(t)
 	repoRoot := t.TempDir()
+	basePath := filepath.Join(rc.WorktreeBase, fmt.Sprintf("%s-pass1-base", rc.RunID))
+	baseBranch := fmt.Sprintf("auto-improve/%s/pass1/base", rc.RunID)
 	firstPath := filepath.Join(rc.WorktreeBase, fmt.Sprintf("%s-pass1-a1", rc.RunID))
 	require.NoError(t, os.MkdirAll(firstPath, 0o755))
 
@@ -89,6 +95,8 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 				return nil, nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", "origin/auto-improve/best"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
+			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", baseBranch, basePath, testBaseSHA}):
+				return []byte("Preparing base worktree\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "list", "--porcelain"}):
 				return []byte("worktree " + firstPath + "\n\n"), nil, nil
 			case slices.Equal(args, []string{"-C", firstPath, "rev-parse", "HEAD"}):

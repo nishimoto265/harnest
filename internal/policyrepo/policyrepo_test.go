@@ -274,6 +274,30 @@ func TestHydrateAndSnapshotFromBranchOrSeedSeedsRepoLocalPolicyWhenBranchMissing
 	assert.NotEmpty(t, meta.RegistryHead)
 }
 
+func TestHydrateAndSnapshotFromBranchOrSeedBootstrapsWhenBranchAndSeedMissing(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	mustGit(t, repoRoot, "checkout", "main")
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	runID := contracts.RunID("2026-04-23-PR5-feedbee")
+	runCtx, err := internalio.NewRunContext(runID, runsBase, filepath.Join(t.TempDir(), "worktrees"))
+	require.NoError(t, err)
+
+	require.NoError(t, HydrateAndSnapshotFromBranchOrSeed(context.Background(), repoRoot, "missing-policy", runsBase, runCtx.RunDir()))
+
+	registryBytes, err := os.ReadFile(filepath.Join(runCtx.RunDir(), "policy", registryLocalName))
+	require.NoError(t, err)
+	assert.Empty(t, registryBytes)
+	assert.FileExists(t, filepath.Join(runCtx.RunDir(), "policy", ".auto-improve", "checklist.md"))
+	assert.FileExists(t, filepath.Join(runCtx.RunDir(), "policy", ".auto-improve", "hooks", "verify-checklist-result.sh"))
+	assert.FileExists(t, filepath.Join(runsBase, ".auto-improve", "hooks", "verify-checklist-result.sh"))
+	meta, ok, err := LoadSnapshotMetadata(runCtx)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "missing-policy", meta.PolicyBranch)
+	assert.Empty(t, meta.PolicyHead)
+	assert.Empty(t, meta.RegistryHead)
+}
+
 func TestPolicyBranchHydrationAllowsSeedRejectsGenericFetchFailures(t *testing.T) {
 	err := errors.New("policyrepo: fetch branch policy: exit status 128: fatal: Authentication failed")
 
@@ -313,6 +337,23 @@ func TestPublishSnapshotPushesRunsBasePolicyToBranch(t *testing.T) {
 	mustGit(t, repoRoot, "fetch", "--no-tags", "origin", "policy")
 	body := string(mustGitOutput(t, repoRoot, "show", "origin/policy:"+RulesRepoDirRelPath+"/r-sync-message-details.md"))
 	assert.Contains(t, body, "# Updated rule")
+}
+
+func TestPublishSnapshotCreatesMissingPolicyBranch(t *testing.T) {
+	repoRoot := newClonedRepoWithPolicyBranch(t)
+	mustGit(t, repoRoot, "checkout", "main")
+	runsBase := filepath.Join(t.TempDir(), "runs")
+	require.NoError(t, os.MkdirAll(runsBase, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runsBase, registryLocalName), nil, 0o644))
+
+	newHead, err := PublishSnapshot(context.Background(), repoRoot, "new-policy", "", runsBase, "2026-04-23-PR2-bootstrap")
+	require.NoError(t, err)
+	assert.NotEmpty(t, newHead)
+
+	mustGit(t, repoRoot, "fetch", "--no-tags", "origin", "new-policy")
+	files := string(mustGitOutput(t, repoRoot, "ls-tree", "-r", "--name-only", "origin/new-policy"))
+	assert.Contains(t, files, RegistryRepoRelPath)
+	assert.NotContains(t, files, "README.md")
 }
 
 func TestPublishSnapshotRemovesUnmanagedFilesFromPolicyBranch(t *testing.T) {
@@ -423,7 +464,7 @@ func TestHydrateFromBranchKeepsPreviousLocalPolicyWhenRemoteSnapshotIsInvalid(t 
 	assert.Equal(t, localRule, string(ruleBytes))
 }
 
-func TestHydrateFromBranchRejectsEmptyPolicyBranch(t *testing.T) {
+func TestHydrateFromBranchBootstrapsEmptyPolicyBranch(t *testing.T) {
 	repoRoot := newClonedRepoWithPolicyBranch(t)
 	runsBase := filepath.Join(t.TempDir(), "runs")
 	mustGit(t, repoRoot, "checkout", "--orphan", "empty-policy")
@@ -433,9 +474,16 @@ func TestHydrateFromBranchRejectsEmptyPolicyBranch(t *testing.T) {
 	mustGit(t, repoRoot, "commit", "-m", "empty policy")
 	mustGit(t, repoRoot, "push", "origin", "empty-policy")
 
-	err := HydrateFromBranch(context.Background(), repoRoot, "empty-policy", runsBase)
-	require.Error(t, err)
-	assert.ErrorContains(t, err, "no managed policy files")
+	require.NoError(t, HydrateFromBranch(context.Background(), repoRoot, "empty-policy", runsBase))
+
+	registryBytes, err := os.ReadFile(filepath.Join(runsBase, registryLocalName))
+	require.NoError(t, err)
+	assert.Empty(t, registryBytes)
+	assert.FileExists(t, filepath.Join(runsBase, ".auto-improve", "checklist.md"))
+	hookBytes, err := os.ReadFile(filepath.Join(runsBase, ".auto-improve", "hooks", "verify-checklist-result.sh"))
+	require.NoError(t, err)
+	assert.Contains(t, string(hookBytes), "lessons verify-checklist-result")
+	assert.FileExists(t, filepath.Join(runsBase, "auto-improve", "guidance", "AGENTS.md.template"))
 }
 
 func TestPublishSnapshotRejectsMissingLocalRegistry(t *testing.T) {

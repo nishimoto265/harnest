@@ -47,7 +47,8 @@ the nested form is the canonical schema now. For operational detect/run flows,
 fill in the `repo.github`, `repo.root`, `repo.default_branch`, and
 `repo.best_branch` fields too. If you want adopted rules to persist in the
 target repository instead of only under the local `runs` cache, also configure
-`repo.policy_branch` and create that remote branch ahead of time.
+`repo.policy_branch`. The branch may already exist; if it does not, the first
+adopt can bootstrap it from the run's policy snapshot.
 Subprocess command names are resolved against the fixed trusted runtime PATH
 (`/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin`), not the
 caller shell's ambient `PATH`; use absolute paths for `claude` / `codex` if
@@ -111,6 +112,8 @@ issue.
   reasons without running the pipeline. Docs-only PRs are skipped by default.
 - `auto-improve preflight`
   Local runtime, writable state path, repo settings, and `best_branch` reachability gate.
+  `policy_branch` is checked for config conflicts only; a missing remote policy
+  branch is allowed so first-run bootstrap can create it.
 - `auto-improve detect-merged`
   `repo.default_branch` 向けの merged PR を列挙する。
 - `auto-improve run --pr <n> --with-preflight`

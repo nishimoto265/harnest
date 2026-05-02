@@ -18,6 +18,7 @@ type RunContext struct {
 	RunsBase     string
 	WorktreeBase string
 	worktrees    map[int]map[contracts.AgentID]contracts.WorktreeAllocation
+	passBases    map[int]contracts.PassBaseAllocation
 }
 
 // NewRunID returns a fresh run identifier with the canonical
@@ -80,6 +81,15 @@ func RunContextFromTaskPackage(pkg contracts.TaskPackage, runsBase, worktreeBase
 			ctx.worktrees[worktree.Pass] = make(map[contracts.AgentID]contracts.WorktreeAllocation)
 		}
 		ctx.worktrees[worktree.Pass][worktree.Agent] = worktree
+	}
+	if len(pkg.PassBases) > 0 {
+		ctx.passBases = make(map[int]contracts.PassBaseAllocation, len(pkg.PassBases))
+		for _, base := range pkg.PassBases {
+			if err := validatePersistedPassBaseAllocation(pkg.RunID, base, worktreeBase); err != nil {
+				return RunContext{}, err
+			}
+			ctx.passBases[base.Pass] = base
+		}
 	}
 	return ctx, nil
 }
@@ -147,6 +157,28 @@ func (ctx RunContext) Pass2WorktreePath(agent contracts.AgentID) (string, error)
 	return ctx.worktreePath(2, agent)
 }
 
+func (ctx RunContext) PassBaseAllocation(pass int) (contracts.PassBaseAllocation, error) {
+	if err := validatePass(pass); err != nil {
+		return contracts.PassBaseAllocation{}, err
+	}
+	if ctx.passBases == nil {
+		return contracts.PassBaseAllocation{}, ErrWorktreePathUnavailable
+	}
+	allocation, ok := ctx.passBases[pass]
+	if !ok {
+		return contracts.PassBaseAllocation{}, ErrWorktreePathUnavailable
+	}
+	return allocation, nil
+}
+
+func (ctx RunContext) PassBaseWorktreePath(pass int) (string, error) {
+	allocation, err := ctx.PassBaseAllocation(pass)
+	if err != nil {
+		return "", err
+	}
+	return allocation.Path, nil
+}
+
 func (ctx RunContext) ManifestPath(pass int, agent contracts.AgentID) (string, error) {
 	dir, err := ctx.agentDir(pass, agent)
 	if err != nil {
@@ -172,6 +204,13 @@ func (ctx RunContext) worktreePath(pass int, agent contracts.AgentID) (string, e
 }
 
 func (ctx RunContext) ValidateWorktreeAllocation(allocation contracts.WorktreeAllocation) error {
+	if err := allocation.Validate(); err != nil {
+		return err
+	}
+	return ctx.ValidateWorktreePath(allocation.Path)
+}
+
+func (ctx RunContext) ValidatePassBaseAllocation(allocation contracts.PassBaseAllocation) error {
 	if err := allocation.Validate(); err != nil {
 		return err
 	}
@@ -274,24 +313,37 @@ func derivePersistedWorktreeBase(pkg contracts.TaskPackage) (string, error) {
 	if err := contracts.EnsureCleanAbsolutePath(base); err != nil {
 		return "", err
 	}
+	var err error
 	for _, worktree := range pkg.Worktrees[1:] {
-		candidateBase := filepath.Dir(worktree.Path)
-		if err := contracts.EnsureCleanAbsolutePath(candidateBase); err != nil {
+		base, err = commonAncestor(base, filepath.Dir(worktree.Path), pkg.Worktrees[0].Path, worktree.Path)
+		if err != nil {
 			return "", err
 		}
-		for {
-			rel, err := filepath.Rel(base, candidateBase)
-			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				break
-			}
-			parent := filepath.Dir(base)
-			if parent == base {
-				return "", fmt.Errorf("%w: could not derive common base for %q and %q", ErrWorktreePathEscapesBase, pkg.Worktrees[0].Path, worktree.Path)
-			}
-			base = parent
+	}
+	for _, passBase := range pkg.PassBases {
+		base, err = commonAncestor(base, filepath.Dir(passBase.Path), pkg.Worktrees[0].Path, passBase.Path)
+		if err != nil {
+			return "", err
 		}
 	}
 	return base, nil
+}
+
+func commonAncestor(base, candidateBase, firstPath, candidatePath string) (string, error) {
+	if err := contracts.EnsureCleanAbsolutePath(candidateBase); err != nil {
+		return "", err
+	}
+	for {
+		rel, err := filepath.Rel(base, candidateBase)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return base, nil
+		}
+		parent := filepath.Dir(base)
+		if parent == base {
+			return "", fmt.Errorf("%w: could not derive common base for %q and %q", ErrWorktreePathEscapesBase, firstPath, candidatePath)
+		}
+		base = parent
+	}
 }
 
 func validatePersistedWorktreeAllocation(runID contracts.RunID, allocation contracts.WorktreeAllocation, worktreeBase string) error {
@@ -323,6 +375,32 @@ func validatePersistedWorktreeAllocation(runID contracts.RunID, allocation contr
 func persistedWorktreePathMatches(runID contracts.RunID, allocation contracts.WorktreeAllocation, worktreeBase string) bool {
 	want := filepath.Join(worktreeBase, fmt.Sprintf("%s-pass%d-%s", runID, allocation.Pass, allocation.Agent))
 	return sameCanonicalPath(allocation.Path, want)
+}
+
+func validatePersistedPassBaseAllocation(runID contracts.RunID, allocation contracts.PassBaseAllocation, worktreeBase string) error {
+	if err := allocation.Validate(); err != nil {
+		return err
+	}
+	baseKey, err := contracts.CanonicalizePathForUniqueness(worktreeBase)
+	if err != nil {
+		return err
+	}
+	pathKey, err := contracts.CanonicalizePathForUniqueness(allocation.Path)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(baseKey, pathKey)
+	if err != nil {
+		return err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%w: worktree_base=%q path=%q", ErrWorktreePathEscapesBase, worktreeBase, allocation.Path)
+	}
+	want := filepath.Join(worktreeBase, fmt.Sprintf("%s-pass%d-base", runID, allocation.Pass))
+	if !sameCanonicalPath(allocation.Path, want) {
+		return fmt.Errorf("%w: persisted pass base path mismatch: got=%q want=%q", ErrWorktreeBaseMismatch, allocation.Path, want)
+	}
+	return nil
 }
 
 func validateManifestIdentity(manifest contracts.Manifest, runID contracts.RunID, pass int, agent contracts.AgentID) error {

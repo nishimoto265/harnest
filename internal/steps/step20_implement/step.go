@@ -171,7 +171,7 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	if err != nil {
 		return fmt.Errorf("step20: load active policy rules: %w", err)
 	}
-	if err := policyoverlay.Apply(allocation.Path, activeRules, nil); err != nil {
+	if err := policyoverlay.ApplyWithSnapshot(allocation.Path, filepath.Join(run.IO.RunDir(), "policy"), activeRules, nil); err != nil {
 		return fmt.Errorf("step20: apply policy overlay: %w", err)
 	}
 	allocation, err = commitPolicyOverlayBase(collectCtxFromContext(ctx), allocation, run.IO.RunID)

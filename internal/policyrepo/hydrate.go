@@ -32,9 +32,10 @@ func HydrateAndSnapshotFromBranchOrSeed(ctx context.Context, repoRoot, branch, r
 	seed, seedErr := loadRepoLocalSnapshot(repoRoot)
 	if seedErr != nil {
 		if errors.Is(seedErr, os.ErrNotExist) {
-			return err
+			seed = defaultBootstrapSnapshot()
+		} else {
+			return fmt.Errorf("policyrepo: seed repo-local policy after hydrate failure: %w", seedErr)
 		}
-		return fmt.Errorf("policyrepo: seed repo-local policy after hydrate failure: %w", seedErr)
 	}
 	lock, lockErr := internalio.AcquireFileLockContext(ctx, filepath.Join(runsBase, "promotion.lock"))
 	if lockErr != nil {

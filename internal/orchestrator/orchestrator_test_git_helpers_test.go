@@ -89,7 +89,7 @@ case "$subcmd" in
   worktree)
     case "${1:-}" in
       add)
-        if [ "${2:-}" = "-b" ]; then
+        if [ "${2:-}" = "-b" ] || [ "${2:-}" = "-B" ]; then
           path="$4"
         else
           path="$2"
@@ -105,6 +105,9 @@ case "$subcmd" in
           [ -n "$path" ] || continue
           printf 'worktree %s\n\n' "$path"
         done < "$state_dir/worktrees.list"
+        ;;
+      prune)
+        exit 0
         ;;
     esac
     ;;
@@ -139,9 +142,11 @@ case "$subcmd" in
     ;;
   branch)
     case "$(basename "$repo_dir")" in
+      *-pass1-base) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-base$//')/pass1/base" ;;
       *-pass1-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a1$//')/pass1/a1" ;;
       *-pass1-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a2$//')/pass1/a2" ;;
       *-pass1-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a3$//')/pass1/a3" ;;
+      *-pass2-base) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-base$//')/pass2/base" ;;
       *-pass2-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a1$//')/pass2/a1" ;;
       *-pass2-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a2$//')/pass2/a2" ;;
       *-pass2-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a3$//')/pass2/a3" ;;
@@ -242,7 +247,7 @@ case "$subcmd" in
   worktree)
     case "${1:-}" in
       add)
-        if [ "${2:-}" = "-b" ]; then
+        if [ "${2:-}" = "-b" ] || [ "${2:-}" = "-B" ]; then
           path="$4"
         else
           path="$2"
@@ -258,6 +263,9 @@ case "$subcmd" in
           [ -n "$path" ] || continue
           printf 'worktree %s\n\n' "$path"
         done < "$state_dir/worktrees.list"
+        ;;
+      prune)
+        exit 0
         ;;
     esac
     ;;
@@ -292,9 +300,11 @@ case "$subcmd" in
     ;;
   branch)
     case "$(basename "$repo_dir")" in
+      *-pass1-base) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-base$//')/pass1/base" ;;
       *-pass1-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a1$//')/pass1/a1" ;;
       *-pass1-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a2$//')/pass1/a2" ;;
       *-pass1-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a3$//')/pass1/a3" ;;
+      *-pass2-base) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-base$//')/pass2/base" ;;
       *-pass2-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a1$//')/pass2/a1" ;;
       *-pass2-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a2$//')/pass2/a2" ;;
       *-pass2-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a3$//')/pass2/a3" ;;

@@ -11,7 +11,10 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/gitremote"
+	"github.com/nishimoto265/auto-improve/internal/policyartifact"
+	"github.com/nishimoto265/auto-improve/internal/policyrepo"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
+	"github.com/nishimoto265/auto-improve/internal/steps/policyoverlay"
 )
 
 // GitClient abstracts the subset of `git` commands step10 needs so tests can
@@ -26,6 +29,10 @@ type GitClient interface {
 	//     (created=false, nil); otherwise return a wrapped error so the caller
 	//     can decide whether to cleanup.
 	WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha string) (created bool, err error)
+
+	// PreparePassBase applies the harness policy overlay to a pass base
+	// worktree and advances the pass base branch to the prepared head.
+	PreparePassBase(ctx context.Context, allocation contracts.PassBaseAllocation, runID contracts.RunID, policySnapshotDir string, activeRules []policyrepo.ActiveRule, experimentLessons []policyoverlay.ExperimentLesson) (contracts.PassBaseAllocation, error)
 
 	// ResolveRef resolves a ref to a 40-hex SHA.
 	ResolveRef(ctx context.Context, repoRoot, ref string) (string, error)
@@ -134,6 +141,65 @@ func (g gitCLI) WorktreeAdd(ctx context.Context, repoRoot, path, branch, sha str
 		return false, formatCommandFailure(fmt.Sprintf("step10: git worktree add %s", path), err, out, stderr)
 	}
 	return true, nil
+}
+
+func (g gitCLI) PreparePassBase(ctx context.Context, allocation contracts.PassBaseAllocation, runID contracts.RunID, policySnapshotDir string, activeRules []policyrepo.ActiveRule, experimentLessons []policyoverlay.ExperimentLesson) (contracts.PassBaseAllocation, error) {
+	if err := policyoverlay.ApplyWithSnapshot(allocation.Path, policySnapshotDir, activeRules, experimentLessons); err != nil {
+		return allocation, err
+	}
+	resetArgs := append([]string{"-C", allocation.Path, "reset", "--quiet", "--"}, policyartifact.GitResetPathspecs()...)
+	if _, stderr, err := g.runLocal(ctx, resetArgs...); err != nil {
+		return allocation, formatCommandFailure("step10: git reset policy checklist result", err, nil, stderr)
+	}
+	policyPathspecs := policyartifact.ExistingPolicyBasePathspecs(allocation.Path)
+	if len(policyPathspecs) == 0 {
+		head, err := g.ResolveRef(ctx, allocation.Path, "HEAD")
+		if err != nil {
+			return allocation, err
+		}
+		allocation.BaseSHA = head
+		allocation.HeadSHA = head
+		return allocation, nil
+	}
+	addArgs := append([]string{"-C", allocation.Path, "add", "-A", "-f", "--"}, policyPathspecs...)
+	if _, stderr, err := g.runLocal(ctx, addArgs...); err != nil {
+		return allocation, formatCommandFailure("step10: git add policy overlay", err, nil, stderr)
+	}
+	diffArgs := append([]string{"-C", allocation.Path, "diff", "--cached", "--name-only", "--"}, policyPathspecs...)
+	out, stderr, err := g.runLocal(ctx, diffArgs...)
+	if err != nil {
+		return allocation, formatCommandFailure("step10: git diff policy overlay", err, out, stderr)
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		head, err := g.ResolveRef(ctx, allocation.Path, "HEAD")
+		if err != nil {
+			return allocation, err
+		}
+		allocation.BaseSHA = head
+		allocation.HeadSHA = head
+		return allocation, nil
+	}
+	tree, stderr, err := g.runLocal(ctx, "-C", allocation.Path, "write-tree")
+	if err != nil {
+		return allocation, formatCommandFailure("step10: git write-tree policy overlay", err, tree, stderr)
+	}
+	commit, stderr, err := g.runLocalWithEnv(ctx, syntheticCommitEnv(), "-C", allocation.Path,
+		"commit-tree", strings.TrimSpace(string(tree)),
+		"-p", allocation.BaseSHA,
+		"-m", fmt.Sprintf("auto-improve: prepare pass%d policy base for %s", allocation.Pass, runID),
+	)
+	if err != nil {
+		return allocation, formatCommandFailure("step10: git commit-tree policy overlay", err, commit, stderr)
+	}
+	commitSHA := strings.TrimSpace(string(commit))
+	if _, stderr, err := g.runLocal(ctx, "-C", allocation.Path, "update-ref", "refs/heads/"+allocation.Branch, commitSHA); err != nil {
+		return allocation, formatCommandFailure("step10: git update-ref policy base", err, nil, stderr)
+	}
+	if _, stderr, err := g.runLocal(ctx, "-C", allocation.Path, "reset", "--hard", commitSHA); err != nil {
+		return allocation, formatCommandFailure("step10: git reset policy base", err, nil, stderr)
+	}
+	allocation.HeadSHA = commitSHA
+	return allocation, nil
 }
 
 func (g gitCLI) removeWorktreeForce(ctx context.Context, repoRoot, path string) error {
@@ -271,6 +337,13 @@ func (g gitCLI) runLocal(ctx context.Context, args ...string) ([]byte, []byte, e
 	return runGitWithEnv(ctx, processenv.GitLocalEnv(), args...)
 }
 
+func (g gitCLI) runLocalWithEnv(ctx context.Context, env []string, args ...string) ([]byte, []byte, error) {
+	if g.run != nil {
+		return g.run(ctx, "git", args...)
+	}
+	return runGitWithEnv(ctx, env, args...)
+}
+
 func (g gitCLI) runNetwork(ctx context.Context, repoRoot string, args ...string) ([]byte, []byte, error) {
 	if g.run != nil {
 		return g.run(ctx, "git", args...)
@@ -305,4 +378,15 @@ func runGitWithEnv(ctx context.Context, env []string, args ...string) ([]byte, [
 		return stdout, exitErr.Stderr, err
 	}
 	return stdout, nil, err
+}
+
+func syntheticCommitEnv() []string {
+	env := processenv.GitLocalEnv()
+	env = append(env,
+		"GIT_AUTHOR_NAME=auto-improve",
+		"GIT_AUTHOR_EMAIL=auto-improve@example.invalid",
+		"GIT_COMMITTER_NAME=auto-improve",
+		"GIT_COMMITTER_EMAIL=auto-improve@example.invalid",
+	)
+	return env
 }

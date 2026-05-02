@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/nishimoto265/auto-improve/internal/harnessinstall"
 	"github.com/nishimoto265/auto-improve/internal/lessons"
 	"github.com/spf13/cobra"
 )
@@ -161,30 +162,55 @@ func newLessonsVerifyChecklistResultCmd() *cobra.Command {
 func newLessonsInstallGuidanceCmd() *cobra.Command {
 	var root string
 	var providers []string
+	var check bool
+	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "install-guidance",
 		Short: "Install optional provider guidance and checklist verification hooks",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			result, err := lessons.InstallGuidance(lessons.InstallGuidanceOptions{
-				Root:      root,
-				Providers: providers,
-			})
+			plan, err := harnessinstall.Plan(root, harnessinstall.InstallOptions{Providers: providers}, harnessinstall.PlanOptions{Check: check})
 			if err != nil {
 				return commandExitError{code: 2, msg: fmt.Sprintf("lessons install-guidance: %v", err)}
+			}
+			files := planFiles(plan)
+			event := "guidance_installed"
+			if check {
+				if len(files) > 0 {
+					return commandExitError{code: 1, msg: "lessons install-guidance: guidance is stale"}
+				}
+				event = "guidance_up_to_date"
+			} else if dryRun {
+				event = "guidance_install_planned"
+			} else {
+				result, err := harnessinstall.Apply(plan)
+				if err != nil {
+					return commandExitError{code: 2, msg: fmt.Sprintf("lessons install-guidance: %v", err)}
+				}
+				files = result.Files
 			}
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
 				Event string   `json:"event"`
 				Files []string `json:"files"`
 			}{
-				Event: "guidance_installed",
-				Files: result.Files,
+				Event: event,
+				Files: files,
 			})
 		},
 	}
 	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .auto-improve")
 	cmd.Flags().StringSliceVar(&providers, "provider", nil, "Provider(s) to install: claude,codex")
+	cmd.Flags().BoolVar(&check, "check", false, "Fail if provider guidance is not installed or up to date")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print files that would change without writing them")
 	return cmd
+}
+
+func planFiles(plan harnessinstall.InstallationPlan) []string {
+	files := make([]string, 0, len(plan.Changes))
+	for _, change := range plan.Changes {
+		files = append(files, change.Path)
+	}
+	return files
 }
 
 func mustAbsRoot(root string) string {

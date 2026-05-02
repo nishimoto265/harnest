@@ -22,6 +22,10 @@ func ensureAllocationWorktree(ctx context.Context, cfg *config.Config, allocatio
 	return ensureAllocationWorktreeAtRef(ctx, cfg, allocation, allocation.HeadSHA, true)
 }
 
+func ensureAllocationWorktreeFromPassBase(ctx context.Context, cfg *config.Config, allocation contracts.WorktreeAllocation) error {
+	return ensureAllocationWorktreeAtRef(ctx, cfg, allocation, allocation.HeadSHA, true)
+}
+
 func ensureAllocationWorktreeBeforeResume(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, agentDir string) (contracts.WorktreeAllocation, error) {
 	state, ok, err := loadResumeState(agentDir)
 	if err != nil {
@@ -232,6 +236,18 @@ func worktreeFor(pkg *contracts.TaskPackage, pass int, agent contracts.AgentID) 
 		}
 	}
 	return contracts.WorktreeAllocation{}, fmt.Errorf("step50: missing worktree allocation: pass=%d agent=%s", pass, agent)
+}
+
+func passBaseFor(pkg *contracts.TaskPackage, pass int) (contracts.PassBaseAllocation, error) {
+	if pkg == nil {
+		return contracts.PassBaseAllocation{}, errors.New("step50: task package is required")
+	}
+	for _, base := range pkg.PassBases {
+		if base.Pass == pass {
+			return base, nil
+		}
+	}
+	return contracts.PassBaseAllocation{}, fmt.Errorf("step50: missing pass base allocation: pass=%d", pass)
 }
 
 func agentDir(runIO internalio.RunContext, pass int, agent contracts.AgentID) (string, error) {

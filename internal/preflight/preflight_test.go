@@ -415,6 +415,16 @@ func TestCheckRejectsPolicyBranchSameAsDefaultBranch(t *testing.T) {
 	assert.Contains(t, failure.Detail, "repo.default_branch")
 }
 
+func TestCheckAllowsPolicyBranchBootstrap(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repo.PolicyBranch = "auto-improve/policy"
+
+	result := NewWithDependencies(fakeDependencies(t, "")).Check(context.Background(), cfg)
+
+	assert.True(t, result.OK, "failures: %+v", result.Failures)
+	assert.NotContains(t, failureNames(result.Failures), "repo.policy_branch")
+}
+
 func TestCheckRejectsSameSlugOriginOnWrongHost(t *testing.T) {
 	cfg := testConfig(t)
 	deps := fakeDependencies(t, "")

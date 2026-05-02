@@ -64,6 +64,10 @@ Verify all supported locale files when adding translation keys.
 	experiment, err := os.ReadFile(filepath.Join(root, ".auto-improve", "lessons", "cand-2026-04-21-PR42-abcdef0-001.md"))
 	require.NoError(t, err)
 	assert.Equal(t, experimentBody, string(experiment))
+	assert.FileExists(t, filepath.Join(root, "AGENTS.md"))
+	assert.FileExists(t, filepath.Join(root, "CLAUDE.md"))
+	assert.FileExists(t, filepath.Join(root, ".claude", "settings.json"))
+	assert.FileExists(t, filepath.Join(root, ".codex", "hooks.json"))
 }
 
 func TestExperimentsFromRulePayloadsUsesCandidateIDs(t *testing.T) {
@@ -91,6 +95,52 @@ func TestApplyRemovesStaleOverlayLessons(t *testing.T) {
 
 	assert.NoFileExists(t, stalePath)
 	assert.FileExists(t, filepath.Join(root, ".auto-improve", "lessons", "fresh.md"))
+}
+
+func TestApplyWithSnapshotCopiesHarnessOverlayFiles(t *testing.T) {
+	root := t.TempDir()
+	snapshotDir := t.TempDir()
+	hookPath := filepath.Join(snapshotDir, ".auto-improve", "hooks", "verify-checklist-result.sh")
+	require.NoError(t, os.MkdirAll(filepath.Dir(hookPath), 0o755))
+	require.NoError(t, os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, ".auto-improve", "checklist.md"), []byte("snapshot checklist\n"), 0o644))
+
+	err := ApplyWithSnapshot(root, snapshotDir, []policyrepo.ActiveRule{{
+		RuleID: "fresh",
+		Body:   "# Fresh\n",
+	}}, nil)
+	require.NoError(t, err)
+
+	hook, err := os.ReadFile(filepath.Join(root, ".auto-improve", "hooks", "verify-checklist-result.sh"))
+	require.NoError(t, err)
+	assert.Equal(t, "#!/bin/sh\nexit 0\n", string(hook))
+	checklist, err := os.ReadFile(filepath.Join(root, ".auto-improve", "checklist.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(checklist), "`fresh`")
+	assert.NotContains(t, string(checklist), "snapshot checklist")
+}
+
+func TestApplyWithSnapshotUsesGuidanceTemplates(t *testing.T) {
+	root := t.TempDir()
+	snapshotDir := t.TempDir()
+	guidanceDir := filepath.Join(snapshotDir, "auto-improve", "guidance")
+	require.NoError(t, os.MkdirAll(guidanceDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(guidanceDir, "AGENTS.md.template"), []byte("<!-- BEGIN AUTO-IMPROVE CHECKLIST -->\nCodex custom checklist @.auto-improve/checklist.md\n<!-- END AUTO-IMPROVE CHECKLIST -->\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(guidanceDir, "CLAUDE.md.template"), []byte("<!-- BEGIN AUTO-IMPROVE CHECKLIST -->\nClaude custom checklist @.auto-improve/checklist.md\n<!-- END AUTO-IMPROVE CHECKLIST -->\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(guidanceDir, "provider-hooks.json.template"), []byte(`{"hooks":{"Stop":[{"id":"auto-improve.checklist-gate","hooks":[{"type":"command","command":"custom-check","timeout":7}]}]}}`), 0o644))
+
+	err := ApplyWithSnapshot(root, snapshotDir, nil, nil)
+	require.NoError(t, err)
+
+	agents, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(agents), "Codex custom checklist")
+	claude, err := os.ReadFile(filepath.Join(root, "CLAUDE.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(claude), "Claude custom checklist")
+	hooks, err := os.ReadFile(filepath.Join(root, ".codex", "hooks.json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(hooks), "custom-check")
 }
 
 func TestApplyRejectsSymlinkedOverlayDir(t *testing.T) {

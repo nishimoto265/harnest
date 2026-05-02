@@ -193,9 +193,6 @@ func (c Checker) Check(ctx context.Context, cfg config.Config) PreflightResult {
 				failures = append(failures, c.checkOriginPushURLs(remoteURL, pushURLs, cfg.Repo.GitHub)...)
 			}
 			failures = appendFailure(failures, c.checkRemoteBranch(ctx, repoRoot, remoteURL, cfg.Repo.BestBranch))
-			if policyBranch, ok := cfg.PolicyBranch(); ok {
-				failures = appendFailure(failures, c.checkRemoteBranchNamed(ctx, repoRoot, remoteURL, policyBranch, "repo.policy_branch"))
-			}
 		}
 	}
 

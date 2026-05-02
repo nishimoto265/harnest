@@ -27,15 +27,24 @@ func PublishSnapshot(ctx context.Context, repoRoot, branch, expectedHead, runsBa
 }
 
 func PrepareSnapshotPublish(ctx context.Context, repoRoot, branch, expectedHead, runsBase, runID string) (*PreparedPublish, error) {
-	if expectedHead == "" {
-		return nil, fmt.Errorf("policyrepo: expected head is required for publish")
-	}
 	snap, err := loadLocalSnapshot(runsBase)
 	if err != nil {
 		return nil, err
 	}
-	if err := fetchBranch(ctx, repoRoot, branch); err != nil {
-		return nil, err
+	baseRef := strings.TrimSpace(expectedHead)
+	if baseRef != "" {
+		if err := fetchBranch(ctx, repoRoot, branch); err != nil {
+			return nil, err
+		}
+	} else {
+		head, err := gitText(ctx, repoRoot, "rev-parse", "HEAD")
+		if err != nil {
+			return nil, err
+		}
+		baseRef = strings.TrimSpace(string(head))
+		if baseRef == "" {
+			return nil, fmt.Errorf("policyrepo: cannot initialize policy publish from empty HEAD")
+		}
 	}
 	tmpDir, err := os.MkdirTemp(runsBase, "policy-publish-"+sanitizeRunID(runID)+"-")
 	if err != nil {
@@ -48,7 +57,7 @@ func PrepareSnapshotPublish(ctx context.Context, repoRoot, branch, expectedHead,
 		Head:         expectedHead,
 		worktreeDir:  tmpDir,
 	}
-	if _, err := gitText(ctx, repoRoot, "worktree", "add", "--detach", tmpDir, expectedHead); err != nil {
+	if _, err := gitText(ctx, repoRoot, "worktree", "add", "--detach", tmpDir, baseRef); err != nil {
 		_ = plan.Cleanup()
 		return nil, err
 	}
@@ -61,7 +70,7 @@ func PrepareSnapshotPublish(ctx context.Context, repoRoot, branch, expectedHead,
 		_ = plan.Cleanup()
 		return nil, err
 	}
-	if _, err := gitText(ctx, tmpDir, "add", "-A", "--", RepoDirName); err != nil {
+	if _, err := gitText(ctx, tmpDir, "add", "-A", "--", "."); err != nil {
 		_ = plan.Cleanup()
 		return nil, err
 	}
@@ -111,7 +120,12 @@ func (p *PreparedPublish) Push(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, err := runGit(ctx, processenv.GitNetworkEnvForRemoteURL(remoteURL), "-C", p.RepoRoot, "push", "origin", fmt.Sprintf("%s:%s", p.Head, p.Branch), fmt.Sprintf("--force-with-lease=%s:%s", p.Branch, p.ExpectedHead)); err != nil {
+	branchRef := fullBranchRef(p.Branch)
+	out, err := runGit(ctx, processenv.GitNetworkEnvForRemoteURL(remoteURL), "-C", p.RepoRoot, "push", "origin", fmt.Sprintf("%s:%s", p.Head, branchRef), fmt.Sprintf("--force-with-lease=%s:%s", branchRef, p.ExpectedHead))
+	if err != nil {
+		if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
+			return fmt.Errorf("policyrepo: push policy snapshot: %w: %s", err, trimmed)
+		}
 		return fmt.Errorf("policyrepo: push policy snapshot: %w", err)
 	}
 	return nil
@@ -130,4 +144,11 @@ func (p *PreparedPublish) Cleanup() error {
 	}
 	p.cleaned = true
 	return nil
+}
+
+func fullBranchRef(branch string) string {
+	if strings.HasPrefix(branch, "refs/heads/") {
+		return branch
+	}
+	return "refs/heads/" + branch
 }

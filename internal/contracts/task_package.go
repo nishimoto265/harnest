@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-// WorktreeAllocation describes one of the 6 worktrees (pass1 × 3 + pass2 × 3)
-// that step10 carves out of the base repository. `task-package.json.worktrees[]`
-// is the **canonical metadata** source; step 20/50/70 must read from there and
-// not re-derive from on-disk paths (io-contracts.md §run ディレクトリ構造).
+// WorktreeAllocation describes one of the 6 agent worktrees (pass1 × 3 + pass2
+// × 3). `task-package.json.worktrees[]` is the **canonical metadata** source;
+// step 20/50/70 must read from there and not re-derive from on-disk paths
+// (io-contracts.md §run ディレクトリ構造).
 type WorktreeAllocation struct {
 	// Agent: a1 / a2 / a3 (positive integer, per pass 3 agents).
 	Agent AgentID `json:"agent" validate:"required,agent_id_fmt"`
@@ -24,6 +24,22 @@ type WorktreeAllocation struct {
 	// (step10 で記録、以降 immutable、rescue の expected_base_sha source).
 	BaseSHA string `json:"base_sha" validate:"required,sha1_hex"`
 	// HeadSHA: HEAD at allocation time (= BaseSHA for fresh worktrees).
+	HeadSHA string `json:"head_sha" validate:"required,sha1_hex"`
+}
+
+// PassBaseAllocation describes the explicit base worktree/branch for a pass.
+// Agent worktrees are fanned out from these base heads instead of directly
+// from the PR merge-base.
+type PassBaseAllocation struct {
+	// Pass: 1 (step20) または 2 (step50).
+	Pass int `json:"pass" validate:"required,oneof=1 2"`
+	// Path: absolute filesystem path to the pass base worktree.
+	Path string `json:"path" validate:"required"`
+	// Branch: git branch name checked out at the pass base worktree.
+	Branch string `json:"branch" validate:"required"`
+	// BaseSHA: commit at which the pass base was initially carved.
+	BaseSHA string `json:"base_sha" validate:"required,sha1_hex"`
+	// HeadSHA: prepared pass base head at allocation time.
 	HeadSHA string `json:"head_sha" validate:"required,sha1_hex"`
 }
 
@@ -54,6 +70,10 @@ type TaskPackage struct {
 	// Worktrees: 2 pass × 3 agent = 6 件の allocation metadata (正本).
 	Worktrees []WorktreeAllocation `json:"worktrees" validate:"required,len=6,dive"`
 
+	// PassBases: optional explicit pass base allocation metadata. Added after
+	// schema v1 for pass-base fanout; absent means older direct-from-base runs.
+	PassBases []PassBaseAllocation `json:"pass_bases,omitempty" validate:"omitempty,dive"`
+
 	// CreatedAt: step10 が task-package を書いた時刻.
 	CreatedAt time.Time `json:"created_at" validate:"required"`
 }
@@ -79,10 +99,12 @@ var (
 	// other's working tree on disk, and shared branches would cross-wire pass1
 	// and pass2 commits. Catch this at contract-validation time instead of
 	// waiting for runtime IO corruption.
-	ErrTaskPackageDuplicatePath   = errors.New("contracts: task_package: duplicate worktree path across allocations")
-	ErrTaskPackageDuplicateBranch = errors.New("contracts: task_package: duplicate worktree branch across allocations")
-	ErrWorktreePathNotAbsolute    = errors.New("contracts: task_package: worktree path must be an absolute path")
-	ErrWorktreePathNotClean       = errors.New("contracts: task_package: worktree path must be a clean absolute path without . or .. elements")
+	ErrTaskPackageDuplicatePath     = errors.New("contracts: task_package: duplicate worktree path across allocations")
+	ErrTaskPackageDuplicateBranch   = errors.New("contracts: task_package: duplicate worktree branch across allocations")
+	ErrTaskPackagePassBaseDuplicate = errors.New("contracts: task_package: duplicate pass base")
+	ErrTaskPackagePassBaseSet       = errors.New("contracts: task_package: pass bases must contain exactly pass 1 and pass 2")
+	ErrWorktreePathNotAbsolute      = errors.New("contracts: task_package: worktree path must be an absolute path")
+	ErrWorktreePathNotClean         = errors.New("contracts: task_package: worktree path must be a clean absolute path without . or .. elements")
 )
 
 // Validate enforces tag-based validation + the 3×2 matrix invariants described
@@ -98,10 +120,18 @@ func (p TaskPackage) Validate() error {
 			return fmt.Errorf("worktrees[%d]: %w", i, err)
 		}
 	}
+	for i, base := range p.PassBases {
+		if err := base.Validate(); err != nil {
+			return fmt.Errorf("pass_bases[%d]: %w", i, err)
+		}
+	}
 	if err := p.validateWorktreeMatrix(); err != nil {
 		return err
 	}
-	return p.validateWorktreePathBranchUniqueness()
+	if err := p.validateWorktreePathBranchUniqueness(); err != nil {
+		return err
+	}
+	return p.validatePassBases()
 }
 
 func (w WorktreeAllocation) Validate() error {
@@ -121,26 +151,81 @@ func (w WorktreeAllocation) Validate() error {
 	return nil
 }
 
+func (b PassBaseAllocation) Validate() error {
+	if err := validateStruct(b); err != nil {
+		return err
+	}
+	if err := EnsureCleanAbsolutePath(b.Path); err != nil {
+		switch {
+		case errors.Is(err, ErrPathNotAbsolute):
+			return fmt.Errorf("%w: path=%q", ErrWorktreePathNotAbsolute, b.Path)
+		case errors.Is(err, ErrPathNotClean), errors.Is(err, ErrPathContainsNUL):
+			return fmt.Errorf("%w: path=%q", ErrWorktreePathNotClean, b.Path)
+		default:
+			return err
+		}
+	}
+	return nil
+}
+
 // validateWorktreePathBranchUniqueness enforces that every WorktreeAllocation
 // in Worktrees[] has a globally unique (path, branch) pair across the matrix.
 // Two rows sharing either would corrupt the filesystem or git state at
 // step20/50 run-time (finding #4).
 func (p TaskPackage) validateWorktreePathBranchUniqueness() error {
-	paths := make(map[string]int, len(p.Worktrees))
-	branches := make(map[string]int, len(p.Worktrees))
+	paths := make(map[string]string, len(p.Worktrees)+len(p.PassBases))
+	branches := make(map[string]string, len(p.Worktrees)+len(p.PassBases))
 	for i, w := range p.Worktrees {
+		label := fmt.Sprintf("worktrees[%d]", i)
 		canonicalPath, err := CanonicalizePathForUniqueness(w.Path)
 		if err != nil {
 			return fmt.Errorf("worktrees[%d].path: %w", i, err)
 		}
 		if prev, dup := paths[canonicalPath]; dup {
-			return fmt.Errorf("%w: canonical_path=%q paths=%q,%q indices=%d,%d", ErrTaskPackageDuplicatePath, canonicalPath, p.Worktrees[prev].Path, w.Path, prev, i)
+			return fmt.Errorf("%w: canonical_path=%q allocations=%s,%s", ErrTaskPackageDuplicatePath, canonicalPath, prev, label)
 		}
-		paths[canonicalPath] = i
+		paths[canonicalPath] = label
 		if prev, dup := branches[w.Branch]; dup {
-			return fmt.Errorf("%w: branch=%q indices=%d,%d", ErrTaskPackageDuplicateBranch, w.Branch, prev, i)
+			return fmt.Errorf("%w: branch=%q allocations=%s,%s", ErrTaskPackageDuplicateBranch, w.Branch, prev, label)
 		}
-		branches[w.Branch] = i
+		branches[w.Branch] = label
+	}
+	for i, base := range p.PassBases {
+		label := fmt.Sprintf("pass_bases[%d]", i)
+		canonicalPath, err := CanonicalizePathForUniqueness(base.Path)
+		if err != nil {
+			return fmt.Errorf("pass_bases[%d].path: %w", i, err)
+		}
+		if prev, dup := paths[canonicalPath]; dup {
+			return fmt.Errorf("%w: canonical_path=%q allocations=%s,%s", ErrTaskPackageDuplicatePath, canonicalPath, prev, label)
+		}
+		paths[canonicalPath] = label
+		if prev, dup := branches[base.Branch]; dup {
+			return fmt.Errorf("%w: branch=%q allocations=%s,%s", ErrTaskPackageDuplicateBranch, base.Branch, prev, label)
+		}
+		branches[base.Branch] = label
+	}
+	return nil
+}
+
+func (p TaskPackage) validatePassBases() error {
+	if len(p.PassBases) == 0 {
+		return nil
+	}
+	if len(p.PassBases) != 2 {
+		return fmt.Errorf("%w: count=%d", ErrTaskPackagePassBaseSet, len(p.PassBases))
+	}
+	seen := map[int]int{}
+	for i, base := range p.PassBases {
+		if prev, dup := seen[base.Pass]; dup {
+			return fmt.Errorf("%w: pass=%d indices=%d,%d", ErrTaskPackagePassBaseDuplicate, base.Pass, prev, i)
+		}
+		seen[base.Pass] = i
+	}
+	for _, pass := range []int{1, 2} {
+		if _, ok := seen[pass]; !ok {
+			return fmt.Errorf("%w: missing_pass=%d", ErrTaskPackagePassBaseSet, pass)
+		}
 	}
 	return nil
 }

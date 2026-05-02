@@ -179,8 +179,10 @@ func syntheticCommitEnv() []string {
 	return append(processenv.GitLocalEnv(),
 		"GIT_AUTHOR_NAME=auto-improve",
 		"GIT_AUTHOR_EMAIL=auto-improve@example.invalid",
+		"GIT_AUTHOR_DATE=2000-01-01T00:00:00Z",
 		"GIT_COMMITTER_NAME=auto-improve",
 		"GIT_COMMITTER_EMAIL=auto-improve@example.invalid",
+		"GIT_COMMITTER_DATE=2000-01-01T00:00:00Z",
 	)
 }
 

@@ -88,6 +88,70 @@ func Cleanup(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.T
 			}
 		}
 	}
+	for _, base := range pkg.PassBases {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := runCtx.ValidatePassBaseAllocation(base); err != nil {
+			return err
+		}
+		wt := contracts.WorktreeAllocation{
+			Agent:   "a1",
+			Pass:    base.Pass,
+			Path:    base.Path,
+			Branch:  base.Branch,
+			BaseSHA: base.BaseSHA,
+			HeadSHA: base.HeadSHA,
+		}
+		if err := cleanupOne(ctx, runCtx, wt, remover); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cleanupOne(ctx context.Context, runCtx internalio.RunContext, wt contracts.WorktreeAllocation, remover Remover) error {
+	path := filepath.Clean(wt.Path)
+	cleanedWorktree := false
+	branchCleanupAllowed := true
+	var unregisteredErr error
+	if remover != nil {
+		if err := remover.RemoveWorktree(ctx, path); err != nil {
+			if errors.Is(err, ErrUnregistered) {
+				unregisteredErr = err
+				branchCleanupAllowed = false
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+		} else {
+			cleanedWorktree = true
+		}
+	}
+	if _, err := os.Lstat(path); err == nil {
+		if unregisteredErr != nil {
+			verifier, ok := remover.(UnregisteredWorktreeVerifier)
+			if !ok {
+				return unregisteredErr
+			}
+			if err := verifier.VerifyUnregisteredWorktreeRemoval(ctx, wt); err != nil {
+				return err
+			}
+			branchCleanupAllowed = true
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+		cleanedWorktree = true
+	} else if !os.IsNotExist(err) {
+		return err
+	} else {
+		cleanedWorktree = true
+	}
+	if branchRemover, ok := remover.(BranchRemover); ok && cleanedWorktree && branchCleanupAllowed && cleanupOwnsBranch(runCtx.RunID, wt) {
+		if err := branchRemover.DeleteBranch(ctx, wt.Branch); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -170,7 +234,8 @@ func (g RepoGit) VerifyUnregisteredWorktreeRemoval(ctx context.Context, allocati
 
 func cleanupOwnsBranch(runID contracts.RunID, wt contracts.WorktreeAllocation) bool {
 	want := fmt.Sprintf("auto-improve/%s/pass%d/%s", runID, wt.Pass, wt.Agent)
-	return wt.Branch == want
+	baseWant := fmt.Sprintf("auto-improve/%s/pass%d/base", runID, wt.Pass)
+	return wt.Branch == want || wt.Branch == baseWant
 }
 
 func (g RepoGit) pruneMissing(ctx context.Context, path string) error {

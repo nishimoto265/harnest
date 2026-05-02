@@ -4,6 +4,7 @@ type snapshot struct {
 	registry        []byte
 	registryPresent bool
 	rules           map[string][]byte
+	files           map[string][]byte
 }
 
 type SnapshotMetadata struct {

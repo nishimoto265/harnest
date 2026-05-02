@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/agents"
@@ -140,6 +142,18 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	if err != nil {
 		return err
 	}
+	candidatesPath, err := run.IO.ResolveRunRelative(filepath.Join("40", "candidates.json"))
+	if err != nil {
+		return err
+	}
+	rulePayloads, err := candidaterules.LoadRulePayloads(candidatesPath)
+	if err != nil {
+		return fmt.Errorf("step50: load rule payloads: %w", err)
+	}
+	activeRules, err := policyrepo.LoadActiveRulesForRun(run.IO)
+	if err != nil {
+		return fmt.Errorf("step50: load active policy rules: %w", err)
+	}
 
 	agentDir, err := agentDir(run.IO, run.Pass, run.Agent)
 	if err != nil {
@@ -158,6 +172,10 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	}
 	defer leaseLock.Unlock()
 
+	allocation, err = s.ensurePreparedPass2Allocation(ctx, run, allocation, activeRules, rulePayloads)
+	if err != nil {
+		return err
+	}
 	allocation, err = ensureAllocationWorktreeBeforeResume(ctx, run, allocation, agentDir)
 	if err != nil {
 		return err
@@ -170,19 +188,7 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	}
 
 	deadline := stepStartedAt.Add(timeout)
-	candidatesPath, err := run.IO.ResolveRunRelative(filepath.Join("40", "candidates.json"))
-	if err != nil {
-		return err
-	}
-	rulePayloads, err := candidaterules.LoadRulePayloads(candidatesPath)
-	if err != nil {
-		return fmt.Errorf("step50: load rule payloads: %w", err)
-	}
-	activeRules, err := policyrepo.LoadActiveRulesForRun(run.IO)
-	if err != nil {
-		return fmt.Errorf("step50: load active policy rules: %w", err)
-	}
-	if err := policyoverlay.Apply(allocation.Path, activeRules, policyoverlay.ExperimentsFromRulePayloads(rulePayloads)); err != nil {
+	if err := policyoverlay.ApplyWithSnapshot(allocation.Path, filepath.Join(run.IO.RunDir(), "policy"), activeRules, policyoverlay.ExperimentsFromRulePayloads(rulePayloads)); err != nil {
 		return fmt.Errorf("step50: apply policy overlay: %w", err)
 	}
 	allocation, err = commitPolicyOverlayBase(ctx, allocation, run.TaskPackage.RunID)
@@ -318,4 +324,137 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 		return finalizeErr
 	}
 	return clearActiveLease(agentDir)
+}
+
+func (s *Step) ensurePreparedPass2Allocation(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, activeRules []policyrepo.ActiveRule, rulePayloads []candidaterules.RulePayload) (contracts.WorktreeAllocation, error) {
+	if len(run.TaskPackage.PassBases) == 0 {
+		return allocation, nil
+	}
+	passBase, err := passBaseFor(run.TaskPackage, passNumber)
+	if err != nil {
+		return allocation, err
+	}
+	if err := run.IO.ValidatePassBaseAllocation(passBase); err != nil {
+		return allocation, err
+	}
+	passDir, err := run.IO.ResolveRunRelative("50-pass2")
+	if err != nil {
+		return allocation, err
+	}
+	if err := ensureDir(passDir); err != nil {
+		return allocation, err
+	}
+	lock, err := internalio.AcquireFileLockContext(ctx, filepath.Join(passDir, ".pass-base.lock"))
+	if err != nil {
+		return allocation, err
+	}
+	defer lock.Unlock()
+
+	if latest, err := internalio.ReadJSON[contracts.TaskPackage](run.IO.TaskPackagePath()); err == nil && latest.RunID == run.TaskPackage.RunID {
+		run.TaskPackage.PassBases = latest.PassBases
+		run.TaskPackage.Worktrees = latest.Worktrees
+		passBase, err = passBaseFor(run.TaskPackage, passNumber)
+		if err != nil {
+			return allocation, err
+		}
+		if err := run.IO.ValidatePassBaseAllocation(passBase); err != nil {
+			return allocation, err
+		}
+	}
+	repoRoot, err := run.Config.RepoRoot()
+	if err != nil {
+		return allocation, err
+	}
+	if err := ensurePassBaseWorktree(ctx, repoRoot, passBase); err != nil {
+		return allocation, err
+	}
+	if err := policyoverlay.ApplyWithSnapshot(passBase.Path, filepath.Join(run.IO.RunDir(), "policy"), activeRules, policyoverlay.ExperimentsFromRulePayloads(rulePayloads)); err != nil {
+		return allocation, fmt.Errorf("step50: apply pass base policy overlay: %w", err)
+	}
+	passBase, err = commitPolicyOverlayPassBase(ctx, passBase, run.TaskPackage.RunID)
+	if err != nil {
+		return allocation, err
+	}
+	if err := persistPreparedPass2Base(run, passBase); err != nil {
+		return allocation, err
+	}
+	allocation.BaseSHA = passBase.HeadSHA
+	allocation.HeadSHA = passBase.HeadSHA
+	return allocation, nil
+}
+
+func ensurePassBaseWorktree(ctx context.Context, repoRoot string, allocation contracts.PassBaseAllocation) error {
+	if err := internalio.EnsureNoSymlinkPathComponents(allocation.Path); err != nil {
+		return fmt.Errorf("step50: pass base path rejected: %w", err)
+	}
+	if info, err := os.Lstat(allocation.Path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("step50: pass base path is a symlink: %s", allocation.Path)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("step50: pass base path is not a directory: %s", allocation.Path)
+		}
+		currentBranch, err := gitOutputContext(ctx, strings.TrimSpace, allocation.Path, "branch", "--show-current")
+		if err != nil {
+			return err
+		}
+		if currentBranch != allocation.Branch {
+			return fmt.Errorf("step50: pass base branch mismatch: path=%s want=%s got=%s", allocation.Path, allocation.Branch, currentBranch)
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := ensureDir(filepath.Dir(allocation.Path)); err != nil {
+		return err
+	}
+	if err := runGitCommand(ctx, repoRoot, "worktree", "prune"); err != nil {
+		return err
+	}
+	ref := allocation.BaseSHA
+	if allocation.HeadSHA != "" && allocation.HeadSHA != allocation.BaseSHA {
+		ref = allocation.HeadSHA
+	}
+	err := runGitCommand(ctx, repoRoot, "worktree", "add", "-B", allocation.Branch, allocation.Path, ref)
+	if err == nil || ref == allocation.BaseSHA {
+		return err
+	}
+	return runGitCommand(ctx, repoRoot, "worktree", "add", "-B", allocation.Branch, allocation.Path, allocation.BaseSHA)
+}
+
+func persistPreparedPass2Base(run RunContext, passBase contracts.PassBaseAllocation) error {
+	if run.TaskPackage == nil || passBase.Pass != passNumber || passBase.HeadSHA == "" {
+		return nil
+	}
+	pkg := *run.TaskPackage
+	pkg.PassBases = append([]contracts.PassBaseAllocation(nil), run.TaskPackage.PassBases...)
+	pkg.Worktrees = append([]contracts.WorktreeAllocation(nil), run.TaskPackage.Worktrees...)
+	changed := false
+	for i := range pkg.PassBases {
+		if pkg.PassBases[i].Pass != passNumber {
+			continue
+		}
+		if pkg.PassBases[i].HeadSHA != passBase.HeadSHA {
+			pkg.PassBases[i].HeadSHA = passBase.HeadSHA
+			changed = true
+		}
+	}
+	for i := range pkg.Worktrees {
+		if pkg.Worktrees[i].Pass != passNumber {
+			continue
+		}
+		if pkg.Worktrees[i].BaseSHA != passBase.HeadSHA || pkg.Worktrees[i].HeadSHA != passBase.HeadSHA {
+			pkg.Worktrees[i].BaseSHA = passBase.HeadSHA
+			pkg.Worktrees[i].HeadSHA = passBase.HeadSHA
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := internalio.WriteJSONAtomic(run.IO.TaskPackagePath(), pkg); err != nil {
+		return err
+	}
+	*run.TaskPackage = pkg
+	return nil
 }

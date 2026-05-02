@@ -180,3 +180,34 @@ func TestLessonsInstallGuidance(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(agentsBody), "@.auto-improve/checklist.md")
 }
+
+func TestLessonsInstallGuidanceDryRunDoesNotWrite(t *testing.T) {
+	root := t.TempDir()
+	var stdout bytes.Buffer
+	cmd := newRootCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stdout)
+	cmd.SetArgs([]string{"lessons", "install-guidance", "--root", root, "--provider", "claude", "--dry-run"})
+
+	require.NoError(t, cmd.Execute())
+
+	var got struct {
+		Event string   `json:"event"`
+		Files []string `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+	assert.Equal(t, "guidance_install_planned", got.Event)
+	assert.Contains(t, got.Files, filepath.Join(root, "CLAUDE.md"))
+	_, err := os.Stat(filepath.Join(root, "CLAUDE.md"))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestLessonsInstallGuidanceCheckReportsStale(t *testing.T) {
+	root := t.TempDir()
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"lessons", "install-guidance", "--root", root, "--provider", "claude", "--check"})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "guidance is stale")
+}

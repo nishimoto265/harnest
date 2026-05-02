@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
+	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -111,6 +112,25 @@ func TestEnsureAllocationWorktreeBeforeResume_AdoptsPolicyOnlyOverlayHeadWithout
 	require.NoError(t, err)
 	assert.Equal(t, overlayHead, updated.BaseSHA)
 	assert.Equal(t, overlayHead, updated.HeadSHA)
+}
+
+func TestEnsurePreparedPass2AllocationDoesNotVerifyAgentWorktree(t *testing.T) {
+	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
+	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "dirty.txt"), []byte("in-progress\n"), 0o644))
+
+	baseSHA := env.run.TaskPackage.BaseSHA
+	runID := string(env.run.TaskPackage.RunID)
+	env.run.TaskPackage.PassBases = []contracts.PassBaseAllocation{
+		{Pass: 1, Path: filepath.Join(env.run.IO.WorktreeBase, runID+"-pass1-base"), Branch: "test/pass1/base", BaseSHA: baseSHA, HeadSHA: baseSHA},
+		{Pass: 2, Path: filepath.Join(env.run.IO.WorktreeBase, runID+"-pass2-base"), Branch: "test/pass2/base", BaseSHA: baseSHA, HeadSHA: baseSHA},
+	}
+
+	updated, err := (&Step{}).ensurePreparedPass2Allocation(context.Background(), env.run, allocation, nil, nil)
+	require.NoError(t, err)
+	assert.NotEqual(t, baseSHA, updated.HeadSHA)
+	assert.FileExists(t, filepath.Join(allocation.Path, "dirty.txt"))
 }
 
 func TestCommitPolicyOverlayBase_RejectsAdvancedImplementationHead(t *testing.T) {

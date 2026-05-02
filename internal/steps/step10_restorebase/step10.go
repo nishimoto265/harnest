@@ -5,9 +5,9 @@
 //  1. Fetches PR metadata (title/body/merge commit/linked issues) via `gh`.
 //  2. Resolves the immutable PR code base used for implementation worktrees
 //     and task reconstruction.
-//  3. Carves 6 git worktrees from that code base (pass1 × 3 agents + pass2 ×
-//     3 agents). Harness/policy files are treated as evaluation overlay, not
-//     persistent implementation output.
+//  3. Prepares the pass1 base worktree/branch and fans out pass1 agent
+//     worktrees. Pass2 agent worktrees are intentionally deferred until step50
+//     has step40 candidate lessons.
 //  4. Reconstructs the task prompt (NOT sanitized; downstream sanitizes).
 //  5. Atomically writes `<run>/task-package.json` and `<run>/base.sha`.
 //  6. Returns a validated Step10Response.
@@ -148,7 +148,12 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 		}
 	}
 
-	worktrees, created, err := r.carveWorktrees(ctx, in, agents, baseSHA)
+	activeRules, err := policyrepo.LoadActiveRulesForRun(in.RunCtx)
+	if err != nil {
+		return Result{}, fmt.Errorf("step10: load active policy rules: %w", err)
+	}
+	preparePolicyBase := in.HarnessFiles || len(activeRules) > 0
+	passBases, worktrees, created, err := r.carveWorktrees(ctx, in, agents, baseSHA, activeRules, preparePolicyBase)
 	if err != nil {
 		return Result{}, err
 	}
@@ -174,6 +179,7 @@ func (r *Runner) Run(ctx context.Context, in Input) (Result, error) {
 		BestBranch:              in.BestBranch,
 		ReconstructedTaskPrompt: prompt,
 		Worktrees:               worktrees,
+		PassBases:               passBases,
 		CreatedAt:               now(),
 	}
 	if err := pkg.Validate(); err != nil {
@@ -335,30 +341,56 @@ func (r *Runner) resolveRepoSlug(ctx context.Context, repoRoot, configuredRepo s
 
 // carveWorktrees iterates (pass, agent) in deterministic order (pass 1 first,
 // agents in the order given) calling GitClient.WorktreeAdd for each.
-func (r *Runner) carveWorktrees(ctx context.Context, in Input, agents []contracts.AgentID, baseSHA string) ([]contracts.WorktreeAllocation, int, error) {
+func (r *Runner) carveWorktrees(ctx context.Context, in Input, agents []contracts.AgentID, baseSHA string, activeRules []policyrepo.ActiveRule, preparePolicyBase bool) ([]contracts.PassBaseAllocation, []contracts.WorktreeAllocation, int, error) {
 	runID := string(in.RunCtx.RunID)
 	worktrees := make([]contracts.WorktreeAllocation, 0, len(agents)*2)
+	passBases := make([]contracts.PassBaseAllocation, 0, 2)
 	created := 0
 	for pass := 1; pass <= 2; pass++ {
-		for _, agent := range agents {
-			path := filepath.Join(in.RunCtx.WorktreeBase, fmt.Sprintf("%s-pass%d-%s", runID, pass, agent))
-			branch := fmt.Sprintf("auto-improve/%s/pass%d/%s", runID, pass, agent)
-			isNew, err := r.Git.WorktreeAdd(ctx, in.RepoRoot, path, branch, baseSHA)
+		base := contracts.PassBaseAllocation{
+			Pass:    pass,
+			Path:    filepath.Join(in.RunCtx.WorktreeBase, fmt.Sprintf("%s-pass%d-base", runID, pass)),
+			Branch:  fmt.Sprintf("auto-improve/%s/pass%d/base", runID, pass),
+			BaseSHA: baseSHA,
+			HeadSHA: baseSHA,
+		}
+		if pass == 1 {
+			isNew, err := r.Git.WorktreeAdd(ctx, in.RepoRoot, base.Path, base.Branch, baseSHA)
 			if err != nil {
-				return nil, 0, fmt.Errorf("step10: worktree add (pass=%d agent=%s): %w", pass, agent, err)
+				return nil, nil, 0, fmt.Errorf("step10: pass base worktree add (pass=%d): %w", pass, err)
 			}
 			if isNew {
 				created++
+			}
+			if preparePolicyBase {
+				base, err = r.Git.PreparePassBase(ctx, base, in.RunCtx.RunID, filepath.Join(in.RunCtx.RunDir(), "policy"), activeRules, nil)
+				if err != nil {
+					return nil, nil, 0, fmt.Errorf("step10: prepare pass base (pass=%d): %w", pass, err)
+				}
+			}
+		}
+		passBases = append(passBases, base)
+		for _, agent := range agents {
+			path := filepath.Join(in.RunCtx.WorktreeBase, fmt.Sprintf("%s-pass%d-%s", runID, pass, agent))
+			branch := fmt.Sprintf("auto-improve/%s/pass%d/%s", runID, pass, agent)
+			if pass == 1 {
+				isNew, err := r.Git.WorktreeAdd(ctx, in.RepoRoot, path, branch, base.HeadSHA)
+				if err != nil {
+					return nil, nil, 0, fmt.Errorf("step10: worktree add (pass=%d agent=%s): %w", pass, agent, err)
+				}
+				if isNew {
+					created++
+				}
 			}
 			worktrees = append(worktrees, contracts.WorktreeAllocation{
 				Agent:   agent,
 				Pass:    pass,
 				Path:    path,
 				Branch:  branch,
-				BaseSHA: baseSHA,
-				HeadSHA: baseSHA,
+				BaseSHA: base.HeadSHA,
+				HeadSHA: base.HeadSHA,
 			})
 		}
 	}
-	return worktrees, created, nil
+	return passBases, worktrees, created, nil
 }

@@ -180,7 +180,7 @@ func TestRun_RebaseMergedPR_UsesGitMergeBase(t *testing.T) {
 	res, err := runner.Run(context.Background(), in)
 	require.NoError(t, err)
 	assert.Equal(t, testBaseSHA, res.Response.BaseSHA)
-	assert.Equal(t, 6, res.Response.WorktreesCreated)
+	assert.Equal(t, 4, res.Response.WorktreesCreated)
 	assert.Contains(t, git.fetched, in.RepoRoot+"::"+testBaseSHA)
 	assert.Contains(t, git.fetched, in.RepoRoot+"::"+testBaseRefOID)
 }
