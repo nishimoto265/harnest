@@ -150,6 +150,32 @@ func TestFilesystemResolver_PolicyOnlyAdoptDoesNotPushImplementationCommit(t *te
 	assert.Equal(t, strings.Repeat("1", 40), decision.BestShaBefore)
 	assert.Equal(t, strings.Repeat("1", 40), decision.TargetSha)
 }
+
+func TestFilesystemResolver_PolicyOnlyAdoptAllowsMissingBestBranch(t *testing.T) {
+	runCtx, pkg, candidates := seedFilesystemResolverFixture(t)
+	resolver := FilesystemResolver{
+		RepoDir: runCtx.RunsBase,
+		Now:     fixedNow(),
+	}
+	target, ok, err := resolver.Resolve(runCtx, pkg, candidates)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	store := newMemStore(intentionPath(t, runCtx))
+	git := &fakeGit{head: ""}
+	require.NoError(t, Run(context.Background(), 42, runCtx, pkg, candidates, store, Deps{
+		Git:      git,
+		Resolver: &fixtureResolver{target: target},
+		Now:      fixedNow(),
+	}))
+
+	assert.Empty(t, git.pushCalls)
+	decision := mustDecisionAdopt(t, readDecision(t, runCtx))
+	assert.True(t, decision.PolicyOnly)
+	assert.Empty(t, decision.BestShaBefore)
+	assert.Empty(t, decision.TargetSha)
+}
+
 func TestHandleRollback_PolicyOnlyPreRegistryDoesNotRequirePushOwnership(t *testing.T) {
 	runCtx, pkg, candidates, _, resolver := newFixtureWithResolver(t, "PR421")
 	resolver.target.PolicyOnly = true

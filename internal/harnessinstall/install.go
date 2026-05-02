@@ -170,7 +170,9 @@ Before creating a PR, update .auto-improve/work/checklist-result.md:
 Then run:
 
 %s
-%s`, markdownBegin, "auto-improve lessons prepare-checklist-result --force", "auto-improve lessons verify-checklist-result", markdownEnd)) + "\n"
+%s`, markdownBegin, `AUTO_IMPROVE_BIN="${AUTO_IMPROVE_BIN:-auto-improve}"
+"$AUTO_IMPROVE_BIN" lessons prepare-checklist-result --force`, `AUTO_IMPROVE_BIN="${AUTO_IMPROVE_BIN:-auto-improve}"
+"$AUTO_IMPROVE_BIN" lessons verify-checklist-result`, markdownEnd)) + "\n"
 }
 
 func guidanceTemplate(install InstallOptions, provider string) string {
@@ -201,12 +203,15 @@ AUTO_IMPROVE_BIN="${AUTO_IMPROVE_BIN:-auto-improve}"
 if ! "$AUTO_IMPROVE_BIN" lessons verify-checklist-result --root "$ROOT" >/dev/null; then
   cat >&2 <<'EOF'
 auto-improve checklist is incomplete.
-Run: auto-improve lessons prepare-checklist-result --force
+Run:
+  AUTO_IMPROVE_BIN="${AUTO_IMPROVE_BIN:-auto-improve}"
+  "$AUTO_IMPROVE_BIN" lessons prepare-checklist-result --force
 Then mark every item in .auto-improve/work/checklist-result.md:
   [x] compliant
   [-] not applicable
   [!] valid exception with an indented reason:
-Then run: auto-improve lessons verify-checklist-result
+Then run:
+  "$AUTO_IMPROVE_BIN" lessons verify-checklist-result
 EOF
   exit 2
 fi

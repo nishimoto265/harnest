@@ -93,7 +93,7 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 	}
 	result := CommandResult{StartedAt: now().UTC()}
 	if err := cmd.Start(); err != nil {
-		return CommandResult{}, err
+		return CommandResult{}, fmt.Errorf("%s: start command binary=%s workdir=%s: %w", req.ErrPrefix, req.Binary, req.Workdir, err)
 	}
 	tracker := req.StartDescendantTracker(cmd.Process.Pid, 25*time.Millisecond)
 	lease, err := req.ResolveProcessLease(cmd.Process.Pid)

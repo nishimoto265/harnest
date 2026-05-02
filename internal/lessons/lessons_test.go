@@ -253,7 +253,8 @@ func TestInstallGuidanceAddsManagedBlocksAndHooks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(agentsBody), "Keep me.")
 	assert.Contains(t, string(agentsBody), "@.auto-improve/checklist.md")
-	assert.Contains(t, string(agentsBody), "auto-improve lessons verify-checklist-result")
+	assert.Contains(t, string(agentsBody), "AUTO_IMPROVE_BIN")
+	assert.Contains(t, string(agentsBody), "lessons verify-checklist-result")
 
 	claudeSettings, err := os.ReadFile(filepath.Join(root, ".claude", "settings.json"))
 	require.NoError(t, err)

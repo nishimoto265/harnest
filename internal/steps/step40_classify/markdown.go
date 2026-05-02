@@ -105,6 +105,10 @@ func lessonIDFromSource(sourceID string) string {
 	return id
 }
 
+func experimentLessonPath(lessonID string) string {
+	return filepath.Join(experimentLessonsDirPath, lessonID+".md")
+}
+
 func lessonMetadataForEvidence(sourceID string, evidence candidateEvidence) lessons.Metadata {
 	return lessons.Metadata{
 		Status:     lessons.StatusActive,

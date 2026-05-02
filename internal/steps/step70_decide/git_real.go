@@ -44,8 +44,9 @@ func (g RealGitOps) RemoteHead(ctx context.Context, branch string) (string, erro
 func (g RealGitOps) PushForceWithLease(ctx context.Context, branch, targetSHA, expected string) error {
 	remote := g.remoteName()
 	remoteURL := g.remotePushURL(ctx, remote)
-	refspec := fmt.Sprintf("%s:%s", targetSHA, branch)
-	lease := fmt.Sprintf("--force-with-lease=%s:%s", branch, expected)
+	branchRef := remoteBranchRef(branch)
+	refspec := fmt.Sprintf("%s:%s", targetSHA, branchRef)
+	lease := fmt.Sprintf("--force-with-lease=%s:%s", branchRef, expected)
 	cmd, err := processenv.TrustedCommandContext(ctx, "git", "-C", g.RepoDir, "push", remote, refspec, lease)
 	if err != nil {
 		return err
@@ -65,6 +66,13 @@ func (g RealGitOps) PushForceWithLease(ctx context.Context, branch, targetSHA, e
 		return err
 	}
 	return nil
+}
+
+func remoteBranchRef(branch string) string {
+	if strings.HasPrefix(branch, "refs/") {
+		return branch
+	}
+	return "refs/heads/" + branch
 }
 
 func (g RealGitOps) RemoveWorktree(ctx context.Context, path string) error {

@@ -229,13 +229,13 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 		Prompt:      promptText,
 		SessionPath: sessionPath,
 		Timeout:     remaining,
-		Env: append([]string{
+		Env: append(append([]string{
 			"AUTO_IMPROVE_STEP=20",
 			"AUTO_IMPROVE_PASS=1",
 			"AUTO_IMPROVE_AGENT=" + string(run.Agent),
 			"AUTO_IMPROVE_RUN_ID=" + string(run.IO.RunID),
 			"AUTO_IMPROVE_OUTPUT_DIR=" + manifestPrefix(run.Pass, run.Agent),
-		}, agentrunner.ProfileEnv(implementer)...),
+		}, agentrunner.CurrentExecutableEnv()...), agentrunner.ProfileEnv(implementer)...),
 		OnStart: func(lease agentrunner.ProcessLease, startedAt time.Time) error {
 			state := resumeState{
 				ExpectedBaseSHA: allocation.BaseSHA,

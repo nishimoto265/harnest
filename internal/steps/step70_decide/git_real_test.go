@@ -38,6 +38,25 @@ func TestRealGitOpsRemoteHeadAndPushForceWithLeaseLocalBareOrigin(t *testing.T) 
 	assert.Equal(t, target, remoteHead)
 }
 
+func TestRealGitOpsPushForceWithLeaseCreatesMissingBranchFromRawSHA(t *testing.T) {
+	fixture := newRealGitFixture(t)
+	ctx := context.Background()
+	gitOps := RealGitOps{RepoDir: fixture.repo, Remote: "origin"}
+
+	branch := "auto-improve/new-best"
+	target := fixture.commit(t, fixture.repo, "new-best.txt", "new best\n", "new best")
+
+	remoteHead, err := gitOps.RemoteHead(ctx, branch)
+	require.NoError(t, err)
+	assert.Empty(t, remoteHead)
+
+	require.NoError(t, gitOps.PushForceWithLease(ctx, branch, target, ""))
+
+	remoteHead, err = gitOps.RemoteHead(ctx, branch)
+	require.NoError(t, err)
+	assert.Equal(t, target, remoteHead)
+}
+
 func TestRealGitOpsPushForceWithLeaseClassifiesStaleLease(t *testing.T) {
 	fixture := newRealGitFixture(t)
 	ctx := context.Background()
@@ -167,7 +186,7 @@ exit 1
 	assert.Contains(t, env, "ARGS:-C /tmp/repo remote get-url origin")
 	assert.Contains(t, env, "ARGS:-C /tmp/repo remote get-url --push --all origin")
 	assert.Contains(t, env, "ARGS:-C /tmp/repo ls-remote --heads origin "+realGitBranch)
-	assert.Contains(t, env, "ARGS:-C /tmp/repo push origin "+strings.Repeat("b", 40)+":"+realGitBranch)
+	assert.Contains(t, env, "ARGS:-C /tmp/repo push origin "+strings.Repeat("b", 40)+":refs/heads/"+realGitBranch)
 	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.com/.extraheader")
 	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.example.com/.extraheader")
 	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+header)

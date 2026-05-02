@@ -105,8 +105,7 @@ func adoptExistingPolicyOverlayHead(ctx context.Context, allocation contracts.Wo
 }
 
 func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeAllocation, run RunContext) (string, string, error) {
-	addArgs := append([]string{"add", "-A", "--", "."}, implementationCommitExcludedPathspecs...)
-	if _, err := gitOutputContext(ctx, identity, allocation.Path, addArgs...); err != nil {
+	if err := stageImplementationChanges(ctx, allocation.Path); err != nil {
 		return "", "", err
 	}
 	if err := unstagePolicyArtifacts(ctx, allocation); err != nil {
@@ -133,6 +132,28 @@ func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeA
 		return "", "", err
 	}
 	return commitSHA, parent, nil
+}
+
+func stageImplementationChanges(ctx context.Context, worktreePath string) error {
+	if _, err := gitOutputContext(ctx, identity, worktreePath, "add", "-u"); err != nil {
+		return err
+	}
+	untracked, err := gitOutputBytesContext(ctx, worktreePath, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return err
+	}
+	for _, entry := range strings.Split(string(untracked), "\x00") {
+		if entry == "" || policyartifact.Is(entry) {
+			continue
+		}
+		if err := contracts.EnsureCleanRelativePath(entry); err != nil {
+			return err
+		}
+		if _, err := gitOutputContext(ctx, identity, worktreePath, "add", "--", entry); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func unstagePolicyArtifacts(ctx context.Context, allocation contracts.WorktreeAllocation) error {

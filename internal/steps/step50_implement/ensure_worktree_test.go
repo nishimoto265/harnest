@@ -119,6 +119,12 @@ func TestEnsurePreparedPass2AllocationDoesNotVerifyAgentWorktree(t *testing.T) {
 	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "dirty.txt"), []byte("in-progress\n"), 0o644))
+	allocationA2, err := worktreeFor(env.run.TaskPackage, 2, "a2")
+	require.NoError(t, err)
+	allocationA3, err := worktreeFor(env.run.TaskPackage, 2, "a3")
+	require.NoError(t, err)
+	require.NoDirExists(t, allocationA2.Path)
+	require.NoDirExists(t, allocationA3.Path)
 
 	baseSHA := env.run.TaskPackage.BaseSHA
 	runID := string(env.run.TaskPackage.RunID)
@@ -131,6 +137,10 @@ func TestEnsurePreparedPass2AllocationDoesNotVerifyAgentWorktree(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, baseSHA, updated.HeadSHA)
 	assert.FileExists(t, filepath.Join(allocation.Path, "dirty.txt"))
+	assert.DirExists(t, allocationA2.Path)
+	assert.DirExists(t, allocationA3.Path)
+	assert.Equal(t, updated.HeadSHA, strings.TrimSpace(runCommand(t, allocationA2.Path, "git", "rev-parse", "HEAD")))
+	assert.Equal(t, updated.HeadSHA, strings.TrimSpace(runCommand(t, allocationA3.Path, "git", "rev-parse", "HEAD")))
 }
 
 func TestCommitPolicyOverlayBase_RejectsAdvancedImplementationHead(t *testing.T) {

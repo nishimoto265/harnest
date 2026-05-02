@@ -3,8 +3,8 @@ package step40_classify
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
@@ -12,6 +12,8 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/lessons"
 	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
 )
+
+const maxStep40Candidates = 10
 
 func buildCandidates(runIO internalio.RunContext, now time.Time, scores []contracts.ScoreEntry, compliance []contracts.ComplianceEntry, issues []contracts.IssueEntry, registry []contracts.RuleRegistryEntry, registryBase string) ([]builtCandidate, error) {
 	latestScores := scorecore.CollapseFinalScores(scores)
@@ -35,12 +37,17 @@ func buildCandidates(runIO internalio.RunContext, now time.Time, scores []contra
 		ruleIDs = append(ruleIDs, ruleID)
 	}
 	sort.Strings(ruleIDs)
+	explicitIssues := collectIssueEvidence(latestIssues)
+	emittedRuleIDs := make(map[string]struct{}, len(ruleIDs)+len(explicitIssues))
 
 	candidates := make([]builtCandidate, 0, len(ruleIDs))
 	for idx, ruleID := range ruleIDs {
 		evidence, err := collectCandidateEvidence(runIO, ruleID, latestCompliance, latestScores)
 		if err != nil {
 			return nil, err
+		}
+		if issue, ok := explicitIssues[ruleID]; ok {
+			evidence = mergeIssueIntoCandidateEvidence(evidence, issue)
 		}
 		candidate, ok, err := buildCandidate(runIO.RunID, now, idx+1, ruleID, violations[ruleID], activeRules[ruleID], activeRuleBodies, evidence)
 		if err != nil {
@@ -49,12 +56,15 @@ func buildCandidates(runIO internalio.RunContext, now time.Time, scores []contra
 		if !ok {
 			continue
 		}
+		emittedRuleIDs[ruleID] = struct{}{}
 		candidates = append(candidates, candidate)
 	}
 
-	explicitIssues := collectIssueEvidence(latestIssues)
 	issueRuleIDs := make([]string, 0, len(explicitIssues))
 	for ruleID := range explicitIssues {
+		if _, emitted := emittedRuleIDs[ruleID]; emitted {
+			continue
+		}
 		issueRuleIDs = append(issueRuleIDs, ruleID)
 	}
 	sort.Strings(issueRuleIDs)
@@ -89,7 +99,7 @@ func buildCandidates(runIO internalio.RunContext, now time.Time, scores []contra
 			candidates = append(candidates, candidate)
 		}
 	}
-	return candidates, nil
+	return selectStep40Candidates(candidates, maxStep40Candidates), nil
 }
 
 func buildCandidate(runID contracts.RunID, now time.Time, index int, ruleID string, violationCount int, existsInRegistry bool, activeRuleBodies map[string]string, evidence candidateEvidence) (builtCandidate, bool, error) {
@@ -166,12 +176,12 @@ type candidateBuildSpec struct {
 }
 
 func buildLessonCandidate(spec candidateBuildSpec) (builtCandidate, bool, error) {
-	candidateID := fmt.Sprintf("cand-%s-%03d", spec.runID, spec.index)
+	candidateID := fmt.Sprintf("cand-%s-%03d", strings.ToLower(string(spec.runID)), spec.index)
 	lessonID := lessonIDFromSource(spec.ruleID)
 	title := fmt.Sprintf("Experiment lesson for %s", lessonID)
 	rationale := candidateRationale(spec.ruleID, spec.evidence)
 	checklistItem := checklistItemForEvidence(spec.ruleID, spec.evidence)
-	bodyPath := filepath.Join(experimentLessonsDirPath, lessonID+".md")
+	bodyPath := experimentLessonPath(lessonID)
 	draftBody := experimentLessonBodyMarkdown(contracts.Candidate{
 		CandidateID:      candidateID,
 		Kind:             contracts.CandidateKindNew,
@@ -243,4 +253,53 @@ func buildLessonCandidate(spec candidateBuildSpec) (builtCandidate, bool, error)
 		},
 		Classification: classification,
 	}, true, nil
+}
+
+func mergeIssueIntoCandidateEvidence(evidence candidateEvidence, issue issueEvidence) candidateEvidence {
+	evidence.Issues = uniqueSortedStrings(append(evidence.Issues, issue.Issues...))
+	evidence.Guidance = uniqueSortedStrings(append(evidence.Guidance, issue.Guidance...))
+	if evidence.Checklist == "" {
+		evidence.Checklist = issue.ChecklistItem
+	}
+	return evidence
+}
+
+func selectStep40Candidates(candidates []builtCandidate, limit int) []builtCandidate {
+	if limit <= 0 || len(candidates) <= limit {
+		return candidates
+	}
+	type rankedCandidate struct {
+		candidate builtCandidate
+		index     int
+	}
+	ranked := make([]rankedCandidate, len(candidates))
+	for i, candidate := range candidates {
+		ranked[i] = rankedCandidate{candidate: candidate, index: i}
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		left := ranked[i]
+		right := ranked[j]
+		if severityRankForLesson(left.candidate.Lesson.Metadata.Severity) != severityRankForLesson(right.candidate.Lesson.Metadata.Severity) {
+			return severityRankForLesson(left.candidate.Lesson.Metadata.Severity) < severityRankForLesson(right.candidate.Lesson.Metadata.Severity)
+		}
+		if evidenceWeight(left.candidate.Body) != evidenceWeight(right.candidate.Body) {
+			return evidenceWeight(left.candidate.Body) > evidenceWeight(right.candidate.Body)
+		}
+		return left.index < right.index
+	})
+	selected := ranked[:limit]
+	sort.Slice(selected, func(i, j int) bool {
+		return selected[i].index < selected[j].index
+	})
+	out := make([]builtCandidate, len(selected))
+	for i, item := range selected {
+		out[i] = item.candidate
+	}
+	return out
+}
+
+func evidenceWeight(body string) int {
+	return strings.Count(body, "- compliance:")*3 +
+		strings.Count(body, "- issue:")*2 +
+		strings.Count(body, "- scoring:")
 }

@@ -59,6 +59,42 @@ func TestSynthesizeSuccessCommit_SetsIdentityUnderHardenedGitEnv(t *testing.T) {
 	require.Contains(t, commit, "committer auto-improve <auto-improve@example.invalid>")
 }
 
+func TestSynthesizeSuccessCommit_SkipsIgnoredChecklistArtifact(t *testing.T) {
+	repo := t.TempDir()
+	runCommand(t, "", "git", "init", "-b", "main", repo)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644))
+	runCommand(t, repo, "git", "add", "README.md")
+	runCommand(t, repo, "git", "-c", "user.name=Seed User", "-c", "user.email=seed@example.invalid", "commit", "-m", "base")
+	runCommand(t, repo, "git", "checkout", "-b", "auto-improve/test/pass2/a1")
+	baseSHA := strings.TrimSpace(runCommand(t, repo, "git", "rev-parse", "HEAD"))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("/checklist-result.json\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "implemented.txt"), []byte("implementation\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, checklistFileName), []byte(`{"schema_version":"1","run_id":"2026-04-21-PR42-abcdef0","pass":2,"agent":"a1","items":[]}`), 0o644))
+
+	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
+	runIO, err := internalio.NewRunContext(runID, t.TempDir(), t.TempDir())
+	require.NoError(t, err)
+	allocation := contracts.WorktreeAllocation{
+		Agent:   "a1",
+		Pass:    2,
+		Path:    repo,
+		Branch:  "auto-improve/test/pass2/a1",
+		BaseSHA: baseSHA,
+		HeadSHA: baseSHA,
+	}
+
+	commitSHA, _, err := synthesizeSuccessCommit(context.Background(), allocation, RunContext{
+		IO:    runIO,
+		Agent: "a1",
+	})
+	require.NoError(t, err)
+
+	files := runCommand(t, repo, "git", "diff-tree", "--no-commit-id", "--name-only", "-r", commitSHA)
+	assert.Contains(t, files, ".gitignore")
+	assert.Contains(t, files, "implemented.txt")
+	assert.NotContains(t, files, checklistFileName)
+}
+
 func TestSynthesizeSuccessCommit_UnstagesPreStagedPolicyArtifacts(t *testing.T) {
 	repo := t.TempDir()
 	runCommand(t, "", "git", "init", "-b", "main", repo)

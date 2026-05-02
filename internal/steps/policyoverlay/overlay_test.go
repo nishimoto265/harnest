@@ -49,19 +49,19 @@ Verify all supported locale files when adding translation keys.
 		RulePath: "rules/r-active.md",
 		Body:     activeBody,
 	}}, []ExperimentLesson{{
-		ID:   "cand-2026-04-21-PR42-abcdef0-001",
+		ID:   "cand-2026-04-21-pr42-abcdef0-001",
 		Body: experimentBody,
 	}})
 	require.NoError(t, err)
 
 	checklist, err := os.ReadFile(filepath.Join(root, ".auto-improve", "checklist.md"))
 	require.NoError(t, err)
-	assert.Equal(t, "# Checklist\n\n- [ ] `cand-2026-04-21-PR42-abcdef0-001` Verify all supported locale files when adding translation keys.\n- [ ] `r-active` Keep existing public API behavior intact.\n", string(checklist))
+	assert.Equal(t, "# Checklist\n\n- [ ] `cand-2026-04-21-pr42-abcdef0-001` Verify all supported locale files when adding translation keys.\n- [ ] `r-active` Keep existing public API behavior intact.\n", string(checklist))
 
 	active, err := os.ReadFile(filepath.Join(root, ".auto-improve", "lessons", "r-active.md"))
 	require.NoError(t, err)
 	assert.Equal(t, activeBody, string(active))
-	experiment, err := os.ReadFile(filepath.Join(root, ".auto-improve", "lessons", "cand-2026-04-21-PR42-abcdef0-001.md"))
+	experiment, err := os.ReadFile(filepath.Join(root, ".auto-improve", "lessons", "cand-2026-04-21-pr42-abcdef0-001.md"))
 	require.NoError(t, err)
 	assert.Equal(t, experimentBody, string(experiment))
 	assert.FileExists(t, filepath.Join(root, "AGENTS.md"))

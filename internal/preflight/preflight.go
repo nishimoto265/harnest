@@ -382,9 +382,6 @@ func (c Checker) checkRemoteBranchNamed(ctx context.Context, repoRoot, remoteURL
 		}
 		return &Failure{Name: failureName, Detail: detail}
 	}
-	if strings.TrimSpace(string(output)) == "" {
-		return &Failure{Name: failureName, Detail: fmt.Sprintf("config: %s %q was not found on origin", failureName, branch)}
-	}
 	return nil
 }
 

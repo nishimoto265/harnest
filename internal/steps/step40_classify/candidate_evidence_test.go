@@ -127,7 +127,7 @@ func TestRun_CandidateEvidenceStaysWithinViolatingAgents(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got.Candidates, 2)
 
-	ruleABodyPath, err := cfg.IO.ResolveRunRelative(got.Candidates[indexOfCandidate(t, got.Candidates, "cand-2026-04-21-PR42-abcdef0-001")].ProposedBodyPath)
+	ruleABodyPath, err := cfg.IO.ResolveRunRelative(got.Candidates[indexOfCandidate(t, got.Candidates, "cand-2026-04-21-pr42-abcdef0-001")].ProposedBodyPath)
 	require.NoError(t, err)
 	ruleABody, err := os.ReadFile(ruleABodyPath)
 	require.NoError(t, err)

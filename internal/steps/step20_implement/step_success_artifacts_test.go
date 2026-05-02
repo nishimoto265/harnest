@@ -99,6 +99,42 @@ func TestSynthesizeSuccessCommit_SetsIdentityUnderHardenedGitEnv(t *testing.T) {
 	require.Contains(t, commit, "committer auto-improve <auto-improve@example.invalid>")
 }
 
+func TestSynthesizeSuccessCommit_SkipsIgnoredChecklistArtifact(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644))
+	runGit(t, repo, "add", "README.md")
+	runGit(t, repo, "-c", "user.name=Seed User", "-c", "user.email=seed@example.invalid", "commit", "-m", "base")
+	runGit(t, repo, "checkout", "-b", "auto-improve/test/pass1/a1")
+	baseSHA := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("/checklist-result.json\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "implemented.txt"), []byte("implementation\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, checklistFileName), []byte(`{"schema_version":"1","run_id":"2026-04-21-PR42-abcdef0","pass":1,"agent":"a1","items":[]}`), 0o644))
+
+	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
+	runIO, err := internalio.NewRunContext(runID, t.TempDir(), t.TempDir())
+	require.NoError(t, err)
+	allocation := contracts.WorktreeAllocation{
+		Agent:   "a1",
+		Pass:    1,
+		Path:    repo,
+		Branch:  "auto-improve/test/pass1/a1",
+		BaseSHA: baseSHA,
+		HeadSHA: baseSHA,
+	}
+
+	commitSHA, _, err := synthesizeSuccessCommit(context.Background(), allocation, RunContext{
+		IO:    runIO,
+		Agent: "a1",
+	})
+	require.NoError(t, err)
+
+	files := runGit(t, repo, "diff-tree", "--no-commit-id", "--name-only", "-r", commitSHA)
+	assert.Contains(t, files, ".gitignore")
+	assert.Contains(t, files, "implemented.txt")
+	assert.NotContains(t, files, checklistFileName)
+}
+
 func TestSynthesizeSuccessCommit_UnstagesPreStagedPolicyArtifacts(t *testing.T) {
 	repo := t.TempDir()
 	runGit(t, repo, "init", "-b", "main")

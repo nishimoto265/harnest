@@ -2,6 +2,7 @@ package step40_classify
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -168,6 +169,126 @@ func TestRun_ExplicitIssuesProduceLessonsAndSuppressScoreConcernFallback(t *test
 	assert.NotContains(t, string(body), "Client component meta tags may not render into the document head.")
 }
 
+func TestRun_MergesComplianceAndExplicitIssueForSameLesson(t *testing.T) {
+	cfg := newTestConfig(t)
+	now := time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC)
+	writeScores(t, cfg.IO, contracts.ScoreEntry{
+		SchemaVersion: "1",
+		RunID:         cfg.IO.RunID,
+		Pass:          1,
+		Agent:         "a1",
+		Dimension:     contracts.DimensionCorrectness,
+		Score:         82,
+		Reasons:       "Route-level behavior is not directly tested.",
+		VerdictPath:   contracts.VerdictPathSingle,
+		RubricVersion: "default",
+		PromptVersion: "phase0",
+		ResolvedAt:    now,
+	})
+	writeCompliance(t, cfg.IO, contracts.ComplianceEntry{
+		SchemaVersion: "1",
+		RunID:         cfg.IO.RunID,
+		Pass:          1,
+		Agent:         "a1",
+		RuleID:        "issue-test-coverage-dynamic-recipe-route-behavior-is-untested",
+		Verdict:       contracts.ComplianceVerdictViolated,
+		Rationale:     "The route data dependency changed without route-level tests.",
+		VerdictPath:   contracts.VerdictPathSingle,
+		RubricVersion: "default",
+		PromptVersion: "phase0",
+		ResolvedAt:    now,
+	})
+	writeIssues(t, cfg.IO, contracts.IssueEntry{
+		SchemaVersion:  "1",
+		RunID:          cfg.IO.RunID,
+		Pass:           1,
+		Agent:          "a2",
+		JudgeRole:      contracts.JudgeRolePrimary,
+		IssueID:        "issue-1111111111111111",
+		Severity:       contracts.IssueSeverityMedium,
+		Category:       "test-coverage",
+		Title:          "dynamic recipe route behavior is untested",
+		Evidence:       "The dynamic route fetches new data but only component tests were added.",
+		ProposedLesson: "Dynamic route changes need route-level render and notFound tests.",
+		ChecklistItem:  "Dynamic route changes include route-level behavior tests.",
+		OutputSha256:   strings.Repeat("a", 64),
+		RubricVersion:  "default",
+		PromptVersion:  "phase0",
+		ResolvedAt:     now,
+	})
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Len(t, got.Candidates, 1)
+	assertCandidateBodies(t, cfg.IO, got.Candidates)
+	assert.Equal(t, "issue-test-coverage-dynamic-recipe-route-behavior-is-untested", experimentLessonTitleID(got.Candidates[0].Title))
+
+	bodyPath, err := cfg.IO.ResolveRunRelative(got.Candidates[0].ProposedBodyPath)
+	require.NoError(t, err)
+	body, err := os.ReadFile(bodyPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "- compliance: The route data dependency changed without route-level tests.")
+	assert.Contains(t, string(body), "- issue: a2/primary/medium: The dynamic route fetches new data but only component tests were added.")
+	assert.Contains(t, string(body), "Apply this proposed lesson: Dynamic route changes need route-level render and notFound tests.")
+}
+
+func TestRun_CapsCandidatesAtTenBySeverity(t *testing.T) {
+	cfg := newTestConfig(t)
+	now := time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC)
+	writeScores(t, cfg.IO, contracts.ScoreEntry{
+		SchemaVersion: "1",
+		RunID:         cfg.IO.RunID,
+		Pass:          1,
+		Agent:         "a1",
+		Dimension:     contracts.DimensionCorrectness,
+		Score:         90,
+		Reasons:       "Baseline score row required by step40.",
+		VerdictPath:   contracts.VerdictPathSingle,
+		RubricVersion: "default",
+		PromptVersion: "phase0",
+		ResolvedAt:    now,
+	})
+	writeCompliance(t, cfg.IO)
+	issues := make([]contracts.IssueEntry, 0, 12)
+	for i := 0; i < 12; i++ {
+		severity := contracts.IssueSeverityLow
+		if i < 2 {
+			severity = contracts.IssueSeverityHigh
+		}
+		issues = append(issues, contracts.IssueEntry{
+			SchemaVersion:  "1",
+			RunID:          cfg.IO.RunID,
+			Pass:           1,
+			Agent:          contracts.AgentID("a1"),
+			JudgeRole:      contracts.JudgeRolePrimary,
+			IssueID:        fmt.Sprintf("issue-%016d", i+1),
+			Severity:       severity,
+			Category:       "candidate-cap",
+			Title:          fmt.Sprintf("candidate %02d", i+1),
+			Evidence:       fmt.Sprintf("Evidence for candidate %02d.", i+1),
+			ProposedLesson: fmt.Sprintf("Guidance for candidate %02d.", i+1),
+			ChecklistItem:  fmt.Sprintf("Checklist for candidate %02d.", i+1),
+			OutputSha256:   strings.Repeat("a", 64),
+			RubricVersion:  "default",
+			PromptVersion:  "phase0",
+			ResolvedAt:     now,
+		})
+	}
+	writeIssues(t, cfg.IO, issues...)
+
+	got, err := Run(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Len(t, got.Candidates, maxStep40Candidates)
+	assertCandidateBodies(t, cfg.IO, got.Candidates)
+
+	titles := make([]string, 0, len(got.Candidates))
+	for _, candidate := range got.Candidates {
+		titles = append(titles, experimentLessonTitleID(candidate.Title))
+	}
+	assert.Contains(t, titles, "issue-candidate-cap-candidate-01")
+	assert.Contains(t, titles, "issue-candidate-cap-candidate-02")
+}
+
 func TestRun_ExplicitIssuesKeepDistinctLessonsWithoutSimilarityBuckets(t *testing.T) {
 	cfg := newTestConfig(t)
 	now := time.Date(2026, 4, 21, 11, 0, 0, 0, time.UTC)
@@ -306,12 +427,12 @@ func TestRun_ComplianceViolationsOnlyProduceNewCandidates(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got.Candidates, 2)
 
-	assert.Equal(t, "cand-2026-04-21-PR42-abcdef0-001", got.Candidates[0].CandidateID)
+	assert.Equal(t, "cand-2026-04-21-pr42-abcdef0-001", got.Candidates[0].CandidateID)
 	assert.Equal(t, "rule-a", experimentLessonTitleID(got.Candidates[0].Title))
 	assert.Equal(t, contracts.CandidateKindNew, got.Candidates[0].Kind)
 	assert.Empty(t, got.Candidates[0].TargetRuleID)
 
-	assert.Equal(t, "cand-2026-04-21-PR42-abcdef0-002", got.Candidates[1].CandidateID)
+	assert.Equal(t, "cand-2026-04-21-pr42-abcdef0-002", got.Candidates[1].CandidateID)
 	assert.Equal(t, "rule-b", experimentLessonTitleID(got.Candidates[1].Title))
 	assert.Equal(t, contracts.CandidateKindNew, got.Candidates[1].Kind)
 	assert.Empty(t, got.Candidates[1].TargetRuleID)

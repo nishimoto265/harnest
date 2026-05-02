@@ -26,6 +26,74 @@ func ensureAllocationWorktreeFromPassBase(ctx context.Context, cfg *config.Confi
 	return ensureAllocationWorktreeAtRef(ctx, cfg, allocation, allocation.HeadSHA, true)
 }
 
+func ensureMissingPass2Worktrees(ctx context.Context, cfg *config.Config, pkg *contracts.TaskPackage, ref string) error {
+	if pkg == nil {
+		return errors.New("step50: task package is required")
+	}
+	for _, allocation := range pkg.Worktrees {
+		if allocation.Pass != passNumber {
+			continue
+		}
+		allocation.BaseSHA = ref
+		allocation.HeadSHA = ref
+		if err := ensureMissingAllocationWorktree(ctx, cfg, allocation, ref); err != nil {
+			return fmt.Errorf("step50: prepare pass2 worktree for agent %s: %w", allocation.Agent, err)
+		}
+	}
+	return nil
+}
+
+func ensureMissingAllocationWorktree(ctx context.Context, cfg *config.Config, allocation contracts.WorktreeAllocation, ref string) error {
+	if err := internalio.EnsureNoSymlinkPathComponents(allocation.Path); err != nil {
+		return fmt.Errorf("step50: worktree path rejected: %w", err)
+	}
+	if info, err := os.Lstat(allocation.Path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("step50: worktree path is a symlink: %s", allocation.Path)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("step50: worktree path is not a directory: %s", allocation.Path)
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if cfg == nil {
+		return errors.New("step50: config is required to create missing worktree")
+	}
+	if ref == "" {
+		return errors.New("step50: cannot create missing worktree without prepared head_sha")
+	}
+	repoRoot, err := cfg.RepoRoot()
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(allocation.Path)
+	if err := internalio.EnsureNoSymlinkPathComponents(parent); err != nil {
+		return fmt.Errorf("step50: worktree parent rejected: %w", err)
+	}
+	if err := ensureDir(parent); err != nil {
+		return err
+	}
+	if err := runGitCommand(ctx, repoRoot, "worktree", "prune"); err != nil {
+		return err
+	}
+	if err := runGitCommand(ctx, repoRoot, "worktree", "add", "-B", allocation.Branch, allocation.Path, ref); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(allocation.Path); err != nil {
+		return fmt.Errorf("step50: created pass2 worktree is missing: path=%s branch=%s ref=%s: %w", allocation.Path, allocation.Branch, ref, err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("step50: created pass2 worktree path is a symlink: %s", allocation.Path)
+	} else if !info.IsDir() {
+		return fmt.Errorf("step50: created pass2 worktree path is not a directory: %s", allocation.Path)
+	}
+	if err := internalio.EnsureNoSymlinkPathComponents(allocation.Path); err != nil {
+		return fmt.Errorf("step50: worktree path swapped after create: %w", err)
+	}
+	return nil
+}
+
 func ensureAllocationWorktreeBeforeResume(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, agentDir string) (contracts.WorktreeAllocation, error) {
 	state, ok, err := loadResumeState(agentDir)
 	if err != nil {

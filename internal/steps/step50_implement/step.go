@@ -174,17 +174,17 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 
 	allocation, err = s.ensurePreparedPass2Allocation(ctx, run, allocation, activeRules, rulePayloads)
 	if err != nil {
-		return err
+		return fmt.Errorf("step50: prepare pass2 allocation: %w", err)
 	}
 	allocation, err = ensureAllocationWorktreeBeforeResume(ctx, run, allocation, agentDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("step50: ensure allocation before resume: %w", err)
 	}
 
 	stepStartedAt := s.now().UTC()
 	retryCount, err := s.resumeIfNeeded(ctx, run, allocation, agentDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("step50: resume: %w", err)
 	}
 
 	deadline := stepStartedAt.Add(timeout)
@@ -248,13 +248,13 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 		Prompt:      promptText,
 		SessionPath: sessionPath,
 		Timeout:     remaining,
-		Env: append([]string{
+		Env: append(append([]string{
 			"AUTO_IMPROVE_STEP=50",
 			"AUTO_IMPROVE_PASS=2",
 			"AUTO_IMPROVE_AGENT=" + string(run.Agent),
 			"AUTO_IMPROVE_RUN_ID=" + string(run.TaskPackage.RunID),
 			"AUTO_IMPROVE_OUTPUT_DIR=" + manifestPrefix(run.Pass, run.Agent),
-		}, agentrunner.ProfileEnv(implementer)...),
+		}, agentrunner.CurrentExecutableEnv()...), agentrunner.ProfileEnv(implementer)...),
 		OnStart: func(lease agentrunner.ProcessLease, startedAt time.Time) error {
 			state := resumeState{
 				ExpectedBaseSHA: allocation.BaseSHA,
@@ -305,7 +305,7 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 		return cause
 	}
 	if err := prepareTerminalLeaseFinalize(agentDir); err != nil {
-		return err
+		return fmt.Errorf("step50: prepare terminal lease finalize: %w", err)
 	}
 
 	var finalizeErr error
@@ -321,9 +321,12 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 		finalizeErr = s.writeSuccessArtifacts(finalizeCtx, run, allocation, runResult)
 	}
 	if finalizeErr != nil {
-		return finalizeErr
+		return fmt.Errorf("step50: finalize agent result: %w", finalizeErr)
 	}
-	return clearActiveLease(agentDir)
+	if err := clearActiveLease(agentDir); err != nil {
+		return fmt.Errorf("step50: clear active lease: %w", err)
+	}
+	return nil
 }
 
 func (s *Step) ensurePreparedPass2Allocation(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, activeRules []policyrepo.ActiveRule, rulePayloads []candidaterules.RulePayload) (contracts.WorktreeAllocation, error) {
@@ -332,21 +335,21 @@ func (s *Step) ensurePreparedPass2Allocation(ctx context.Context, run RunContext
 	}
 	passBase, err := passBaseFor(run.TaskPackage, passNumber)
 	if err != nil {
-		return allocation, err
+		return allocation, fmt.Errorf("select pass base: %w", err)
 	}
 	if err := run.IO.ValidatePassBaseAllocation(passBase); err != nil {
-		return allocation, err
+		return allocation, fmt.Errorf("validate pass base allocation: %w", err)
 	}
 	passDir, err := run.IO.ResolveRunRelative("50-pass2")
 	if err != nil {
-		return allocation, err
+		return allocation, fmt.Errorf("resolve pass2 dir: %w", err)
 	}
 	if err := ensureDir(passDir); err != nil {
-		return allocation, err
+		return allocation, fmt.Errorf("ensure pass2 dir: %w", err)
 	}
 	lock, err := internalio.AcquireFileLockContext(ctx, filepath.Join(passDir, ".pass-base.lock"))
 	if err != nil {
-		return allocation, err
+		return allocation, fmt.Errorf("acquire pass base lock: %w", err)
 	}
 	defer lock.Unlock()
 
@@ -355,28 +358,31 @@ func (s *Step) ensurePreparedPass2Allocation(ctx context.Context, run RunContext
 		run.TaskPackage.Worktrees = latest.Worktrees
 		passBase, err = passBaseFor(run.TaskPackage, passNumber)
 		if err != nil {
-			return allocation, err
+			return allocation, fmt.Errorf("select refreshed pass base: %w", err)
 		}
 		if err := run.IO.ValidatePassBaseAllocation(passBase); err != nil {
-			return allocation, err
+			return allocation, fmt.Errorf("validate refreshed pass base allocation: %w", err)
 		}
 	}
 	repoRoot, err := run.Config.RepoRoot()
 	if err != nil {
-		return allocation, err
+		return allocation, fmt.Errorf("resolve repo root: %w", err)
 	}
 	if err := ensurePassBaseWorktree(ctx, repoRoot, passBase); err != nil {
-		return allocation, err
+		return allocation, fmt.Errorf("ensure pass base worktree: %w", err)
 	}
 	if err := policyoverlay.ApplyWithSnapshot(passBase.Path, filepath.Join(run.IO.RunDir(), "policy"), activeRules, policyoverlay.ExperimentsFromRulePayloads(rulePayloads)); err != nil {
 		return allocation, fmt.Errorf("step50: apply pass base policy overlay: %w", err)
 	}
 	passBase, err = commitPolicyOverlayPassBase(ctx, passBase, run.TaskPackage.RunID)
 	if err != nil {
-		return allocation, err
+		return allocation, fmt.Errorf("commit pass base policy overlay: %w", err)
 	}
 	if err := persistPreparedPass2Base(run, passBase); err != nil {
-		return allocation, err
+		return allocation, fmt.Errorf("persist prepared pass2 base: %w", err)
+	}
+	if err := ensureMissingPass2Worktrees(ctx, run.Config, run.TaskPackage, passBase.HeadSHA); err != nil {
+		return allocation, fmt.Errorf("ensure missing pass2 worktrees: %w", err)
 	}
 	allocation.BaseSHA = passBase.HeadSHA
 	allocation.HeadSHA = passBase.HeadSHA

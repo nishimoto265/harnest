@@ -326,7 +326,7 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 			}
 			continue
 		}
-		return result.err
+		return fmt.Errorf("orchestrator: step %s agent %s: %w", step, result.agent, result.err)
 	}
 	if manualRecoveryErr != nil {
 		if err := o.handleManualRecovery(run, step, manualRecoveryErr.Reason, manualRecoveryAgent, manualRecoveryErr.Detail); err != nil {

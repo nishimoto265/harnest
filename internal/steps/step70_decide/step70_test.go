@@ -63,6 +63,20 @@ func TestRun_AdoptHappyPath(t *testing.T) {
 	require.Len(t, git.pushCalls, 1)
 	assert.Equal(t, resolver.target.TargetSHA, git.pushCalls[0].target)
 }
+
+func TestRun_AdoptCreatesMissingBestBranch(t *testing.T) {
+	runCtx, pkg, candidates, store, resolver := newFixtureWithResolver(t, "PR22")
+	git := &fakeGit{head: ""}
+
+	require.NoError(t, Run(context.Background(), 22, runCtx, pkg, candidates, store, Deps{Git: git, Resolver: resolver, Now: fixedNow()}))
+
+	adopt := mustDecisionAdopt(t, readDecision(t, runCtx))
+	assert.Equal(t, "", adopt.BestShaBefore)
+	require.Len(t, git.pushCalls, 1)
+	assert.Equal(t, resolver.target.TargetSHA, git.pushCalls[0].target)
+	assert.Equal(t, "", git.pushCalls[0].expected)
+}
+
 func TestRun_RejectsCandidatesHashMismatchAtEntry(t *testing.T) {
 	runCtx, pkg, candidates, store, _ := newFixture(t, "PR430")
 	candidates.CandidatesHash = strings.Repeat("f", 64)

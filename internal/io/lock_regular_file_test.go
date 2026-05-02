@@ -44,6 +44,31 @@ func TestAcquireFileLock_RejectsSymlinkSwapWhileAnotherHolderOwnsLock(t *testing
 	assert.False(t, errors.Is(err, context.DeadlineExceeded))
 }
 
+func TestAcquireFileLockContext_WaitsForSameProcessHolder(t *testing.T) {
+	lockPath := filepath.Join(realTempDir(t), "promotion.lock")
+	firstLock, err := AcquireFileLock(lockPath)
+	require.NoError(t, err)
+
+	acquired := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go func() {
+		secondLock, lockErr := AcquireFileLockContext(ctx, lockPath)
+		if lockErr == nil {
+			lockErr = secondLock.Unlock()
+		}
+		acquired <- lockErr
+	}()
+
+	select {
+	case err := <-acquired:
+		require.Failf(t, "second lock acquired before first unlock", "err=%v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	require.NoError(t, firstLock.Unlock())
+	require.NoError(t, <-acquired)
+}
+
 func TestOpenFileNoFollow_DoesNotLeakFDToChildProcess(t *testing.T) {
 	path := filepath.Join(realTempDir(t), "artifact.txt")
 	require.NoError(t, os.WriteFile(path, []byte("hello\n"), defaultFilePerm))

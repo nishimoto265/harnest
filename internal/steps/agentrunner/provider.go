@@ -43,6 +43,14 @@ func ProfileEnv(profile agents.Profile) []string {
 	return nil
 }
 
+func CurrentExecutableEnv() []string {
+	executable, err := os.Executable()
+	if err != nil || executable == "" {
+		return nil
+	}
+	return []string{"AUTO_IMPROVE_BIN=" + executable}
+}
+
 func PrepareProviderBinary(provider agents.Provider, binary string) (string, []string, error) {
 	return PrepareProviderBinaryWithNode(provider, binary, "")
 }

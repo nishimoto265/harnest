@@ -44,8 +44,10 @@ type IntentionRecord struct {
 
 	RunID RunID `json:"run_id" validate:"required,run_id_fmt"`
 
-	BestShaBefore  string `json:"best_sha_before" validate:"required,sha1_hex"`
-	TargetSha      string `json:"target_sha" validate:"required,sha1_hex"`
+	// Empty means best_branch did not exist before this adoption and will be
+	// created with a zero-expectation force-with-lease.
+	BestShaBefore  string `json:"best_sha_before" validate:"omitempty,sha1_hex"`
+	TargetSha      string `json:"target_sha" validate:"omitempty,sha1_hex"`
 	CandidatesHash string `json:"candidates_hash" validate:"required,sha256_hex"`
 	PolicyOnly     bool   `json:"policy_only,omitempty"`
 
@@ -101,6 +103,7 @@ var (
 	ErrIntentionMissingRecoveryReason        = errors.New("contracts: intention: recovery_reason is required for this stage")
 	ErrIntentionMissingFailedStep            = errors.New("contracts: intention: failed_step is required for this stage")
 	ErrIntentionMissingRegistryHeadBefore    = errors.New("contracts: intention: registry_head_before field is required")
+	ErrIntentionMissingTargetSha             = errors.New("contracts: intention: target_sha is required unless policy_only=true")
 	ErrIntentionMissingPlannedAdoption       = errors.New("contracts: intention: planned_adoption is required for this stage")
 	ErrIntentionMissingPolicyBranch          = errors.New("contracts: intention: policy_branch is required for this stage")
 	ErrIntentionMissingPolicyHeadAfter       = errors.New("contracts: intention: policy_head_after is required for this stage")
@@ -201,6 +204,9 @@ func (r IntentionRecord) MarshalJSON() ([]byte, error) {
 func (r IntentionRecord) Validate() error {
 	if err := validateStruct(r); err != nil {
 		return err
+	}
+	if !r.PolicyOnly && r.TargetSha == "" {
+		return ErrIntentionMissingTargetSha
 	}
 	expected := ComputeAdoptIdempotencyKey(string(r.RunID), r.TargetSha, r.BestShaBefore, r.CandidatesHash)
 	if r.IdempotencyKey != expected {

@@ -19,6 +19,8 @@ type FileLock struct {
 
 var activeLockPaths sync.Map
 
+var errFileLockAlreadyHeldInProcess = errors.New("io: file lock already held in this process")
+
 func AcquirePromotionLock(ctx RunContext) (*FileLock, error) {
 	return AcquireFileLock(ctx.PromotionLockPath())
 }
@@ -67,12 +69,25 @@ func AcquireFileLockContext(ctx context.Context, path string) (*FileLock, error)
 
 func acquireFileLock(path string, nonBlocking bool, ctx context.Context) (*FileLock, error) {
 	if err := ensureWritableParentDir(path); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("io: prepare lock parent path=%s: %w", path, err)
 	}
 	for {
 		lock, acquired, err := tryLockFile(path, os.O_CREATE|os.O_RDWR, defaultFilePerm, syscall.LOCK_EX)
 		if err != nil {
-			return nil, err
+			if os.IsNotExist(err) {
+				if parentErr := ensureWritableParentDir(path); parentErr != nil {
+					return nil, fmt.Errorf("io: repair lock parent path=%s: %w", path, parentErr)
+				}
+				if nonBlocking && ctx != nil {
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(50 * time.Millisecond):
+					}
+				}
+				continue
+			}
+			return nil, fmt.Errorf("io: acquire file lock path=%s: %w", path, err)
 		}
 		if acquired {
 			return lock, nil
@@ -115,18 +130,22 @@ func tryLockFile(path string, flags int, perm os.FileMode, lockMode int) (*FileL
 	if err := registerActiveLockPath(path, identity); err != nil {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
+		if errors.Is(err, errFileLockAlreadyHeldInProcess) {
+			return nil, false, nil
+		}
 		return nil, false, err
 	}
 	return &FileLock{path: path, file: f, held: true}, true, nil
 }
 
 func registerActiveLockPath(path string, identity fileIdentity) error {
-	if current, ok := activeLockPaths.Load(path); ok {
+	current, loaded := activeLockPaths.LoadOrStore(path, identity)
+	if loaded {
 		if heldIdentity, ok := current.(fileIdentity); ok && heldIdentity != identity {
 			return fmt.Errorf("%w: path=%s", ErrPathIdentityChanged, path)
 		}
+		return errFileLockAlreadyHeldInProcess
 	}
-	activeLockPaths.Store(path, identity)
 	return nil
 }
 

@@ -289,7 +289,7 @@ func fakeDependencies(t *testing.T, missing string) Dependencies {
 	}
 }
 
-func TestCheckReportsMissingBestBranchOnOrigin(t *testing.T) {
+func TestCheckAllowsMissingBestBranchOnOrigin(t *testing.T) {
 	cfg := testConfig(t)
 	deps := fakeDependencies(t, "")
 	originalRun := deps.Run
@@ -302,8 +302,8 @@ func TestCheckReportsMissingBestBranchOnOrigin(t *testing.T) {
 
 	result := NewWithDependencies(deps).Check(context.Background(), cfg)
 
-	require.False(t, result.OK)
-	assert.Contains(t, failureNames(result.Failures), "repo.best_branch")
+	require.True(t, result.OK, "failures: %+v", result.Failures)
+	assert.NotContains(t, failureNames(result.Failures), "repo.best_branch")
 }
 
 func TestCheckReportsRepoGitHubMismatch(t *testing.T) {

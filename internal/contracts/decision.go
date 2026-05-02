@@ -67,6 +67,7 @@ var (
 	ErrDecisionVariantTypeMismatch    = errors.New("contracts: decision: action does not match variant type")
 	ErrDecisionVariantActionMismatch  = errors.New("contracts: decision: action does not match inner action field")
 	ErrDecisionIdempotencyKeyMismatch = errors.New("contracts: decision: adopt idempotency_key does not match derived value")
+	ErrDecisionAdoptMissingTargetSha  = errors.New("contracts: decision: adopt target_sha is required unless policy_only=true")
 	ErrReasonFailedStepMismatch       = errors.New("contracts: rollback reason is not allowed for failed_step")
 )
 
@@ -76,10 +77,11 @@ type DecisionAdopt struct {
 	SchemaVersion  string         `json:"schema_version" validate:"required,oneof=1"`
 	RunID          RunID          `json:"run_id" validate:"required,run_id_fmt"`
 	IdempotencyKey string         `json:"idempotency_key" validate:"required,sha256_hex"`
-	BestShaBefore  string         `json:"best_sha_before" validate:"required,sha1_hex"`
-	TargetSha      string         `json:"target_sha" validate:"required,sha1_hex"`
-	CandidatesHash string         `json:"candidates_hash" validate:"required,sha256_hex"`
-	PolicyOnly     bool           `json:"policy_only,omitempty"`
+	// Empty means best_branch was created by this adoption.
+	BestShaBefore  string `json:"best_sha_before" validate:"omitempty,sha1_hex"`
+	TargetSha      string `json:"target_sha" validate:"omitempty,sha1_hex"`
+	CandidatesHash string `json:"candidates_hash" validate:"required,sha256_hex"`
+	PolicyOnly     bool   `json:"policy_only,omitempty"`
 
 	// RegistryAppendResult: step70 stage 4 で registry に append した結果.
 	RegistryAppendResult RegistryAppendResult `json:"registry_append_result" validate:"required"`
@@ -92,6 +94,9 @@ func (DecisionAdopt) decisionVariant() {}
 func (d DecisionAdopt) Validate() error {
 	if err := validateStruct(d); err != nil {
 		return err
+	}
+	if !d.PolicyOnly && d.TargetSha == "" {
+		return ErrDecisionAdoptMissingTargetSha
 	}
 	expected := ComputeAdoptIdempotencyKey(string(d.RunID), d.TargetSha, d.BestShaBefore, d.CandidatesHash)
 	if d.IdempotencyKey != expected {
