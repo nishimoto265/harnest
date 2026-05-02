@@ -19,7 +19,7 @@ Old migration-plan memos (`docs/memos/`) are history/参考 only.
 
 ## Runtime
 
-- Go 1.22 binary: `auto-improve {preflight, detect-merged, run, sunset, recover}`
+- Go 1.22 binary: `auto-improve <repo-url>` or `auto-improve {preflight, detect-merged, run, sunset, recover}`
 - macOS launchd (hourly tick) or `workflow_dispatch` on GitHub Actions
 - External CLI dependencies: `git >= 2.35`, `gh >= 2.40`, `jq >= 1.6`, `yq >= 4.0`, `lsof`, `claude`, `codex`
 - Platform: darwin/arm64, darwin/amd64, linux/amd64
@@ -65,6 +65,15 @@ deterministic path unless the run context itself was canceled. The source
 boundary is kept small so future providers such as Asana can feed the same
 `auto` generation path.
 
+The repo URL entrypoint (`auto-improve <repo-url>`) can bootstrap a target
+repository without a checked-in local `config.yaml`. It clones or reuses the
+target under `~/.auto-improve/repos/<owner>/<repo>`, stores per-repository
+state under `~/.auto-improve/runs/<owner>__<repo>/`, and records registrations
+in `~/.auto-improve/repositories.yaml`. Set `AUTO_IMPROVE_HOME` to relocate
+that user-scope state. If a local `config.yaml` exists in the current working
+directory, its provider/scoring settings are used as the base and the target
+repo/path fields are overlaid from the URL.
+
 `agents.yaml` controls which runtime provider each role uses. Implementer roles
 can use `claude` or `codex`; judge roles can stay `stub` or use CLI-backed
 `claude` / `codex` profiles. Provider-specific `args` are appended to the
@@ -90,6 +99,16 @@ issue.
 
 ## Commands
 
+- `auto-improve <repo-url>`
+  Register/bootstrap a GitHub repository URL under `~/.auto-improve` and run
+  continuously. Repository state is namespaced per `owner/repo`.
+- `auto-improve <repo-url> --limit <n>`
+  Process at most `<n>` selected merged PRs and exit.
+- `auto-improve <repo-url> --pr <n[,m...]>`
+  Process one or more comma-separated PR numbers and exit.
+- `auto-improve <repo-url> --dry-run`
+  Resolve the repository, candidate PRs, selected PRs, state paths, and skip
+  reasons without running the pipeline. Docs-only PRs are skipped by default.
 - `auto-improve preflight`
   Local runtime, writable state path, repo settings, and `best_branch` reachability gate.
 - `auto-improve detect-merged`

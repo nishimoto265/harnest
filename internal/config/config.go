@@ -101,6 +101,15 @@ func LoadDefault() (Config, error) {
 	return Load(defaultConfigFile)
 }
 
+func Default() Config {
+	var cfg Config
+	cfg.applyDefaults()
+	cfg.agentFile = agents.Legacy(agents.LegacyDefaults{
+		ImplementerBinary: cfg.legacyImplementerBinary(),
+	})
+	return cfg
+}
+
 func LoadConfig(path string) (*Config, error) {
 	cfg, err := Load(path)
 	if err != nil {
@@ -421,6 +430,24 @@ func (c Config) PairwiseMode() string {
 		return "basic"
 	}
 	return strings.TrimSpace(c.Scoring.PairwiseMode)
+}
+
+func (c Config) ForRepository(repo RepoConfig, runsPath, worktreePath string) Config {
+	out := c
+	out.Repo = repo
+	out.Paths.Runs = runsPath
+	out.RunsBasePath = ""
+	out.Worktree.Base = worktreePath
+	out.WorktreeBasePath = ""
+	out.Paths.StateFile = ""
+	out.Paths.RulesRegistry = ""
+	out.AgentFileSnapshot = c.AgentFile()
+	out.agentFile = out.AgentFileSnapshot
+	out.AgentConfigPath = ""
+	out.configPath = ""
+	out.repoRoot = repo.Root
+	out.applyDefaults()
+	return out
 }
 
 func (c Config) TaskGeneratorProfile() (agents.Profile, bool, error) {

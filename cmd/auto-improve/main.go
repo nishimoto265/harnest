@@ -34,12 +34,23 @@ func main() {
 }
 
 func newRootCmd() *cobra.Command {
+	entrypointOptions := repoEntrypointOptions{}
 	cmd := &cobra.Command{
-		Use:           "auto-improve",
+		Use:           "auto-improve [repo-url]",
 		Short:         "Self-improving harness pipeline for AI coding agents",
 		SilenceErrors: true,
 		SilenceUsage:  true,
+		Args:          cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return cmd.Help()
+			}
+			return runRepoEntrypoint(cmd, args[0], entrypointOptions)
+		},
 	}
+	cmd.Flags().IntVar(&entrypointOptions.Limit, "limit", 0, "Process at most N selected PRs and exit")
+	cmd.Flags().StringVar(&entrypointOptions.PRList, "pr", "", "Comma-separated PR numbers to process and exit")
+	cmd.Flags().BoolVar(&entrypointOptions.DryRun, "dry-run", false, "Resolve repo and PR candidates without running the pipeline")
 
 	cmd.AddCommand(
 		newPreflightCmd(),
