@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/config"
+	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -217,6 +219,37 @@ func TestRepoEntrypointDryRunPrintsPlanWithoutCloneOrRun(t *testing.T) {
 	assert.Equal(t, 201, plan.Selected[0].Number)
 	require.Len(t, plan.Skipped, 1)
 	assert.Equal(t, "docs_only", plan.Skipped[0].Reason)
+}
+
+func TestRunGhAPIRetriesTransientFailures(t *testing.T) {
+	dir := t.TempDir()
+	countPath := filepath.Join(dir, "count")
+	ghPath := filepath.Join(dir, "gh")
+	script := fmt.Sprintf(`#!/bin/sh
+count=$(cat %q 2>/dev/null || echo 0)
+count=$((count + 1))
+echo "$count" > %q
+if [ "$count" -lt 3 ]; then
+  echo 'Get "https://api.github.com/repos/owner/repo": read: connection reset by peer' >&2
+  exit 1
+fi
+printf '{"ok":true}'
+`, countPath, countPath)
+	require.NoError(t, os.WriteFile(ghPath, []byte(script), 0o755))
+
+	restorePath := processenv.SetTrustedPathForTest(dir + ":/usr/bin:/bin")
+	defer restorePath()
+	originalSleep := ghAPIRetrySleep
+	ghAPIRetrySleep = func(context.Context, time.Duration) error { return nil }
+	defer func() { ghAPIRetrySleep = originalSleep }()
+
+	output, err := runGhAPI(context.Background(), "repos/owner/repo")
+
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"ok":true}`, string(output))
+	count, err := os.ReadFile(countPath)
+	require.NoError(t, err)
+	assert.Equal(t, "3\n", string(count))
 }
 
 func TestRepoEntrypointDryRunPRPrintsSelectedAndSkipped(t *testing.T) {

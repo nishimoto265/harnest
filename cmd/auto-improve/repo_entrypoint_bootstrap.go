@@ -15,6 +15,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const ghAPIMaxAttempts = 4
+
+var ghAPIRetryDelays = []time.Duration{
+	250 * time.Millisecond,
+	750 * time.Millisecond,
+	1500 * time.Millisecond,
+}
+
+var ghAPIRetrySleep = func(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (r repoEntrypointRuntime) processedPath() string {
 	path, err := r.Config.ProcessedPath()
 	if err != nil {
@@ -142,6 +161,28 @@ func repoDefaultBranch(ctx context.Context, repo string) (string, error) {
 }
 
 func runGhAPI(ctx context.Context, args ...string) ([]byte, error) {
+	var lastOutput []byte
+	var lastErr error
+	attempts := 0
+	for attempt := 0; attempt < ghAPIMaxAttempts; attempt++ {
+		attempts = attempt + 1
+		output, err := runGhAPIOnce(ctx, args...)
+		if err == nil {
+			return output, nil
+		}
+		lastOutput = output
+		lastErr = err
+		if ctx.Err() != nil || attempt == ghAPIMaxAttempts-1 || !isTransientGhAPIError(output, err) {
+			break
+		}
+		if err := ghAPIRetrySleep(ctx, ghAPIRetryDelay(attempt)); err != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("auto-improve: gh api failed after %d attempt(s): %w: %s", attempts, lastErr, strings.TrimSpace(string(lastOutput)))
+}
+
+func runGhAPIOnce(ctx context.Context, args ...string) ([]byte, error) {
 	cmd, err := processenv.TrustedCommandContext(ctx, "gh", append([]string{"api"}, args...)...)
 	if err != nil {
 		return nil, err
@@ -149,9 +190,41 @@ func runGhAPI(ctx context.Context, args ...string) ([]byte, error) {
 	cmd.Env = processenv.SanitizeForNetworkExec()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("auto-improve: gh api failed: %w: %s", err, strings.TrimSpace(string(output)))
+		return output, err
 	}
 	return output, nil
+}
+
+func ghAPIRetryDelay(attempt int) time.Duration {
+	if attempt < len(ghAPIRetryDelays) {
+		return ghAPIRetryDelays[attempt]
+	}
+	return ghAPIRetryDelays[len(ghAPIRetryDelays)-1]
+}
+
+func isTransientGhAPIError(output []byte, err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(string(output)) + " " + err.Error())
+	transientFragments := []string{
+		"connection reset by peer",
+		"connection refused",
+		"connection timed out",
+		"i/o timeout",
+		"tls handshake timeout",
+		"unexpected eof",
+		"temporary failure",
+		"502 bad gateway",
+		"503 service unavailable",
+		"504 gateway timeout",
+	}
+	for _, fragment := range transientFragments {
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func repoNamespace(slug string) string {
