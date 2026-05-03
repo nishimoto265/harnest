@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -107,13 +108,28 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 	}
 
 	groupKillDone := make(chan struct{})
-	go func(pgid int) {
+	var timeoutFired atomic.Bool
+	go func(pgid, pid int) {
+		timer := time.NewTimer(req.Timeout)
+		defer timer.Stop()
 		select {
 		case <-timeoutCtx.Done():
+			if errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) {
+				timeoutFired.Store(true)
+			}
 			_ = req.KillProcessGroup(pgid)
+			if pid > 0 {
+				_ = cmd.Process.Kill()
+			}
+		case <-timer.C:
+			timeoutFired.Store(true)
+			_ = req.KillProcessGroup(pgid)
+			if pid > 0 {
+				_ = cmd.Process.Kill()
+			}
 		case <-groupKillDone:
 		}
-	}(lease.PGID)
+	}(lease.PGID, lease.PID)
 
 	if tracker != nil {
 		tracker.CaptureBurst(250 * time.Millisecond)
@@ -146,7 +162,7 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 	switch {
 	case waitErr == nil:
 		return result, nil
-	case timeoutCtx.Err() == context.DeadlineExceeded:
+	case timeoutFired.Load() || timeoutCtx.Err() == context.DeadlineExceeded:
 		result.TimedOut = true
 		return result, nil
 	case ctx.Err() != nil:
