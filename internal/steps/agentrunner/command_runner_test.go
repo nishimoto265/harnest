@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,6 +43,29 @@ func TestRunCommand_TimeoutGroupKillArmedBeforeCaptureBurstAndOnStart(t *testing
 			default:
 				return errors.New("timeout group kill was not armed before OnStart")
 			}
+		},
+	})
+
+	require.NoError(t, err)
+	require.True(t, result.TimedOut)
+}
+
+func TestRunCommand_WallClockWatchdogKillsAfterSleepGap(t *testing.T) {
+	base := time.Now().UTC()
+	var nowCalls int64
+
+	result, err := RunCommand(context.Background(), CommandRequest{
+		Binary:                 "sh",
+		Args:                   []string{"-c", "sleep 10"},
+		Workdir:                t.TempDir(),
+		SessionPath:            filepath.Join(t.TempDir(), "session.log"),
+		Timeout:                time.Hour,
+		WallClockCheckInterval: 10 * time.Millisecond,
+		Now: func() time.Time {
+			if atomic.AddInt64(&nowCalls, 1) == 1 {
+				return base
+			}
+			return base.Add(2 * time.Hour)
 		},
 	})
 

@@ -351,15 +351,28 @@ func TestStepRunParentCancelDoesNotWriteManifest(t *testing.T) {
 	assertArtifactPresence(t, env.run.IO.RunDir(), false)
 }
 
-func TestStepRunMissingChecklistFailsClosed(t *testing.T) {
+func TestStepRunMissingChecklistWritesErrorManifest(t *testing.T) {
 	t.Setenv("FAKE_RUN_ID", "2026-04-21-PR42-abcdef0")
 	t.Setenv("FAKE_AGENT", "a1")
 	t.Setenv("FAKE_SKIP_CHECKLIST", "1")
 
 	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
 
-	err := (Step{}).Run(context.Background(), env.run)
-	require.ErrorContains(t, err, "missing checklist artifact")
+	require.NoError(t, (Step{}).Run(context.Background(), env.run))
+
+	manifest := readManifest(t, env.manifestPath)
+	require.Equal(t, contracts.ManifestKindError, manifest.Kind)
+	errorVariant, ok := manifest.Value.(contracts.ManifestError)
+	require.True(t, ok)
+	assert.Contains(t, errorVariant.Detail, "missing checklist artifact")
+
+	agentDir, err := agentDir(env.run.IO, 2, "a1")
+	require.NoError(t, err)
+	state, ok, err := loadResumeState(agentDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Zero(t, state.Pid)
+	assert.Zero(t, state.Pgid)
 }
 
 func TestStepRun_RecreatesDeletedPass2Worktree(t *testing.T) {
@@ -433,34 +446,6 @@ func TestStepRun_MissingRescueWorktreeCapturesAdvancedBranchBeforeReset(t *testi
 	require.NoError(t, err)
 	assert.Equal(t, advancedHead, rescueState.RescuedHeadSHA)
 	assert.Greater(t, rescueState.CommitCount, 0)
-}
-
-func TestStepRun_FinalizeFailureForcesImmediateRescueOnNextResume(t *testing.T) {
-	env := newStepTestEnv(t, "fake-claude-success.sh", 30)
-	agentDir, err := agentDir(env.run.IO, 2, "a1")
-	require.NoError(t, err)
-
-	t.Setenv("FAKE_SKIP_CHECKLIST", "1")
-	err = (Step{}).Run(context.Background(), env.run)
-	require.ErrorContains(t, err, "missing checklist artifact")
-
-	state, ok, err := loadResumeState(agentDir)
-	require.NoError(t, err)
-	require.True(t, ok)
-	assert.NotZero(t, state.Pid)
-	_, statErr := os.Stat(heartbeatPath(agentDir))
-	require.Error(t, statErr)
-	assert.True(t, os.IsNotExist(statErr))
-
-	originalWorktreePIDs := rescueWorktreeProcessIDs
-	rescueWorktreeProcessIDs = func(context.Context, string) ([]int, error) { return nil, nil }
-	t.Cleanup(func() {
-		rescueWorktreeProcessIDs = originalWorktreePIDs
-	})
-
-	t.Setenv("FAKE_SKIP_CHECKLIST", "")
-	require.NoError(t, (Step{}).Run(context.Background(), env.run))
-	assert.Len(t, rescueDirEntries(t, agentDir), 1)
 }
 
 func TestStepRun_StopsHeartbeatBeforeSlowFinalize(t *testing.T) {

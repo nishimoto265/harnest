@@ -50,9 +50,6 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 		}
 		syntheticCommit = true
 	}
-	if err := internalio.WriteAtomic(diffPath, diffBytes); err != nil {
-		return err
-	}
 
 	checklistPath, err := artifactPath(run.IO, run.Pass, run.Agent, checklistFileName)
 	if err != nil {
@@ -60,6 +57,9 @@ func (s *Step) writeSuccessArtifacts(ctx context.Context, run RunContext, alloca
 	}
 	checklist, err := loadChecklistArtifact(collectCtx, allocation.Path, run.TaskPackage.RunID, run.Pass, run.Agent)
 	if err != nil {
+		return err
+	}
+	if err := internalio.WriteAtomic(diffPath, diffBytes); err != nil {
 		return err
 	}
 	if err := internalio.WriteJSONAtomic(checklistPath, checklist); err != nil {

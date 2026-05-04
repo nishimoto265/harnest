@@ -33,6 +33,7 @@ type CommandRequest struct {
 	StartDescendantTracker func(int, time.Duration) *DescendantTracker
 	CleanupProcessTree     func(ProcessLease, int, *DescendantTracker) error
 	KillProcessGroup       func(int) error
+	WallClockCheckInterval time.Duration
 }
 
 type CommandResult struct {
@@ -111,23 +112,34 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 	var timeoutFired atomic.Bool
 	go func(pgid, pid int) {
 		timer := time.NewTimer(req.Timeout)
+		ticker := time.NewTicker(wallClockCheckInterval(req.Timeout, req.WallClockCheckInterval))
 		defer timer.Stop()
-		select {
-		case <-timeoutCtx.Done():
-			if errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) {
+		defer ticker.Stop()
+		kill := func(timedOut bool) {
+			if timedOut {
 				timeoutFired.Store(true)
 			}
 			_ = req.KillProcessGroup(pgid)
 			if pid > 0 {
 				_ = cmd.Process.Kill()
 			}
-		case <-timer.C:
-			timeoutFired.Store(true)
-			_ = req.KillProcessGroup(pgid)
-			if pid > 0 {
-				_ = cmd.Process.Kill()
+		}
+		for {
+			select {
+			case <-timeoutCtx.Done():
+				kill(errors.Is(timeoutCtx.Err(), context.DeadlineExceeded))
+				return
+			case <-timer.C:
+				kill(true)
+				return
+			case <-ticker.C:
+				if now().UTC().Sub(result.StartedAt) >= req.Timeout {
+					kill(true)
+					return
+				}
+			case <-groupKillDone:
+				return
 			}
-		case <-groupKillDone:
 		}
 	}(lease.PGID, lease.PID)
 
@@ -175,6 +187,24 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 		return result, nil
 	}
 	return CommandResult{}, waitErr
+}
+
+func wallClockCheckInterval(timeout, override time.Duration) time.Duration {
+	if override > 0 {
+		return override
+	}
+	switch {
+	case timeout <= 0:
+		return time.Second
+	case timeout < time.Second:
+		return timeout
+	case timeout/10 < time.Second:
+		return time.Second
+	case timeout/10 > 5*time.Second:
+		return 5 * time.Second
+	default:
+		return timeout / 10
+	}
 }
 
 func InterruptionReason(exitCode int, stdout, stderr []byte) contracts.InterruptedReason {

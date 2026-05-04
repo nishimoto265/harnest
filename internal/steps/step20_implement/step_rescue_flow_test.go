@@ -166,12 +166,17 @@ func TestEnsureRescueLeaseQuiesced_SkipsRecycledProcessGroup(t *testing.T) {
 	assert.Zero(t, groupKillCalls)
 }
 
-func TestStepRunMissingChecklistFailsClosed(t *testing.T) {
+func TestStepRunMissingChecklistWritesErrorManifest(t *testing.T) {
 	t.Setenv("FAKE_SKIP_CHECKLIST", "1")
 
 	fx := newTestFixture(t, 5)
-	err := fx.step.Run(context.Background(), fx.run)
-	require.ErrorContains(t, err, "missing checklist artifact")
+	require.NoError(t, fx.step.Run(context.Background(), fx.run))
+
+	manifest := fx.readManifest(t)
+	require.Equal(t, contracts.ManifestKindError, manifest.Kind)
+	errorVariant, ok := manifest.Value.(contracts.ManifestError)
+	require.True(t, ok)
+	assert.Contains(t, errorVariant.Detail, "missing checklist artifact")
 }
 
 func TestStepRunReturnsLeaseContendedDuringConcurrentStartup(t *testing.T) {

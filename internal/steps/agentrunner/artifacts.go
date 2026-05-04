@@ -20,10 +20,11 @@ const maxSuccessDiffBytes = 16 << 20
 const maxChecklistArtifactBytes = 10 << 20
 
 var (
-	ErrSuccessDiffOverflow   = errors.New("agentrunner: success diff exceeded 16MB limit")
-	ErrArtifactNotRegular    = errors.New("agentrunner: artifact path is not a regular file")
-	ErrArtifactCollectionTTL = errors.New("agentrunner: artifact collection deadline exceeded")
-	ErrArtifactTooLarge      = errors.New("agentrunner: artifact exceeds size limit")
+	ErrSuccessDiffOverflow      = errors.New("agentrunner: success diff exceeded 16MB limit")
+	ErrArtifactNotRegular       = errors.New("agentrunner: artifact path is not a regular file")
+	ErrArtifactCollectionTTL    = errors.New("agentrunner: artifact collection deadline exceeded")
+	ErrArtifactTooLarge         = errors.New("agentrunner: artifact exceeds size limit")
+	ErrMissingChecklistArtifact = errors.New("agentrunner: missing checklist artifact")
 )
 
 var snapshotOpenValidatedRegularFile = OpenValidatedRegularFile
@@ -133,7 +134,7 @@ func LoadChecklistArtifactContext(ctx context.Context, worktreePath, filename, e
 	sourcePath := filepath.Join(worktreePath, filename)
 	if err := ensureArtifactSourceRegular(sourcePath); err != nil {
 		if os.IsNotExist(err) {
-			return contracts.ChecklistResult{}, fmt.Errorf("%s: missing checklist artifact: %s", errPrefix, sourcePath)
+			return contracts.ChecklistResult{}, fmt.Errorf("%w: %s: %s", ErrMissingChecklistArtifact, errPrefix, sourcePath)
 		}
 		return contracts.ChecklistResult{}, err
 	}

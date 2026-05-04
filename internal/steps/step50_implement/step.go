@@ -319,6 +319,11 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 		finalizeErr = s.writeErrorManifest(finalizeCtx, run, runResult)
 	} else {
 		finalizeErr = s.writeSuccessArtifacts(finalizeCtx, run, allocation, runResult)
+		if errors.Is(finalizeErr, agentrunner.ErrMissingChecklistArtifact) {
+			runResult.ExitCode = 1
+			runResult.StderrSnippet = []byte(finalizeErr.Error())
+			finalizeErr = s.writeErrorManifest(finalizeCtx, run, runResult)
+		}
 	}
 	if finalizeErr != nil {
 		return fmt.Errorf("step50: finalize agent result: %w", finalizeErr)
