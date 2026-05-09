@@ -54,6 +54,7 @@ type Orchestrator struct {
 	stateWriter state.Writer
 	decoders    ContractDecoders
 	steps       Steps
+	progress    ProgressObserver
 	runMu       sync.Mutex
 	running     bool
 }

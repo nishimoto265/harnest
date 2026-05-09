@@ -1,11 +1,15 @@
 SHELL := /bin/bash
 
-.PHONY: all build test integration-test lint tidy size-report check-sync script-test
+.PHONY: all build build-cli test integration-test lint tidy size-report check-sync script-test
 
 all: build test lint check-sync script-test
 
 build:
 	go build ./...
+
+build-cli:
+	mkdir -p bin
+	go build -o bin/harnest ./cmd/auto-improve
 
 test:
 	go test ./...

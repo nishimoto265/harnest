@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 . "$SCRIPT_DIR/launchd-common.sh"
 
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
-TARGET="${TARGET:-$INSTALL_DIR/auto-improve}"
+TARGET="${TARGET:-$INSTALL_DIR/harnest}"
 REPO_ROOT_INPUT="${REPO_ROOT:-$(pwd -P)}"
 PLIST_OVERRIDE_SET=0
 if [[ -n "${PLIST:-}" ]]; then

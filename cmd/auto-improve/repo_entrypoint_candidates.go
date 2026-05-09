@@ -101,11 +101,11 @@ func parsePRList(value string) ([]int, error) {
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
-			return nil, fmt.Errorf("auto-improve: --pr contains an empty PR number")
+			return nil, fmt.Errorf("%s --pr contains an empty PR number", cliErrorPrefix())
 		}
 		n, err := strconv.Atoi(part)
 		if err != nil || n <= 0 {
-			return nil, fmt.Errorf("auto-improve: invalid --pr value %q", part)
+			return nil, fmt.Errorf("%s invalid --pr value %q", cliErrorPrefix(), part)
 		}
 		if _, ok := seen[n]; ok {
 			continue

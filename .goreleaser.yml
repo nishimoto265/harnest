@@ -1,11 +1,11 @@
 version: 2
 
-project_name: auto-improve
+project_name: harnest
 
 builds:
-  - id: auto-improve
+  - id: harnest
     main: ./cmd/auto-improve
-    binary: auto-improve
+    binary: harnest
     goos:
       - darwin
       - linux
@@ -21,7 +21,7 @@ builds:
 archives:
   - id: binaries
     ids:
-      - auto-improve
+      - harnest
     formats:
       - binary
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
@@ -31,3 +31,22 @@ checksum:
 
 changelog:
   disable: true
+
+homebrew_casks:
+  - name: harnest
+    ids:
+      - binaries
+    binaries:
+      - harnest
+    repository:
+      owner: nishimoto265
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: github-actions[bot]
+      email: 41898282+github-actions[bot]@users.noreply.github.com
+    homepage: "https://github.com/nishimoto265/auto-improve"
+    description: "Self-improving harness pipeline for AI coding agents"
+    caveats: |
+      HarNest depends on git, gh, jq, yq, lsof, and configured Codex/Claude CLIs.
+      Run `harnest preflight` before enabling scheduled runs.

@@ -138,7 +138,7 @@ func ensureRepoEntrypointClone(ctx context.Context, runtime repoEntrypointRuntim
 	cmd.Env = processenv.GitNetworkEnvForRemoteURL(runtime.RepoURL)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("auto-improve: git clone failed: %w: %s", err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("%s git clone failed: %w: %s", cliErrorPrefix(), err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
@@ -155,7 +155,7 @@ func repoDefaultBranch(ctx context.Context, repo string) (string, error) {
 		return "", err
 	}
 	if strings.TrimSpace(payload.DefaultBranch) == "" {
-		return "", fmt.Errorf("auto-improve: could not resolve default branch for %s", repo)
+		return "", fmt.Errorf("%s could not resolve default branch for %s", cliErrorPrefix(), repo)
 	}
 	return payload.DefaultBranch, nil
 }
@@ -179,7 +179,7 @@ func runGhAPI(ctx context.Context, args ...string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("auto-improve: gh api failed after %d attempt(s): %w: %s", attempts, lastErr, strings.TrimSpace(string(lastOutput)))
+	return nil, fmt.Errorf("%s gh api failed after %d attempt(s): %w: %s", cliErrorPrefix(), attempts, lastErr, strings.TrimSpace(string(lastOutput)))
 }
 
 func runGhAPIOnce(ctx context.Context, args ...string) ([]byte, error) {
@@ -256,13 +256,8 @@ func writeRepositoryRegistration(home string, registration repoRegistration) err
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		return err
 	}
-	path := filepath.Join(home, "repositories.yaml")
-	var registrations []repoRegistration
-	if data, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(data))) > 0 {
-		if err := yaml.Unmarshal(data, &registrations); err != nil {
-			return err
-		}
-	} else if err != nil && !os.IsNotExist(err) {
+	registrations, err := readRepositoryRegistrations(home)
+	if err != nil {
 		return err
 	}
 	replaced := false
@@ -276,6 +271,27 @@ func writeRepositoryRegistration(home string, registration repoRegistration) err
 	if !replaced {
 		registrations = append(registrations, registration)
 	}
+	return writeRepositoryRegistrations(home, registrations)
+}
+
+func readRepositoryRegistrations(home string) ([]repoRegistration, error) {
+	path := filepath.Join(home, "repositories.yaml")
+	var registrations []repoRegistration
+	if data, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		if err := yaml.Unmarshal(data, &registrations); err != nil {
+			return nil, err
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	return registrations, nil
+}
+
+func writeRepositoryRegistrations(home string, registrations []repoRegistration) error {
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(home, "repositories.yaml")
 	data, err := yaml.Marshal(registrations)
 	if err != nil {
 		return err

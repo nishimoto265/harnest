@@ -30,7 +30,7 @@ var detectMergedPRs = func(ctx context.Context, cfg config.Config, processedPath
 	return detect.New(processedPath).DetectMergedPRs(ctx, cfg.Repo.GitHub, cfg.Repo.DefaultBranch)
 }
 
-func newRunCmd() *cobra.Command {
+func newRunCmd(outputOptions *cliOutputOptions) *cobra.Command {
 	var pr int
 	var detectLoop bool
 	var withPreflight bool
@@ -50,6 +50,14 @@ func newRunCmd() *cobra.Command {
 			case !detectLoop && pr <= 0:
 				return commandExitError{code: 2, msg: "run: either --pr <n> or --detect-loop is required"}
 			}
+			if outputOptions == nil {
+				outputOptions = &cliOutputOptions{}
+			}
+			if err := validateOutputOptions(*outputOptions); err != nil {
+				return err
+			}
+			reporter := newCLIProgressReporter(cmd, *outputOptions)
+			defer reporter.Close()
 
 			ctx, stopSignals := signalAwareContext(cmd.Context())
 			defer stopSignals()
@@ -78,6 +86,7 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			attachProgressReporter(runner, reporter)
 			if detectLoop {
 				return runDetectLoop(ctx, cfg, runner)
 			}

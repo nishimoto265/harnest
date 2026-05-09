@@ -1,4 +1,4 @@
-# auto-improve
+# HarNest
 
 Self-improving harness pipeline for AI coding agents.
 Observes merged PRs, replays each under the current "best" rule set, scores the
@@ -19,14 +19,14 @@ Old migration-plan memos (`docs/memos/`) are history/参考 only.
 
 ## Runtime
 
-- Go 1.22 binary: `auto-improve <repo-url>` or `auto-improve {preflight, detect-merged, run, sunset, recover}`
+- Go 1.22 binary: `harnest <repo-url>` or `harnest {preflight, detect-merged, run, sunset, recover}`
 - macOS launchd (hourly tick) or `workflow_dispatch` on GitHub Actions
 - External CLI dependencies: `git >= 2.35`, `gh >= 2.40`, `jq >= 1.6`, `yq >= 4.0`, `lsof`, `claude`, `codex`
 - Platform: darwin/arm64, darwin/amd64, linux/amd64
 
 ## Runtime dependencies
 
-`auto-improve preflight` validates the local runtime before `run --with-preflight`
+`harnest preflight` validates the local runtime before `run --with-preflight`
 or the installer arms launchd. Make sure these are installed and working first:
 
 - `git >= 2.35`
@@ -66,7 +66,7 @@ deterministic path unless the run context itself was canceled. The source
 boundary is kept small so future providers such as Asana can feed the same
 `auto` generation path.
 
-The repo URL entrypoint (`auto-improve <repo-url>`) can bootstrap a target
+The repo URL entrypoint (`harnest <repo-url>`) can bootstrap a target
 repository without a checked-in local `config.yaml`. It clones or reuses the
 target under `~/.auto-improve/repos/<owner>/<repo>`, stores per-repository
 state under `~/.auto-improve/runs/<owner>__<repo>/`, and records registrations
@@ -100,47 +100,66 @@ issue.
 
 ## Commands
 
-- `auto-improve <repo-url>`
+- `harnest <repo-url>`
   Register/bootstrap a GitHub repository URL under `~/.auto-improve` and run
   continuously. Repository state is namespaced per `owner/repo`.
-- `auto-improve <repo-url> --limit <n>`
+- `harnest <repo-url> --limit <n>`
   Process at most `<n>` selected merged PRs and exit.
-- `auto-improve <repo-url> --pr <n[,m...]>`
+- `harnest <repo-url> --pr <n[,m...]>`
   Process one or more comma-separated PR numbers and exit.
-- `auto-improve <repo-url> --dry-run`
+- `harnest <repo-url> --dry-run`
   Resolve the repository, candidate PRs, selected PRs, state paths, and skip
   reasons without running the pipeline. Docs-only PRs are skipped by default.
-- `auto-improve preflight`
+- `harnest preflight`
   Local runtime, writable state path, repo settings, and `best_branch` reachability gate.
   `policy_branch` is checked for config conflicts only; a missing remote policy
   branch is allowed so first-run bootstrap can create it.
-- `auto-improve detect-merged`
+- `harnest detect-merged`
   `repo.default_branch` 向けの merged PR を列挙する。
-- `auto-improve run --pr <n> --with-preflight`
+- `harnest run --pr <n> --with-preflight`
   1 PR 分の pipeline を実行する。
-- `auto-improve run --pr <n> --from-scratch`
+- `harnest run --pr <n> --from-scratch`
   既存の non-terminal run を `superseded_by_from_scratch` として閉じ、worktree を prune して新規 run で再実行する。
-- `auto-improve run --detect-loop --with-preflight`
+- `harnest run --detect-loop --with-preflight`
   未処理 merged PR を順に実行する。
-- `auto-improve sunset`
+- `harnest clear <repo-url>`
+  指定 repo の clone / runs / worktrees / active registration を
+  `~/.auto-improve/archives/cleared/<timestamp>/...` に退避し、次回実行で
+  clean bootstrap できる状態にする。実リモートや policy branch は変更しない。
+- `harnest clear --all`
+  `AUTO_IMPROVE_HOME` 配下の generated state 全体を archive に退避する。
+- `harnest sunset`
   archived/deprecated lifecycle の sunset flow を手動実行する。
-- `auto-improve recover ...`
+- `harnest recover ...`
   step70 / sentinel / cleanup の recover flow を実行する。
-- `auto-improve lessons new <id> --checklist-item <text>`
+- `harnest lessons new <id> --checklist-item <text>`
   `.auto-improve/lessons/<id>.md` の lesson skeleton を作成する。
-- `auto-improve lessons generate-checklist [--check]`
+- `harnest lessons generate-checklist [--check]`
   active lessons から `.auto-improve/checklist.md` を生成、または stale か確認する。
-- `auto-improve lessons prepare-checklist-result [--force]`
+- `harnest lessons prepare-checklist-result [--force]`
   `.auto-improve/checklist.md` を `.auto-improve/work/checklist-result.md` にコピーする。
-- `auto-improve lessons verify-checklist-result`
+- `harnest lessons verify-checklist-result`
   作業用 checklist result が `[x]` / `[-]` / `[!]` で解決済みか確認する。
-- `auto-improve lessons install-guidance [--provider claude,codex]`
+- `harnest lessons install-guidance [--provider claude,codex]`
   `CLAUDE.md` / `AGENTS.md` / provider hook 設定を managed block 方式で追加する。
 
 ## Install
 
-Install the released binary into `/usr/local/bin` and configure launchd on
-macOS:
+Install via Homebrew after a release has been published:
+
+```bash
+brew tap nishimoto265/homebrew-tap
+brew install --cask harnest
+```
+
+The release workflow publishes GitHub Release assets named
+`harnest_darwin_arm64`, `harnest_darwin_amd64`, `harnest_linux_amd64`, and
+`checksums.txt`, then updates the `nishimoto265/homebrew-tap` cask. The release
+repository needs a `HOMEBREW_TAP_GITHUB_TOKEN` secret with write access to that
+tap.
+
+To install the released binary directly into `/usr/local/bin` and configure
+launchd on macOS:
 
 ```bash
 make install
@@ -169,7 +188,7 @@ do not share the same LaunchAgent.
 
 The installer downloads from GitHub Releases `latest`. Until the first release
 exists, `make install` needs either a published release or explicit overrides
-such as `AUTO_IMPROVE_RELEASE_URL` and `AUTO_IMPROVE_EXPECTED_SHA256`.
+such as `HARNEST_RELEASE_URL` and `HARNEST_EXPECTED_SHA256`.
 
 `make release` は local publish を既定で拒否します。通常は GitHub release
 workflow を使ってください。手元から明示的に publish する場合だけ
@@ -186,11 +205,11 @@ invocations.
 ### Recover after `needs_manual_recovery`
 
 launchd は `StartInterval: 3600` で hourly tick のため、operator が sentinel を `recover` した後 **最大 1 時間** pipeline 停止することがある。即時復旧したい場合は以下いずれか:
-- `auto-improve run --pr <n>` で該当 PR を手動 trigger
-- `auto-improve run --detect-loop --with-preflight` で detect ループを手動起動
+- `harnest run --pr <n>` で該当 PR を手動 trigger
+- `harnest run --detect-loop --with-preflight` で detect ループを手動起動
 - `launchctl start com.nishimoto265.auto-improve.<instance>` で launchd の次 tick を前倒し
 
-`auto-improve recover --inspect --run <id>` は read-only で state を confirm でき、副作用なしに診断可能。
+`harnest recover --inspect --run <id>` は read-only で state を confirm でき、副作用なしに診断可能。
 
 Manual CLI commands load `config.yaml` from the current working directory, so
 run them from the repository root unless you have arranged the same config file

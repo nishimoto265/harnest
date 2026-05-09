@@ -263,6 +263,16 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 			return err
 		}
 		if done {
+			o.emitProgress(ctx, ProgressEvent{
+				Event:   ProgressAgentDone,
+				RunID:   run.IO.RunID,
+				PR:      run.PR,
+				Step:    step,
+				Pass:    pass,
+				Agent:   agent,
+				RunDir:  run.IO.RunDir(),
+				Message: "already finalized",
+			})
 			continue
 		}
 		runner, ok := runners[agent]
@@ -277,11 +287,34 @@ func (o *Orchestrator) runParallel(ctx context.Context, run *StepRunContext, pas
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			o.emitProgress(ctx, ProgressEvent{
+				Event:  ProgressAgentStart,
+				RunID:  run.IO.RunID,
+				PR:     run.PR,
+				Step:   step,
+				Pass:   pass,
+				Agent:  agent,
+				RunDir: run.IO.RunDir(),
+			})
 			stepRun := *run
 			stepRun.Step = step
 			stepRun.Pass = pass
 			stepRun.Agent = agent
-			errCh <- parallelResult{agent: agent, err: runner.Run(ctx, &stepRun)}
+			err := runner.Run(ctx, &stepRun)
+			event := ProgressEvent{
+				Event:  ProgressAgentDone,
+				RunID:  run.IO.RunID,
+				PR:     run.PR,
+				Step:   step,
+				Pass:   pass,
+				Agent:  agent,
+				RunDir: run.IO.RunDir(),
+			}
+			if err != nil {
+				event.Error = err.Error()
+			}
+			o.emitProgress(ctx, event)
+			errCh <- parallelResult{agent: agent, err: err}
 		}()
 	}
 	wg.Wait()

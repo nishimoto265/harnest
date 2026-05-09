@@ -2,6 +2,8 @@
 node_modules/
 
 # Runtime artifacts
+bin/
+.gocache/
 runs/
 processed.jsonl
 rules-registry.jsonl

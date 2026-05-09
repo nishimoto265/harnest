@@ -78,16 +78,19 @@ var repoEntrypointSleep = func(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func runRepoEntrypoint(cmd *cobra.Command, repoURL string, opts repoEntrypointOptions) error {
+func runRepoEntrypoint(cmd *cobra.Command, repoURL string, opts repoEntrypointOptions, outputOpts cliOutputOptions) error {
 	if opts.Limit < 0 {
-		return commandExitError{code: 2, msg: "auto-improve: --limit must be >= 0"}
+		return commandExitError{code: 2, msg: cliErrorPrefix() + " --limit must be >= 0"}
+	}
+	if err := validateOutputOptions(outputOpts); err != nil {
+		return err
 	}
 	prs, err := parsePRList(opts.PRList)
 	if err != nil {
 		return commandExitError{code: 2, msg: err.Error()}
 	}
 	if len(prs) > 0 && opts.Limit > 0 {
-		return commandExitError{code: 2, msg: "auto-improve: --pr and --limit are mutually exclusive"}
+		return commandExitError{code: 2, msg: cliErrorPrefix() + " --pr and --limit are mutually exclusive"}
 	}
 
 	ctx, stopSignals := signalAwareContext(cmd.Context())
@@ -97,15 +100,17 @@ func runRepoEntrypoint(cmd *cobra.Command, repoURL string, opts repoEntrypointOp
 	if err != nil {
 		return err
 	}
+	reporter := newCLIProgressReporter(cmd, outputOpts)
+	defer reporter.Close()
 
 	switch {
 	case opts.DryRun:
 		return outputRepoEntrypointDryRun(ctx, cmd, runtime, opts, prs)
 	case len(prs) > 0:
-		return runRepoEntrypointPRs(ctx, runtime, prs)
+		return runRepoEntrypointPRs(ctx, runtime, prs, reporter)
 	case opts.Limit > 0:
-		return runRepoEntrypointBatch(ctx, runtime, opts.Limit)
+		return runRepoEntrypointBatch(ctx, runtime, opts.Limit, reporter)
 	default:
-		return runRepoEntrypointWatch(ctx, runtime)
+		return runRepoEntrypointWatch(ctx, runtime, reporter)
 	}
 }

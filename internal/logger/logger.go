@@ -13,7 +13,7 @@ const (
 	FieldPass  = "pass"
 )
 
-var output io.Writer = os.Stdout
+var output io.Writer = os.Stderr
 
 func New(level slog.Level) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(output, &slog.HandlerOptions{

@@ -54,7 +54,7 @@ func outputRepoEntrypointDryRun(ctx context.Context, cmd *cobra.Command, runtime
 	return encoder.Encode(plan)
 }
 
-func runRepoEntrypointPRs(ctx context.Context, runtime repoEntrypointRuntime, prs []int) error {
+func runRepoEntrypointPRs(ctx context.Context, runtime repoEntrypointRuntime, prs []int, reporter *cliProgressReporter) error {
 	if err := registerRepoEntrypoint(runtime); err != nil {
 		return err
 	}
@@ -72,6 +72,7 @@ func runRepoEntrypointPRs(ctx context.Context, runtime repoEntrypointRuntime, pr
 	if err != nil {
 		return err
 	}
+	attachProgressReporter(runner, reporter)
 	for _, pr := range selected {
 		if err := runner.Run(ctx, pr.Number, orchestrator.RunOptions{}); err != nil {
 			if commandErr := recoveryGateExitError(err); commandErr != nil {
@@ -83,7 +84,7 @@ func runRepoEntrypointPRs(ctx context.Context, runtime repoEntrypointRuntime, pr
 	return nil
 }
 
-func runRepoEntrypointBatch(ctx context.Context, runtime repoEntrypointRuntime, limit int) error {
+func runRepoEntrypointBatch(ctx context.Context, runtime repoEntrypointRuntime, limit int, reporter *cliProgressReporter) error {
 	if err := registerRepoEntrypoint(runtime); err != nil {
 		return err
 	}
@@ -97,10 +98,11 @@ func runRepoEntrypointBatch(ctx context.Context, runtime repoEntrypointRuntime, 
 	if err != nil {
 		return err
 	}
+	attachProgressReporter(runner, reporter)
 	return runRepoEntrypointTick(ctx, runtime, runner, limit, false)
 }
 
-func runRepoEntrypointWatch(ctx context.Context, runtime repoEntrypointRuntime) error {
+func runRepoEntrypointWatch(ctx context.Context, runtime repoEntrypointRuntime, reporter *cliProgressReporter) error {
 	if err := registerRepoEntrypoint(runtime); err != nil {
 		return err
 	}
@@ -114,6 +116,7 @@ func runRepoEntrypointWatch(ctx context.Context, runtime repoEntrypointRuntime) 
 	if err != nil {
 		return err
 	}
+	attachProgressReporter(runner, reporter)
 	for {
 		if err := runRepoEntrypointTick(ctx, runtime, runner, 0, true); err != nil {
 			return err

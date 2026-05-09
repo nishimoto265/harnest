@@ -3,21 +3,21 @@
 set -euo pipefail
 
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
-TARGET="$INSTALL_DIR/auto-improve"
-STAGE="$INSTALL_DIR/.auto-improve.new.$$"
-BACKUP="$INSTALL_DIR/.auto-improve.bak.$$"
+TARGET="${TARGET:-$INSTALL_DIR/harnest}"
+STAGE="$INSTALL_DIR/.harnest.new.$$"
+BACKUP="$INSTALL_DIR/.harnest.bak.$$"
 REPO_ROOT_INPUT="${REPO_ROOT:-$(pwd -P)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=scripts/launchd-common.sh
 . "$SCRIPT_DIR/launchd-common.sh"
 INSTALL_LAUNCHD_SCRIPT="$SCRIPT_DIR/install-launchd.sh"
-REPO_SLUG="${AUTO_IMPROVE_REPO_SLUG:-nishimoto265/auto-improve}"
+REPO_SLUG="${HARNEST_REPO_SLUG:-${AUTO_IMPROVE_REPO_SLUG:-nishimoto265/auto-improve}}"
 
 ARCHIVE_URL_DEFAULT_BASE="https://github.com/${REPO_SLUG}/releases/latest/download"
-RELEASE_URL="${AUTO_IMPROVE_RELEASE_URL:-}"
-DOWNLOAD_BASE_URL="${AUTO_IMPROVE_RELEASE_BASE_URL:-$ARCHIVE_URL_DEFAULT_BASE}"
-CHECKSUMS_URL="${AUTO_IMPROVE_CHECKSUMS_URL:-}"
-EXPECTED_SHA256="${AUTO_IMPROVE_EXPECTED_SHA256:-}"
+RELEASE_URL="${HARNEST_RELEASE_URL:-${AUTO_IMPROVE_RELEASE_URL:-}}"
+DOWNLOAD_BASE_URL="${HARNEST_RELEASE_BASE_URL:-${AUTO_IMPROVE_RELEASE_BASE_URL:-$ARCHIVE_URL_DEFAULT_BASE}}"
+CHECKSUMS_URL="${HARNEST_CHECKSUMS_URL:-${AUTO_IMPROVE_CHECKSUMS_URL:-}}"
+EXPECTED_SHA256="${HARNEST_EXPECTED_SHA256:-${AUTO_IMPROVE_EXPECTED_SHA256:-}}"
 PLIST_OVERRIDE_SET=0
 PLIST_OVERRIDE="${PLIST:-}"
 if [[ -n "${PLIST:-}" ]]; then
@@ -104,7 +104,7 @@ if [[ "$asset_os" == "darwin" ]]; then
   PLIST_BAK="${PLIST}.bak.$$"
 fi
 
-asset_name="auto-improve_${asset_os}_${asset_arch}"
+asset_name="harnest_${asset_os}_${asset_arch}"
 if [[ -z "$RELEASE_URL" ]]; then
   release_base="${DOWNLOAD_BASE_URL%/}"
   RELEASE_URL="${release_base}/${asset_name}"
@@ -117,19 +117,19 @@ if [[ -z "$CHECKSUMS_URL" && -z "$EXPECTED_SHA256" ]]; then
   CHECKSUMS_URL="${RELEASE_URL%/*}/checksums.txt"
 fi
 
-archive_path="$(mktemp "$INSTALL_DIR/.auto-improve.download.XXXXXX")"
+archive_path="$(mktemp "$INSTALL_DIR/.harnest.download.XXXXXX")"
 if ! curl -fsSL "$RELEASE_URL" -o "$archive_path"; then
   cat >&2 <<EOF
 failed to download release asset: ${RELEASE_URL}
 If no GitHub release has been published yet, either cut a release first or set:
-  AUTO_IMPROVE_RELEASE_URL=<direct binary url>
-  AUTO_IMPROVE_EXPECTED_SHA256=<sha256>
+  HARNEST_RELEASE_URL=<direct binary url>
+  HARNEST_EXPECTED_SHA256=<sha256>
 EOF
   exit 1
 fi
 if [[ -z "$EXPECTED_SHA256" ]]; then
   asset_name="${asset_name:-$(basename "${RELEASE_URL%%\?*}")}"
-  checksums_path="$(mktemp "$INSTALL_DIR/.auto-improve.checksums.XXXXXX")"
+  checksums_path="$(mktemp "$INSTALL_DIR/.harnest.checksums.XXXXXX")"
   curl -fsSL "$CHECKSUMS_URL" -o "$checksums_path"
   EXPECTED_SHA256="$(awk -v name="$asset_name" '$2 == name { print $1; exit }' "$checksums_path")"
   if [[ -z "$EXPECTED_SHA256" ]]; then

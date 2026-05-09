@@ -48,9 +48,9 @@ jobs:
       - name: Smoke build
         run: |
           set -euo pipefail
-          go build -o ./auto-improve-smoke ./cmd/auto-improve
-          ./auto-improve-smoke help >/dev/null
-          rm -f ./auto-improve-smoke
+          go build -o ./harnest-smoke ./cmd/auto-improve
+          ./harnest-smoke help >/dev/null
+          rm -f ./harnest-smoke
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
@@ -59,3 +59,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

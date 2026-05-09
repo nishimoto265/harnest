@@ -23,9 +23,10 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	entrypointOptions := repoEntrypointOptions{}
+	outputOptions := cliOutputOptions{}
 	cmd := &cobra.Command{
-		Use:           "auto-improve [repo-url]",
-		Short:         "Self-improving harness pipeline for AI coding agents",
+		Use:           cliCommandName + " [repo-url]",
+		Short:         productName + " improves an AI coding harness from merged PRs",
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		Args:          cobra.MaximumNArgs(1),
@@ -33,9 +34,10 @@ func newRootCmd() *cobra.Command {
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			return runRepoEntrypoint(cmd, args[0], entrypointOptions)
+			return runRepoEntrypoint(cmd, args[0], entrypointOptions, outputOptions)
 		},
 	}
+	bindOutputFlags(cmd, &outputOptions)
 	cmd.Flags().IntVar(&entrypointOptions.Limit, "limit", 0, "Process at most N selected PRs and exit")
 	cmd.Flags().StringVar(&entrypointOptions.PRList, "pr", "", "Comma-separated PR numbers to process and exit")
 	cmd.Flags().BoolVar(&entrypointOptions.DryRun, "dry-run", false, "Resolve repo and PR candidates without running the pipeline")
@@ -43,7 +45,8 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(
 		newPreflightCmd(),
 		newDetectMergedCmd(),
-		newRunCmd(),
+		newRunCmd(&outputOptions),
+		newClearCmd(&outputOptions),
 		newLessonsCmd(),
 		newSunsetCmd(),
 		newRecoverCmd(),

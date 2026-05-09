@@ -15,7 +15,7 @@ import (
 	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
 )
 
-func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) error {
+func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) (err error) {
 	if pr <= 0 {
 		return fmt.Errorf("orchestrator: pr must be > 0: pr=%d", pr)
 	}
@@ -61,6 +61,24 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 		IO:            selection.runContext,
 		IntentionFile: NewIntentionStore(selection.runContext),
 	}
+	o.emitProgress(ctx, ProgressEvent{
+		Event:  ProgressRunStart,
+		RunID:  run.IO.RunID,
+		PR:     run.PR,
+		RunDir: run.IO.RunDir(),
+	})
+	defer func() {
+		event := ProgressEvent{
+			Event:  ProgressRunDone,
+			RunID:  run.IO.RunID,
+			PR:     run.PR,
+			RunDir: run.IO.RunDir(),
+		}
+		if err != nil {
+			event.Error = err.Error()
+		}
+		o.emitProgress(ctx, event)
+	}()
 
 	if selection.fresh {
 		if err := beforeFreshRunGateHook(run); err != nil {
@@ -128,6 +146,7 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 		if err := o.ensureNoGlobalSentinel(run.IO); err != nil {
 			return err
 		}
+		o.emitProgress(ctx, progressStepEvent(ProgressStepStart, run, step))
 		switch step {
 		case contracts.FailedStep10:
 			if err := o.runStep10(ctx, run); err != nil {
@@ -211,6 +230,9 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 			}
 		case contracts.FailedStep50:
 			if noActionableCandidates(run.Candidates) {
+				event := progressStepEvent(ProgressStepSkip, run, step)
+				event.Message = "no actionable candidates"
+				o.emitProgress(ctx, event)
 				continue
 			}
 			if err := o.runParallel(ctx, run, 2, contracts.FailedStep50, o.steps.Step50); err != nil {
@@ -261,6 +283,9 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 			}
 		case contracts.FailedStep60:
 			if noActionableCandidates(run.Candidates) {
+				event := progressStepEvent(ProgressStepSkip, run, step)
+				event.Message = "no actionable candidates"
+				o.emitProgress(ctx, event)
 				continue
 			}
 			if err := o.runSingle(ctx, run, contracts.FailedStep60, o.steps.Step60); err != nil {
@@ -331,6 +356,7 @@ func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) er
 				return err
 			}
 		}
+		o.emitProgress(ctx, progressStepEvent(ProgressStepDone, run, step))
 		if err := o.loadPersistedArtifacts(run); err != nil {
 			return err
 		}
