@@ -52,7 +52,20 @@ jobs:
           ./harnest-smoke help >/dev/null
           rm -f ./harnest-smoke
 
+      - name: Check Homebrew Tap token
+        id: homebrew-token
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${HOMEBREW_TAP_GITHUB_TOKEN}" ]]; then
+            echo "available=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "available=false" >>"$GITHUB_OUTPUT"
+          fi
+
       - name: Run GoReleaser
+        if: ${{ steps.homebrew-token.outputs.available == 'true' }}
         uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
@@ -60,3 +73,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+      - name: Skip GoReleaser without Homebrew Tap token
+        if: ${{ steps.homebrew-token.outputs.available != 'true' }}
+        run: |
+          echo "Skipping GoReleaser because HOMEBREW_TAP_GITHUB_TOKEN is not configured."
