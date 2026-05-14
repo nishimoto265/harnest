@@ -101,6 +101,37 @@ func TestClearCommandAllArchivesGeneratedHomeState(t *testing.T) {
 	assert.Contains(t, stdout.String(), "mode: all")
 }
 
+func TestClearCommandAllRejectsUnmarkedHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AUTO_IMPROVE_HOME", home)
+	seedClearRepoState(t, home)
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"clear", "--all"})
+
+	require.Error(t, cmd.Execute())
+	assert.DirExists(t, filepath.Join(home, "repos"))
+	assert.NoDirExists(t, filepath.Join(home, "archives"))
+}
+
+func TestClearCommandRejectsSymlinkedStateSource(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AUTO_IMPROVE_HOME", home)
+	require.NoError(t, ensureHarnestHomeMarker(home))
+
+	outside := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(outside, "owner", "repo"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "owner", "repo", "README.md"), []byte("outside\n"), 0o644))
+	require.NoError(t, os.Symlink(outside, filepath.Join(home, "repos")))
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"clear", "https://github.com/owner/repo"})
+
+	require.Error(t, cmd.Execute())
+	assert.DirExists(t, filepath.Join(outside, "owner", "repo"))
+	assert.FileExists(t, filepath.Join(outside, "owner", "repo", "README.md"))
+}
+
 func seedClearRepoState(t *testing.T, home string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Join(home, "repos", "owner", "repo"), 0o755))

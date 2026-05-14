@@ -13,8 +13,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/interruption"
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 )
 
@@ -25,6 +27,7 @@ type CommandRequest struct {
 	Prompt                 string
 	SessionPath            string
 	Timeout                time.Duration
+	Provider               agents.Provider
 	Env                    []string
 	OnStart                func(ProcessLease, time.Time) error
 	ErrPrefix              string
@@ -63,10 +66,7 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 	if req.KillProcessGroup == nil {
 		req.KillProcessGroup = KillProcessGroup
 	}
-	if err := os.MkdirAll(filepath.Dir(req.SessionPath), 0o755); err != nil {
-		return CommandResult{}, err
-	}
-	sessionFile, err := os.OpenFile(req.SessionPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	sessionFile, err := openSessionFileNoFollow(req.SessionPath)
 	if err != nil {
 		return CommandResult{}, err
 	}
@@ -82,7 +82,7 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 	cmd.Dir = req.Workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin = strings.NewReader(req.Prompt)
-	cmd.Env = processenv.SanitizeForAgentExec(req.Env...)
+	cmd.Env = sanitizeCommandEnv(req.Provider, req.Env...)
 
 	stdoutTail := newTailBuffer(8 << 10)
 	stderrTail := newTailBuffer(8 << 10)
@@ -187,6 +187,53 @@ func RunCommand(ctx context.Context, req CommandRequest) (CommandResult, error) 
 		return result, nil
 	}
 	return CommandResult{}, waitErr
+}
+
+func sanitizeCommandEnv(provider agents.Provider, extra ...string) []string {
+	if provider == "" {
+		return processenv.SanitizeForAgentExec(extra...)
+	}
+	return processenv.SanitizeForAgentProviderExec(string(provider), extra...)
+}
+
+func openSessionFileNoFollow(path string) (*os.File, error) {
+	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
+		return nil, err
+	}
+	dir := filepath.Dir(path)
+	if err := internalio.EnsureDirNoFollow(dir, 0o700); err != nil {
+		return nil, err
+	}
+	file, err := internalio.OpenFileNoFollow(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, fmt.Errorf("agentrunner: session path is not a regular file: %s", path)
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Nlink > 1 {
+		_ = file.Close()
+		return nil, fmt.Errorf("agentrunner: session path has multiple hard links: %s", path)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if err := file.Truncate(0); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if _, err := file.Seek(0, 0); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
 }
 
 func wallClockCheckInterval(timeout, override time.Duration) time.Duration {

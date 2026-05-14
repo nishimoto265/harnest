@@ -45,6 +45,63 @@ func TestParseGitHubRemoteRejectsUnsupportedSchemes(t *testing.T) {
 	}
 }
 
+func TestParseGitHubRemoteRejectsCredentialsQueryAndFragments(t *testing.T) {
+	tests := []struct {
+		name      string
+		remoteURL string
+		want      string
+	}{
+		{
+			name:      "https credentials",
+			remoteURL: "https://token@github.com/owner/repo.git",
+			want:      "must not include credentials",
+		},
+		{
+			name:      "ssh password",
+			remoteURL: "ssh://git:secret@github.com/owner/repo.git",
+			want:      "must not include a password",
+		},
+		{
+			name:      "ssh non git user",
+			remoteURL: "ssh://deploy@github.com/owner/repo.git",
+			want:      "user must be git",
+		},
+		{
+			name:      "scp non git user",
+			remoteURL: "deploy@github.com:owner/repo.git",
+			want:      "user must be git",
+		},
+		{
+			name:      "query",
+			remoteURL: "https://github.com/owner/repo.git?token=secret",
+			want:      "must not contain query strings or fragments",
+		},
+		{
+			name:      "fragment",
+			remoteURL: "https://github.com/owner/repo.git#secret",
+			want:      "must not contain query strings or fragments",
+		},
+		{
+			name:      "scp query",
+			remoteURL: "git@github.com:owner/repo.git?token=secret",
+			want:      "must not contain query strings or fragments",
+		},
+		{
+			name:      "scp fragment",
+			remoteURL: "git@github.com:owner/repo.git#secret",
+			want:      "must not contain query strings or fragments",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseGitHubRemote(tt.remoteURL, nil)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
 func TestParseGitHubRemoteRejectsSameSlugWrongHost(t *testing.T) {
 	_, err := ParseGitHubRemote("https://evil.example.com/owner/repo.git", nil)
 
@@ -127,4 +184,28 @@ ssh://git@github.com/owner/repo.git
 `
 
 	assert.Equal(t, "git@github.com:owner/repo.git", PreferredRemoteURLForAuth(output))
+}
+
+func TestCanonicalRemoteURL(t *testing.T) {
+	tests := []struct {
+		name string
+		info Info
+		want string
+	}{
+		{
+			name: "https",
+			info: Info{Scheme: "https", Host: "github.com", Slug: "owner/repo"},
+			want: "https://github.com/owner/repo.git",
+		},
+		{
+			name: "ssh",
+			info: Info{Scheme: "ssh", Host: "github.example.com", Slug: "owner/repo"},
+			want: "git@github.example.com:owner/repo.git",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, CanonicalRemoteURL(tt.info))
+		})
+	}
 }

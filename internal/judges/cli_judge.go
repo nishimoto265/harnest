@@ -236,6 +236,7 @@ func runCLIJudge(ctx context.Context, profile agents.Profile, workdir, promptTex
 		Prompt:      promptText,
 		SessionPath: command.SessionPath,
 		Timeout:     timeout,
+		Provider:    command.Provider,
 		Env:         command.Env,
 		ErrPrefix:   "judge",
 	})

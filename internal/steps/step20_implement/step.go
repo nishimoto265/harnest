@@ -229,6 +229,7 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 		Prompt:      promptText,
 		SessionPath: sessionPath,
 		Timeout:     remaining,
+		Provider:    implementer.Provider,
 		Env: append(append([]string{
 			"AUTO_IMPROVE_STEP=20",
 			"AUTO_IMPROVE_PASS=1",

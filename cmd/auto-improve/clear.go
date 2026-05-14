@@ -9,10 +9,13 @@ import (
 	"time"
 
 	"github.com/nishimoto265/auto-improve/internal/gitremote"
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
+
+const harnestHomeMarkerFile = ".harnest-home.json"
 
 type clearOptions struct {
 	All    bool
@@ -156,7 +159,10 @@ func clearMove(name, source, target string) clearMovePlan {
 }
 
 func executeClearPlan(plan clearPlan) error {
-	if err := os.MkdirAll(plan.ArchiveDir, 0o755); err != nil {
+	if err := requireHarnestHomeMarker(plan.Home); err != nil {
+		return err
+	}
+	if err := internalio.EnsureDirNoFollow(plan.ArchiveDir, 0o700); err != nil {
 		return err
 	}
 	if err := writeClearArchiveMetadata(plan); err != nil {
@@ -166,10 +172,10 @@ func executeClearPlan(plan clearPlan) error {
 		if !move.Exists {
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(move.Target), 0o755); err != nil {
+		if err := internalio.EnsureDirNoFollow(filepath.Dir(move.Target), 0o700); err != nil {
 			return err
 		}
-		if err := os.Rename(move.Source, move.Target); err != nil {
+		if err := internalio.RenameNoFollow(move.Source, move.Target); err != nil {
 			return fmt.Errorf("%s clear: archive %s: %w", cliErrorPrefix(), move.Name, err)
 		}
 	}
@@ -187,7 +193,7 @@ func writeClearArchiveMetadata(plan clearPlan) error {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(plan.ArchiveDir, "repositories.removed.yaml"), data, 0o644); err != nil {
+		if err := internalio.WriteAtomic(filepath.Join(plan.ArchiveDir, "repositories.removed.yaml"), data); err != nil {
 			return err
 		}
 	}
@@ -195,7 +201,47 @@ func writeClearArchiveMetadata(plan clearPlan) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(plan.ArchiveDir, "clear-metadata.json"), append(data, '\n'), 0o644)
+	return internalio.WriteAtomic(filepath.Join(plan.ArchiveDir, "clear-metadata.json"), append(data, '\n'))
+}
+
+func ensureHarnestHomeMarker(home string) error {
+	if err := internalio.EnsureDirNoFollow(filepath.Clean(home), 0o700); err != nil {
+		return err
+	}
+	payload := map[string]string{
+		"app":     cliCommandName,
+		"purpose": "generated-state-home",
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	return internalio.WriteAtomic(filepath.Join(home, harnestHomeMarkerFile), append(data, '\n'))
+}
+
+func requireHarnestHomeMarker(home string) error {
+	if err := internalio.EnsureNoSymlinkPathComponents(filepath.Clean(home)); err != nil {
+		return err
+	}
+	markerPath := filepath.Join(home, harnestHomeMarkerFile)
+	data, err := internalio.ReadValidatedRegularFile(markerPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s clear: refusing to archive unmarked home %s; missing %s", cliErrorPrefix(), home, harnestHomeMarkerFile)
+		}
+		return err
+	}
+	var marker struct {
+		App     string `json:"app"`
+		Purpose string `json:"purpose"`
+	}
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return fmt.Errorf("%s clear: invalid home marker %s: %w", cliErrorPrefix(), markerPath, err)
+	}
+	if marker.App != cliCommandName || marker.Purpose != "generated-state-home" {
+		return fmt.Errorf("%s clear: invalid home marker %s", cliErrorPrefix(), markerPath)
+	}
+	return nil
 }
 
 func removeRepositoryRegistration(home, slug string) error {

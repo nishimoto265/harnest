@@ -11,6 +11,7 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/config"
 	"github.com/nishimoto265/auto-improve/internal/gitremote"
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"gopkg.in/yaml.v3"
 )
@@ -47,6 +48,10 @@ func bootstrapRepoEntrypoint(ctx context.Context, repoURL string) (repoEntrypoin
 	if err != nil {
 		return repoEntrypointRuntime{}, commandExitError{code: 2, msg: err.Error()}
 	}
+	if info.Host != gitremote.DefaultGitHubHost {
+		return repoEntrypointRuntime{}, commandExitError{code: 2, msg: cliErrorPrefix() + " repository entrypoint currently supports github.com remotes only"}
+	}
+	canonicalRepoURL := gitremote.CanonicalRemoteURL(info)
 	home, err := autoImproveHome()
 	if err != nil {
 		return repoEntrypointRuntime{}, err
@@ -91,7 +96,7 @@ func bootstrapRepoEntrypoint(ctx context.Context, repoURL string) (repoEntrypoin
 	}
 	return repoEntrypointRuntime{
 		Config:        cfg,
-		RepoURL:       repoURL,
+		RepoURL:       canonicalRepoURL,
 		Repo:          info.Slug,
 		DefaultBranch: defaultBranch,
 		RepoRoot:      repoRoot,
@@ -183,11 +188,11 @@ func runGhAPI(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 func runGhAPIOnce(ctx context.Context, args ...string) ([]byte, error) {
-	cmd, err := processenv.TrustedCommandContext(ctx, "gh", append([]string{"api"}, args...)...)
+	cmd, err := processenv.TrustedCommandContext(ctx, "gh", append([]string{"api", "--hostname", gitremote.DefaultGitHubHost}, args...)...)
 	if err != nil {
 		return nil, err
 	}
-	cmd.Env = processenv.SanitizeForNetworkExec()
+	cmd.Env = processenv.SanitizeForGitHubDotComExec()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return output, err
@@ -253,7 +258,7 @@ type repoRegistration struct {
 }
 
 func writeRepositoryRegistration(home string, registration repoRegistration) error {
-	if err := os.MkdirAll(home, 0o755); err != nil {
+	if err := ensureHarnestHomeMarker(home); err != nil {
 		return err
 	}
 	registrations, err := readRepositoryRegistrations(home)
@@ -288,7 +293,7 @@ func readRepositoryRegistrations(home string) ([]repoRegistration, error) {
 }
 
 func writeRepositoryRegistrations(home string, registrations []repoRegistration) error {
-	if err := os.MkdirAll(home, 0o755); err != nil {
+	if err := ensureHarnestHomeMarker(home); err != nil {
 		return err
 	}
 	path := filepath.Join(home, "repositories.yaml")
@@ -296,5 +301,5 @@ func writeRepositoryRegistrations(home string, registrations []repoRegistration)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return internalio.WriteAtomic(path, data)
 }

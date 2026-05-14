@@ -15,7 +15,7 @@ import (
 
 var (
 	atomicNowFunc                           = time.Now
-	atomicRename                            = os.Rename
+	atomicRenameat                          = unix.Renameat
 	atomicRand                 stdio.Reader = crand.Reader
 	directorySync                           = syncDirectory
 	atomicAfterParentValidated              = func(string) {}
@@ -76,7 +76,7 @@ func WriteAtomic(path string, data []byte) error {
 		return err
 	}
 
-	if err := atomicRename(tmpPath, path); err != nil {
+	if err := atomicRenameat(int(parentDir.Fd()), tmpName, int(parentDir.Fd()), filepath.Base(path)); err != nil {
 		cleanupTmp()
 		return err
 	}

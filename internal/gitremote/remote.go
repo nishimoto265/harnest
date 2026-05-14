@@ -54,33 +54,57 @@ func parse(remoteURL string) (Info, error) {
 		if err != nil {
 			return Info{}, fmt.Errorf("could not parse git remote url %q: %w", remoteURL, err)
 		}
+		if parsed.RawQuery != "" || parsed.Fragment != "" {
+			return Info{}, fmt.Errorf("GitHub remote URL must not contain query strings or fragments")
+		}
 		scheme := strings.ToLower(parsed.Scheme)
 		if scheme != "https" && scheme != "ssh" {
 			return Info{}, fmt.Errorf("unsupported GitHub remote URL scheme %q; supported schemes are https and ssh", parsed.Scheme)
 		}
+		if parsed.User != nil {
+			if scheme == "https" {
+				return Info{}, fmt.Errorf("GitHub HTTPS remote URL must not include credentials")
+			}
+			if username := parsed.User.Username(); username != "" && username != "git" {
+				return Info{}, fmt.Errorf("GitHub SSH remote URL user must be git")
+			}
+			if _, ok := parsed.User.Password(); ok {
+				return Info{}, fmt.Errorf("GitHub SSH remote URL must not include a password")
+			}
+		}
 		return infoFromParts(parsed.Scheme, parsed.Host, parsed.Path)
 	}
 
-	if host, path, ok := parseSCPStyle(remoteURL); ok {
+	if host, path, ok, err := parseSCPStyle(remoteURL); err != nil {
+		return Info{}, err
+	} else if ok {
 		return infoFromParts("ssh", host, path)
 	}
 
 	return Info{}, fmt.Errorf("could not parse GitHub remote url: %q", remoteURL)
 }
 
-func parseSCPStyle(remoteURL string) (string, string, bool) {
+func parseSCPStyle(remoteURL string) (string, string, bool, error) {
 	colon := strings.Index(remoteURL, ":")
 	if colon <= 0 || strings.Contains(remoteURL[:colon], "/") {
-		return "", "", false
+		return "", "", false, nil
 	}
 	hostPart := remoteURL[:colon]
 	if at := strings.LastIndex(hostPart, "@"); at >= 0 {
+		user := hostPart[:at]
+		if user != "" && user != "git" {
+			return "", "", false, fmt.Errorf("GitHub SSH remote URL user must be git")
+		}
 		hostPart = hostPart[at+1:]
 	}
-	if hostPart == "" || remoteURL[colon+1:] == "" {
-		return "", "", false
+	path := remoteURL[colon+1:]
+	if hostPart == "" || path == "" {
+		return "", "", false, nil
 	}
-	return hostPart, remoteURL[colon+1:], true
+	if strings.ContainsAny(path, "?#") {
+		return "", "", false, fmt.Errorf("GitHub remote URL must not contain query strings or fragments")
+	}
+	return hostPart, path, true, nil
 }
 
 func infoFromParts(scheme, host, path string) (Info, error) {
@@ -208,4 +232,15 @@ func PreferredRemoteURLForAuth(output string) string {
 		}
 	}
 	return first
+}
+
+func CanonicalRemoteURL(info Info) string {
+	switch strings.ToLower(info.Scheme) {
+	case "https":
+		return "https://" + info.Host + "/" + info.Slug + ".git"
+	case "ssh":
+		return "git@" + info.Host + ":" + info.Slug + ".git"
+	default:
+		return info.Scheme + "://" + info.Host + "/" + info.Slug + ".git"
+	}
 }

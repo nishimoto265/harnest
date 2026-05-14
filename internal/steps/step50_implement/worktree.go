@@ -15,7 +15,7 @@ import (
 )
 
 func ensureDir(path string) error {
-	return os.MkdirAll(path, 0o755)
+	return internalio.EnsureDirNoFollow(path, 0o700)
 }
 
 func ensureAllocationWorktree(ctx context.Context, cfg *config.Config, allocation contracts.WorktreeAllocation) error {

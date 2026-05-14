@@ -66,7 +66,7 @@ func TestCheckAcceptsGatedTestStubProvidersWithEnvGate(t *testing.T) {
 func TestCheckReportsProviderSmokeFailure(t *testing.T) {
 	cfg := testConfig(t)
 	deps := fakeDependencies(t, "")
-	deps.RunProviderSmoke = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	deps.RunProviderSmoke = func(ctx context.Context, _ agents.Provider, name string, args ...string) ([]byte, error) {
 		if strings.HasSuffix(name, "/claude") {
 			return []byte("bad version"), fmt.Errorf("exit status 1")
 		}
@@ -142,7 +142,7 @@ exit 0
 	assert.Contains(t, env, "PATH="+toolsDir)
 	assert.Contains(t, env, "GH_TOKEN=token")
 	assert.Contains(t, env, "ANTHROPIC_API_KEY=anthropic-key")
-	assert.Contains(t, env, "OPENAI_API_KEY=openai-key")
+	assert.NotContains(t, env, "OPENAI_API_KEY=openai-key")
 	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.com/.extraheader")
 	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+header)
 	assert.Contains(t, env, "GIT_ASKPASS=")
@@ -283,7 +283,7 @@ func fakeDependencies(t *testing.T, missing string) Dependencies {
 			}
 			return path, nil, nil
 		},
-		RunProviderSmoke: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		RunProviderSmoke: func(ctx context.Context, _ agents.Provider, name string, args ...string) ([]byte, error) {
 			return []byte("provider version"), nil
 		},
 	}

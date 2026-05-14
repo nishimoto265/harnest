@@ -2,6 +2,9 @@ package agentrunner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -80,6 +83,28 @@ func TestComputeDirtyStateDetectsOversizedUntrackedMetadataDrift(t *testing.T) {
 	assert.NotEqual(t, first, second)
 }
 
+func TestVerifyRescueStateRejectsSymlinkArtifact(t *testing.T) {
+	rescueDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "tracked.patch")
+	require.NoError(t, os.WriteFile(outside, []byte("outside\n"), 0o600))
+	require.NoError(t, os.Symlink(outside, filepath.Join(rescueDir, "tracked.patch")))
+	require.NoError(t, WriteRescueState(filepath.Join(rescueDir, "state.json"), RescueStateFile{
+		ExpectedBaseSHA: "1111111111111111111111111111111111111111",
+		RescuedHeadSHA:  "2222222222222222222222222222222222222222",
+		RetryCount:      1,
+		BundleMode:      RescueBundleModeNone,
+		CreatedAt:       time.Now().UTC(),
+		Artifacts: []RescueArtifactDigest{{
+			Path:   "tracked.patch",
+			SHA256: sha256Hex([]byte("outside\n")),
+		}},
+	}))
+
+	err := VerifyRescueState(rescueDir, secureTestFileDigest, "test")
+
+	require.Error(t, err)
+}
+
 func initDirtyStateTestRepo(t *testing.T) string {
 	t.Helper()
 	repoDir := t.TempDir()
@@ -90,4 +115,22 @@ func initDirtyStateTestRepo(t *testing.T) string {
 	runGit(t, repoDir, "git", "add", "README.md")
 	runGit(t, repoDir, "git", "commit", "-m", "base")
 	return repoDir
+}
+
+func secureTestFileDigest(path string) (string, error) {
+	file, _, _, err := OpenValidatedRegularFile(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }

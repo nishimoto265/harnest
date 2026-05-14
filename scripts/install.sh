@@ -2,6 +2,17 @@
 
 set -euo pipefail
 
+if [[ "${AUTO_IMPROVE_TEST_MODE:-0}" == "1" && -n "${AUTO_IMPROVE_TEST_SAFE_PATH:-}" ]]; then
+  if [[ "$(/usr/bin/id -u)" == "0" || -n "${SUDO_USER:-}" ]]; then
+    echo "AUTO_IMPROVE_TEST_MODE is not allowed for privileged installs" >&2
+    exit 1
+  fi
+  PATH="$AUTO_IMPROVE_TEST_SAFE_PATH"
+else
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
+fi
+export PATH
+
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 TARGET="${TARGET:-$INSTALL_DIR/harnest}"
 STAGE="$INSTALL_DIR/.harnest.new.$$"

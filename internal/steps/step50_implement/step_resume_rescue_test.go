@@ -579,12 +579,13 @@ func TestPerformRescue_RemovesIgnoredFiles(t *testing.T) {
 		RetryCount:      0,
 		LastHeartbeat:   time.Now().Add(-2 * time.Hour).UTC(),
 	})
-	require.NoError(t, err)
-	assert.NoFileExists(t, filepath.Join(allocation.Path, ".env.local"))
-	matches, err := filepath.Glob(filepath.Join(agentDir, rescuedDirName, "*", "ignored", ".env.local"))
+	var manual *agentrunner.ManualRecoveryRequiredError
+	require.ErrorAs(t, err, &manual)
+	assert.FileExists(t, filepath.Join(allocation.Path, ".env.local"))
+	matches, err := filepath.Glob(filepath.Join(agentDir, rescuedDirName, "*", "ignored-skipped.txt"))
 	require.NoError(t, err)
 	require.Len(t, matches, 1)
 	rescuedBytes, err := os.ReadFile(matches[0])
 	require.NoError(t, err)
-	assert.Equal(t, "secret\n", string(rescuedBytes))
+	assert.Contains(t, string(rescuedBytes), "skipped_ignored_content:\".env.local\"")
 }

@@ -6,10 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 )
 
@@ -74,46 +73,34 @@ func StreamGitOutputWithLimit(ctx context.Context, worktreePath, errPrefix, dest
 	if limit <= 0 {
 		limit = RescueDiffLimitBytes
 	}
-	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-		return 0, err
-	}
-	tempFile, err := os.CreateTemp(filepath.Dir(destPath), filepath.Base(destPath)+".tmp-*")
-	if err != nil {
-		return 0, err
-	}
-	tempPath := tempFile.Name()
-	closeWithErr := func(err error) (int64, error) {
-		_ = tempFile.Close()
-		_ = os.Remove(tempPath)
-		return 0, err
-	}
 
 	cmdCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	cmd, err := processenv.TrustedCommandContext(cmdCtx, "git", append([]string{"-C", worktreePath}, args...)...)
 	if err != nil {
-		return closeWithErr(fmt.Errorf("%s: resolve git: %w", errPrefix, err))
+		return 0, fmt.Errorf("%s: resolve git: %w", errPrefix, err)
 	}
 	cmd.Env = processenv.GitLocalEnv()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return closeWithErr(err)
+		return 0, err
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return closeWithErr(err)
+		return 0, err
 	}
 
-	written, copyErr := copyWithLimit(tempFile, stdout, limit)
+	var output bytes.Buffer
+	written, copyErr := copyWithLimit(&output, stdout, limit)
 	if copyErr != nil {
 		cancel()
 		_ = cmd.Wait()
 		if ctx.Err() != nil {
-			return closeWithErr(ctx.Err())
+			return 0, ctx.Err()
 		}
-		return closeWithErr(copyErr)
+		return 0, copyErr
 	}
 	if written > limit {
 		cancel()
@@ -121,33 +108,20 @@ func StreamGitOutputWithLimit(ctx context.Context, worktreePath, errPrefix, dest
 	waitErr := cmd.Wait()
 	if written > limit {
 		if ctx.Err() != nil {
-			return closeWithErr(ctx.Err())
+			return 0, ctx.Err()
 		}
-		return closeWithErr(fmt.Errorf("%w: git %s bytes=%d limit=%d", ErrRescueDiffOverLimit, strings.Join(args, " "), written, limit))
+		return 0, fmt.Errorf("%w: git %s bytes=%d limit=%d", ErrRescueDiffOverLimit, strings.Join(args, " "), written, limit)
 	}
 	if waitErr != nil {
 		if ctx.Err() != nil {
-			return closeWithErr(ctx.Err())
+			return 0, ctx.Err()
 		}
-		return closeWithErr(fmt.Errorf("%s: git %s: %w: %s", errPrefix, strings.Join(args, " "), waitErr, strings.TrimSpace(stderr.String())))
+		return 0, fmt.Errorf("%s: git %s: %w: %s", errPrefix, strings.Join(args, " "), waitErr, strings.TrimSpace(stderr.String()))
 	}
-	if err := tempFile.Sync(); err != nil {
-		return closeWithErr(err)
-	}
-	if err := tempFile.Close(); err != nil {
+	if err := internalio.WriteAtomic(destPath, output.Bytes()); err != nil {
 		return 0, err
 	}
-	if err := os.Rename(tempPath, destPath); err != nil {
-		_ = os.Remove(tempPath)
-		return 0, err
-	}
-	if err := syncRescueDir(filepath.Dir(destPath)); err != nil {
-		return 0, err
-	}
-	if info, err := os.Stat(destPath); err == nil {
-		written = info.Size()
-	}
-	return written, nil
+	return int64(output.Len()), nil
 }
 
 func copyWithLimit(dst io.Writer, src io.Reader, limit int64) (int64, error) {
@@ -180,13 +154,4 @@ func copyWithLimit(dst io.Writer, src io.Reader, limit int64) (int64, error) {
 			return written, err
 		}
 	}
-}
-
-func syncRescueDir(path string) error {
-	dir, err := os.Open(filepath.Clean(path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
 }

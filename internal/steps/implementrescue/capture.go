@@ -2,10 +2,15 @@ package implementrescue
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 
+	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
+
+var ErrRescueSkippedDestructiveArtifacts = errors.New("implementrescue: rescue skipped files that reset or clean would delete")
 
 func CaptureArtifacts(ctx context.Context, opts PerformOptions, rescueDir, headSHA, dirtyFingerprint string, nextRetry int) error {
 	budget := agentrunner.NewRescueArtifactBudget()
@@ -98,5 +103,18 @@ func CaptureArtifacts(ctx context.Context, opts PerformOptions, rescueDir, headS
 	if err := agentrunner.WriteRescueState(filepath.Join(rescueDir, "state.json"), rescueState); err != nil {
 		return err
 	}
-	return opts.VerifyState(rescueDir)
+	if err := opts.VerifyState(rescueDir, rescueState); err != nil {
+		return err
+	}
+	if rescueStateHasDestructiveSkipMarkers(rescueDir, rescueState) {
+		return errors.Join(
+			&agentrunner.ManualRecoveryRequiredError{
+				Reason: contracts.RollbackReasonLeaseFailure,
+				Detail: fmt.Sprintf("%s: rescue captured only skip markers for ignored or sensitive local files; manual recovery is required before reset/clean", opts.StepName),
+				Err:    ErrRescueSkippedDestructiveArtifacts,
+			},
+			ErrRescueSkippedDestructiveArtifacts,
+		)
+	}
+	return nil
 }

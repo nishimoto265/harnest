@@ -194,11 +194,22 @@ func dirtyFileComponent(ctx context.Context, worktreePath, label, rel string) (s
 	if info.Size() > RescueDiffLimitBytes {
 		return fmt.Sprintf("%s:%s:too_large:%s", label, cleaned, fileMetadataFingerprint(info)), nil
 	}
-	file, err := os.Open(path)
+	identity, _, _, err := regularFileIdentityFromInfo(path, info)
+	if err != nil {
+		return "", err
+	}
+	file, err := internalio.OpenFileNoFollow(path, os.O_RDONLY, 0)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if err := verifyRegularFileIdentity(path, openedInfo, identity); err != nil {
+		return "", err
+	}
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
 		if ctx.Err() != nil {
@@ -226,6 +237,10 @@ func VerifyRescueState(rescueDir string, fileDigest func(string) (string, error)
 	if err != nil {
 		return err
 	}
+	return VerifyRescueStateFile(rescueDir, state, fileDigest, errPrefix)
+}
+
+func VerifyRescueStateFile(rescueDir string, state RescueStateFile, fileDigest func(string) (string, error), errPrefix string) error {
 	for _, artifact := range state.Artifacts {
 		path := filepath.Join(rescueDir, filepath.FromSlash(artifact.Path))
 		digest, err := fileDigest(path)

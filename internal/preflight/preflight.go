@@ -31,7 +31,7 @@ type Dependencies struct {
 	Run                   func(context.Context, string, ...string) ([]byte, error)
 	RunGitLocal           func(context.Context, string, ...string) ([]byte, error)
 	RunGitNetwork         func(context.Context, string, string, ...string) ([]byte, error)
-	RunProviderSmoke      func(context.Context, string, ...string) ([]byte, error)
+	RunProviderSmoke      func(context.Context, agents.Provider, string, ...string) ([]byte, error)
 	PrepareProviderBinary func(agents.Profile) (string, []string, error)
 }
 
@@ -81,7 +81,9 @@ func NewWithDependencies(deps Dependencies) Checker {
 	}
 	if deps.RunProviderSmoke == nil {
 		if customRun {
-			deps.RunProviderSmoke = deps.Run
+			deps.RunProviderSmoke = func(ctx context.Context, _ agents.Provider, name string, args ...string) ([]byte, error) {
+				return deps.Run(ctx, name, args...)
+			}
 		} else {
 			deps.RunProviderSmoke = runSanitizedAgentCommand
 		}
@@ -110,12 +112,12 @@ func runSanitizedGitLocalCommand(ctx context.Context, name string, args ...strin
 	return cmd.CombinedOutput()
 }
 
-func runSanitizedAgentCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+func runSanitizedAgentCommand(ctx context.Context, provider agents.Provider, name string, args ...string) ([]byte, error) {
 	cmd, err := processenv.TrustedCommandContext(ctx, name, args...)
 	if err != nil {
 		return nil, err
 	}
-	cmd.Env = processenv.SanitizeForAgentExec()
+	cmd.Env = processenv.SanitizeForAgentProviderExec(string(provider))
 	return cmd.CombinedOutput()
 }
 
@@ -279,19 +281,19 @@ func (c Checker) checkAgentBinaries(ctx context.Context, cfg config.Config) []Fa
 			failures = append(failures, Failure{Name: profile.Binary, Detail: err.Error()})
 			continue
 		}
-		if failure := c.smokeProviderVersion(ctx, profile.Binary, binary, prefixArgs); failure != nil {
+		if failure := c.smokeProviderVersion(ctx, profile.Provider, profile.Binary, binary, prefixArgs); failure != nil {
 			failures = append(failures, *failure)
 		}
 	}
 	return failures
 }
 
-func (c Checker) smokeProviderVersion(ctx context.Context, failureName, binary string, prefixArgs []string) *Failure {
+func (c Checker) smokeProviderVersion(ctx context.Context, provider agents.Provider, failureName, binary string, prefixArgs []string) *Failure {
 	smokeCtx, cancel := context.WithTimeout(ctx, providerSmokeTimeout)
 	defer cancel()
 	args := append([]string{}, prefixArgs...)
 	args = append(args, "--version")
-	output, err := c.deps.RunProviderSmoke(smokeCtx, binary, args...)
+	output, err := c.deps.RunProviderSmoke(smokeCtx, provider, binary, args...)
 	if err == nil {
 		return nil
 	}

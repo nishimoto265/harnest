@@ -188,8 +188,8 @@ case "$subcmd" in
     esac
     ;;
   ls-tree)
-    printf '%s\n' "auto-improve/rules-registry.jsonl"
-    printf '%s\n' "auto-improve/rules/r-bad.md"
+    printf '%s\t%s\n' "100644 blob 1111111111111111111111111111111111111111" "auto-improve/rules-registry.jsonl"
+    printf '%s\t%s\n' "100644 blob 2222222222222222222222222222222222222222" "auto-improve/rules/r-bad.md"
     ;;
   show)
     case "${1:-}" in

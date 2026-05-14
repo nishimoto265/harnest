@@ -134,11 +134,27 @@ func SanitizeForNetworkExec(extra ...string) []string {
 	return sanitize(extra, networkAllowlist)
 }
 
-// SanitizeForAgentExec is the local subprocess profile plus provider auth and
-// an explicit Git safety profile. Agents may invoke git themselves, so do not
-// let them inherit operator global/system git config or git extension-point env.
+// SanitizeForGitHubDotComExec is for gh API calls that are explicitly scoped
+// to github.com. It keeps regular GitHub tokens but drops GH_HOST and
+// enterprise tokens so ambient enterprise configuration cannot redirect the
+// request or receive github.com credentials.
+func SanitizeForGitHubDotComExec(extra ...string) []string {
+	return sanitize(extra, githubDotComAllowlist)
+}
+
+// SanitizeForAgentExec is the legacy broad agent profile. New agent execution
+// paths should prefer SanitizeForAgentProviderExec so provider credentials do
+// not cross into a different provider's subprocess.
 func SanitizeForAgentExec(extra ...string) []string {
 	return appendSafeGitProfile(sanitize(extra, agentAllowlist))
+}
+
+// SanitizeForAgentProviderExec is the local subprocess profile plus only the
+// auth variables needed by the requested provider and an explicit Git safety
+// profile. Agents may invoke git themselves, so do not let them inherit
+// operator global/system git config or git extension-point env.
+func SanitizeForAgentProviderExec(provider string, extra ...string) []string {
+	return appendSafeGitProfile(sanitize(extra, agentProviderAllowlist(provider)))
 }
 
 // GitLocalEnv returns the hardened env for local harness git plumbing.
@@ -156,9 +172,9 @@ func GitNetworkEnv(extra ...string) []string {
 
 // GitNetworkEnvForRemoteURL returns GitNetworkEnv plus an HTTPS-only GitHub
 // Authorization extraheader scoped to the remote host. github.com uses regular
-// GitHub tokens; GHES hosts prefer enterprise tokens and fall back to regular
-// tokens for compatibility. The header is only added for github.com or GH_HOST,
-// so a token is not sent to same-slug remotes on unrelated hosts.
+// GitHub tokens. GHES hosts must use enterprise tokens; regular GitHub tokens
+// are intentionally not reused for GHES. The header is only added for github.com
+// or GH_HOST, so a token is not sent to same-slug remotes on unrelated hosts.
 func GitNetworkEnvForRemoteURL(remoteURL string, extra ...string) []string {
 	env := SanitizeForNetworkExec(extra...)
 	config := make([]gitConfigEntry, 0, 1)
@@ -245,6 +261,47 @@ func agentAllowlist(key string) bool {
 	}
 }
 
+func agentProviderAllowlist(provider string) func(string) bool {
+	return func(key string) bool {
+		if localAllowlist(key) || key == "NODENV_VERSION" {
+			return true
+		}
+		switch strings.ToLower(strings.TrimSpace(provider)) {
+		case "claude":
+			return claudeAuthAllowlist(key)
+		case "codex":
+			return codexAuthAllowlist(key)
+		default:
+			return false
+		}
+	}
+}
+
+func claudeAuthAllowlist(key string) bool {
+	switch key {
+	case "ANTHROPIC_API_KEY",
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_BASE_URL",
+		"CLAUDE_CODE_OAUTH_TOKEN":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexAuthAllowlist(key string) bool {
+	switch key {
+	case "OPENAI_API_KEY",
+		"OPENAI_BASE_URL",
+		"OPENAI_ORG_ID",
+		"OPENAI_ORGANIZATION",
+		"OPENAI_PROJECT":
+		return true
+	default:
+		return false
+	}
+}
+
 // networkAllowlist extends localAllowlist with the minimum auth env required
 // by gh/git to reach remote hosts (README requires `gh >= 2.40` for PR
 // fetching; Go実装計画 L334 calls out `gh auth status` as a preflight check).
@@ -263,6 +320,19 @@ func networkAllowlist(key string) bool {
 		return true
 	}
 	return false
+}
+
+func githubDotComAllowlist(key string) bool {
+	if localAllowlist(key) {
+		return true
+	}
+	switch key {
+	case "GH_TOKEN",
+		"GITHUB_TOKEN":
+		return true
+	default:
+		return false
+	}
 }
 
 type gitConfigEntry struct {
@@ -319,10 +389,7 @@ func gitTokenForHostFromEnv(env []string, host string) string {
 	if strings.EqualFold(host, gitremote.DefaultGitHubHost) {
 		return regularGitTokenFromEnv(env)
 	}
-	if token := enterpriseGitTokenFromEnv(env); token != "" {
-		return token
-	}
-	return regularGitTokenFromEnv(env)
+	return enterpriseGitTokenFromEnv(env)
 }
 
 func regularGitTokenFromEnv(env []string) string {

@@ -388,11 +388,27 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Repo.GitHub) != "" && strings.TrimSpace(c.Repo.BestBranch) == "" {
 		return errors.New("config: repo.best_branch is required when repo.github is set")
 	}
-	if policyBranch := strings.TrimSpace(c.Repo.PolicyBranch); policyBranch != "" {
-		if policyBranch == strings.TrimSpace(c.Repo.BestBranch) {
+	defaultBranch := normalizeConfiguredBranch(c.Repo.DefaultBranch)
+	bestBranch := normalizeConfiguredBranch(c.Repo.BestBranch)
+	policyBranch := normalizeConfiguredBranch(c.Repo.PolicyBranch)
+	if defaultBranch != "" {
+		if err := validateConfiguredBranch("repo.default_branch", defaultBranch); err != nil {
+			return err
+		}
+	}
+	if bestBranch != "" {
+		if err := validateConfiguredBranch("repo.best_branch", bestBranch); err != nil {
+			return err
+		}
+	}
+	if policyBranch != "" {
+		if err := validateConfiguredBranch("repo.policy_branch", policyBranch); err != nil {
+			return err
+		}
+		if policyBranch == bestBranch {
 			return errors.New("config: repo.policy_branch must be distinct from repo.best_branch")
 		}
-		if policyBranch == strings.TrimSpace(c.Repo.DefaultBranch) {
+		if policyBranch == defaultBranch {
 			return errors.New("config: repo.policy_branch must be distinct from repo.default_branch")
 		}
 	}
@@ -416,6 +432,45 @@ func (c Config) Validate() error {
 		TaskPromptSource:          c.TaskPromptSource(),
 		PairwiseMode:              c.PairwiseMode(),
 	})
+}
+
+func normalizeConfiguredBranch(value string) string {
+	return strings.TrimSpace(value)
+}
+
+func validateConfiguredBranch(field, branch string) error {
+	if strings.HasPrefix(branch, "refs/") {
+		return fmt.Errorf("config: %s must be a branch name, not a ref path", field)
+	}
+	if branch == "@" {
+		return fmt.Errorf("config: %s is not a safe branch name", field)
+	}
+	if strings.HasPrefix(branch, "-") {
+		return fmt.Errorf("config: %s must not start with '-'", field)
+	}
+	if strings.HasPrefix(branch, "/") || strings.HasSuffix(branch, "/") || strings.Contains(branch, "//") {
+		return fmt.Errorf("config: %s contains invalid slash placement", field)
+	}
+	if strings.HasSuffix(branch, ".") {
+		return fmt.Errorf("config: %s must not end with '.'", field)
+	}
+	for _, component := range strings.Split(branch, "/") {
+		if strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".") || strings.HasSuffix(component, ".lock") {
+			return fmt.Errorf("config: %s contains invalid branch component %q", field, component)
+		}
+	}
+	if strings.Contains(branch, "..") || strings.Contains(branch, "@{") || strings.HasSuffix(branch, ".lock") {
+		return fmt.Errorf("config: %s is not a safe branch name", field)
+	}
+	if strings.ContainsAny(branch, " ~^:?*[\\") {
+		return fmt.Errorf("config: %s contains invalid branch characters", field)
+	}
+	for _, r := range branch {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("config: %s contains control characters", field)
+		}
+	}
+	return nil
 }
 
 func (c Config) TaskPromptSource() string {

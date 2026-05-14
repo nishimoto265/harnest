@@ -26,6 +26,7 @@ type ReadOnlyCommand struct {
 	Workdir      string
 	SessionPath  string
 	ResponsePath string
+	Provider     agents.Provider
 	Env          []string
 	Cleanup      func()
 }
@@ -88,6 +89,7 @@ func PrepareReadOnlyCommand(profile agents.Profile, workdir string) (ReadOnlyCom
 		Workdir:      workdir,
 		SessionPath:  sessionPath,
 		ResponsePath: responsePath,
+		Provider:     profile.Provider,
 		Env:          ProfileEnv(profile),
 		Cleanup: func() {
 			runtime.CleanupReadOnlyArtifacts(sessionPath, outputPath)

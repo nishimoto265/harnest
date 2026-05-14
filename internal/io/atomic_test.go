@@ -32,12 +32,12 @@ func TestWriteAtomic_RenameFailureCleansTemp(t *testing.T) {
 	dir := realTempDir(t)
 	target := filepath.Join(dir, "decision.json")
 
-	originalRename := atomicRename
-	atomicRename = func(oldPath, newPath string) error {
+	originalRename := atomicRenameat
+	atomicRenameat = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
 		return errors.New("rename failed")
 	}
 	t.Cleanup(func() {
-		atomicRename = originalRename
+		atomicRenameat = originalRename
 	})
 
 	err := WriteAtomic(target, []byte(`{"ok":true}`))
@@ -53,7 +53,7 @@ func TestWriteAtomic_ConcurrentWritersDoNotDeletePeerTemps(t *testing.T) {
 	dir := realTempDir(t)
 	target := filepath.Join(dir, "manifest.json")
 
-	originalRename := atomicRename
+	originalRename := atomicRenameat
 	originalAfterTempCreate := atomicAfterTempCreate
 	enteredRename := make(chan string, 2)
 	releaseRename := make(chan struct{})
@@ -62,13 +62,13 @@ func TestWriteAtomic_ConcurrentWritersDoNotDeletePeerTemps(t *testing.T) {
 	releaseFirstWriter := make(chan struct{})
 	var tempCreateMu sync.Mutex
 	tempCreateCount := 0
-	atomicRename = func(oldPath, newPath string) error {
-		enteredRename <- oldPath
+	atomicRenameat = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+		enteredRename <- oldName
 		<-releaseRename
-		return originalRename(oldPath, newPath)
+		return originalRename(oldDirFD, oldName, newDirFD, newName)
 	}
 	t.Cleanup(func() {
-		atomicRename = originalRename
+		atomicRenameat = originalRename
 		atomicAfterTempCreate = originalAfterTempCreate
 	})
 	atomicAfterTempCreate = func(tmpPath string) {

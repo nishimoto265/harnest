@@ -1,16 +1,27 @@
 package implementrescue
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
-func FindExistingDir(agentDir, rescuedDirName, expectedBaseSHA string, nextRetry int, currentHead, currentDirtyFingerprint string, currentDirtyEntries []string, verifyState func(string) error) (string, bool, error) {
+func FindExistingDir(agentDir, rescuedDirName, expectedBaseSHA string, nextRetry int, currentHead, currentDirtyFingerprint string, currentDirtyEntries []string, verifyState func(string, agentrunner.RescueStateFile) error) (string, bool, error) {
 	rescueRoot := filepath.Join(agentDir, rescuedDirName)
+	if err := internalio.EnsureNoSymlinkPathComponents(rescueRoot); err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
 	entries, err := os.ReadDir(rescueRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -42,7 +53,7 @@ func FindExistingDir(agentDir, rescuedDirName, expectedBaseSHA string, nextRetry
 		if !rescueStateHasRequiredArtifacts(state) {
 			continue
 		}
-		if err := verifyState(candidateDir); err != nil {
+		if err := verifyState(candidateDir, state); err != nil {
 			continue
 		}
 		if !rescueStateCoversCurrentDirty(candidateDir, state, currentDirtyEntries) {
@@ -77,8 +88,11 @@ func rescueStateHasRequiredArtifacts(state agentrunner.RescueStateFile) bool {
 }
 
 func rescueStateCoversCurrentDirty(rescueDir string, state agentrunner.RescueStateFile, dirtyEntries []string) bool {
+	if rescueStateHasDestructiveSkipMarkers(rescueDir, state) {
+		return false
+	}
 	artifacts := rescueArtifactSet(state)
-	untrackedSkipped, err := skippedArtifactPaths(filepath.Join(rescueDir, "untracked-symlinks.txt"))
+	untrackedSkipped, err := skippedArtifactPathsFromState(rescueDir, state, "untracked-symlinks.txt")
 	if err != nil {
 		return false
 	}
@@ -96,11 +110,11 @@ func rescueStateCoversCurrentDirty(rescueDir string, state agentrunner.RescueSta
 		}
 	}
 
-	ignoredPaths, err := ignoredListPaths(filepath.Join(rescueDir, "ignored.txt"))
+	ignoredPaths, err := ignoredListPathsFromState(rescueDir, state, "ignored.txt")
 	if err != nil {
 		return false
 	}
-	ignoredSkipped, err := skippedArtifactPaths(filepath.Join(rescueDir, "ignored-skipped.txt"))
+	ignoredSkipped, err := skippedArtifactPathsFromState(rescueDir, state, "ignored-skipped.txt")
 	if err != nil {
 		return false
 	}
@@ -148,8 +162,8 @@ func cleanedArtifactRelPath(rel string) string {
 	return filepath.ToSlash(cleaned)
 }
 
-func ignoredListPaths(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
+func ignoredListPathsFromState(rescueDir string, state agentrunner.RescueStateFile, rel string) ([]string, error) {
+	data, err := readVerifiedRescueArtifact(rescueDir, state, rel)
 	if err != nil {
 		return nil, err
 	}
@@ -170,11 +184,43 @@ func ignoredListPaths(path string) ([]string, error) {
 	return paths, nil
 }
 
-func skippedArtifactPaths(path string) (map[string]bool, error) {
-	data, err := os.ReadFile(path)
+func rescueStateHasDestructiveSkipMarkers(rescueDir string, state agentrunner.RescueStateFile) bool {
+	return artifactContainsAnyLinePrefix(rescueDir, state, "ignored-skipped.txt", "skipped_ignored_content:") ||
+		artifactContainsAnyLinePrefix(
+			rescueDir,
+			state,
+			"untracked-symlinks.txt",
+			"symlink:",
+			"skipped_non_regular:",
+			"skipped_sensitive_path:",
+			"skipped_too_large:",
+		)
+}
+
+func artifactContainsAnyLinePrefix(rescueDir string, state agentrunner.RescueStateFile, rel string, prefixes ...string) bool {
+	data, err := readVerifiedRescueArtifact(rescueDir, state, rel)
+	if err != nil {
+		return true
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func skippedArtifactPathsFromState(rescueDir string, state agentrunner.RescueStateFile, rel string) (map[string]bool, error) {
+	data, err := readVerifiedRescueArtifact(rescueDir, state, rel)
 	if err != nil {
 		return nil, err
 	}
+	return skippedArtifactPathsFromBytes(data), nil
+}
+
+func skippedArtifactPathsFromBytes(data []byte) map[string]bool {
 	paths := make(map[string]bool)
 	for _, line := range strings.Split(string(data), "\n") {
 		if line == "" {
@@ -186,6 +232,20 @@ func skippedArtifactPaths(path string) (map[string]bool, error) {
 			rel = strings.TrimPrefix(line, "symlink:")
 		case strings.HasPrefix(line, "skipped_non_regular:"):
 			rel = strings.TrimPrefix(line, "skipped_non_regular:")
+		case strings.HasPrefix(line, "skipped_ignored_content:"):
+			payload := strings.TrimPrefix(line, "skipped_ignored_content:")
+			if unquoted, err := strconv.Unquote(payload); err == nil {
+				rel = unquoted
+			} else {
+				rel = payload
+			}
+		case strings.HasPrefix(line, "skipped_sensitive_path:"):
+			payload := strings.TrimPrefix(line, "skipped_sensitive_path:")
+			if unquoted, err := strconv.Unquote(payload); err == nil {
+				rel = unquoted
+			} else {
+				rel = payload
+			}
 		case strings.HasPrefix(line, "skipped_too_large:"):
 			payload := strings.TrimPrefix(line, "skipped_too_large:")
 			sizeSep := strings.LastIndex(payload, ":")
@@ -200,5 +260,41 @@ func skippedArtifactPaths(path string) (map[string]bool, error) {
 			paths[cleaned] = true
 		}
 	}
-	return paths, nil
+	return paths
+}
+
+func readVerifiedRescueArtifact(rescueDir string, state agentrunner.RescueStateFile, rel string) ([]byte, error) {
+	expectedDigest, ok := rescueArtifactDigestMap(state)[filepath.ToSlash(rel)]
+	if !ok {
+		return nil, fmt.Errorf("implementrescue: rescue artifact missing from state: %s", rel)
+	}
+	path := filepath.Join(rescueDir, filepath.FromSlash(rel))
+	file, _, size, err := agentrunner.OpenValidatedRegularFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if size > agentrunner.RescueDiffLimitBytes {
+		return nil, fmt.Errorf("%w: path=%s bytes=%d limit=%d", agentrunner.ErrRescueDiffOverLimit, path, size, agentrunner.RescueDiffLimitBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, agentrunner.RescueDiffLimitBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > agentrunner.RescueDiffLimitBytes {
+		return nil, fmt.Errorf("%w: path=%s bytes=%d limit=%d", agentrunner.ErrRescueDiffOverLimit, path, len(data), agentrunner.RescueDiffLimitBytes)
+	}
+	sum := sha256.Sum256(data)
+	if actualDigest := hex.EncodeToString(sum[:]); actualDigest != expectedDigest {
+		return nil, fmt.Errorf("implementrescue: rescue artifact digest mismatch: path=%s", rel)
+	}
+	return data, nil
+}
+
+func rescueArtifactDigestMap(state agentrunner.RescueStateFile) map[string]string {
+	artifacts := make(map[string]string, len(state.Artifacts))
+	for _, artifact := range state.Artifacts {
+		artifacts[artifact.Path] = artifact.SHA256
+	}
+	return artifacts
 }

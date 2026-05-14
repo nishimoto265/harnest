@@ -24,7 +24,37 @@ func CopyUntrackedFilesWithBudget(ctx context.Context, stepName, repoPath, rescu
 }
 
 func CopyIgnoredFilesWithBudget(ctx context.Context, stepName, repoPath, rescueDir string, budget *agentrunner.RescueArtifactBudget, gitOutputBytes GitOutputBytesFunc, ensureDir func(string) error, copyOpenFile CopyOpenFileFunc, fileDigest func(string) (string, error)) ([]agentrunner.RescueArtifactDigest, error) {
-	return copyOtherFilesWithBudget(ctx, stepName, repoPath, rescueDir, "ignored", "ignored-skipped.txt", []string{"ls-files", "--others", "-i", "--exclude-standard", "-z"}, budget, gitOutputBytes, ensureDir, copyOpenFile, fileDigest)
+	output, err := gitOutputBytes(ctx, repoPath, "ls-files", "--others", "-i", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, err
+	}
+	entries := strings.Split(string(output), "\x00")
+	skipLog := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if entry == "" {
+			continue
+		}
+		cleaned := filepath.Clean(entry)
+		if filepath.IsAbs(cleaned) || cleaned == "." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) || cleaned == ".." {
+			return nil, fmt.Errorf("%s: ignored file escapes repo dir: %s", stepName, entry)
+		}
+		skipLog = append(skipLog, "skipped_ignored_content:"+strconv.Quote(cleaned))
+	}
+	skipLogPath := filepath.Join(rescueDir, "ignored-skipped.txt")
+	if err := internalio.WriteAtomic(skipLogPath, []byte(strings.Join(skipLog, "\n"))); err != nil {
+		return nil, err
+	}
+	if err := recordArtifact(budget, skipLogPath, "ignored-skipped.txt"); err != nil {
+		return nil, err
+	}
+	digest, err := fileDigest(skipLogPath)
+	if err != nil {
+		return nil, err
+	}
+	return []agentrunner.RescueArtifactDigest{{Path: "ignored-skipped.txt", SHA256: digest}}, nil
 }
 
 func copyOtherFilesWithBudget(ctx context.Context, stepName, repoPath, rescueDir, rescueSubdir, skipLogName string, listArgs []string, budget *agentrunner.RescueArtifactBudget, gitOutputBytes GitOutputBytesFunc, ensureDir func(string) error, copyOpenFile CopyOpenFileFunc, fileDigest func(string) (string, error)) ([]agentrunner.RescueArtifactDigest, error) {
@@ -57,7 +87,11 @@ func copyOtherFilesWithBudget(ctx context.Context, stepName, repoPath, rescueDir
 			skipLog = append(skipLog, "symlink:"+cleaned)
 			continue
 		}
-		file, perm, size, err := agentrunner.OpenValidatedRegularFile(src)
+		if sensitiveUntrackedPath(cleaned) {
+			skipLog = append(skipLog, "skipped_sensitive_path:"+strconv.Quote(cleaned))
+			continue
+		}
+		file, _, size, err := agentrunner.OpenValidatedRegularFile(src)
 		if err != nil {
 			if errors.Is(err, agentrunner.ErrArtifactNotRegular) {
 				skipLog = append(skipLog, "skipped_non_regular:"+cleaned)
@@ -79,7 +113,7 @@ func copyOtherFilesWithBudget(ctx context.Context, stepName, repoPath, rescueDir
 			_ = file.Close()
 			return nil, err
 		}
-		if err := copyOpenFile(ctx, file, dst, perm, MaxUntrackedBytes); err != nil {
+		if err := copyOpenFile(ctx, file, dst, 0o600, MaxUntrackedBytes); err != nil {
 			return nil, err
 		}
 		digest, err := fileDigest(dst)
@@ -104,6 +138,28 @@ func copyOtherFilesWithBudget(ctx context.Context, stepName, repoPath, rescueDir
 	}
 	artifacts = append(artifacts, agentrunner.RescueArtifactDigest{Path: skipLogName, SHA256: digest})
 	return artifacts, nil
+}
+
+func sensitiveUntrackedPath(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	switch base {
+	case ".env",
+		".npmrc",
+		".pypirc",
+		".netrc",
+		"id_rsa",
+		"id_dsa",
+		"id_ecdsa",
+		"id_ed25519",
+		"credentials",
+		"credentials.json":
+		return true
+	}
+	return strings.HasPrefix(base, ".env.") ||
+		strings.HasSuffix(base, ".pem") ||
+		strings.HasSuffix(base, ".key") ||
+		strings.HasSuffix(base, ".p12") ||
+		strings.HasSuffix(base, ".pfx")
 }
 
 func WriteIgnoredList(ctx context.Context, repoPath, dest string, gitOutputBytes GitOutputBytesFunc) error {

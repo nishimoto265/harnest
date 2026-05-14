@@ -3,7 +3,10 @@ package agentrunner
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
+
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 )
 
 var ErrArtifactMultipleLinks = fmt.Errorf("%w: multiple hard links", ErrArtifactNotRegular)
@@ -18,7 +21,7 @@ func OpenValidatedRegularFile(path string) (*os.File, os.FileMode, int64, error)
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	file, err := os.Open(path)
+	file, err := internalio.OpenFileNoFollow(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -35,6 +38,9 @@ func OpenValidatedRegularFile(path string) (*os.File, os.FileMode, int64, error)
 }
 
 func validatedRegularFileIdentity(path string) (regularFileIdentity, os.FileMode, int64, error) {
+	if err := internalio.EnsureNoSymlinkPathComponents(filepath.Dir(path)); err != nil {
+		return regularFileIdentity{}, 0, 0, fmt.Errorf("%w: %s", ErrArtifactNotRegular, path)
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return regularFileIdentity{}, 0, 0, err
@@ -63,6 +69,9 @@ func regularFileIdentityFromInfo(path string, info os.FileInfo) (regularFileIden
 }
 
 func verifyRegularFileIdentity(path string, info os.FileInfo, expected regularFileIdentity) error {
+	if err := internalio.EnsureNoSymlinkPathComponents(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("%w: %s", ErrArtifactNotRegular, path)
+	}
 	identity, _, _, err := regularFileIdentityFromInfo(path, info)
 	if err != nil {
 		return err

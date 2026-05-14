@@ -10,8 +10,8 @@ const (
 	JSONLMaxLineBytes      = 4 * 1024
 	RegistryTailScanN      = 2000
 	sidecarFilenameExt     = ".txt"
-	defaultDirectoryPerm   = 0o755
-	defaultFilePerm        = 0o644
+	defaultDirectoryPerm   = 0o700
+	defaultFilePerm        = 0o600
 	sidecarDigestHexLength = 64
 )
 

@@ -121,6 +121,17 @@ func TestPlanRejectsMalformedProviderHooksJSON(t *testing.T) {
 	assert.Contains(t, err.Error(), "parse provider hook config")
 }
 
+func TestPlanRejectsSymlinkedExistingGuidance(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "outside.md")
+	require.NoError(t, os.WriteFile(target, []byte("# Secret\n"), 0o644))
+	require.NoError(t, os.Symlink(target, filepath.Join(root, "AGENTS.md")))
+
+	_, err := Plan(root, InstallOptions{Providers: []string{ProviderCodex}}, PlanOptions{})
+
+	require.Error(t, err)
+}
+
 func TestMergeCodexHooksFeatureEnablesFalseValueAndIgnoresComments(t *testing.T) {
 	existing := "# codex_hooks mentioned in a comment\n[features]\ncodex_hooks = false\n"
 

@@ -19,7 +19,7 @@ Old migration-plan memos (`docs/memos/`) are history/参考 only.
 
 ## Runtime
 
-- Go 1.22 binary: `harnest <repo-url>` or `harnest {preflight, detect-merged, run, sunset, recover}`
+- Go 1.23+ binary. Release and CI builds use patched Go 1.26.3: `harnest <repo-url>` or `harnest {preflight, detect-merged, run, sunset, recover}`
 - macOS launchd (hourly tick) or `workflow_dispatch` on GitHub Actions
 - External CLI dependencies: `git >= 2.35`, `gh >= 2.40`, `jq >= 1.6`, `yq >= 4.0`, `lsof`, `claude`, `codex`
 - Platform: darwin/arm64, darwin/amd64, linux/amd64

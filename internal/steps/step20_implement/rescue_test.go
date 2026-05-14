@@ -198,14 +198,14 @@ func TestResumeIfNeeded_SkipsStaleRescueDirWhenIgnoredContentDrifts(t *testing.T
 	}))
 	require.NoError(t, os.WriteFile(filepath.Join(fx.worktree, ".env.local"), []byte("new\n"), 0o644))
 
-	retryCount, err := fx.step.resumeIfNeeded(context.Background(), fx.run, allocation, fx.agentDir)
-	require.NoError(t, err)
-	assert.Equal(t, 1, retryCount)
-	assert.NoFileExists(t, filepath.Join(fx.worktree, ".env.local"))
+	_, err = fx.step.resumeIfNeeded(context.Background(), fx.run, allocation, fx.agentDir)
+	var manual *agentrunner.ManualRecoveryRequiredError
+	require.ErrorAs(t, err, &manual)
+	assert.FileExists(t, filepath.Join(fx.worktree, ".env.local"))
 	assert.GreaterOrEqual(t, len(rescueDirEntries(t, fx.agentDir)), 2, "ignored content drift must force a fresh rescue capture")
 
-	rescuedBytes := readFreshRescueFile(t, fx.agentDir, "stale-ignored-rescue", "ignored/.env.local")
-	assert.Equal(t, "new\n", string(rescuedBytes))
+	skippedBytes := readFreshRescueFile(t, fx.agentDir, "stale-ignored-rescue", "ignored-skipped.txt")
+	assert.Contains(t, string(skippedBytes), "skipped_ignored_content:\".env.local\"")
 }
 
 func TestResumeIfNeeded_SkipsRescueDirWithPartialIgnoredCoverage(t *testing.T) {

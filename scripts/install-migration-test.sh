@@ -11,6 +11,7 @@ install_dir="$TMP_ROOT/bin"
 home_dir="$TMP_ROOT/home"
 plist_dir="$home_dir/Library/LaunchAgents"
 fake_bin="$TMP_ROOT/fake-bin"
+test_safe_path="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
 payload="$TMP_ROOT/harnest-payload"
 launchctl_log="$TMP_ROOT/launchctl.log"
 install_output_path="$TMP_ROOT/install.out"
@@ -139,6 +140,8 @@ chmod +x "$fake_bin/chown"
 
 set +e
 PATH="$fake_bin:$PATH" \
+AUTO_IMPROVE_TEST_MODE=1 \
+AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 REPO_ROOT="$repo_root" \
 HARNEST_RELEASE_URL="https://example.invalid/harnest" \
@@ -178,6 +181,8 @@ fi
 standalone_log="$TMP_ROOT/standalone-launchctl.log"
 printf 'legacy plist\n' >"$legacy_plist"
 PATH="$fake_bin:$PATH" \
+AUTO_IMPROVE_TEST_MODE=1 \
+AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 TARGET="$install_dir/harnest" \
 REPO_ROOT="$repo_root" \
@@ -202,6 +207,8 @@ fi
 write_legacy_plist_for_repo "$legacy_plist" "$repo_root"
 set +e
 PATH="$fake_bin:$PATH" \
+AUTO_IMPROVE_TEST_MODE=1 \
+AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 REPO_ROOT="$repo_root" \
 HARNEST_RELEASE_URL="https://example.invalid/harnest" \
@@ -232,6 +239,8 @@ fi
 write_legacy_plist_for_repo "$legacy_plist" "$repo_root"
 set +e
 PATH="$fake_bin:$PATH" \
+AUTO_IMPROVE_TEST_MODE=1 \
+AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 REPO_ROOT="$repo_root" \
 HARNEST_RELEASE_URL="https://example.invalid/harnest" \
@@ -262,6 +271,8 @@ foreign_log="$TMP_ROOT/foreign-legacy-launchctl.log"
 write_legacy_plist_for_repo "$legacy_plist" "$TMP_ROOT/foreign-repo"
 set +e
 PATH="$fake_bin:$PATH" \
+AUTO_IMPROVE_TEST_MODE=1 \
+AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 REPO_ROOT="$repo_root" \
 HARNEST_RELEASE_URL="https://example.invalid/harnest" \
@@ -297,6 +308,8 @@ printf 'old chown plist\n' >"$chown_plist"
 
 set +e
 PATH="$fake_bin:$PATH" \
+AUTO_IMPROVE_TEST_MODE=1 \
+AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 REPO_ROOT="$repo_root" \
 HARNEST_RELEASE_URL="https://example.invalid/harnest" \
@@ -330,6 +343,8 @@ printf 'old custom plist\n' >"$custom_plist"
 printf 'legacy plist\n' >"$legacy_plist"
 
 PATH="$fake_bin:$PATH" \
+AUTO_IMPROVE_TEST_MODE=1 \
+AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 REPO_ROOT="$repo_root" \
 PLIST="$custom_plist" \

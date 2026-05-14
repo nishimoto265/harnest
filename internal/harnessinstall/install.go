@@ -317,7 +317,7 @@ func containsProvider(providers []string, provider string) bool {
 }
 
 func readOptional(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
+	data, err := internalio.ReadValidatedRegularFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

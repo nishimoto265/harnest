@@ -170,6 +170,7 @@ exit 1
 	t.Cleanup(restore)
 	t.Setenv("FAKE_GIT_ENV_OUT", envPath)
 	t.Setenv("GH_TOKEN", "token")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "enterprise-token")
 	t.Setenv("GH_HOST", "github.example.com")
 	t.Setenv("GIT_ASKPASS", "/tmp/malicious-askpass")
 
@@ -182,14 +183,16 @@ exit 1
 	envBytes, err := os.ReadFile(envPath)
 	require.NoError(t, err)
 	env := string(envBytes)
-	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:token"))
+	githubHeader := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:token"))
+	enterpriseHeader := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:enterprise-token"))
 	assert.Contains(t, env, "ARGS:-C /tmp/repo remote get-url origin")
 	assert.Contains(t, env, "ARGS:-C /tmp/repo remote get-url --push --all origin")
 	assert.Contains(t, env, "ARGS:-C /tmp/repo ls-remote --heads origin "+realGitBranch)
 	assert.Contains(t, env, "ARGS:-C /tmp/repo push origin "+strings.Repeat("b", 40)+":refs/heads/"+realGitBranch)
 	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.com/.extraheader")
 	assert.Contains(t, env, "GIT_CONFIG_KEY_4=http.https://github.example.com/.extraheader")
-	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+header)
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+githubHeader)
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_4="+enterpriseHeader)
 	assert.NotContains(t, env, "GIT_ASKPASS=/tmp/malicious-askpass")
 }
 

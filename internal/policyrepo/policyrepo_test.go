@@ -439,6 +439,7 @@ func TestPublishSnapshotRejectsSymlinkedLocalRule(t *testing.T) {
 
 func TestPreparedPublishPushUsesScopedHTTPSTokenAuth(t *testing.T) {
 	t.Setenv("GH_TOKEN", "test-token")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "enterprise-token")
 	t.Setenv("GH_HOST", "github.example.com")
 	repoRoot := newClonedRepoWithPolicyBranch(t)
 	head := strings.TrimSpace(string(mustGitOutput(t, repoRoot, "rev-parse", "origin/policy")))
@@ -452,7 +453,7 @@ func TestPreparedPublishPushUsesScopedHTTPSTokenAuth(t *testing.T) {
 			pushChecked++
 			assertSafeGitEnv(t, env)
 			assert.Contains(t, env, "GH_TOKEN=test-token")
-			assertScopedGitHubExtraHeader(t, env, "github.example.com", "test-token")
+			assertScopedGitHubExtraHeader(t, env, "github.example.com", "enterprise-token")
 			return nil, nil
 		}
 		return originalRunGit(ctx, env, args...)

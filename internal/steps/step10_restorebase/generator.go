@@ -140,6 +140,7 @@ func runTaskBriefGeneratorCLI(ctx context.Context, profile agents.Profile, workd
 		Prompt:      promptText,
 		SessionPath: command.SessionPath,
 		Timeout:     timeout,
+		Provider:    command.Provider,
 		Env:         command.Env,
 		ErrPrefix:   "step10 task brief generator",
 	})

@@ -291,6 +291,7 @@ func TestCopyUntrackedFiles_SkipsSymlinksAndKeepsWhitespaceNames(t *testing.T) {
 	require.NoError(t, os.WriteFile(secretPath, []byte("secret\n"), 0o600))
 	require.NoError(t, os.Symlink(secretPath, filepath.Join(worktree, "loot")))
 	require.NoError(t, os.WriteFile(filepath.Join(worktree, "space name.txt"), []byte("hello\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, ".env.local"), []byte("token=secret\n"), 0o600))
 
 	rescueDir := filepath.Join(t.TempDir(), "rescue")
 	require.NoError(t, os.MkdirAll(filepath.Join(rescueDir, "untracked"), 0o755))
@@ -299,11 +300,13 @@ func TestCopyUntrackedFiles_SkipsSymlinksAndKeepsWhitespaceNames(t *testing.T) {
 	artifacts, err := copyUntrackedFilesWithBudget(context.Background(), worktree, rescueDir, &budget)
 	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(rescueDir, "untracked", "loot"))
+	assert.NoFileExists(t, filepath.Join(rescueDir, "untracked", ".env.local"))
 	assert.FileExists(t, filepath.Join(rescueDir, "untracked", "space name.txt"))
 	assert.FileExists(t, filepath.Join(rescueDir, "untracked-symlinks.txt"))
 	symlinkLog, err := os.ReadFile(filepath.Join(rescueDir, "untracked-symlinks.txt"))
 	require.NoError(t, err)
 	assert.Contains(t, string(symlinkLog), "loot")
+	assert.Contains(t, string(symlinkLog), `skipped_sensitive_path:".env.local"`)
 
 	paths := make([]string, 0, len(artifacts))
 	for _, artifact := range artifacts {

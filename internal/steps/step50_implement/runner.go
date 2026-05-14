@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 )
 
@@ -23,6 +24,7 @@ type runnerRequest struct {
 	Prompt      string
 	SessionPath string
 	Timeout     time.Duration
+	Provider    agents.Provider
 	Env         []string
 	OnStart     func(agentrunner.ProcessLease, time.Time) error
 }
@@ -50,6 +52,7 @@ func (r commandRunner) Run(ctx context.Context, req runnerRequest) (runnerResult
 		Prompt:                 req.Prompt,
 		SessionPath:            req.SessionPath,
 		Timeout:                req.Timeout,
+		Provider:               req.Provider,
 		Env:                    req.Env,
 		OnStart:                req.OnStart,
 		ErrPrefix:              "step50",

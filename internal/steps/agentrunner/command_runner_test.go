@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nishimoto265/auto-improve/internal/agents"
 	"github.com/stretchr/testify/require"
 )
 
@@ -191,6 +192,53 @@ func TestRunCommand_AppliesSafeGitProfileToAgentEnv(t *testing.T) {
 	require.NotContains(t, output, "/tmp/malicious-gitconfig")
 	require.NotContains(t, output, "ssh -F /tmp/malicious-ssh-config")
 	require.NotContains(t, output, "/tmp/malicious-askpass")
+}
+
+func TestRunCommand_UsesProviderSpecificAgentEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "claude-oauth")
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+	t.Setenv("OPENAI_PROJECT", "openai-project")
+
+	sessionPath := filepath.Join(t.TempDir(), "session.log")
+	result, err := RunCommand(context.Background(), CommandRequest{
+		Binary:      "sh",
+		Args:        []string{"-c", `env | sort | grep -E '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|OPENAI_PROJECT)=' || true`},
+		Workdir:     t.TempDir(),
+		SessionPath: sessionPath,
+		Timeout:     time.Second,
+		Provider:    agents.ProviderCodex,
+		ErrPrefix:   "test",
+	})
+
+	require.NoError(t, err)
+	require.False(t, result.TimedOut)
+	data, err := os.ReadFile(sessionPath)
+	require.NoError(t, err)
+	output := string(data)
+	require.Contains(t, output, "OPENAI_API_KEY=openai-key")
+	require.Contains(t, output, "OPENAI_PROJECT=openai-project")
+	require.NotContains(t, output, "ANTHROPIC_API_KEY=anthropic-key")
+	require.NotContains(t, output, "CLAUDE_CODE_OAUTH_TOKEN=claude-oauth")
+}
+
+func TestRunCommand_RejectsSymlinkSessionPath(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "session.log")
+	require.NoError(t, os.Symlink(filepath.Join(dir, "target.log"), sessionPath))
+
+	_, err := RunCommand(context.Background(), CommandRequest{
+		Binary:      "sh",
+		Args:        []string{"-c", "printf should-not-run"},
+		Workdir:     t.TempDir(),
+		SessionPath: sessionPath,
+		Timeout:     time.Second,
+		ErrPrefix:   "test",
+	})
+
+	require.Error(t, err)
+	_, statErr := os.Stat(filepath.Join(dir, "target.log"))
+	require.True(t, os.IsNotExist(statErr), "symlink target should not be created or truncated")
 }
 
 func assertFileContains(t *testing.T, path, want string) {

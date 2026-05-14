@@ -303,6 +303,21 @@ func assertFreshRescueStateHasArtifacts(t *testing.T, agentDir, skipDir string, 
 	}
 }
 
+func readFreshRescueFile(t *testing.T, agentDir, skipDir, rel string) []byte {
+	t.Helper()
+	for _, entry := range rescueDirEntries(t, agentDir) {
+		if entry.Name() == skipDir {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(agentDir, rescuedDirName, entry.Name(), filepath.FromSlash(rel)))
+		if err == nil {
+			return data
+		}
+	}
+	t.Fatalf("fresh rescue file %s not found under %s", rel, filepath.Join(agentDir, rescuedDirName))
+	return nil
+}
+
 func writeRescueGitWrapper(t *testing.T, dir, body string) {
 	t.Helper()
 	path := filepath.Join(dir, "git")

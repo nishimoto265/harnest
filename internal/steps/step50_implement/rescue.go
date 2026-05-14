@@ -16,9 +16,11 @@ import (
 
 	"github.com/nishimoto265/auto-improve/internal/contracts"
 	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
+	internalio "github.com/nishimoto265/auto-improve/internal/io"
 	"github.com/nishimoto265/auto-improve/internal/processenv"
 	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
 	"github.com/nishimoto265/auto-improve/internal/steps/implementrescue"
+	"golang.org/x/sys/unix"
 )
 
 type RescueExhaustedError struct {
@@ -84,7 +86,6 @@ func (s *Step) performRescue(ctx context.Context, run RunContext, allocation con
 		RescuedDirName: rescuedDirName,
 		State:          implementrescue.State(state),
 		Now:            s.now,
-		EnsureDir:      ensureDir,
 		Quiesce: func(ctx context.Context, worktreePath string, state implementrescue.State) error {
 			return ensureRescueLeaseQuiesced(ctx, worktreePath, resumeState(state))
 		},
@@ -113,8 +114,8 @@ func tryAcquireRescueLock(path string) (*rescueLock, bool, error) {
 
 type rescueArtifactDigest = agentrunner.RescueArtifactDigest
 
-func verifyRescueState(rescueDir string) error {
-	return agentrunner.VerifyRescueState(rescueDir, fileDigest, "step50")
+func verifyRescueState(rescueDir string, state agentrunner.RescueStateFile) error {
+	return agentrunner.VerifyRescueStateFile(rescueDir, state, fileDigest, "step50")
 }
 
 func writeCommitBundle(ctx context.Context, repoPath, rescueDir, expectedBaseSHA string) (int, string, error) {
@@ -204,7 +205,7 @@ func writeIgnoredList(ctx context.Context, repoPath, dest string) error {
 }
 
 func fileDigest(path string) (string, error) {
-	f, err := os.Open(path)
+	f, _, _, err := agentrunner.OpenValidatedRegularFile(path)
 	if err != nil {
 		return "", err
 	}
@@ -222,8 +223,20 @@ func identity(s string) string {
 
 func copyOpenFileContext(ctx context.Context, in *os.File, dst string, perm os.FileMode, sizeLimit int64) error {
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err := internalio.EnsureNoSymlinkPathComponents(filepath.Dir(dst)); err != nil {
+		return err
+	}
+	fd, err := unix.Open(dst, unix.O_CREAT|unix.O_WRONLY|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, uint32(perm))
 	if err != nil {
+		return err
+	}
+	out := os.NewFile(uintptr(fd), dst)
+	if out == nil {
+		_ = unix.Close(fd)
+		return fmt.Errorf("step50: rescue output open returned nil: %s", dst)
+	}
+	if err := out.Chmod(0o600); err != nil {
+		_ = out.Close()
 		return err
 	}
 	written, err := io.CopyBuffer(out, io.LimitReader(&copyContextReader{ctx: ctx, reader: in}, sizeLimit+1), make([]byte, 32<<10))

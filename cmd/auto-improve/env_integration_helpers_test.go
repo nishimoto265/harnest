@@ -83,7 +83,7 @@ func (e cliIntegrationEnv) runDirs(t *testing.T) []string {
 			continue
 		}
 		name := entry.Name()
-		if name == "pr-locks" || name == "rules" || name == "needs-recovery" {
+		if strings.HasPrefix(name, ".") || name == "pr-locks" || name == "rules" || name == "needs-recovery" {
 			continue
 		}
 		dirs = append(dirs, filepath.Join(e.runsBase, name))

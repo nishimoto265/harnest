@@ -193,6 +193,9 @@ func TestLoadConfig_RejectsPolicyBranchMatchingDefaultOrBestBranch(t *testing.T)
 		want         string
 	}{
 		{name: "default", policyBranch: "main", want: "repo.default_branch"},
+		{name: "default ref path", policyBranch: "refs/heads/main", want: "repo.policy_branch must be a branch name"},
+		{name: "dot component", policyBranch: "auto-improve/.policy", want: "invalid branch component"},
+		{name: "trailing dot", policyBranch: "auto-improve/policy.", want: "must not end with '.'"},
 		{name: "best", policyBranch: "auto-improve/best", want: "repo.best_branch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

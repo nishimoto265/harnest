@@ -35,6 +35,10 @@ func openFileNoFollow(path string, flags int, perm os.FileMode) (*os.File, error
 	return file, nil
 }
 
+func OpenFileNoFollow(path string, flags int, perm os.FileMode) (*os.File, error) {
+	return openFileNoFollow(path, flags, perm)
+}
+
 func openTrackedFileNoFollow(path string, flags int, perm os.FileMode) (*os.File, fileIdentity, error) {
 	if err := contracts.EnsureCleanAbsolutePath(path); err != nil {
 		return nil, fileIdentity{}, err

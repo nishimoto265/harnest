@@ -35,6 +35,15 @@ var writeSuccessDiffFileSync = func(f *os.File) error {
 var writeSuccessDiffRename = os.Rename
 var writeSuccessDiffSyncDir = syncRescueDir
 
+func syncRescueDir(path string) error {
+	dir, err := os.Open(filepath.Clean(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
 func SuccessDiffBytes(ctx context.Context, worktreePath, baseSHA, errPrefix string) ([]byte, error) {
 	tempDir, err := os.MkdirTemp("", "auto-improve-diff-*")
 	if err != nil {
