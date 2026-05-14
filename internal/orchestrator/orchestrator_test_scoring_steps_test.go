@@ -2,11 +2,11 @@ package orchestrator
 
 import (
 	"context"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/judges"
-	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/contracts/stepio"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/judges"
+	"github.com/nishimoto265/harnest/internal/steps/step60_scorepairwise"
 	"time"
 )
 

@@ -781,7 +781,7 @@ Phase 4:               1 agent  半日    [実PR検証 + docs + tag]
 
 | 項目 | 決定 |
 |---|---|
-| module path | `github.com/nishimoto265/auto-improve` |
+| module path | `github.com/nishimoto265/harnest` |
 | Go toolchain | `go 1.22`(`go.mod` で pin、最新 patch は自動 tracking) |
 | 並列実装 agent type | `back`(Go 得意) |
 | Phase 0-parallel 起動 | 1 メッセージに 5 Agent tool call を並べて同時起動 |

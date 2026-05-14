@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/archive"
-	"github.com/nishimoto265/auto-improve/internal/config"
+	"github.com/nishimoto265/harnest/internal/archive"
+	"github.com/nishimoto265/harnest/internal/config"
 )
 
 type SunsetTickOptions struct {

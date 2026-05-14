@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
+	"github.com/nishimoto265/harnest/internal/steps/agentrunner"
 )
 
 type FileDigestFunc func(string) (string, error)

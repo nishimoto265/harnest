@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/gitremote"
-	"github.com/nishimoto265/auto-improve/internal/processenv"
-	"github.com/nishimoto265/auto-improve/internal/worktreecleanup"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/gitremote"
+	"github.com/nishimoto265/harnest/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/worktreecleanup"
 )
 
 // RealGitOps executes the production git commands against the source repo.

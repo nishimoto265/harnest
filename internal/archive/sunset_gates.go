@@ -4,8 +4,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/state"
 )
 
 func sentinelExists(runsBase string) (bool, error) {

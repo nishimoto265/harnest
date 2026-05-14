@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/agents"
-	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/gitremote"
-	"github.com/nishimoto265/auto-improve/internal/processenv"
-	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
+	"github.com/nishimoto265/harnest/internal/agents"
+	"github.com/nishimoto265/harnest/internal/config"
+	"github.com/nishimoto265/harnest/internal/gitremote"
+	"github.com/nishimoto265/harnest/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/steps/agentrunner"
 )
 
 type Failure struct {

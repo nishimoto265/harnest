@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/config"
+	"github.com/nishimoto265/harnest/internal/config"
 	"github.com/spf13/cobra"
 )
 

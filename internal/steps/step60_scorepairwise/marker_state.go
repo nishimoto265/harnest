@@ -7,9 +7,9 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/steps/step60contract"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/steps/step60contract"
 )
 
 func doneMarkerMatchesCurrentState(runIO internalio.RunContext, paths step60Paths, expectedAgents []contracts.AgentID, inputHashes contracts.Step60DoneInputHashes) (bool, bool, error) {

@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=scripts/launchd-common.sh
 . "$SCRIPT_DIR/launchd-common.sh"
 INSTALL_LAUNCHD_SCRIPT="$SCRIPT_DIR/install-launchd.sh"
-REPO_SLUG="${HARNEST_REPO_SLUG:-${AUTO_IMPROVE_REPO_SLUG:-nishimoto265/auto-improve}}"
+REPO_SLUG="${HARNEST_REPO_SLUG:-${AUTO_IMPROVE_REPO_SLUG:-nishimoto265/harnest}}"
 
 ARCHIVE_URL_DEFAULT_BASE="https://github.com/${REPO_SLUG}/releases/latest/download"
 RELEASE_URL="${HARNEST_RELEASE_URL:-${AUTO_IMPROVE_RELEASE_URL:-}}"

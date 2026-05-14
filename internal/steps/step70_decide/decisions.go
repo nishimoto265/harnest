@@ -3,8 +3,8 @@ package step70_decide
 import (
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
 )
 
 func newRollbackDecision(runCtx internalio.RunContext, intention contracts.IntentionRecord, reason contracts.RollbackReason, failed contracts.FailedStep, at time.Time) contracts.Decision {

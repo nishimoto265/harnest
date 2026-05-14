@@ -3,8 +3,8 @@ package orchestrator
 import (
 	"fmt"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
 )
 
 func validatePersistedRunScopedArtifacts(runCtx internalio.RunContext) error {

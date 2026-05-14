@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"unicode/utf8"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
 )
 
 func Append(ctx internalio.RunContext, entry contracts.StateEntry) error {

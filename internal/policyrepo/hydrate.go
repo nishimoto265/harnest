@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	internalio "github.com/nishimoto265/harnest/internal/io"
 )
 
 func HydrateFromBranch(ctx context.Context, repoRoot, branch, runsBase string) error {

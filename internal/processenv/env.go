@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/nishimoto265/auto-improve/internal/gitremote"
+	"github.com/nishimoto265/harnest/internal/gitremote"
 )
 
 // defaultTrustedPATH is the fixed PATH used for every sanitized subprocess env.

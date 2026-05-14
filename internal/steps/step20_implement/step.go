@@ -8,15 +8,15 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/agents"
-	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/policyartifact"
-	"github.com/nishimoto265/auto-improve/internal/policyrepo"
-	"github.com/nishimoto265/auto-improve/internal/prompt"
-	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
-	"github.com/nishimoto265/auto-improve/internal/steps/policyoverlay"
+	"github.com/nishimoto265/harnest/internal/agents"
+	"github.com/nishimoto265/harnest/internal/config"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/policyartifact"
+	"github.com/nishimoto265/harnest/internal/policyrepo"
+	"github.com/nishimoto265/harnest/internal/prompt"
+	"github.com/nishimoto265/harnest/internal/steps/agentrunner"
+	"github.com/nishimoto265/harnest/internal/steps/policyoverlay"
 )
 
 const (

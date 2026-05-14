@@ -1,6 +1,6 @@
 package policyrepo
 
-import "github.com/nishimoto265/auto-improve/internal/policyartifact"
+import "github.com/nishimoto265/harnest/internal/policyartifact"
 
 const (
 	RepoDirName          = "auto-improve"

@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 
-	"github.com/nishimoto265/auto-improve/internal/archive"
-	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/orchestrator"
+	"github.com/nishimoto265/harnest/internal/archive"
+	"github.com/nishimoto265/harnest/internal/config"
+	"github.com/nishimoto265/harnest/internal/orchestrator"
 )
 
 const sunsetRunningMarker = "sunset-running.marker"

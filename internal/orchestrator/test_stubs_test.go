@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/steps/step30_score"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/steps/step30_score"
 )
 
 type stubStep10 struct{}

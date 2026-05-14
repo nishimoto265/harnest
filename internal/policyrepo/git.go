@@ -9,8 +9,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/gitremote"
-	"github.com/nishimoto265/auto-improve/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/gitremote"
+	"github.com/nishimoto265/harnest/internal/processenv"
 )
 
 var runGit = func(ctx context.Context, env []string, args ...string) ([]byte, error) {

@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/processenv"
 )
 
 // LinkedIssue describes a GitHub issue that is closed by the PR (via closing

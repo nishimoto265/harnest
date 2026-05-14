@@ -10,13 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/archive"
-	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/policyrepo"
-	"github.com/nishimoto265/auto-improve/internal/state"
-	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
+	"github.com/nishimoto265/harnest/internal/archive"
+	"github.com/nishimoto265/harnest/internal/config"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/policyrepo"
+	"github.com/nishimoto265/harnest/internal/state"
+	"github.com/nishimoto265/harnest/internal/steps/step70_decide"
 	"github.com/spf13/cobra"
 )
 

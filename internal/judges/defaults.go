@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/contracts"
 )
 
 // defaultRubricContent holds the authoritative Phase 0 rubric shipped with the

@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/processenv"
 )
 
 var (

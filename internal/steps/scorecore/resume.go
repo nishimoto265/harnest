@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/judges"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/judges"
 )
 
 func sortRuleIDs(ids []string) { sort.Strings(ids) }

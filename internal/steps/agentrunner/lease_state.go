@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"time"
 
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/validation"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/validation"
 )
 
 var ErrHeartbeatUpdateFailed = errors.New("agentrunner: heartbeat update failed")

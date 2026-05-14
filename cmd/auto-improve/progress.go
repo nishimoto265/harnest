@@ -15,10 +15,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/orchestrator"
-	"github.com/nishimoto265/auto-improve/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/orchestrator"
+	"github.com/nishimoto265/harnest/internal/processenv"
 	"github.com/spf13/cobra"
 )
 

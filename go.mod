@@ -1,4 +1,4 @@
-module github.com/nishimoto265/auto-improve
+module github.com/nishimoto265/harnest
 
 go 1.23.0
 

@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/nishimoto265/auto-improve/internal/agents"
+	"github.com/nishimoto265/harnest/internal/agents"
 )
 
 type providerRuntime interface {

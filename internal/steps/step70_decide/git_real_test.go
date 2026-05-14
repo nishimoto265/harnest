@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/processenv"
-	"github.com/nishimoto265/auto-improve/internal/worktreecleanup"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/worktreecleanup"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

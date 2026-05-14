@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/policyrepo"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/policyrepo"
 )
 
 func policySnapshotPreAdoptBlockReason(ctx context.Context, runCtx internalio.RunContext, deps Deps) (string, error) {

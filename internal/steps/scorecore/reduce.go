@@ -3,8 +3,8 @@ package scorecore
 import (
 	"fmt"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
 )
 
 // CollapseFinalScores keeps only the latest final score row for each

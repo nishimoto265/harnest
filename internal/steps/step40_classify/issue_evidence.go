@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/lessons"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/lessons"
 )
 
 func collectIssueEvidence(entries []contracts.IssueEntry) map[string]issueEvidence {

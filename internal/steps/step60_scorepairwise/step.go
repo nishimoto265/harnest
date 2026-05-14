@@ -7,11 +7,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/judges"
-	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/contracts/stepio"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/judges"
+	"github.com/nishimoto265/harnest/internal/steps/scorecore"
 )
 
 type Input struct {

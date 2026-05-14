@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/processenv"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/processenv"
 )
 
 const (

@@ -2,10 +2,10 @@ package step70_decide
 
 import (
 	"context"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/policyrepo"
-	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/policyrepo"
+	"github.com/nishimoto265/harnest/internal/state"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"os"

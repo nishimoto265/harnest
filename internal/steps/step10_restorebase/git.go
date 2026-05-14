@@ -9,12 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/gitremote"
-	"github.com/nishimoto265/auto-improve/internal/policyartifact"
-	"github.com/nishimoto265/auto-improve/internal/policyrepo"
-	"github.com/nishimoto265/auto-improve/internal/processenv"
-	"github.com/nishimoto265/auto-improve/internal/steps/policyoverlay"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/gitremote"
+	"github.com/nishimoto265/harnest/internal/policyartifact"
+	"github.com/nishimoto265/harnest/internal/policyrepo"
+	"github.com/nishimoto265/harnest/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/steps/policyoverlay"
 )
 
 // GitClient abstracts the subset of `git` commands step10 needs so tests can

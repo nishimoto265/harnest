@@ -3,7 +3,7 @@ package orchestrator
 import (
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/contracts"
 )
 
 func stateRunID(entry contracts.StateEntry) (contracts.RunID, bool) {

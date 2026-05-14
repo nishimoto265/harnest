@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	internalio "github.com/nishimoto265/harnest/internal/io"
 )
 
 var ErrArtifactMultipleLinks = fmt.Errorf("%w: multiple hard links", ErrArtifactNotRegular)

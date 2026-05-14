@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/state"
 )
 
 func appendRegistryEntries(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.TaskPackage, intention *contracts.IntentionRecord, store IntentionWriter, writer state.Writer, deps Deps, pr int) (contracts.RegistryAppendResult, error) {

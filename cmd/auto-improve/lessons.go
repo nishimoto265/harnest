@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/nishimoto265/auto-improve/internal/harnessinstall"
-	"github.com/nishimoto265/auto-improve/internal/lessons"
+	"github.com/nishimoto265/harnest/internal/harnessinstall"
+	"github.com/nishimoto265/harnest/internal/lessons"
 	"github.com/spf13/cobra"
 )
 

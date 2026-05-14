@@ -7,7 +7,7 @@ import (
 	"io"
 	"reflect"
 
-	"github.com/nishimoto265/auto-improve/internal/validation"
+	"github.com/nishimoto265/harnest/internal/validation"
 )
 
 // decodeStrict decodes a single JSON value into v using DisallowUnknownFields

@@ -1,8 +1,8 @@
 package step30_score
 
 import (
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/steps/scorecore"
 )
 
 type stepPathsResult struct {

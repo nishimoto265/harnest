@@ -5,8 +5,8 @@ import (
 	"errors"
 	"os"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
 )
 
 func writeNoop(ctx context.Context, runCtx internalio.RunContext, pkg *contracts.TaskPackage, deps Deps) error {

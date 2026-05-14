@@ -7,11 +7,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/candidaterules"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/harnessinstall"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/policyrepo"
+	"github.com/nishimoto265/harnest/internal/candidaterules"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/harnessinstall"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/policyrepo"
 )
 
 type ExperimentLesson struct {

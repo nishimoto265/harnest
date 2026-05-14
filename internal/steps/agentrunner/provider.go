@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/agents"
-	"github.com/nishimoto265/auto-improve/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/agents"
+	"github.com/nishimoto265/harnest/internal/processenv"
 )
 
 func ImplementerCommand(profile agents.Profile, workdir string) (string, []string, error) {

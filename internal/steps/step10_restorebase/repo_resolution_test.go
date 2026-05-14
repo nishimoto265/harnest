@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	internalio "github.com/nishimoto265/harnest/internal/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

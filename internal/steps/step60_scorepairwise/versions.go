@@ -1,8 +1,8 @@
 package step60_scorepairwise
 
 import (
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/steps/scorecore"
 )
 
 func step60VersionsMatch(paths step60Paths, rubricVersion, promptVersion, pairwisePromptVersion string) (bool, error) {

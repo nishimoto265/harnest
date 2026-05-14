@@ -1,6 +1,6 @@
 package state
 
-import "github.com/nishimoto265/auto-improve/internal/contracts"
+import "github.com/nishimoto265/harnest/internal/contracts"
 
 func stateEntryPR(entry contracts.StateEntry) (int, bool) {
 	switch value := entry.Value.(type) {

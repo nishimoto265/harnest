@@ -1,6 +1,6 @@
 package lessons
 
-import "github.com/nishimoto265/auto-improve/internal/harnessinstall"
+import "github.com/nishimoto265/harnest/internal/harnessinstall"
 
 type InstallGuidanceOptions struct {
 	Root      string

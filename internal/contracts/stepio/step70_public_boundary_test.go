@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	stepio "github.com/nishimoto265/auto-improve/internal/contracts/stepio"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	stepio "github.com/nishimoto265/harnest/internal/contracts/stepio"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -3,7 +3,7 @@ package step70_decide
 import (
 	"context"
 	"fmt"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/contracts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"os"

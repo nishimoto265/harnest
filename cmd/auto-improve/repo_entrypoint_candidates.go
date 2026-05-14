@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/detect"
+	"github.com/nishimoto265/harnest/internal/config"
+	"github.com/nishimoto265/harnest/internal/detect"
 )
 
 func selectRepoEntrypointCandidates(ctx context.Context, cfg config.Config, processedPath string) ([]repoCandidate, []repoSkippedPR, error) {

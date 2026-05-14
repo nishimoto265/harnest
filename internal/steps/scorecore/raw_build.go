@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/judges"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/judges"
 )
 
 // buildRawScoreEntries converts a JudgeOutput into RawScoreEntry rows for the

@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/policyartifact"
-	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/policyartifact"
+	"github.com/nishimoto265/harnest/internal/steps/agentrunner"
 )
 
 func successDiffBytes(ctx context.Context, worktreePath, baseSHA string) ([]byte, error) {

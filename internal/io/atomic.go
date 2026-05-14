@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/contracts"
 	"golang.org/x/sys/unix"
 )
 

@@ -7,12 +7,12 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/nishimoto265/auto-improve/internal/candidaterules"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/judges"
-	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
-	"github.com/nishimoto265/auto-improve/internal/steps/step60contract"
+	"github.com/nishimoto265/harnest/internal/candidaterules"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/judges"
+	"github.com/nishimoto265/harnest/internal/steps/scorecore"
+	"github.com/nishimoto265/harnest/internal/steps/step60contract"
 )
 
 func loadStep60Artifacts(runCtx internalio.RunContext) (step60ArtifactSnapshot, error) {

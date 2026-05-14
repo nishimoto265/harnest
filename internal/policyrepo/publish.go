@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/processenv"
 )
 
 var removePreparedPublishWorktree = removeWorktree

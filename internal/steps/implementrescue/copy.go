@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/steps/agentrunner"
 )
 
 const (

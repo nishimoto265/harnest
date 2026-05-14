@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/contracts/stepio"
+	internalio "github.com/nishimoto265/harnest/internal/io"
 )
 
 func noActionableCandidates(candidates *contracts.Candidates) bool {

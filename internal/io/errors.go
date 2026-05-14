@@ -3,7 +3,7 @@ package io
 import (
 	"errors"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
+	"github.com/nishimoto265/harnest/internal/contracts/stepio"
 )
 
 const (

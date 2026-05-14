@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/nishimoto265/auto-improve/internal/candidaterules"
-	"github.com/nishimoto265/auto-improve/internal/policyrepo"
+	"github.com/nishimoto265/harnest/internal/candidaterules"
+	"github.com/nishimoto265/harnest/internal/policyrepo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -1,8 +1,8 @@
 package step30_score
 
 import (
-	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/judges"
+	"github.com/nishimoto265/harnest/internal/config"
+	"github.com/nishimoto265/harnest/internal/judges"
 )
 
 // defaultPanelProvider returns the default primary judge used for absolute

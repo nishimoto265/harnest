@@ -5,11 +5,11 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/policyrepo"
-	"github.com/nishimoto265/auto-improve/internal/prompt"
+	"github.com/nishimoto265/harnest/internal/config"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/policyrepo"
+	"github.com/nishimoto265/harnest/internal/prompt"
 )
 
 //go:embed prompts/step20-implement.tmpl

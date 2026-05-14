@@ -3,9 +3,9 @@ package judges
 import (
 	"fmt"
 
-	"github.com/nishimoto265/auto-improve/internal/agents"
-	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/agents"
+	"github.com/nishimoto265/harnest/internal/config"
+	"github.com/nishimoto265/harnest/internal/contracts"
 )
 
 func NewJudgeFromConfig(cfg *config.Config, role contracts.JudgeRole) (Judge, error) {

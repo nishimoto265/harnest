@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	"github.com/nishimoto265/auto-improve/internal/orchestrator"
+	"github.com/nishimoto265/harnest/internal/orchestrator"
 	"github.com/spf13/cobra"
 )
 

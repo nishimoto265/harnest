@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/nishimoto265/auto-improve/internal/validation"
+	"github.com/nishimoto265/harnest/internal/validation"
 )
 
 var (

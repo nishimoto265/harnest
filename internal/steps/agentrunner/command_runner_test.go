@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/agents"
+	"github.com/nishimoto265/harnest/internal/agents"
 	"github.com/stretchr/testify/require"
 )
 

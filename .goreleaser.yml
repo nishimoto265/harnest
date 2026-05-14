@@ -45,7 +45,7 @@ homebrew_casks:
     commit_author:
       name: github-actions[bot]
       email: 41898282+github-actions[bot]@users.noreply.github.com
-    homepage: "https://github.com/nishimoto265/auto-improve"
+    homepage: "https://github.com/nishimoto265/harnest"
     description: "Self-improving harness pipeline for AI coding agents"
     caveats: |
       HarNest depends on git, gh, jq, yq, lsof, and configured Codex/Claude CLIs.

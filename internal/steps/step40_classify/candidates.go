@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/lessons"
-	"github.com/nishimoto265/auto-improve/internal/steps/scorecore"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/lessons"
+	"github.com/nishimoto265/harnest/internal/steps/scorecore"
 )
 
 const maxStep40Candidates = 10

@@ -6,11 +6,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/detect"
-	"github.com/nishimoto265/auto-improve/internal/orchestrator"
-	"github.com/nishimoto265/auto-improve/internal/preflight"
-	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/harnest/internal/config"
+	"github.com/nishimoto265/harnest/internal/detect"
+	"github.com/nishimoto265/harnest/internal/orchestrator"
+	"github.com/nishimoto265/harnest/internal/preflight"
+	"github.com/nishimoto265/harnest/internal/state"
 	"github.com/spf13/cobra"
 )
 

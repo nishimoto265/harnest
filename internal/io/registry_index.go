@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/contracts"
 )
 
 var idempotencyIndexBeforeAppendHook = func() error { return nil }

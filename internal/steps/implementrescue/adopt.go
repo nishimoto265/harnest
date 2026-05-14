@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/steps/agentrunner"
 )
 
 func FindExistingDir(agentDir, rescuedDirName, expectedBaseSHA string, nextRetry int, currentHead, currentDirtyFingerprint string, currentDirtyEntries []string, verifyState func(string, agentrunner.RescueStateFile) error) (string, bool, error) {

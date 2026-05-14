@@ -5,9 +5,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/judges"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/judges"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

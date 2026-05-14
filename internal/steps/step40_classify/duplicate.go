@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/registryview"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/registryview"
 )
 
 func activeRulesFromRegistry(entries []contracts.RuleRegistryEntry) (map[string]bool, error) {

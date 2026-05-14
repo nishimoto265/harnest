@@ -10,11 +10,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/harnessinstall"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/lessons"
-	"github.com/nishimoto265/auto-improve/internal/registryview"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/harnessinstall"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/lessons"
+	"github.com/nishimoto265/harnest/internal/registryview"
 )
 
 func BranchSnapshotMatchesLocal(ctx context.Context, repoRoot, branch, runsBase string) (bool, error) {

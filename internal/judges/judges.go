@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/validation"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/validation"
 )
 
 type Role = contracts.JudgeRole

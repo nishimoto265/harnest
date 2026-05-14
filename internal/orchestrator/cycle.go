@@ -7,12 +7,12 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	ilog "github.com/nishimoto265/auto-improve/internal/logger"
-	"github.com/nishimoto265/auto-improve/internal/state"
-	step10restorebase "github.com/nishimoto265/auto-improve/internal/steps/step10_restorebase"
-	"github.com/nishimoto265/auto-improve/internal/steps/step60_scorepairwise"
-	"github.com/nishimoto265/auto-improve/internal/steps/step70_decide"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	ilog "github.com/nishimoto265/harnest/internal/logger"
+	"github.com/nishimoto265/harnest/internal/state"
+	step10restorebase "github.com/nishimoto265/harnest/internal/steps/step10_restorebase"
+	"github.com/nishimoto265/harnest/internal/steps/step60_scorepairwise"
+	"github.com/nishimoto265/harnest/internal/steps/step70_decide"
 )
 
 func (o *Orchestrator) runCycle(ctx context.Context, pr int, opts RunOptions) (err error) {

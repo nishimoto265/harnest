@@ -8,11 +8,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	ilog "github.com/nishimoto265/auto-improve/internal/logger"
-	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/harnest/internal/config"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	ilog "github.com/nishimoto265/harnest/internal/logger"
+	"github.com/nishimoto265/harnest/internal/state"
 )
 
 var defaultAgents = []contracts.AgentID{"a1", "a2", "a3"}

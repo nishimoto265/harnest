@@ -6,10 +6,10 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/nishimoto265/auto-improve/internal/candidaterules"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/policyrepo"
+	"github.com/nishimoto265/harnest/internal/candidaterules"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/policyrepo"
 )
 
 //go:embed prompts/step50-implement-pass2.tmpl

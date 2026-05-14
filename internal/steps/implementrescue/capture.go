@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/steps/agentrunner"
 )
 
 var ErrRescueSkippedDestructiveArtifacts = errors.New("implementrescue: rescue skipped files that reset or clean would delete")

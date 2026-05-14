@@ -6,9 +6,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
-	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/contracts/stepio"
+	"github.com/nishimoto265/harnest/internal/steps/agentrunner"
 )
 
 func FinishState(agentDir string, state State, nextRetry int, heartbeatPath func(string) string, saveState func(string, State) error) (int, error) {

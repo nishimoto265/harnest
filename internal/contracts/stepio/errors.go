@@ -11,7 +11,7 @@ package stepio
 import (
 	"errors"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/contracts"
 )
 
 // Sentinel errors: step I/O boundary failures.

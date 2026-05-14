@@ -9,14 +9,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/config"
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/contracts/stepio"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/state"
-	"github.com/nishimoto265/auto-improve/internal/steps/agentrunner"
-	"github.com/nishimoto265/auto-improve/internal/steps/step20_implement"
-	"github.com/nishimoto265/auto-improve/internal/steps/step50_implement"
+	"github.com/nishimoto265/harnest/internal/config"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/contracts/stepio"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/state"
+	"github.com/nishimoto265/harnest/internal/steps/agentrunner"
+	"github.com/nishimoto265/harnest/internal/steps/step20_implement"
+	"github.com/nishimoto265/harnest/internal/steps/step50_implement"
 	"gopkg.in/yaml.v3"
 )
 

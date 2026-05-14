@@ -10,8 +10,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/nishimoto265/auto-improve/internal/processenv"
-	"github.com/nishimoto265/auto-improve/internal/state"
+	"github.com/nishimoto265/harnest/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/state"
 )
 
 type MergedPR struct {

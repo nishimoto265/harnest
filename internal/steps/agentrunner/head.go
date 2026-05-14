@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	"github.com/nishimoto265/auto-improve/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	"github.com/nishimoto265/harnest/internal/processenv"
 )
 
 func ValidateSuccessHead(ctx context.Context, allocation contracts.WorktreeAllocation, headSHA, errPrefix string) error {

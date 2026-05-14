@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/nishimoto265/auto-improve/internal/orchestrator"
+	"github.com/nishimoto265/harnest/internal/orchestrator"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

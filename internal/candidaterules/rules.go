@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"unicode"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/judges"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/judges"
 )
 
 // RulePayload is the prompt-ready experiment lesson body loaded from the run's

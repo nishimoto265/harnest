@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nishimoto265/auto-improve/internal/contracts"
-	internalio "github.com/nishimoto265/auto-improve/internal/io"
-	"github.com/nishimoto265/auto-improve/internal/processenv"
+	"github.com/nishimoto265/harnest/internal/contracts"
+	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/processenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

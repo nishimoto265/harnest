@@ -3,7 +3,7 @@ package step70_decide
 import (
 	"errors"
 
-	"github.com/nishimoto265/auto-improve/internal/worktreecleanup"
+	"github.com/nishimoto265/harnest/internal/worktreecleanup"
 )
 
 // Public sentinel errors for the step70 staged-transaction machinery.

@@ -459,7 +459,7 @@ scoring は 2 層:
 外部入力(PR body, linked issues, agent 生成 reasons / rationale 等)を judge/extractor prompt に埋める場合は:
 
 ```go
-import autoio "github.com/nishimoto265/auto-improve/internal/io"
+import autoio "github.com/nishimoto265/harnest/internal/io"
 
 safe := autoio.SanitizeForPromptEmbedding(pkg.ReconstructedTaskPrompt, autoio.SafeTextOptions{
     Label: "task_prompt",
