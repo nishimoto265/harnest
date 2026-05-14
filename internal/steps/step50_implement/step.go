@@ -124,6 +124,8 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 	if run.TaskPackage.RunID != run.IO.RunID {
 		return fmt.Errorf("step50: task package run_id mismatch: task_package=%s io=%s", run.TaskPackage.RunID, run.IO.RunID)
 	}
+	taskPackage := cloneTaskPackage(run.TaskPackage)
+	run.TaskPackage = &taskPackage
 	if run.Config == nil {
 		run.Config = s.cfg
 	}
@@ -333,6 +335,16 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 		return fmt.Errorf("step50: clear active lease: %w", err)
 	}
 	return nil
+}
+
+func cloneTaskPackage(pkg *contracts.TaskPackage) contracts.TaskPackage {
+	if pkg == nil {
+		return contracts.TaskPackage{}
+	}
+	clone := *pkg
+	clone.PassBases = append([]contracts.PassBaseAllocation(nil), pkg.PassBases...)
+	clone.Worktrees = append([]contracts.WorktreeAllocation(nil), pkg.Worktrees...)
+	return clone
 }
 
 func (s *Step) ensurePreparedPass2Allocation(ctx context.Context, run RunContext, allocation contracts.WorktreeAllocation, activeRules []policyrepo.ActiveRule, rulePayloads []candidaterules.RulePayload) (contracts.WorktreeAllocation, error) {
