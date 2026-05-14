@@ -98,7 +98,7 @@ func TestRecoverInspectWithRunIDUsesRunScopedPath(t *testing.T) {
 		"repo:\n"+
 			"  root: "+root+"\n"+
 			"  default_branch: main\n"+
-			"  best_branch: auto-improve/best\n"+
+			"  best_branch: harnest/best\n"+
 			"paths:\n"+
 			"  runs: "+runsBase+"\n"+
 			"worktree:\n"+
@@ -110,7 +110,7 @@ func TestRecoverInspectWithRunIDUsesRunScopedPath(t *testing.T) {
 		PR:                      42,
 		Title:                   "inspect",
 		BaseSHA:                 strings.Repeat("1", 40),
-		BestBranch:              "auto-improve/best",
+		BestBranch:              "harnest/best",
 		ReconstructedTaskPrompt: "prompt",
 		CreatedAt:               time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
 		Worktrees: []contracts.WorktreeAllocation{
@@ -125,7 +125,7 @@ func TestRecoverInspectWithRunIDUsesRunScopedPath(t *testing.T) {
 	originalRemoteHead := recoverRemoteHead
 	recoverRemoteHead = func(_ context.Context, repoRoot, branch string) (string, error) {
 		assert.Equal(t, root, repoRoot)
-		assert.Equal(t, "auto-improve/best", branch)
+		assert.Equal(t, "harnest/best", branch)
 		return strings.Repeat("d", 40), nil
 	}
 	t.Cleanup(func() { recoverRemoteHead = originalRemoteHead })
@@ -167,7 +167,7 @@ func TestRecoverInspectWithRunIDTimesOutRemoteHeadLookup(t *testing.T) {
 		"repo:\n"+
 			"  root: "+root+"\n"+
 			"  default_branch: main\n"+
-			"  best_branch: auto-improve/best\n"+
+			"  best_branch: harnest/best\n"+
 			"paths:\n"+
 			"  runs: "+runsBase+"\n"+
 			"worktree:\n"+
@@ -179,7 +179,7 @@ func TestRecoverInspectWithRunIDTimesOutRemoteHeadLookup(t *testing.T) {
 		PR:                      42,
 		Title:                   "inspect-timeout",
 		BaseSHA:                 strings.Repeat("1", 40),
-		BestBranch:              "auto-improve/best",
+		BestBranch:              "harnest/best",
 		ReconstructedTaskPrompt: "prompt",
 		CreatedAt:               time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
 		Worktrees: []contracts.WorktreeAllocation{
@@ -196,7 +196,7 @@ func TestRecoverInspectWithRunIDTimesOutRemoteHeadLookup(t *testing.T) {
 	recoverInspectRemoteHeadTimeout = 25 * time.Millisecond
 	recoverRemoteHead = func(ctx context.Context, repoRoot, branch string) (string, error) {
 		assert.Equal(t, root, repoRoot)
-		assert.Equal(t, "auto-improve/best", branch)
+		assert.Equal(t, "harnest/best", branch)
 		<-ctx.Done()
 		return "", ctx.Err()
 	}

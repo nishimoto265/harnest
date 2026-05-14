@@ -33,7 +33,7 @@ func seedRealGitIntegrationRepo(t *testing.T, repoRoot string) realGitIntegratio
 	runIntegrationGit(t, repoRoot, "commit", "-m", "base")
 	baseSHA := strings.TrimSpace(runIntegrationGit(t, repoRoot, "rev-parse", "HEAD"))
 	runIntegrationGit(t, repoRoot, "push", "origin", "HEAD:refs/heads/main")
-	runIntegrationGit(t, repoRoot, "push", "origin", baseSHA+":refs/heads/auto-improve/best")
+	runIntegrationGit(t, repoRoot, "push", "origin", baseSHA+":refs/heads/harnest/best")
 
 	runIntegrationGit(t, repoRoot, "checkout", "-b", "feature/pr-77")
 	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "app", "message.txt"), []byte("merged change\n"), 0o644))
@@ -55,11 +55,11 @@ func seedRealGitIntegrationRepo(t *testing.T, repoRoot string) realGitIntegratio
 func seedIntegrationPolicyBranch(t *testing.T, repoRoot, branch string) {
 	t.Helper()
 	current := strings.TrimSpace(runIntegrationGit(t, repoRoot, "rev-parse", "--abbrev-ref", "HEAD"))
-	runIntegrationGit(t, repoRoot, "checkout", "--orphan", "auto-improve-policy-seed")
+	runIntegrationGit(t, repoRoot, "checkout", "--orphan", "harnest-policy-seed")
 	runIntegrationGit(t, repoRoot, "rm", "-r", "-f", "--ignore-unmatch", ".")
-	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, "auto-improve"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "auto-improve", "rules-registry.jsonl"), []byte(""), 0o644))
-	runIntegrationGit(t, repoRoot, "add", "auto-improve/rules-registry.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, "harnest"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "harnest", "rules-registry.jsonl"), []byte(""), 0o644))
+	runIntegrationGit(t, repoRoot, "add", "harnest/rules-registry.jsonl")
 	runIntegrationGit(t, repoRoot, "commit", "-m", "seed policy")
 	runIntegrationGit(t, repoRoot, "push", "origin", "HEAD:refs/heads/"+branch)
 	runIntegrationGit(t, repoRoot, "checkout", current)
@@ -78,7 +78,7 @@ func recoverAdoptAnywayGitScript() string {
 	return `#!/bin/sh
 set -eu
 
-state_dir="${AUTO_IMPROVE_GIT_STATE_DIR}"
+state_dir="${HARNEST_GIT_STATE_DIR}"
 mkdir -p "$state_dir"
 
 if [ "${1:-}" = "-C" ]; then
@@ -104,7 +104,7 @@ case "$subcmd" in
     ;;
   ls-remote)
     branch="${4:-best}"
-    printf '%s\trefs/heads/%s\n' "${AUTO_IMPROVE_TEST_REMOTE_SHA}" "$branch"
+    printf '%s\trefs/heads/%s\n' "${HARNEST_TEST_REMOTE_SHA}" "$branch"
     ;;
   worktree)
     case "${1:-}" in
@@ -164,14 +164,14 @@ case "$subcmd" in
     ;;
   rev-parse)
     if [ "${1:-}" = "--verify" ]; then
-      echo "${AUTO_IMPROVE_TEST_BEST_SHA}"
+      echo "${HARNEST_TEST_BEST_SHA}"
       exit 0
     fi
     case "${1:-}" in
-      *^1) echo "${AUTO_IMPROVE_TEST_BASE_SHA}" ;;
-      HEAD) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
-      refs/heads/*) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
-      *) echo "${AUTO_IMPROVE_TEST_BEST_SHA}" ;;
+      *^1) echo "${HARNEST_TEST_BASE_SHA}" ;;
+      HEAD) echo "${HARNEST_TEST_TARGET_SHA}" ;;
+      refs/heads/*) echo "${HARNEST_TEST_TARGET_SHA}" ;;
+      *) echo "${HARNEST_TEST_BEST_SHA}" ;;
     esac
     ;;
   fetch)
@@ -188,15 +188,15 @@ case "$subcmd" in
     esac
     ;;
   ls-tree)
-    printf '%s\t%s\n' "100644 blob 1111111111111111111111111111111111111111" "auto-improve/rules-registry.jsonl"
-    printf '%s\t%s\n' "100644 blob 2222222222222222222222222222222222222222" "auto-improve/rules/r-bad.md"
+    printf '%s\t%s\n' "100644 blob 1111111111111111111111111111111111111111" "harnest/rules-registry.jsonl"
+    printf '%s\t%s\n' "100644 blob 2222222222222222222222222222222222222222" "harnest/rules/r-bad.md"
     ;;
   show)
     case "${1:-}" in
-      origin/auto-improve/policy:auto-improve/rules-registry.jsonl)
+      origin/harnest/policy:harnest/rules-registry.jsonl)
         printf '%s\n' '{"kind":"added","schema_version":"1","rule_id":"r-bad","rule_path":"rules/r-bad.md","sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","idempotency_key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version_seq":1,"prev_hash":"","by_run_id":"2026-04-23-PR1-feedbee","at":"2026-04-23T08:00:00Z"}'
         ;;
-      origin/auto-improve/policy:auto-improve/rules/r-bad.md)
+      origin/harnest/policy:harnest/rules/r-bad.md)
         printf '%s\n' '# broken policy'
         ;;
       *)

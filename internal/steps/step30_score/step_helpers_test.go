@@ -20,6 +20,8 @@ import (
 // package but without manifests so step30 ignores them.
 func seedStep30Fixtures(t *testing.T, agents []contracts.AgentID) (internalio.RunContext, contracts.TaskPackage) {
 	t.Helper()
+	judges.SetDefaultRubricDirForTest(filepath.Join(t.TempDir(), "rubric-cache"))
+	t.Cleanup(func() { judges.SetDefaultRubricDirForTest("") })
 	runsBase := t.TempDir()
 	worktreeBase := t.TempDir()
 	runID := internalio.NewRunID(99)

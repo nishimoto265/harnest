@@ -88,14 +88,14 @@ func PrepareSnapshotPublish(ctx context.Context, repoRoot, branch, expectedHead,
 
 	env := processenv.GitLocalEnv()
 	env = append(env,
-		"GIT_AUTHOR_NAME=auto-improve",
-		"GIT_AUTHOR_EMAIL=auto-improve@local",
-		"GIT_COMMITTER_NAME=auto-improve",
-		"GIT_COMMITTER_EMAIL=auto-improve@local",
+		"GIT_AUTHOR_NAME=harnest",
+		"GIT_AUTHOR_EMAIL=harnest@local",
+		"GIT_COMMITTER_NAME=harnest",
+		"GIT_COMMITTER_EMAIL=harnest@local",
 		"GIT_AUTHOR_DATE=2000-01-01T00:00:00Z",
 		"GIT_COMMITTER_DATE=2000-01-01T00:00:00Z",
 	)
-	if _, err := runGit(ctx, env, "-C", tmpDir, "commit", "-m", fmt.Sprintf("auto-improve: publish policy snapshot for %s", runID)); err != nil {
+	if _, err := runGit(ctx, env, "-C", tmpDir, "commit", "-m", fmt.Sprintf("harnest: publish policy snapshot for %s", runID)); err != nil {
 		_ = plan.Cleanup()
 		return nil, fmt.Errorf("policyrepo: commit policy snapshot: %w", err)
 	}

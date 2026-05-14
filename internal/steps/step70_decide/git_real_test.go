@@ -43,7 +43,7 @@ func TestRealGitOpsPushForceWithLeaseCreatesMissingBranchFromRawSHA(t *testing.T
 	ctx := context.Background()
 	gitOps := RealGitOps{RepoDir: fixture.repo, Remote: "origin"}
 
-	branch := "auto-improve/new-best"
+	branch := "harnest/new-best"
 	target := fixture.commit(t, fixture.repo, "new-best.txt", "new best\n", "new best")
 
 	remoteHead, err := gitOps.RemoteHead(ctx, branch)
@@ -106,7 +106,7 @@ func TestRealGitOpsDeleteBranch(t *testing.T) {
 	ctx := context.Background()
 	gitOps := RealGitOps{RepoDir: fixture.repo, Remote: "origin"}
 
-	branch := "auto-improve/delete-test"
+	branch := "harnest/delete-test"
 	fixture.runGit(t, fixture.repo, "branch", branch, "HEAD")
 	require.NoError(t, gitOps.DeleteBranch(ctx, branch))
 
@@ -121,7 +121,7 @@ func TestRealGitOpsVerifyUnregisteredWorktreeRemoval(t *testing.T) {
 	gitOps := RealGitOps{RepoDir: fixture.repo, Remote: "origin"}
 
 	worktreePath := filepath.Join(fixture.root, "verify-worktree")
-	branch := "auto-improve/verify-test"
+	branch := "harnest/verify-test"
 	fixture.runGit(t, fixture.repo, "worktree", "add", "-b", branch, worktreePath, "HEAD")
 	allocation := contracts.WorktreeAllocation{
 		Agent:   "a1",
@@ -133,7 +133,7 @@ func TestRealGitOpsVerifyUnregisteredWorktreeRemoval(t *testing.T) {
 	}
 
 	require.NoError(t, gitOps.VerifyUnregisteredWorktreeRemoval(ctx, allocation))
-	allocation.Branch = "auto-improve/wrong-branch"
+	allocation.Branch = "harnest/wrong-branch"
 	err := gitOps.VerifyUnregisteredWorktreeRemoval(ctx, allocation)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, worktreecleanup.ErrUnregistered)
@@ -157,7 +157,7 @@ if [ "$3" = "remote" ] && [ "$4" = "get-url" ]; then
   exit 0
 fi
 if [ "$3" = "ls-remote" ]; then
-  printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/auto-improve/best\n'
+  printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/harnest/best\n'
   exit 0
 fi
 if [ "$3" = "push" ]; then
@@ -196,7 +196,7 @@ exit 1
 	assert.NotContains(t, env, "GIT_ASKPASS=/tmp/malicious-askpass")
 }
 
-const realGitBranch = "auto-improve/best"
+const realGitBranch = "harnest/best"
 
 type realGitFixture struct {
 	root   string
@@ -235,8 +235,8 @@ func newRealGitFixture(t *testing.T) realGitFixture {
 
 func (f realGitFixture) configureUser(t *testing.T, repo string) {
 	t.Helper()
-	f.runGit(t, repo, "config", "user.name", "Auto Improve Tests")
-	f.runGit(t, repo, "config", "user.email", "auto-improve-tests@example.invalid")
+	f.runGit(t, repo, "config", "user.name", "HarNest Tests")
+	f.runGit(t, repo, "config", "user.email", "harnest-tests@example.invalid")
 }
 
 func (f realGitFixture) commit(t *testing.T, repo, name, body, message string) string {

@@ -1,6 +1,6 @@
 // Package step10restorebase implements Phase 0-G step10 restore-base.
 //
-// step10 is the first step of an auto-improve run. For a merged PR it:
+// step10 is the first step of an harnest run. For a merged PR it:
 //
 //  1. Fetches PR metadata (title/body/merge commit/linked issues) via `gh`.
 //  2. Resolves the immutable PR code base used for implementation worktrees
@@ -350,7 +350,7 @@ func (r *Runner) carveWorktrees(ctx context.Context, in Input, agents []contract
 		base := contracts.PassBaseAllocation{
 			Pass:    pass,
 			Path:    filepath.Join(in.RunCtx.WorktreeBase, fmt.Sprintf("%s-pass%d-base", runID, pass)),
-			Branch:  fmt.Sprintf("auto-improve/%s/pass%d/base", runID, pass),
+			Branch:  fmt.Sprintf("harnest/%s/pass%d/base", runID, pass),
 			BaseSHA: baseSHA,
 			HeadSHA: baseSHA,
 		}
@@ -372,7 +372,7 @@ func (r *Runner) carveWorktrees(ctx context.Context, in Input, agents []contract
 		passBases = append(passBases, base)
 		for _, agent := range agents {
 			path := filepath.Join(in.RunCtx.WorktreeBase, fmt.Sprintf("%s-pass%d-%s", runID, pass, agent))
-			branch := fmt.Sprintf("auto-improve/%s/pass%d/%s", runID, pass, agent)
+			branch := fmt.Sprintf("harnest/%s/pass%d/%s", runID, pass, agent)
 			if pass == 1 {
 				isNew, err := r.Git.WorktreeAdd(ctx, in.RepoRoot, path, branch, base.HeadSHA)
 				if err != nil {

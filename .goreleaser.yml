@@ -4,7 +4,7 @@ project_name: harnest
 
 builds:
   - id: harnest
-    main: ./cmd/auto-improve
+    main: ./cmd/harnest
     binary: harnest
     goos:
       - darwin

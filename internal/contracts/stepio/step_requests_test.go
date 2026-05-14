@@ -19,7 +19,7 @@ func buildTaskPackage() contracts.TaskPackage {
 		PR:                      42,
 		Title:                   "fix: example",
 		BaseSHA:                 "1111111111111111111111111111111111111111",
-		BestBranch:              "auto-improve/best",
+		BestBranch:              "harnest/best",
 		ReconstructedTaskPrompt: "hello",
 		Worktrees:               make([]contracts.WorktreeAllocation, 6),
 		CreatedAt:               time.Now(),

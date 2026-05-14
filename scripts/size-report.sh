@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-target="${1:-cmd/auto-improve}"
+target="${1:-cmd/harnest}"
 
 case "${target}" in
   /*) target_path="${target}" ;;

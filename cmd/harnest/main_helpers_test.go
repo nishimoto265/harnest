@@ -22,7 +22,7 @@ func writeTestConfig(t *testing.T, root, runsBase, worktreeBase string) {
 	content := "repo:\n" +
 		"  root: " + root + "\n" +
 		"  default_branch: main\n" +
-		"  best_branch: auto-improve/best\n" +
+		"  best_branch: harnest/best\n" +
 		"paths:\n" +
 		"  runs: " + runsBase + "\n" +
 		"worktree:\n" +

@@ -18,24 +18,24 @@ func TestPolicySnapshotMetadataForBranch_TrimsAndRejectsMismatch(t *testing.T) {
 	require.NoError(t, os.MkdirAll(policyDir, 0o755))
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(policyDir, "snapshot.json"), policyrepo.SnapshotMetadata{
 		SchemaVersion: "1",
-		PolicyBranch:  " auto-improve/policy ",
+		PolicyBranch:  " harnest/policy ",
 		PolicyHead:    strings.Repeat("1", 40),
 		RegistryHead:  "",
 	}))
 
-	meta, ok, err := policySnapshotMetadataForBranch(runCtx, "auto-improve/policy")
+	meta, ok, err := policySnapshotMetadataForBranch(runCtx, "harnest/policy")
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, strings.Repeat("1", 40), meta.PolicyHead)
 
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(policyDir, "snapshot.json"), policyrepo.SnapshotMetadata{
 		SchemaVersion: "1",
-		PolicyBranch:  "auto-improve/other-policy",
+		PolicyBranch:  "harnest/other-policy",
 		PolicyHead:    strings.Repeat("1", 40),
 		RegistryHead:  "",
 	}))
 
-	_, _, err = policySnapshotMetadataForBranch(runCtx, "auto-improve/policy")
+	_, _, err = policySnapshotMetadataForBranch(runCtx, "harnest/policy")
 	require.ErrorContains(t, err, "policy snapshot branch mismatch")
 }
 
@@ -45,7 +45,7 @@ func TestLocalPolicySnapshotPreAdoptBlockReason_RejectsBranchMetadata(t *testing
 	require.NoError(t, os.MkdirAll(policyDir, 0o755))
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(policyDir, "snapshot.json"), policyrepo.SnapshotMetadata{
 		SchemaVersion: "1",
-		PolicyBranch:  "auto-improve/policy",
+		PolicyBranch:  "harnest/policy",
 		PolicyHead:    strings.Repeat("1", 40),
 		RegistryHead:  "",
 	}))

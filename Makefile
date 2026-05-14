@@ -9,13 +9,13 @@ build:
 
 build-cli:
 	mkdir -p bin
-	go build -o bin/harnest ./cmd/auto-improve
+	go build -o bin/harnest ./cmd/harnest
 
 test:
 	go test ./...
 
 integration-test:
-	AUTO_IMPROVE_INTEGRATION=1 go test ./cmd/auto-improve -count=1
+	HARNEST_INTEGRATION=1 go test ./cmd/harnest -count=1
 
 lint:
 	go vet ./...

@@ -123,7 +123,7 @@ func TestDetectMergedPRsIncludesLateLowerNumberAndPaginates(t *testing.T) {
 }
 
 func TestDefaultRunnerUsesSanitizedNetworkEnv(t *testing.T) {
-	t.Setenv("AUTO_IMPROVE_DETECT_HELPER", "1")
+	t.Setenv("HARNEST_DETECT_HELPER", "1")
 	t.Setenv("GH_TOKEN", "gh-secret")
 	t.Setenv("BASH_ENV", "/tmp/evil")
 	t.Setenv("GIT_CONFIG_GLOBAL", "/tmp/gitconfig")
@@ -142,7 +142,7 @@ func TestDefaultRunnerUsesSanitizedNetworkEnv(t *testing.T) {
 }
 
 func TestDetectDefaultRunnerHelper(t *testing.T) {
-	if os.Getenv("AUTO_IMPROVE_DETECT_HELPER") != "1" {
+	if os.Getenv("HARNEST_DETECT_HELPER") != "1" {
 		return
 	}
 	if os.Getenv("BASH_ENV") != "" {

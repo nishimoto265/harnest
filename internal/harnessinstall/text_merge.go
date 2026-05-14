@@ -61,7 +61,7 @@ func upsertTextBlock(existing, begin, end, block string) (string, error) {
 func mergeCodexHooksFeature(existing string) string {
 	text := strings.ReplaceAll(existing, "\r\n", "\n")
 	if strings.TrimSpace(text) == "" {
-		return "# BEGIN AUTO-IMPROVE CODEX HOOKS\n[features]\ncodex_hooks = true\n# END AUTO-IMPROVE CODEX HOOKS\n"
+		return "# BEGIN HARNEST CODEX HOOKS\n[features]\ncodex_hooks = true\n# END HARNEST CODEX HOOKS\n"
 	}
 	lines := strings.Split(text, "\n")
 	featuresStart := -1
@@ -93,7 +93,7 @@ func mergeCodexHooksFeature(existing string) string {
 		lines = append(lines[:insertAt], append([]string{"codex_hooks = true"}, lines[insertAt:]...)...)
 		return ensureTrailingNewline(strings.Join(lines, "\n"))
 	}
-	block := "\n# BEGIN AUTO-IMPROVE CODEX HOOKS\n[features]\ncodex_hooks = true\n# END AUTO-IMPROVE CODEX HOOKS\n"
+	block := "\n# BEGIN HARNEST CODEX HOOKS\n[features]\ncodex_hooks = true\n# END HARNEST CODEX HOOKS\n"
 	return strings.TrimRight(text, "\n") + block
 }
 

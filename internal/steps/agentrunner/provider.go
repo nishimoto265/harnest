@@ -48,7 +48,7 @@ func CurrentExecutableEnv() []string {
 	if err != nil || executable == "" {
 		return nil
 	}
-	return []string{"AUTO_IMPROVE_BIN=" + executable}
+	return []string{"HARNEST_BIN=" + executable}
 }
 
 func PrepareProviderBinary(provider agents.Provider, binary string) (string, []string, error) {

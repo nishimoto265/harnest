@@ -53,7 +53,7 @@ func newTestFixture(t *testing.T, timeoutSec int) *testFixture {
 	require.NoError(t, err)
 
 	worktree := filepath.Join(worktreeBase, "repo-a1")
-	baseSHA := initGitRepo(t, worktree, "auto-improve/"+string(runID)+"/pass1/a1")
+	baseSHA := initGitRepo(t, worktree, "harnest/"+string(runID)+"/pass1/a1")
 	pkg := buildTaskPackage(t, runID, worktreeBase, worktree, baseSHA)
 
 	cfg := &config.Config{
@@ -466,7 +466,7 @@ func buildTaskPackage(t *testing.T, runID contracts.RunID, worktreeBase, pass1Pa
 				Agent:   agent,
 				Pass:    pass,
 				Path:    path,
-				Branch:  fmt.Sprintf("auto-improve/%s/pass%d/%s", runID, pass, agent),
+				Branch:  fmt.Sprintf("harnest/%s/pass%d/%s", runID, pass, agent),
 				BaseSHA: baseSHA,
 				HeadSHA: baseSHA,
 			})

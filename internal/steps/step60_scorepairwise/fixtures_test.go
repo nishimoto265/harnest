@@ -393,6 +393,8 @@ func (j *countingJudge) callCount() int32 {
 
 func seedStep60Fixture(t *testing.T, opts fixtureOptions) (internalio.RunContext, contracts.TaskPackage) {
 	t.Helper()
+	judges.SetDefaultRubricDirForTest(filepath.Join(t.TempDir(), "rubric-cache"))
+	t.Cleanup(func() { judges.SetDefaultRubricDirForTest("") })
 
 	runsBase := filepath.Join(t.TempDir(), "runs")
 	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
@@ -411,7 +413,7 @@ func seedStep60Fixture(t *testing.T, opts fixtureOptions) (internalio.RunContext
 				Agent:   agent,
 				Pass:    pass,
 				Path:    path,
-				Branch:  filepath.ToSlash(filepath.Join("auto-improve", string(runID), fmt.Sprintf("pass%d", pass), string(agent))),
+				Branch:  filepath.ToSlash(filepath.Join("harnest", string(runID), fmt.Sprintf("pass%d", pass), string(agent))),
 				BaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				HeadSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 			})
@@ -488,7 +490,7 @@ func writeManifestSuccess(t *testing.T, runIO internalio.RunContext, runID contr
 			RunID:         runID,
 			Pass:          pass,
 			Agent:         agent,
-			BranchName:    "auto-improve/fixture",
+			BranchName:    "harnest/fixture",
 			HeadSHA:       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 			BaseSHA:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			DiffPath:      filepath.ToSlash(filepath.Join(prefix, "diff.patch")),

@@ -20,7 +20,7 @@ func writeIntegrationConfigForRepo(t *testing.T, root, repoRoot, runsBase, workt
 	content := "repo:\n" +
 		"  root: " + repoRoot + "\n" +
 		"  default_branch: main\n" +
-		"  best_branch: auto-improve/best\n" +
+		"  best_branch: harnest/best\n" +
 		"paths:\n" +
 		"  runs: " + runsBase + "\n" +
 		"worktree:\n" +
@@ -113,10 +113,10 @@ func appendPolicyBranchConfig(t *testing.T, path, policyBranch string) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	content := string(data)
-	replacement := "  best_branch: auto-improve/best\n"
+	replacement := "  best_branch: harnest/best\n"
 	if policyBranch != "" {
 		replacement += "  policy_branch: " + policyBranch + "\n"
 	}
-	content = strings.Replace(content, "  best_branch: auto-improve/best\n", replacement, 1)
+	content = strings.Replace(content, "  best_branch: harnest/best\n", replacement, 1)
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 }

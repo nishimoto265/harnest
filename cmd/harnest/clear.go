@@ -76,13 +76,13 @@ func newClearCmd(outputOpts *cliOutputOptions) *cobra.Command {
 			return outputClearPlan(cmd, plan, *outputOpts)
 		},
 	}
-	cmd.Flags().BoolVar(&opts.All, "all", false, "Archive all generated state under AUTO_IMPROVE_HOME")
+	cmd.Flags().BoolVar(&opts.All, "all", false, "Archive all generated state under HARNEST_HOME")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "Show what would be archived without moving anything")
 	return cmd
 }
 
 func buildClearPlan(args []string, opts clearOptions) (clearPlan, error) {
-	home, err := autoImproveHome()
+	home, err := harnestHome()
 	if err != nil {
 		return clearPlan{}, err
 	}

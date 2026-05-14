@@ -20,7 +20,7 @@ func fixtureManifestSuccess(t *testing.T) string {
   "run_id": "2026-04-20-PR42-abcdef0",
   "pass": 1,
   "agent": "a1",
-  "branch_name": "auto-improve/run-2026-04-20-PR42-abcdef0-pass1-a1",
+  "branch_name": "harnest/run-2026-04-20-PR42-abcdef0-pass1-a1",
   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "diff_path": "20-pass1/a1/diff.patch",

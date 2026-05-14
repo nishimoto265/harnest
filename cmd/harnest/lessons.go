@@ -36,7 +36,7 @@ func newLessonsNewCmd() *cobra.Command {
 	var category string
 	cmd := &cobra.Command{
 		Use:   "new <id>",
-		Short: "Create a lesson skeleton under .auto-improve/lessons",
+		Short: "Create a lesson skeleton under .harnest/lessons",
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return commandExitError{code: 2, msg: "lessons new: requires exactly one <id>"}
@@ -61,7 +61,7 @@ func newLessonsNewCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .auto-improve")
+	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .harnest")
 	cmd.Flags().StringVar(&checklistItem, "checklist-item", "", "Short checklist text generated from this lesson")
 	cmd.Flags().StringVar(&severity, "severity", string(lessons.SeverityMedium), "critical, high, medium, or low")
 	cmd.Flags().StringVar(&confidence, "confidence", string(lessons.ConfidenceMedium), "high, medium, or low")
@@ -74,7 +74,7 @@ func newLessonsGenerateChecklistCmd() *cobra.Command {
 	var check bool
 	cmd := &cobra.Command{
 		Use:   "generate-checklist",
-		Short: "Generate .auto-improve/checklist.md from active lessons",
+		Short: "Generate .harnest/checklist.md from active lessons",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			content, err := lessons.GenerateChecklist(root)
@@ -105,8 +105,8 @@ func newLessonsGenerateChecklistCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .auto-improve")
-	cmd.Flags().BoolVar(&check, "check", false, "Fail if .auto-improve/checklist.md is not up to date")
+	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .harnest")
+	cmd.Flags().BoolVar(&check, "check", false, "Fail if .harnest/checklist.md is not up to date")
 	return cmd
 }
 
@@ -115,7 +115,7 @@ func newLessonsPrepareChecklistResultCmd() *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "prepare-checklist-result",
-		Short: "Copy .auto-improve/checklist.md to .auto-improve/work/checklist-result.md",
+		Short: "Copy .harnest/checklist.md to .harnest/work/checklist-result.md",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			path, err := lessons.PrepareChecklistResult(root, force)
@@ -128,7 +128,7 @@ func newLessonsPrepareChecklistResultCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .auto-improve")
+	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .harnest")
 	cmd.Flags().BoolVar(&force, "force", false, "Overwrite an existing checklist result")
 	return cmd
 }
@@ -137,7 +137,7 @@ func newLessonsVerifyChecklistResultCmd() *cobra.Command {
 	var root string
 	cmd := &cobra.Command{
 		Use:   "verify-checklist-result",
-		Short: "Verify .auto-improve/work/checklist-result.md is fully resolved",
+		Short: "Verify .harnest/work/checklist-result.md is fully resolved",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			summary, err := lessons.VerifyChecklistResult(root)
@@ -155,7 +155,7 @@ func newLessonsVerifyChecklistResultCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .auto-improve")
+	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .harnest")
 	return cmd
 }
 
@@ -198,7 +198,7 @@ func newLessonsInstallGuidanceCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .auto-improve")
+	cmd.Flags().StringVar(&root, "root", ".", "Repository root containing .harnest")
 	cmd.Flags().StringSliceVar(&providers, "provider", nil, "Provider(s) to install: claude,codex")
 	cmd.Flags().BoolVar(&check, "check", false, "Fail if provider guidance is not installed or up to date")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print files that would change without writing them")

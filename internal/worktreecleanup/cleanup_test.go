@@ -65,7 +65,7 @@ func TestCleanupDeletesOwnedLocalBranchAfterUnregisteredFallbackRemoval(t *testi
 	wtPath := filepath.Join(runCtx.WorktreeBase, string(runCtx.RunID)+"-pass1-a1")
 	require.NoError(t, os.MkdirAll(wtPath, 0o755))
 	wt := testAllocation(wtPath)
-	wt.Branch = fmt.Sprintf("auto-improve/%s/pass1/a1", runCtx.RunID)
+	wt.Branch = fmt.Sprintf("harnest/%s/pass1/a1", runCtx.RunID)
 	pkg := contracts.TaskPackage{
 		Worktrees: []contracts.WorktreeAllocation{wt},
 	}
@@ -82,7 +82,7 @@ func TestCleanupDoesNotDeleteOwnedBranchAfterUnverifiedMissingUnregisteredWorktr
 	runCtx := testRunContext(t)
 	wtPath := filepath.Join(runCtx.WorktreeBase, string(runCtx.RunID)+"-pass1-a1")
 	wt := testAllocation(wtPath)
-	wt.Branch = fmt.Sprintf("auto-improve/%s/pass1/a1", runCtx.RunID)
+	wt.Branch = fmt.Sprintf("harnest/%s/pass1/a1", runCtx.RunID)
 	pkg := contracts.TaskPackage{
 		Worktrees: []contracts.WorktreeAllocation{wt},
 	}
@@ -99,7 +99,7 @@ func TestCleanupDeletesOwnedLocalBranchAfterGitWorktreeRemoval(t *testing.T) {
 	wtPath := filepath.Join(runCtx.WorktreeBase, string(runCtx.RunID)+"-pass1-a1")
 	require.NoError(t, os.MkdirAll(wtPath, 0o755))
 	wt := testAllocation(wtPath)
-	wt.Branch = fmt.Sprintf("auto-improve/%s/pass1/a1", runCtx.RunID)
+	wt.Branch = fmt.Sprintf("harnest/%s/pass1/a1", runCtx.RunID)
 	pkg := contracts.TaskPackage{
 		Worktrees: []contracts.WorktreeAllocation{wt},
 	}
@@ -136,7 +136,7 @@ func TestCleanupWithRepoGitDeletesOwnedRegisteredBranch(t *testing.T) {
 	require.NoError(t, os.MkdirAll(runCtx.WorktreeBase, 0o755))
 	wtPath := filepath.Join(runCtx.WorktreeBase, string(runCtx.RunID)+"-pass1-a1")
 	wt := testAllocation(wtPath)
-	wt.Branch = fmt.Sprintf("auto-improve/%s/pass1/a1", runCtx.RunID)
+	wt.Branch = fmt.Sprintf("harnest/%s/pass1/a1", runCtx.RunID)
 	pkg := contracts.TaskPackage{
 		Worktrees: []contracts.WorktreeAllocation{wt},
 	}
@@ -244,8 +244,8 @@ func newCleanupTestRepo(t *testing.T) string {
 	}
 	repoRoot := filepath.Join(t.TempDir(), "repo")
 	cleanupRunGit(t, "", "init", "-b", "main", repoRoot)
-	cleanupRunGit(t, repoRoot, "config", "user.email", "auto-improve@example.test")
-	cleanupRunGit(t, repoRoot, "config", "user.name", "auto-improve test")
+	cleanupRunGit(t, repoRoot, "config", "user.email", "harnest@example.test")
+	cleanupRunGit(t, repoRoot, "config", "user.name", "harnest test")
 	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, "README.md"), []byte("fixture\n"), 0o644))
 	cleanupRunGit(t, repoRoot, "add", "README.md")
 	cleanupRunGit(t, repoRoot, "commit", "-m", "initial")

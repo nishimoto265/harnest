@@ -29,8 +29,8 @@ func TestStubJudgeScoreOutputReturnsValidFixture(t *testing.T) {
 		RunID:      "2026-04-21-PR42-abcdef0",
 		Pass:       1,
 		Agent:      "a1",
-		OutputPath: "/tmp/auto-improve/output.patch",
-		RubricPath: "/tmp/auto-improve/rubrics/default.md",
+		OutputPath: "/tmp/harnest/output.patch",
+		RubricPath: "/tmp/harnest/rubrics/default.md",
 	}
 
 	for _, tt := range tests {
@@ -54,8 +54,8 @@ func TestJudgeOutputValidate_RejectsDuplicateComplianceRuleIDs(t *testing.T) {
 		RunID:      "2026-04-21-PR42-abcdef0",
 		Pass:       1,
 		Agent:      "a1",
-		OutputPath: "/tmp/auto-improve/output.patch",
-		RubricPath: "/tmp/auto-improve/rubrics/default.md",
+		OutputPath: "/tmp/harnest/output.patch",
+		RubricPath: "/tmp/harnest/rubrics/default.md",
 	}
 	output, err := NewPrimaryStub().ScoreOutput(context.Background(), input)
 	require.NoError(t, err)

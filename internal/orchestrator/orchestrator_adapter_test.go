@@ -65,7 +65,7 @@ func TestStubStep40_UsesRequestBoundDecoder(t *testing.T) {
 			RunID:         runID,
 			Pass:          1,
 			Agent:         "a1",
-			BranchName:    "auto-improve/fixture",
+			BranchName:    "harnest/fixture",
 			HeadSHA:       strings.Repeat("b", 40),
 			BaseSHA:       strings.Repeat("a", 40),
 			DiffPath:      "20-pass1/a1/diff.patch",

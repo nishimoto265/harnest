@@ -130,7 +130,7 @@ func TestFilesystemResolver_AllDuplicateCandidatesDoesNotRequireStep60Artifacts(
 		PR:                      42,
 		Title:                   "test",
 		BaseSHA:                 strings.Repeat("a", 40),
-		BestBranch:              "auto-improve/best",
+		BestBranch:              "harnest/best",
 		ReconstructedTaskPrompt: "test task",
 		Worktrees: []contracts.WorktreeAllocation{
 			{Agent: "a1", Pass: 1, Path: filepath.Join(runCtx.WorktreeBase, "p1-a1"), Branch: "b1", BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("a", 40)},

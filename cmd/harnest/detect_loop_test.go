@@ -28,7 +28,7 @@ func TestRunDetectLoopUsesConfiguredDefaultBranch(t *testing.T) {
 			"  github: owner/repo\n"+
 			"  root: "+root+"\n"+
 			"  default_branch: develop\n"+
-			"  best_branch: auto-improve/best\n"+
+			"  best_branch: harnest/best\n"+
 			"paths:\n"+
 			"  runs: "+runsBase+"\n"+
 			"worktree:\n"+
@@ -70,7 +70,7 @@ func TestRunDetectLoopUsesNamespacedProcessedPathWhenEnabled(t *testing.T) {
 			"  github: owner/repo\n"+
 			"  root: "+root+"\n"+
 			"  default_branch: develop\n"+
-			"  best_branch: auto-improve/best\n"+
+			"  best_branch: harnest/best\n"+
 			"paths:\n"+
 			"  runs: "+runsBase+"\n"+
 			"worktree:\n"+
@@ -112,7 +112,7 @@ func TestRunDetectLoopDrainsResumeQueueBeforeFreshDetection(t *testing.T) {
 			"  github: owner/repo\n"+
 			"  root: "+root+"\n"+
 			"  default_branch: develop\n"+
-			"  best_branch: auto-improve/best\n"+
+			"  best_branch: harnest/best\n"+
 			"paths:\n"+
 			"  runs: "+runsBase+"\n"+
 			"worktree:\n"+
@@ -401,7 +401,7 @@ func TestRunDetectLoopStopsWhenResumeCreatesNeedsRecoverySentinel(t *testing.T) 
 			"  github: owner/repo\n"+
 			"  root: "+root+"\n"+
 			"  default_branch: develop\n"+
-			"  best_branch: auto-improve/best\n"+
+			"  best_branch: harnest/best\n"+
 			"paths:\n"+
 			"  runs: "+runsBase+"\n"+
 			"worktree:\n"+

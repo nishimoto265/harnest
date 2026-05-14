@@ -23,7 +23,7 @@ jobs:
       - name: Vulnerability check
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
       - name: Integration tests
-        run: AUTO_IMPROVE_INTEGRATION=1 go test ./cmd/auto-improve -count=1
+        run: HARNEST_INTEGRATION=1 go test ./cmd/harnest -count=1
       - name: Vet
         run: go vet ./...
       - name: Check contracts sync

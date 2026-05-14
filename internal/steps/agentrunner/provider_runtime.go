@@ -208,7 +208,7 @@ func (codexRuntime) PrepareReadOnlyWorkspace(_ string, tempPattern string, files
 }
 
 func tempJSONFile(prefix string) (string, error) {
-	file, err := os.CreateTemp("", "auto-improve-"+prefix+"-*.json")
+	file, err := os.CreateTemp("", "harnest-"+prefix+"-*.json")
 	if err != nil {
 		return "", err
 	}

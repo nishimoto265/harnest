@@ -38,7 +38,7 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
 
       - name: Integration test
-        run: AUTO_IMPROVE_INTEGRATION=1 go test ./cmd/auto-improve -count=1
+        run: HARNEST_INTEGRATION=1 go test ./cmd/harnest -count=1
 
       - name: Vet
         run: go vet ./...
@@ -52,7 +52,7 @@ jobs:
       - name: Smoke build
         run: |
           set -euo pipefail
-          go build -o ./harnest-smoke ./cmd/auto-improve
+          go build -o ./harnest-smoke ./cmd/harnest
           ./harnest-smoke help >/dev/null
           rm -f ./harnest-smoke
 

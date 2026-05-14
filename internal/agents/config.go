@@ -30,7 +30,7 @@ const (
 	ProviderStubAdopt     Provider = "stub_adopt"
 )
 
-const AllowTestStubProvidersEnv = "AUTO_IMPROVE_ALLOW_TEST_STUB_PROVIDERS"
+const AllowTestStubProvidersEnv = "HARNEST_ALLOW_TEST_STUB_PROVIDERS"
 
 type Profile struct {
 	Provider   Provider `yaml:"provider"`

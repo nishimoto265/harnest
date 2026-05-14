@@ -61,7 +61,7 @@ func seedRecoverActionRun(t *testing.T) (string, string, string, contracts.RunID
 		"repo:\n"+
 			"  root: "+root+"\n"+
 			"  default_branch: main\n"+
-			"  best_branch: auto-improve/best\n"+
+			"  best_branch: harnest/best\n"+
 			"paths:\n"+
 			"  runs: "+runsBase+"\n"+
 			"worktree:\n"+
@@ -74,7 +74,7 @@ func seedRecoverActionRun(t *testing.T) (string, string, string, contracts.RunID
 		PR:                      52,
 		Title:                   "recover",
 		BaseSHA:                 strings.Repeat("1", 40),
-		BestBranch:              "auto-improve/best",
+		BestBranch:              "harnest/best",
 		ReconstructedTaskPrompt: "prompt",
 		CreatedAt:               time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
 		Worktrees: []contracts.WorktreeAllocation{

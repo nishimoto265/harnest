@@ -229,7 +229,7 @@ func localAllowlist(key string) bool {
 		key == "TZ",
 		key == "TMPDIR":
 		return true
-	case strings.HasPrefix(key, "AUTO_IMPROVE_"),
+	case strings.HasPrefix(key, "HARNEST_"),
 		strings.HasPrefix(key, "FAKE_"),
 		strings.HasPrefix(key, "PROMPT_"):
 		return true

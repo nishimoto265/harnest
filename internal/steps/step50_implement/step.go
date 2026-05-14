@@ -252,11 +252,11 @@ func (s *Step) run(ctx context.Context, run RunContext) error {
 		Timeout:     remaining,
 		Provider:    implementer.Provider,
 		Env: append(append([]string{
-			"AUTO_IMPROVE_STEP=50",
-			"AUTO_IMPROVE_PASS=2",
-			"AUTO_IMPROVE_AGENT=" + string(run.Agent),
-			"AUTO_IMPROVE_RUN_ID=" + string(run.TaskPackage.RunID),
-			"AUTO_IMPROVE_OUTPUT_DIR=" + manifestPrefix(run.Pass, run.Agent),
+			"HARNEST_STEP=50",
+			"HARNEST_PASS=2",
+			"HARNEST_AGENT=" + string(run.Agent),
+			"HARNEST_RUN_ID=" + string(run.TaskPackage.RunID),
+			"HARNEST_OUTPUT_DIR=" + manifestPrefix(run.Pass, run.Agent),
 		}, agentrunner.CurrentExecutableEnv()...), agentrunner.ProfileEnv(implementer)...),
 		OnStart: func(lease agentrunner.ProcessLease, startedAt time.Time) error {
 			state := resumeState{

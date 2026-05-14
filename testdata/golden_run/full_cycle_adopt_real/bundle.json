@@ -2,7 +2,7 @@
   "20-pass1/a1/manifest.json": {
     "agent": "a1",
     "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "branch_name": "auto-improve/2026-04-21-PR43-abcdeff/pass1/a1",
+    "branch_name": "harnest/2026-04-21-PR43-abcdeff/pass1/a1",
     "checklist_path": "20-pass1/a1/checklist-result.json",
     "diff_path": "20-pass1/a1/diff.patch",
     "finished_at": "__TIME__",
@@ -18,7 +18,7 @@
   "20-pass1/a2/manifest.json": {
     "agent": "a2",
     "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "branch_name": "auto-improve/2026-04-21-PR43-abcdeff/pass1/a2",
+    "branch_name": "harnest/2026-04-21-PR43-abcdeff/pass1/a2",
     "checklist_path": "20-pass1/a2/checklist-result.json",
     "diff_path": "20-pass1/a2/diff.patch",
     "finished_at": "__TIME__",
@@ -34,7 +34,7 @@
   "20-pass1/a3/manifest.json": {
     "agent": "a3",
     "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "branch_name": "auto-improve/2026-04-21-PR43-abcdeff/pass1/a3",
+    "branch_name": "harnest/2026-04-21-PR43-abcdeff/pass1/a3",
     "checklist_path": "20-pass1/a3/checklist-result.json",
     "diff_path": "20-pass1/a3/diff.patch",
     "finished_at": "__TIME__",
@@ -96,7 +96,7 @@
   "50-pass2/a1/manifest.json": {
     "agent": "a1",
     "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "branch_name": "auto-improve/2026-04-21-PR43-abcdeff/pass2/a1",
+    "branch_name": "harnest/2026-04-21-PR43-abcdeff/pass2/a1",
     "checklist_path": "50-pass2/a1/checklist-result.json",
     "diff_path": "50-pass2/a1/diff.patch",
     "finished_at": "__TIME__",
@@ -112,7 +112,7 @@
   "50-pass2/a2/manifest.json": {
     "agent": "a2",
     "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "branch_name": "auto-improve/2026-04-21-PR43-abcdeff/pass2/a2",
+    "branch_name": "harnest/2026-04-21-PR43-abcdeff/pass2/a2",
     "checklist_path": "50-pass2/a2/checklist-result.json",
     "diff_path": "50-pass2/a2/diff.patch",
     "finished_at": "__TIME__",
@@ -128,7 +128,7 @@
   "50-pass2/a3/manifest.json": {
     "agent": "a3",
     "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "branch_name": "auto-improve/2026-04-21-PR43-abcdeff/pass2/a3",
+    "branch_name": "harnest/2026-04-21-PR43-abcdeff/pass2/a3",
     "checklist_path": "50-pass2/a3/checklist-result.json",
     "diff_path": "50-pass2/a3/diff.patch",
     "finished_at": "__TIME__",
@@ -320,14 +320,14 @@
     "pass_bases": [
       {
         "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass1/base",
+        "branch": "harnest/2026-04-21-PR43-abcdeff/pass1/base",
         "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "pass": 1,
         "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass1-base"
       },
       {
         "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass2/base",
+        "branch": "harnest/2026-04-21-PR43-abcdeff/pass2/base",
         "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "pass": 2,
         "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass2-base"
@@ -342,7 +342,7 @@
       {
         "agent": "a1",
         "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass1/a1",
+        "branch": "harnest/2026-04-21-PR43-abcdeff/pass1/a1",
         "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "pass": 1,
         "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass1-a1"
@@ -350,7 +350,7 @@
       {
         "agent": "a2",
         "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass1/a2",
+        "branch": "harnest/2026-04-21-PR43-abcdeff/pass1/a2",
         "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "pass": 1,
         "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass1-a2"
@@ -358,7 +358,7 @@
       {
         "agent": "a3",
         "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass1/a3",
+        "branch": "harnest/2026-04-21-PR43-abcdeff/pass1/a3",
         "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "pass": 1,
         "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass1-a3"
@@ -366,7 +366,7 @@
       {
         "agent": "a1",
         "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass2/a1",
+        "branch": "harnest/2026-04-21-PR43-abcdeff/pass2/a1",
         "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "pass": 2,
         "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass2-a1"
@@ -374,7 +374,7 @@
       {
         "agent": "a2",
         "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass2/a2",
+        "branch": "harnest/2026-04-21-PR43-abcdeff/pass2/a2",
         "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "pass": 2,
         "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass2-a2"
@@ -382,7 +382,7 @@
       {
         "agent": "a3",
         "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "branch": "auto-improve/2026-04-21-PR43-abcdeff/pass2/a3",
+        "branch": "harnest/2026-04-21-PR43-abcdeff/pass2/a3",
         "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "pass": 2,
         "path": "${WORKTREE_BASE}/2026-04-21-PR43-abcdeff-pass2-a3"

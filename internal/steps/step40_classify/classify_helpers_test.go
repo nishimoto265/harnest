@@ -53,7 +53,7 @@ func validTaskPackage(t *testing.T, runIO internalio.RunContext) *contracts.Task
 				Agent:   agent,
 				Pass:    pass,
 				Path:    path,
-				Branch:  fmt.Sprintf("auto-improve/%s/pass%d/%d", runIO.RunID, pass, agentIndex+1),
+				Branch:  fmt.Sprintf("harnest/%s/pass%d/%d", runIO.RunID, pass, agentIndex+1),
 				BaseSHA: baseSHA,
 				HeadSHA: baseSHA,
 			})
@@ -333,7 +333,7 @@ func writePass1Manifest(t *testing.T, runIO internalio.RunContext, runID contrac
 				RunID:         runID,
 				Pass:          1,
 				Agent:         agent,
-				BranchName:    "auto-improve/fixture",
+				BranchName:    "harnest/fixture",
 				HeadSHA:       strings.Repeat("b", 40),
 				BaseSHA:       strings.Repeat("a", 40),
 				DiffPath:      filepath.ToSlash(filepath.Join("20-pass1", string(agent), "diff.patch")),

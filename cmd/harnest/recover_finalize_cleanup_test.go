@@ -47,8 +47,8 @@ func TestRecoverFinalizeCleanupVerifiesHeadsAndClearsAbortedSentinel(t *testing.
 		"repo:\n"+
 			"  root: "+root+"\n"+
 			"  default_branch: main\n"+
-			"  best_branch: auto-improve/best\n"+
-			"  policy_branch: auto-improve/policy\n"+
+			"  best_branch: harnest/best\n"+
+			"  policy_branch: harnest/policy\n"+
 			"paths:\n"+
 			"  runs: "+runsBase+"\n"+
 			"worktree:\n"+
@@ -62,7 +62,7 @@ func TestRecoverFinalizeCleanupVerifiesHeadsAndClearsAbortedSentinel(t *testing.
 		PR:                      42,
 		Title:                   "cleanup",
 		BaseSHA:                 strings.Repeat("1", 40),
-		BestBranch:              "auto-improve/best",
+		BestBranch:              "harnest/best",
 		ReconstructedTaskPrompt: "prompt",
 		CreatedAt:               time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
 		Worktrees: []contracts.WorktreeAllocation{
@@ -109,8 +109,8 @@ func TestRecoverFinalizeCleanupVerifiesHeadsAndClearsAbortedSentinel(t *testing.
 		"repo:\n"+
 			"  root: "+root+"\n"+
 			"  default_branch: main\n"+
-			"  best_branch: auto-improve/best\n"+
-			"  policy_branch: auto-improve/policy\n"+
+			"  best_branch: harnest/best\n"+
+			"  policy_branch: harnest/policy\n"+
 			"paths:\n"+
 			"  runs: "+runsBase+"\n"+
 			"worktree:\n"+
@@ -121,9 +121,9 @@ func TestRecoverFinalizeCleanupVerifiesHeadsAndClearsAbortedSentinel(t *testing.
 	recoverRemoteHead = func(_ context.Context, repoRoot, branch string) (string, error) {
 		assert.Equal(t, root, repoRoot)
 		switch branch {
-		case "auto-improve/best":
+		case "harnest/best":
 			return strings.Repeat("d", 40), nil
-		case "auto-improve/policy":
+		case "harnest/policy":
 			return strings.Repeat("f", 40), nil
 		default:
 			t.Fatalf("unexpected branch: %s", branch)

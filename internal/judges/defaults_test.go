@@ -56,6 +56,18 @@ func TestDefaultRubricPath_IsIdempotent(t *testing.T) {
 	assert.Equal(t, info1.ModTime(), info2.ModTime())
 }
 
+func TestDefaultRubricPath_UsesHarnestHomeCacheWhenSet(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HARNEST_HOME", home)
+	SetDefaultRubricDirForTest("")
+	t.Cleanup(func() { SetDefaultRubricDirForTest("") })
+
+	path, err := DefaultRubricPath()
+	require.NoError(t, err)
+
+	assert.True(t, strings.HasPrefix(path, filepath.Join(home, "cache", "rubrics")), "rubric path must live under HARNEST_HOME cache: %s", path)
+}
+
 // TestEmbeddedRubricMatchesRepoCopy ensures the embedded rubric in
 // internal/judges/rubrics/default.md stays byte-identical to the canonical
 // repository rubric at rubrics/default.md so edits to one do not silently

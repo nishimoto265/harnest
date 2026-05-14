@@ -160,7 +160,7 @@ type cliPairwiseDecisionWorkspace struct {
 }
 
 func prepareCLIPairwiseWorkspace(input PairwiseInput, provider agents.Provider) (cliPairwiseWorkspace, error) {
-	workspace, err := agentrunner.PrepareReadOnlyWorkspace(provider, filepath.Dir(input.A.OutputPath), "auto-improve-pairwise-workdir-*", []agentrunner.WorkspaceFile{
+	workspace, err := agentrunner.PrepareReadOnlyWorkspace(provider, filepath.Dir(input.A.OutputPath), "harnest-pairwise-workdir-*", []agentrunner.WorkspaceFile{
 		{Key: "rubric", SourcePath: input.RubricPath, TargetName: "rubric.md"},
 		{Key: "A", SourcePath: input.A.OutputPath, TargetName: "A.patch"},
 		{Key: "B", SourcePath: input.B.OutputPath, TargetName: "B.patch"},
@@ -187,7 +187,7 @@ func prepareCLIPairwiseDecisionWorkspace(input PairwiseDecisionInput, provider a
 			agentrunner.WorkspaceFile{Key: fmt.Sprintf("pair-%02d-B", i+1), SourcePath: pair.B.OutputPath, TargetName: fmt.Sprintf("pair-%02d-B.patch", i+1)},
 		)
 	}
-	workspace, err := agentrunner.PrepareReadOnlyWorkspace(provider, defaultWorkdir, "auto-improve-pairwise-decision-workdir-*", files)
+	workspace, err := agentrunner.PrepareReadOnlyWorkspace(provider, defaultWorkdir, "harnest-pairwise-decision-workdir-*", files)
 	if err != nil {
 		return cliPairwiseDecisionWorkspace{}, err
 	}

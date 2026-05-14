@@ -49,7 +49,7 @@ func TestIntegrationRunFailsClosedOnBrokenPolicyBranch(t *testing.T) {
 	localRegistry := "{\"kind\":\"added\",\"schema_version\":\"1\",\"rule_id\":\"r-local\",\"rule_path\":\"rules/r-local.md\",\"sha256\":\"" + sha256String(localRule) + "\",\"idempotency_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_seq\":1,\"prev_hash\":\"\",\"by_run_id\":\"2026-04-23-PR1-feedbee\",\"at\":\"2026-04-23T08:00:00Z\"}\n"
 	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "rules-registry.jsonl"), []byte(localRegistry), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(runsBase, "rules", "r-local.md"), []byte(localRule), 0o644))
-	appendPolicyBranchConfig(t, filepath.Join(root, "config.yaml"), "auto-improve/policy")
+	appendPolicyBranchConfig(t, filepath.Join(root, "config.yaml"), "harnest/policy")
 
 	bin := buildIntegrationBinary(t)
 	binDir := filepath.Join(root, "bin")
@@ -64,10 +64,11 @@ func TestIntegrationRunFailsClosedOnBrokenPolicyBranch(t *testing.T) {
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
 		integrationTrustedPathEnvVar+"="+trustedPathWithFakeBin(binDir),
-		"AUTO_IMPROVE_TEST_BASE_SHA="+strings.Repeat("a", 40),
-		"AUTO_IMPROVE_TEST_TARGET_SHA="+strings.Repeat("b", 40),
-		"AUTO_IMPROVE_TEST_MERGE_SHA="+strings.Repeat("c", 40),
-		"AUTO_IMPROVE_TEST_BEST_SHA="+strings.Repeat("d", 40),
+		"HARNEST_HOME="+filepath.Join(root, "home"),
+		"HARNEST_TEST_BASE_SHA="+strings.Repeat("a", 40),
+		"HARNEST_TEST_TARGET_SHA="+strings.Repeat("b", 40),
+		"HARNEST_TEST_MERGE_SHA="+strings.Repeat("c", 40),
+		"HARNEST_TEST_BEST_SHA="+strings.Repeat("d", 40),
 	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

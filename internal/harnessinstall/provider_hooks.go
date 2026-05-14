@@ -88,7 +88,7 @@ func stopHookJSONFromTemplate(template []byte) ([]byte, error) {
 		return nil, fmt.Errorf("provider hook template is invalid JSON: %w", err)
 	}
 	for _, raw := range config.Hooks["Stop"] {
-		if rawStopHookIsAutoImprove(raw) {
+		if rawStopHookIsHarnest(raw) {
 			return bytes.TrimSpace(raw), nil
 		}
 	}
@@ -98,7 +98,7 @@ func stopHookJSONFromTemplate(template []byte) ([]byte, error) {
 func renderDefaultStopHookJSON() []byte {
 	out, err := json.MarshalIndent(renderStopHook(), "", "  ")
 	if err != nil {
-		return []byte(`{"id":"auto-improve.checklist-gate","hooks":[]}`)
+		return []byte(`{"id":"harnest.checklist-gate","hooks":[]}`)
 	}
 	return out
 }
@@ -121,19 +121,19 @@ func mergeStopHooksArrayJSON(data, stopHook []byte) ([]byte, error) {
 		return nil, err
 	}
 	kept := make([][]byte, 0, len(rawItems))
-	autoCount := 0
-	currentAutoHook := false
+	harnestHookCount := 0
+	currentHarnestHook := false
 	for _, raw := range rawItems {
-		if rawStopHookIsAutoImprove(raw) {
-			autoCount++
+		if rawStopHookIsHarnest(raw) {
+			harnestHookCount++
 			if jsonSemanticallyEqual(raw, stopHook) {
-				currentAutoHook = true
+				currentHarnestHook = true
 			}
 			continue
 		}
 		kept = append(kept, bytes.TrimSpace(raw))
 	}
-	if autoCount == 1 && currentAutoHook {
+	if harnestHookCount == 1 && currentHarnestHook {
 		return bytes.TrimSpace(data), nil
 	}
 	return renderRawJSONArray(kept, stopHook), nil
@@ -173,7 +173,7 @@ func renderRawJSONArray(items [][]byte, stopHook []byte) []byte {
 	return []byte(out.String())
 }
 
-func rawStopHookIsAutoImprove(raw []byte) bool {
+func rawStopHookIsHarnest(raw []byte) bool {
 	var item map[string]any
 	if err := json.Unmarshal(raw, &item); err != nil {
 		return false
@@ -181,7 +181,7 @@ func rawStopHookIsAutoImprove(raw []byte) bool {
 	if id, _ := item["id"].(string); id == HookID {
 		return true
 	}
-	return containsAutoImproveCommand(item)
+	return containsHarnestCommand(item)
 }
 
 func renderStopHook() map[string]any {
@@ -190,14 +190,14 @@ func renderStopHook() map[string]any {
 		"hooks": []any{
 			map[string]any{
 				"type":    "command",
-				"command": "sh .auto-improve/hooks/verify-checklist-result.sh",
+				"command": "sh .harnest/hooks/verify-checklist-result.sh",
 				"timeout": float64(30),
 			},
 		},
 	}
 }
 
-func containsAutoImproveCommand(itemMap map[string]any) bool {
+func containsHarnestCommand(itemMap map[string]any) bool {
 	hookItems, ok := itemMap["hooks"].([]any)
 	if !ok {
 		return false
@@ -208,7 +208,7 @@ func containsAutoImproveCommand(itemMap map[string]any) bool {
 			continue
 		}
 		command, _ := hookMap["command"].(string)
-		if strings.Contains(command, ".auto-improve/hooks/verify-checklist-result.sh") {
+		if strings.Contains(command, ".harnest/hooks/verify-checklist-result.sh") {
 			return true
 		}
 	}

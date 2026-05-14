@@ -19,7 +19,7 @@ func TestRun_UsesRepoRootSlugWhenInputRepoEmpty(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   t.TempDir(),
 		RunCtx:     rc,
 	}
@@ -41,7 +41,7 @@ func TestRun_UsesConfiguredRepoWhenProvided(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   repoRoot,
 		Repo:       "owner/repo",
 		RunCtx:     rc,
@@ -68,7 +68,7 @@ func TestRun_RejectsConfiguredRepoMismatchWhenLocalSlugIsKnown(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   repoRoot,
 		Repo:       "stale/slug",
 		RunCtx:     rc,
@@ -90,7 +90,7 @@ func TestRun_RejectsConfiguredRepoWhenLocalSlugCannotBeResolved(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   repoRoot,
 		Repo:       "owner/repo",
 		RunCtx:     rc,
@@ -112,7 +112,7 @@ func TestRun_RejectsConfiguredRepoWhenLocalSlugIsEmpty(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   repoRoot,
 		Repo:       "owner/repo",
 		RunCtx:     rc,
@@ -130,7 +130,7 @@ func TestRun_InvalidBaseSHA(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   t.TempDir(),
 		RunCtx:     rc,
 	}
@@ -145,7 +145,7 @@ func TestRun_NotMergedPR(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   t.TempDir(),
 		RunCtx:     rc,
 	}
@@ -173,7 +173,7 @@ func TestRun_RebaseMergedPR_UsesGitMergeBase(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   t.TempDir(),
 		RunCtx:     rc,
 	}
@@ -200,7 +200,7 @@ func TestRun_RebaseMergedPR_WithoutImmutableBaseFailsClosed(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   t.TempDir(),
 		RunCtx:     rc,
 	}
@@ -222,7 +222,7 @@ func TestRun_RebaseUnmergedPR_RejectsOpenState(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   t.TempDir(),
 		RunCtx:     rc,
 	}
@@ -244,7 +244,7 @@ func TestRun_PersistedBaseSHADrift(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   t.TempDir(),
 		RunCtx:     rc,
 	}
@@ -267,7 +267,7 @@ func TestRun_PersistedBaseSHAMatchesCodeBase(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   t.TempDir(),
 		RunCtx:     rc,
 	}

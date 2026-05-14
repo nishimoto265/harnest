@@ -742,7 +742,7 @@ func (s realStep70) Run(ctx context.Context, run *StepRunContext) error {
 
 // realArchiveStep is intentionally a no-op in the per-run step pipeline.
 // Sunset/archive is a separate cycle-level tick owned by sunset_tick / the
-// `auto-improve sunset` entry points, both of which delegate to
+// `harnest sunset` entry points, both of which delegate to
 // internal/archive.RunSunsetWithLock.
 type realArchiveStep struct{}
 

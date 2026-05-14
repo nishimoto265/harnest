@@ -49,7 +49,7 @@ func setSanitizeTestEnv(t *testing.T) {
 func TestSanitizeForLocalExec_UsesStrictAllowlistForBaseAndExtraEnv(t *testing.T) {
 	setSanitizeTestEnv(t)
 
-	env := SanitizeForLocalExec("AUTO_IMPROVE_STEP=20", "GH_TOKEN=override", "BASH_ENV=/tmp/extra", "PATH=/override/bin")
+	env := SanitizeForLocalExec("HARNEST_STEP=20", "GH_TOKEN=override", "BASH_ENV=/tmp/extra", "PATH=/override/bin")
 
 	assert.Contains(t, env, "HOME=/tmp/home")
 	assert.Contains(t, env, "PATH="+defaultTrustedPATH)
@@ -58,7 +58,7 @@ func TestSanitizeForLocalExec_UsesStrictAllowlistForBaseAndExtraEnv(t *testing.T
 	assert.Contains(t, env, "LC_ALL=C.UTF-8")
 	assert.Contains(t, env, "TZ=UTC")
 	assert.Contains(t, env, "TMPDIR=/tmp/runtime")
-	assert.Contains(t, env, "AUTO_IMPROVE_STEP=20")
+	assert.Contains(t, env, "HARNEST_STEP=20")
 	assert.NotContains(t, env, "PATH=/tmp/bin")
 	assert.NotContains(t, env, "PATH=/override/bin")
 	assert.NotContains(t, env, "SSH_AUTH_SOCK=/tmp/ssh.sock")
@@ -93,13 +93,13 @@ func TestSanitizeForLocalExec_UsesStrictAllowlistForBaseAndExtraEnv(t *testing.T
 func TestSanitizeForNetworkExec_PreservesAuthEnvButBlocksHooks(t *testing.T) {
 	setSanitizeTestEnv(t)
 
-	env := SanitizeForNetworkExec("AUTO_IMPROVE_STEP=10", "GH_TOKEN=override")
+	env := SanitizeForNetworkExec("HARNEST_STEP=10", "GH_TOKEN=override")
 
 	// Baseline allowlist still applied.
 	assert.Contains(t, env, "HOME=/tmp/home")
 	assert.Contains(t, env, "PATH="+defaultTrustedPATH)
 	assert.Contains(t, env, "USER=tester")
-	assert.Contains(t, env, "AUTO_IMPROVE_STEP=10")
+	assert.Contains(t, env, "HARNEST_STEP=10")
 
 	// Auth env required by gh / git over the network must survive.
 	assert.Contains(t, env, "SSH_AUTH_SOCK=/tmp/ssh.sock")
@@ -171,10 +171,10 @@ func TestSanitizeForAgentProviderExec_KeepsOnlyRequestedProviderAuth(t *testing.
 func TestGitLocalEnv_AppendsSafeGitProfile(t *testing.T) {
 	setSanitizeTestEnv(t)
 
-	env := GitLocalEnv("AUTO_IMPROVE_STEP=20")
+	env := GitLocalEnv("HARNEST_STEP=20")
 	falsePath := trustedFalsePath()
 
-	assert.Contains(t, env, "AUTO_IMPROVE_STEP=20")
+	assert.Contains(t, env, "HARNEST_STEP=20")
 	assert.Contains(t, env, "PATH="+defaultTrustedPATH)
 	assert.Contains(t, env, "GIT_CONFIG_NOSYSTEM=1")
 	assert.Contains(t, env, "GIT_CONFIG_GLOBAL="+os.DevNull)

@@ -8,7 +8,7 @@ else
   repo_dir="$(pwd)"
 fi
 
-state_dir="${AUTO_IMPROVE_GIT_STATE_DIR:-$repo_dir/.fake-git-state}"
+state_dir="${HARNEST_GIT_STATE_DIR:-$repo_dir/.fake-git-state}"
 mkdir -p "$state_dir"
 : >> "$state_dir/worktrees.list"
 
@@ -29,21 +29,21 @@ case "$subcmd" in
     ;;
   rev-parse)
     if [ "${1:-}" = "--verify" ]; then
-      echo "${AUTO_IMPROVE_TEST_BEST_SHA}"
+      echo "${HARNEST_TEST_BEST_SHA}"
       exit 0
     fi
     case "${1:-}" in
       *^1)
-        echo "${AUTO_IMPROVE_TEST_BASE_SHA}"
+        echo "${HARNEST_TEST_BASE_SHA}"
         ;;
       HEAD)
-        echo "${AUTO_IMPROVE_TEST_TARGET_SHA}"
+        echo "${HARNEST_TEST_TARGET_SHA}"
         ;;
       refs/heads/*)
-        echo "${AUTO_IMPROVE_TEST_TARGET_SHA}"
+        echo "${HARNEST_TEST_TARGET_SHA}"
         ;;
       *)
-        echo "${AUTO_IMPROVE_TEST_BEST_SHA}"
+        echo "${HARNEST_TEST_BEST_SHA}"
         ;;
     esac
     ;;
@@ -73,7 +73,7 @@ case "$subcmd" in
     echo "0000000000000000000000000000000000000000"
     ;;
   commit-tree)
-    echo "${AUTO_IMPROVE_TEST_TARGET_SHA}"
+    echo "${HARNEST_TEST_TARGET_SHA}"
     ;;
   update-ref|reset)
     exit 0
@@ -146,20 +146,20 @@ case "$subcmd" in
     ;;
   branch)
     case "$(basename "$repo_dir")" in
-      *-pass1-base) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-base$//')/pass1/base" ;;
-      *-pass1-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a1$//')/pass1/a1" ;;
-      *-pass1-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a2$//')/pass1/a2" ;;
-      *-pass1-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a3$//')/pass1/a3" ;;
-      *-pass2-base) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-base$//')/pass2/base" ;;
-      *-pass2-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a1$//')/pass2/a1" ;;
-      *-pass2-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a2$//')/pass2/a2" ;;
-      *-pass2-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a3$//')/pass2/a3" ;;
+      *-pass1-base) echo "harnest/$(basename "$repo_dir" | sed 's/-pass1-base$//')/pass1/base" ;;
+      *-pass1-a1) echo "harnest/$(basename "$repo_dir" | sed 's/-pass1-a1$//')/pass1/a1" ;;
+      *-pass1-a2) echo "harnest/$(basename "$repo_dir" | sed 's/-pass1-a2$//')/pass1/a2" ;;
+      *-pass1-a3) echo "harnest/$(basename "$repo_dir" | sed 's/-pass1-a3$//')/pass1/a3" ;;
+      *-pass2-base) echo "harnest/$(basename "$repo_dir" | sed 's/-pass2-base$//')/pass2/base" ;;
+      *-pass2-a1) echo "harnest/$(basename "$repo_dir" | sed 's/-pass2-a1$//')/pass2/a1" ;;
+      *-pass2-a2) echo "harnest/$(basename "$repo_dir" | sed 's/-pass2-a2$//')/pass2/a2" ;;
+      *-pass2-a3) echo "harnest/$(basename "$repo_dir" | sed 's/-pass2-a3$//')/pass2/a3" ;;
       *) echo "stub-branch" ;;
     esac
     ;;
   ls-remote)
     branch="${4:-best}"
-    printf '%s\trefs/heads/%s\n' "${AUTO_IMPROVE_TEST_BEST_SHA}" "$branch"
+    printf '%s\trefs/heads/%s\n' "${HARNEST_TEST_BEST_SHA}" "$branch"
     ;;
   push)
     exit 0

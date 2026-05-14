@@ -64,9 +64,9 @@ func fakeClaudeScript(delay time.Duration) string {
 		"if [ \"${1:-}\" = \"--version\" ]; then printf 'claude 1.0.0\\n'; exit 0; fi\n" +
 		"sleep " + formatSleep(delay) + "\n" +
 		"cat > checklist-result.json <<EOF\n" +
-		"{\"schema_version\":\"1\",\"run_id\":\"${AUTO_IMPROVE_RUN_ID}\",\"pass\":${AUTO_IMPROVE_PASS},\"agent\":\"${AUTO_IMPROVE_AGENT}\",\"items\":[]}\n" +
+		"{\"schema_version\":\"1\",\"run_id\":\"${HARNEST_RUN_ID}\",\"pass\":${HARNEST_PASS},\"agent\":\"${HARNEST_AGENT}\",\"items\":[]}\n" +
 		"EOF\n" +
-		"printf 'generated change\\n' > \"generated-${AUTO_IMPROVE_PASS}-${AUTO_IMPROVE_AGENT}.txt\"\n" +
+		"printf 'generated change\\n' > \"generated-${HARNEST_PASS}-${HARNEST_AGENT}.txt\"\n" +
 		"printf '{\"event\":\"ok\"}\\n'\n"
 }
 
@@ -80,10 +80,10 @@ if [ "${1:-}" = "--version" ]; then
 fi
 
 cat > checklist-result.json <<EOF
-{"schema_version":"1","run_id":"${AUTO_IMPROVE_RUN_ID}","pass":${AUTO_IMPROVE_PASS},"agent":"${AUTO_IMPROVE_AGENT}","items":[]}
+{"schema_version":"1","run_id":"${HARNEST_RUN_ID}","pass":${HARNEST_PASS},"agent":"${HARNEST_AGENT}","items":[]}
 EOF
 mkdir -p app
-printf 'pass=%s agent=%s\n' "${AUTO_IMPROVE_PASS}" "${AUTO_IMPROVE_AGENT}" > "app/generated-${AUTO_IMPROVE_PASS}-${AUTO_IMPROVE_AGENT}.txt"
+printf 'pass=%s agent=%s\n' "${HARNEST_PASS}" "${HARNEST_AGENT}" > "app/generated-${HARNEST_PASS}-${HARNEST_AGENT}.txt"
 printf '{"event":"ok"}\n'
 `
 }

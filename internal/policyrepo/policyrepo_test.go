@@ -287,9 +287,9 @@ func TestHydrateAndSnapshotFromBranchOrSeedBootstrapsWhenBranchAndSeedMissing(t 
 	registryBytes, err := os.ReadFile(filepath.Join(runCtx.RunDir(), "policy", registryLocalName))
 	require.NoError(t, err)
 	assert.Empty(t, registryBytes)
-	assert.FileExists(t, filepath.Join(runCtx.RunDir(), "policy", ".auto-improve", "checklist.md"))
-	assert.FileExists(t, filepath.Join(runCtx.RunDir(), "policy", ".auto-improve", "hooks", "verify-checklist-result.sh"))
-	assert.FileExists(t, filepath.Join(runsBase, ".auto-improve", "hooks", "verify-checklist-result.sh"))
+	assert.FileExists(t, filepath.Join(runCtx.RunDir(), "policy", ".harnest", "checklist.md"))
+	assert.FileExists(t, filepath.Join(runCtx.RunDir(), "policy", ".harnest", "hooks", "verify-checklist-result.sh"))
+	assert.FileExists(t, filepath.Join(runsBase, ".harnest", "hooks", "verify-checklist-result.sh"))
 	meta, ok, err := LoadSnapshotMetadata(runCtx)
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -515,11 +515,11 @@ func TestHydrateFromBranchBootstrapsEmptyPolicyBranch(t *testing.T) {
 	registryBytes, err := os.ReadFile(filepath.Join(runsBase, registryLocalName))
 	require.NoError(t, err)
 	assert.Empty(t, registryBytes)
-	assert.FileExists(t, filepath.Join(runsBase, ".auto-improve", "checklist.md"))
-	hookBytes, err := os.ReadFile(filepath.Join(runsBase, ".auto-improve", "hooks", "verify-checklist-result.sh"))
+	assert.FileExists(t, filepath.Join(runsBase, ".harnest", "checklist.md"))
+	hookBytes, err := os.ReadFile(filepath.Join(runsBase, ".harnest", "hooks", "verify-checklist-result.sh"))
 	require.NoError(t, err)
 	assert.Contains(t, string(hookBytes), "lessons verify-checklist-result")
-	assert.FileExists(t, filepath.Join(runsBase, "auto-improve", "guidance", "AGENTS.md.template"))
+	assert.FileExists(t, filepath.Join(runsBase, "harnest", "guidance", "AGENTS.md.template"))
 }
 
 func TestPublishSnapshotRejectsMissingLocalRegistry(t *testing.T) {

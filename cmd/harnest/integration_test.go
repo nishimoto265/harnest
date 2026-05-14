@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	integrationEnvVar            = "AUTO_IMPROVE_INTEGRATION"
-	integrationTrustedPathEnvVar = "AUTO_IMPROVE_INTEGRATION_TRUSTED_PATH"
+	integrationEnvVar            = "HARNEST_INTEGRATION"
+	integrationTrustedPathEnvVar = "HARNEST_INTEGRATION_TRUSTED_PATH"
 	testTrustedPathSuffix        = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
 )
 

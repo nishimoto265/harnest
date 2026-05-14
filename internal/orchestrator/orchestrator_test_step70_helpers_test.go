@@ -140,7 +140,7 @@ func (s branchPushedCrashStep) Run(ctx context.Context, run *StepRunContext) err
 	require.NoError(s.t, err)
 	require.True(s.t, ok)
 
-	bestSHA := os.Getenv("AUTO_IMPROVE_TEST_BEST_SHA")
+	bestSHA := os.Getenv("HARNEST_TEST_BEST_SHA")
 	target.TargetSHA = bestSHA
 	target.BestShaBefore = bestSHA
 	idempotencyKey := contracts.ComputeAdoptIdempotencyKey(string(run.IO.RunID), target.TargetSHA, bestSHA, run.Candidates.CandidatesHash)

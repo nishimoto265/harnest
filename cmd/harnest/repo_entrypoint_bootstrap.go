@@ -52,7 +52,7 @@ func bootstrapRepoEntrypoint(ctx context.Context, repoURL string) (repoEntrypoin
 		return repoEntrypointRuntime{}, commandExitError{code: 2, msg: cliErrorPrefix() + " repository entrypoint currently supports github.com remotes only"}
 	}
 	canonicalRepoURL := gitremote.CanonicalRemoteURL(info)
-	home, err := autoImproveHome()
+	home, err := harnestHome()
 	if err != nil {
 		return repoEntrypointRuntime{}, err
 	}
@@ -236,15 +236,15 @@ func repoNamespace(slug string) string {
 	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(slug)), "/", "__")
 }
 
-func autoImproveHome() (string, error) {
-	if value := strings.TrimSpace(os.Getenv("AUTO_IMPROVE_HOME")); value != "" {
+func harnestHome() (string, error) {
+	if value := strings.TrimSpace(os.Getenv("HARNEST_HOME")); value != "" {
 		return filepath.Abs(value)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".auto-improve"), nil
+	return filepath.Join(home, ".harnest"), nil
 }
 
 type repoRegistration struct {

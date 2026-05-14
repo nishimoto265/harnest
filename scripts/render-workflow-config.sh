@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-base_dir="${HOME}/.auto-improve"
+base_dir="${HOME}/.harnest"
 runs_base="${INPUT_RUNS_BASE:-${base_dir}/runs}"
 worktree_base="${INPUT_WORKTREE_BASE:-${base_dir}/worktrees}"
 repo_github="${INPUT_REPO_GITHUB:-${GITHUB_REPOSITORY}}"
 default_branch="${INPUT_DEFAULT_BRANCH:-${REPOSITORY_DEFAULT_BRANCH}}"
-output_dir="${AUTO_IMPROVE_WORKFLOW_OUTPUT_DIR:-.}"
+output_dir="${HARNEST_WORKFLOW_OUTPUT_DIR:-.}"
 
 case "${runs_base}" in
   /*) ;;

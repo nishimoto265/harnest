@@ -8,25 +8,25 @@ import (
 
 const (
 	ChecklistResultFile = "checklist-result.json"
-	OverlayDir          = ".auto-improve"
+	OverlayDir          = ".harnest"
 	AgentGuidanceFile   = "AGENTS.md"
 	ClaudeGuidanceFile  = "CLAUDE.md"
 	GitignoreFile       = ".gitignore"
 	ClaudeSettingsFile  = ".claude/settings.json"
 	CodexHooksFile      = ".codex/hooks.json"
 	CodexConfigFile     = ".codex/config.toml"
-	RepoPolicyDir       = "auto-improve"
+	RepoPolicyDir       = "harnest"
 	RepoGuidanceDir     = RepoPolicyDir + "/guidance"
 	RepoRegistryFile    = RepoPolicyDir + "/rules-registry.jsonl"
 	RepoRulesDir        = RepoPolicyDir + "/rules"
 )
 
 // Is reports whether a repository-relative path is fully owned by
-// auto-improve policy/overlay state and must be excluded from task
+// harnest policy/overlay state and must be excluded from task
 // implementation output.
 //
 // Mixed user files such as AGENTS.md, CLAUDE.md, .gitignore, and provider
-// config files are intentionally not included here. auto-improve may install
+// config files are intentionally not included here. harnest may install
 // managed blocks or hook entries in those files when preparing the policy base,
 // but implementation changes outside that managed state must remain visible in
 // agent diffs.
@@ -50,7 +50,7 @@ func Is(path string) bool {
 }
 
 // IsPolicyBasePath reports whether a repository-relative path may be changed
-// while preparing the auto-improve policy base. This is broader than Is because
+// while preparing the harnest policy base. This is broader than Is because
 // it includes mixed user files that receive managed blocks or hook entries.
 func IsPolicyBasePath(path string) bool {
 	path = filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))

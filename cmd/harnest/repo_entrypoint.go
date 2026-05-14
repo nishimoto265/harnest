@@ -10,8 +10,8 @@ import (
 
 const (
 	defaultRepoEntrypointInterval = time.Hour
-	defaultBestBranch             = "auto-improve/best"
-	defaultPolicyBranch           = "auto-improve/policy"
+	defaultBestBranch             = "harnest/best"
+	defaultPolicyBranch           = "harnest/policy"
 )
 
 type repoEntrypointOptions struct {

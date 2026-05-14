@@ -111,7 +111,7 @@ type cliJudgeWorkspace struct {
 }
 
 func prepareCLIJudgeWorkspace(input JudgeInput, provider agents.Provider) (cliJudgeWorkspace, error) {
-	workspace, err := agentrunner.PrepareReadOnlyWorkspace(provider, filepath.Dir(input.OutputPath), "auto-improve-judge-workdir-*", []agentrunner.WorkspaceFile{
+	workspace, err := agentrunner.PrepareReadOnlyWorkspace(provider, filepath.Dir(input.OutputPath), "harnest-judge-workdir-*", []agentrunner.WorkspaceFile{
 		{Key: "output", SourcePath: input.OutputPath, TargetName: "output.patch"},
 		{Key: "rubric", SourcePath: input.RubricPath, TargetName: "rubric.md"},
 	})

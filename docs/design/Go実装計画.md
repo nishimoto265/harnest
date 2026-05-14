@@ -15,5 +15,5 @@ rev34 時点の実体は archive に退避しました。
 - `Phase 3`: Actions / launchd / release/install 実装済み
 - `Phase 4`: docs finalization 進行中
 
-実装の正本は `cmd/auto-improve/**`, `internal/**`, `scripts/**`, `.github/workflows/**` です。
+実装の正本は `cmd/harnest/**`, `internal/**`, `scripts/**`, `.github/workflows/**` です。
 履歴として Phase 分割や review 反映の経緯を追いたい場合だけ archive を参照してください。

@@ -17,7 +17,7 @@ func manualRecoveryGitScript() string {
 	return `#!/bin/sh
 set -eu
 
-state_dir="${AUTO_IMPROVE_GIT_STATE_DIR}"
+state_dir="${HARNEST_GIT_STATE_DIR}"
 mkdir -p "$state_dir"
 : >> "$state_dir/worktrees.list"
 
@@ -45,14 +45,14 @@ case "$subcmd" in
     ;;
   rev-parse)
     if [ "${1:-}" = "--verify" ]; then
-      echo "${AUTO_IMPROVE_TEST_BEST_SHA}"
+      echo "${HARNEST_TEST_BEST_SHA}"
       exit 0
     fi
     case "${1:-}" in
-      *^1) echo "${AUTO_IMPROVE_TEST_BASE_SHA}" ;;
-      HEAD) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
-      refs/heads/*) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
-      *) echo "${AUTO_IMPROVE_TEST_BEST_SHA}" ;;
+      *^1) echo "${HARNEST_TEST_BASE_SHA}" ;;
+      HEAD) echo "${HARNEST_TEST_TARGET_SHA}" ;;
+      refs/heads/*) echo "${HARNEST_TEST_TARGET_SHA}" ;;
+      *) echo "${HARNEST_TEST_BEST_SHA}" ;;
     esac
     ;;
   fetch)
@@ -81,7 +81,7 @@ case "$subcmd" in
     echo "0000000000000000000000000000000000000000"
     ;;
   commit-tree)
-    echo "${AUTO_IMPROVE_TEST_TARGET_SHA}"
+    echo "${HARNEST_TEST_TARGET_SHA}"
     ;;
   update-ref|reset)
     exit 0
@@ -142,14 +142,14 @@ case "$subcmd" in
     ;;
   branch)
     case "$(basename "$repo_dir")" in
-      *-pass1-base) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-base$//')/pass1/base" ;;
-      *-pass1-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a1$//')/pass1/a1" ;;
-      *-pass1-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a2$//')/pass1/a2" ;;
-      *-pass1-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a3$//')/pass1/a3" ;;
-      *-pass2-base) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-base$//')/pass2/base" ;;
-      *-pass2-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a1$//')/pass2/a1" ;;
-      *-pass2-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a2$//')/pass2/a2" ;;
-      *-pass2-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a3$//')/pass2/a3" ;;
+      *-pass1-base) echo "harnest/$(basename "$repo_dir" | sed 's/-pass1-base$//')/pass1/base" ;;
+      *-pass1-a1) echo "harnest/$(basename "$repo_dir" | sed 's/-pass1-a1$//')/pass1/a1" ;;
+      *-pass1-a2) echo "harnest/$(basename "$repo_dir" | sed 's/-pass1-a2$//')/pass1/a2" ;;
+      *-pass1-a3) echo "harnest/$(basename "$repo_dir" | sed 's/-pass1-a3$//')/pass1/a3" ;;
+      *-pass2-base) echo "harnest/$(basename "$repo_dir" | sed 's/-pass2-base$//')/pass2/base" ;;
+      *-pass2-a1) echo "harnest/$(basename "$repo_dir" | sed 's/-pass2-a1$//')/pass2/a1" ;;
+      *-pass2-a2) echo "harnest/$(basename "$repo_dir" | sed 's/-pass2-a2$//')/pass2/a2" ;;
+      *-pass2-a3) echo "harnest/$(basename "$repo_dir" | sed 's/-pass2-a3$//')/pass2/a3" ;;
       *) echo "stub-branch" ;;
     esac
     ;;
@@ -158,7 +158,7 @@ case "$subcmd" in
       exit 0
     fi
     branch="${4:-best}"
-    printf '%s\trefs/heads/%s\n' "${AUTO_IMPROVE_TEST_BEST_SHA}" "$branch"
+    printf '%s\trefs/heads/%s\n' "${HARNEST_TEST_BEST_SHA}" "$branch"
     ;;
   push)
     touch "$state_dir/after-push"
@@ -175,7 +175,7 @@ func postPushRollbackGitScript() string {
 	return `#!/bin/sh
 set -eu
 
-state_dir="${AUTO_IMPROVE_GIT_STATE_DIR}"
+state_dir="${HARNEST_GIT_STATE_DIR}"
 mkdir -p "$state_dir"
 : >> "$state_dir/worktrees.list"
 
@@ -203,14 +203,14 @@ case "$subcmd" in
     ;;
   rev-parse)
     if [ "${1:-}" = "--verify" ]; then
-      echo "${AUTO_IMPROVE_TEST_BEST_SHA}"
+      echo "${HARNEST_TEST_BEST_SHA}"
       exit 0
     fi
     case "${1:-}" in
-      *^1) echo "${AUTO_IMPROVE_TEST_BASE_SHA}" ;;
-      HEAD) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
-      refs/heads/*) echo "${AUTO_IMPROVE_TEST_TARGET_SHA}" ;;
-      *) echo "${AUTO_IMPROVE_TEST_BEST_SHA}" ;;
+      *^1) echo "${HARNEST_TEST_BASE_SHA}" ;;
+      HEAD) echo "${HARNEST_TEST_TARGET_SHA}" ;;
+      refs/heads/*) echo "${HARNEST_TEST_TARGET_SHA}" ;;
+      *) echo "${HARNEST_TEST_BEST_SHA}" ;;
     esac
     ;;
   fetch)
@@ -239,7 +239,7 @@ case "$subcmd" in
     echo "0000000000000000000000000000000000000000"
     ;;
   commit-tree)
-    echo "${AUTO_IMPROVE_TEST_TARGET_SHA}"
+    echo "${HARNEST_TEST_TARGET_SHA}"
     ;;
   update-ref|reset)
     exit 0
@@ -300,30 +300,30 @@ case "$subcmd" in
     ;;
   branch)
     case "$(basename "$repo_dir")" in
-      *-pass1-base) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-base$//')/pass1/base" ;;
-      *-pass1-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a1$//')/pass1/a1" ;;
-      *-pass1-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a2$//')/pass1/a2" ;;
-      *-pass1-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass1-a3$//')/pass1/a3" ;;
-      *-pass2-base) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-base$//')/pass2/base" ;;
-      *-pass2-a1) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a1$//')/pass2/a1" ;;
-      *-pass2-a2) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a2$//')/pass2/a2" ;;
-      *-pass2-a3) echo "auto-improve/$(basename "$repo_dir" | sed 's/-pass2-a3$//')/pass2/a3" ;;
+      *-pass1-base) echo "harnest/$(basename "$repo_dir" | sed 's/-pass1-base$//')/pass1/base" ;;
+      *-pass1-a1) echo "harnest/$(basename "$repo_dir" | sed 's/-pass1-a1$//')/pass1/a1" ;;
+      *-pass1-a2) echo "harnest/$(basename "$repo_dir" | sed 's/-pass1-a2$//')/pass1/a2" ;;
+      *-pass1-a3) echo "harnest/$(basename "$repo_dir" | sed 's/-pass1-a3$//')/pass1/a3" ;;
+      *-pass2-base) echo "harnest/$(basename "$repo_dir" | sed 's/-pass2-base$//')/pass2/base" ;;
+      *-pass2-a1) echo "harnest/$(basename "$repo_dir" | sed 's/-pass2-a1$//')/pass2/a1" ;;
+      *-pass2-a2) echo "harnest/$(basename "$repo_dir" | sed 's/-pass2-a2$//')/pass2/a2" ;;
+      *-pass2-a3) echo "harnest/$(basename "$repo_dir" | sed 's/-pass2-a3$//')/pass2/a3" ;;
       *) echo "stub-branch" ;;
     esac
     ;;
   ls-remote)
     branch="${4:-best}"
     if [ -f "$state_dir/pushed-target" ]; then
-      printf '%s\trefs/heads/%s\n' "${AUTO_IMPROVE_TEST_TARGET_SHA}" "$branch"
+      printf '%s\trefs/heads/%s\n' "${HARNEST_TEST_TARGET_SHA}" "$branch"
     else
-      printf '%s\trefs/heads/%s\n' "${AUTO_IMPROVE_TEST_BEST_SHA}" "$branch"
+      printf '%s\trefs/heads/%s\n' "${HARNEST_TEST_BEST_SHA}" "$branch"
     fi
     ;;
   push)
     refspec="${2:-}"
-    if [ "$refspec" = "${AUTO_IMPROVE_TEST_TARGET_SHA}:best" ]; then
-      mkdir -p "$(dirname "$AUTO_IMPROVE_TEST_SENTINEL_PATH")"
-      cat > "$AUTO_IMPROVE_TEST_SENTINEL_PATH" <<EOF
+    if [ "$refspec" = "${HARNEST_TEST_TARGET_SHA}:best" ]; then
+      mkdir -p "$(dirname "$HARNEST_TEST_SENTINEL_PATH")"
+      cat > "$HARNEST_TEST_SENTINEL_PATH" <<EOF
 {"run_id":"2026-04-21-PR99-deadbee","pr":99,"reason":"transactional_failure","failed_step":"70","created_at":"2026-04-21T00:00:00Z"}
 EOF
       touch "$state_dir/pushed-target"

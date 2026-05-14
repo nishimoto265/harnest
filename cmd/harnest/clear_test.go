@@ -13,7 +13,7 @@ import (
 
 func TestClearCommandArchivesRepoStateAndRemovesRegistration(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("AUTO_IMPROVE_HOME", home)
+	t.Setenv("HARNEST_HOME", home)
 	seedClearRepoState(t, home)
 	require.NoError(t, writeRepositoryRegistration(home, repoRegistration{
 		Slug:          "owner/repo",
@@ -50,7 +50,7 @@ func TestClearCommandArchivesRepoStateAndRemovesRegistration(t *testing.T) {
 
 func TestClearCommandDryRunDoesNotMoveState(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("AUTO_IMPROVE_HOME", home)
+	t.Setenv("HARNEST_HOME", home)
 	seedClearRepoState(t, home)
 
 	var stdout bytes.Buffer
@@ -69,7 +69,7 @@ func TestClearCommandDryRunDoesNotMoveState(t *testing.T) {
 
 func TestClearCommandAllArchivesGeneratedHomeState(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("AUTO_IMPROVE_HOME", home)
+	t.Setenv("HARNEST_HOME", home)
 	seedClearRepoState(t, home)
 	require.NoError(t, writeRepositoryRegistration(home, repoRegistration{
 		Slug:          "owner/repo",
@@ -103,7 +103,7 @@ func TestClearCommandAllArchivesGeneratedHomeState(t *testing.T) {
 
 func TestClearCommandAllRejectsUnmarkedHome(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("AUTO_IMPROVE_HOME", home)
+	t.Setenv("HARNEST_HOME", home)
 	seedClearRepoState(t, home)
 
 	cmd := newRootCmd()
@@ -116,7 +116,7 @@ func TestClearCommandAllRejectsUnmarkedHome(t *testing.T) {
 
 func TestClearCommandRejectsSymlinkedStateSource(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("AUTO_IMPROVE_HOME", home)
+	t.Setenv("HARNEST_HOME", home)
 	require.NoError(t, ensureHarnestHomeMarker(home))
 
 	outside := t.TempDir()

@@ -25,7 +25,7 @@ func TestCreateLessonAndGenerateChecklist(t *testing.T) {
 		Now:           func() time.Time { return now },
 	})
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(root, ".auto-improve", "lessons", "no-temp-artifact-commit.md"), path)
+	assert.Equal(t, filepath.Join(root, ".harnest", "lessons", "no-temp-artifact-commit.md"), path)
 
 	body, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -69,7 +69,7 @@ func TestValidateIDRejectsNonCanonicalSlugs(t *testing.T) {
 
 func TestLoadRejectsHeadingMismatch(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, ".auto-improve", "lessons", "lesson-id.md")
+	path := filepath.Join(root, ".harnest", "lessons", "lesson-id.md")
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte(`---
 status: active
@@ -92,7 +92,7 @@ Do the thing.
 
 func TestLoadRejectsMultipleFrontMatterDocuments(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, ".auto-improve", "lessons", "lesson-id.md")
+	path := filepath.Join(root, ".harnest", "lessons", "lesson-id.md")
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte(`---
 status: active
@@ -120,7 +120,7 @@ func TestWriteChecklistAllowsMissingLessonsDir(t *testing.T) {
 	root := t.TempDir()
 	path, err := WriteChecklist(root)
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(root, ".auto-improve", "checklist.md"), path)
+	assert.Equal(t, filepath.Join(root, ".harnest", "checklist.md"), path)
 
 	body, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -148,7 +148,7 @@ func TestPrepareAndVerifyChecklistResult(t *testing.T) {
 
 	resultPath, err := PrepareChecklistResult(root, false)
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(root, ".auto-improve", "work", "checklist-result.md"), resultPath)
+	assert.Equal(t, filepath.Join(root, ".harnest", "work", "checklist-result.md"), resultPath)
 
 	data, err := os.ReadFile(resultPath)
 	require.NoError(t, err)
@@ -243,7 +243,7 @@ func TestInstallGuidanceAddsManagedBlocksAndHooks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, result.Files, filepath.Join(root, "CLAUDE.md"))
 	assert.Contains(t, result.Files, filepath.Join(root, "AGENTS.md"))
-	assert.Contains(t, result.Files, filepath.Join(root, ".auto-improve", "hooks", "verify-checklist-result.sh"))
+	assert.Contains(t, result.Files, filepath.Join(root, ".harnest", "hooks", "verify-checklist-result.sh"))
 	assert.Contains(t, result.Files, filepath.Join(root, ".claude", "settings.json"))
 	assert.Contains(t, result.Files, filepath.Join(root, ".codex", "hooks.json"))
 	assert.Contains(t, result.Files, filepath.Join(root, ".codex", "config.toml"))
@@ -252,18 +252,18 @@ func TestInstallGuidanceAddsManagedBlocksAndHooks(t *testing.T) {
 	agentsBody, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
 	require.NoError(t, err)
 	assert.Contains(t, string(agentsBody), "Keep me.")
-	assert.Contains(t, string(agentsBody), "@.auto-improve/checklist.md")
-	assert.Contains(t, string(agentsBody), "AUTO_IMPROVE_BIN")
+	assert.Contains(t, string(agentsBody), "@.harnest/checklist.md")
+	assert.Contains(t, string(agentsBody), "HARNEST_BIN")
 	assert.Contains(t, string(agentsBody), "lessons verify-checklist-result")
 
 	claudeSettings, err := os.ReadFile(filepath.Join(root, ".claude", "settings.json"))
 	require.NoError(t, err)
 	assert.Contains(t, string(claudeSettings), "echo existing")
-	assert.Contains(t, string(claudeSettings), ".auto-improve/hooks/verify-checklist-result.sh")
+	assert.Contains(t, string(claudeSettings), ".harnest/hooks/verify-checklist-result.sh")
 
 	codexHooks, err := os.ReadFile(filepath.Join(root, ".codex", "hooks.json"))
 	require.NoError(t, err)
-	assert.Contains(t, string(codexHooks), ".auto-improve/hooks/verify-checklist-result.sh")
+	assert.Contains(t, string(codexHooks), ".harnest/hooks/verify-checklist-result.sh")
 
 	codexConfig, err := os.ReadFile(filepath.Join(root, ".codex", "config.toml"))
 	require.NoError(t, err)
@@ -271,7 +271,7 @@ func TestInstallGuidanceAddsManagedBlocksAndHooks(t *testing.T) {
 
 	gitignore, err := os.ReadFile(filepath.Join(root, ".gitignore"))
 	require.NoError(t, err)
-	assert.Contains(t, string(gitignore), ".auto-improve/work/")
+	assert.Contains(t, string(gitignore), ".harnest/work/")
 }
 
 func TestInstallGuidanceIsIdempotent(t *testing.T) {
@@ -283,9 +283,9 @@ func TestInstallGuidanceIsIdempotent(t *testing.T) {
 
 	body, err := os.ReadFile(filepath.Join(root, "CLAUDE.md"))
 	require.NoError(t, err)
-	assert.Equal(t, 1, strings.Count(string(body), "BEGIN AUTO-IMPROVE CHECKLIST"))
+	assert.Equal(t, 1, strings.Count(string(body), "BEGIN HARNEST CHECKLIST"))
 
 	settings, err := os.ReadFile(filepath.Join(root, ".claude", "settings.json"))
 	require.NoError(t, err)
-	assert.Equal(t, 1, strings.Count(string(settings), ".auto-improve/hooks/verify-checklist-result.sh"))
+	assert.Equal(t, 1, strings.Count(string(settings), ".harnest/hooks/verify-checklist-result.sh"))
 }

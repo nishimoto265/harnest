@@ -14,7 +14,7 @@ import (
 func validStep10Request() Step10Request {
 	return Step10Request{
 		PR:           42,
-		BestBranch:   "auto-improve/best",
+		BestBranch:   "harnest/best",
 		HarnessFiles: true,
 	}
 }
@@ -204,9 +204,9 @@ func TestStepIO_JSONBoundaries_StrictRequestsAndResponses(t *testing.T) {
 				var v Step10Request
 				return v.UnmarshalJSON(data)
 			},
-			anchor:    `"best_branch":"auto-improve/best"`,
-			duplicate: `"best_branch":"auto-improve/best","best_branch":"other-branch"`,
-			remove:    `"best_branch":"auto-improve/best",`,
+			anchor:    `"best_branch":"harnest/best"`,
+			duplicate: `"best_branch":"harnest/best","best_branch":"other-branch"`,
+			remove:    `"best_branch":"harnest/best",`,
 		},
 		{
 			name:  "step10 response",

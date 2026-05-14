@@ -27,7 +27,7 @@ func TestSynthesizeSuccessCommit_SetsIdentityUnderHardenedGitEnv(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644))
 	runCommand(t, repo, "git", "add", "README.md")
 	runCommand(t, repo, "git", "-c", "user.name=Seed User", "-c", "user.email=seed@example.invalid", "commit", "-m", "base")
-	runCommand(t, repo, "git", "checkout", "-b", "auto-improve/test/pass2/a1")
+	runCommand(t, repo, "git", "checkout", "-b", "harnest/test/pass2/a1")
 	baseSHA := strings.TrimSpace(runCommand(t, repo, "git", "rev-parse", "HEAD"))
 	localIdentity := exec.Command("git", "config", "--local", "--get", "user.email")
 	localIdentity.Dir = repo
@@ -42,7 +42,7 @@ func TestSynthesizeSuccessCommit_SetsIdentityUnderHardenedGitEnv(t *testing.T) {
 		Agent:   "a1",
 		Pass:    2,
 		Path:    repo,
-		Branch:  "auto-improve/test/pass2/a1",
+		Branch:  "harnest/test/pass2/a1",
 		BaseSHA: baseSHA,
 		HeadSHA: baseSHA,
 	}
@@ -55,8 +55,8 @@ func TestSynthesizeSuccessCommit_SetsIdentityUnderHardenedGitEnv(t *testing.T) {
 	require.Equal(t, baseSHA, parent)
 
 	commit := runCommand(t, repo, "git", "cat-file", "-p", commitSHA)
-	require.Contains(t, commit, "author auto-improve <auto-improve@example.invalid>")
-	require.Contains(t, commit, "committer auto-improve <auto-improve@example.invalid>")
+	require.Contains(t, commit, "author harnest <harnest@example.invalid>")
+	require.Contains(t, commit, "committer harnest <harnest@example.invalid>")
 }
 
 func TestSynthesizeSuccessCommit_SkipsIgnoredChecklistArtifact(t *testing.T) {
@@ -65,7 +65,7 @@ func TestSynthesizeSuccessCommit_SkipsIgnoredChecklistArtifact(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644))
 	runCommand(t, repo, "git", "add", "README.md")
 	runCommand(t, repo, "git", "-c", "user.name=Seed User", "-c", "user.email=seed@example.invalid", "commit", "-m", "base")
-	runCommand(t, repo, "git", "checkout", "-b", "auto-improve/test/pass2/a1")
+	runCommand(t, repo, "git", "checkout", "-b", "harnest/test/pass2/a1")
 	baseSHA := strings.TrimSpace(runCommand(t, repo, "git", "rev-parse", "HEAD"))
 	require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("/checklist-result.json\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(repo, "implemented.txt"), []byte("implementation\n"), 0o644))
@@ -78,7 +78,7 @@ func TestSynthesizeSuccessCommit_SkipsIgnoredChecklistArtifact(t *testing.T) {
 		Agent:   "a1",
 		Pass:    2,
 		Path:    repo,
-		Branch:  "auto-improve/test/pass2/a1",
+		Branch:  "harnest/test/pass2/a1",
 		BaseSHA: baseSHA,
 		HeadSHA: baseSHA,
 	}
@@ -101,15 +101,15 @@ func TestSynthesizeSuccessCommit_UnstagesPreStagedPolicyArtifacts(t *testing.T) 
 	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644))
 	runCommand(t, repo, "git", "add", "README.md")
 	runCommand(t, repo, "git", "-c", "user.name=Seed User", "-c", "user.email=seed@example.invalid", "commit", "-m", "base")
-	runCommand(t, repo, "git", "checkout", "-b", "auto-improve/test/pass2/a1")
+	runCommand(t, repo, "git", "checkout", "-b", "harnest/test/pass2/a1")
 	baseSHA := strings.TrimSpace(runCommand(t, repo, "git", "rev-parse", "HEAD"))
-	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".auto-improve", "lessons"), 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Join(repo, "auto-improve", "rules"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".harnest", "lessons"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "harnest", "rules"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(repo, "implemented.txt"), []byte("implementation\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(repo, "AGENTS.md"), []byte("task guidance change\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(repo, ".auto-improve", "lessons", "r.md"), []byte("lesson\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(repo, "auto-improve", "rules-registry.jsonl"), []byte("{}\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(repo, "auto-improve", "rules", "r.md"), []byte("rule\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".harnest", "lessons", "r.md"), []byte("lesson\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "harnest", "rules-registry.jsonl"), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "harnest", "rules", "r.md"), []byte("rule\n"), 0o644))
 	runCommand(t, repo, "git", "add", "-A")
 
 	runID := contracts.RunID("2026-04-21-PR42-abcdef0")
@@ -119,7 +119,7 @@ func TestSynthesizeSuccessCommit_UnstagesPreStagedPolicyArtifacts(t *testing.T) 
 		Agent:   "a1",
 		Pass:    2,
 		Path:    repo,
-		Branch:  "auto-improve/test/pass2/a1",
+		Branch:  "harnest/test/pass2/a1",
 		BaseSHA: baseSHA,
 		HeadSHA: baseSHA,
 	}
@@ -133,9 +133,9 @@ func TestSynthesizeSuccessCommit_UnstagesPreStagedPolicyArtifacts(t *testing.T) 
 	files := runCommand(t, repo, "git", "diff-tree", "--no-commit-id", "--name-only", "-r", commitSHA)
 	assert.Contains(t, files, "implemented.txt")
 	assert.Contains(t, files, "AGENTS.md")
-	assert.NotContains(t, files, ".auto-improve")
-	assert.NotContains(t, files, "auto-improve/rules-registry.jsonl")
-	assert.NotContains(t, files, "auto-improve/rules/r.md")
+	assert.NotContains(t, files, ".harnest")
+	assert.NotContains(t, files, "harnest/rules-registry.jsonl")
+	assert.NotContains(t, files, "harnest/rules/r.md")
 }
 
 func TestRejectCommittedPolicyArtifactChangesFailsClosed(t *testing.T) {
@@ -145,9 +145,9 @@ func TestRejectCommittedPolicyArtifactChangesFailsClosed(t *testing.T) {
 	runCommand(t, repo, "git", "add", "README.md")
 	runCommand(t, repo, "git", "-c", "user.name=Seed User", "-c", "user.email=seed@example.invalid", "commit", "-m", "base")
 	baseSHA := strings.TrimSpace(runCommand(t, repo, "git", "rev-parse", "HEAD"))
-	require.NoError(t, os.MkdirAll(filepath.Join(repo, "auto-improve", "rules"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(repo, "auto-improve", "rules", "r.md"), []byte("mutated\n"), 0o644))
-	runCommand(t, repo, "git", "add", "auto-improve/rules/r.md")
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "harnest", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "harnest", "rules", "r.md"), []byte("mutated\n"), 0o644))
+	runCommand(t, repo, "git", "add", "harnest/rules/r.md")
 	runCommand(t, repo, "git", "-c", "user.name=Agent", "-c", "user.email=agent@example.invalid", "commit", "-m", "mutate policy")
 
 	err := rejectCommittedPolicyArtifactChanges(context.Background(), contracts.WorktreeAllocation{
@@ -360,8 +360,8 @@ func TestVerifyExistingAllocationWorktreeIgnoresPolicyOverlay(t *testing.T) {
 		BaseSHA: baseSHA,
 		HeadSHA: baseSHA,
 	}
-	require.NoError(t, os.MkdirAll(filepath.Join(worktreePath, ".auto-improve"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, ".auto-improve", "checklist.md"), []byte("# Checklist\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(worktreePath, ".harnest"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, ".harnest", "checklist.md"), []byte("# Checklist\n"), 0o644))
 	require.NoError(t, verifyExistingAllocationWorktree(context.Background(), allocation))
 
 	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, "app.txt"), []byte("dirty\n"), 0o644))

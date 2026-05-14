@@ -217,7 +217,7 @@ func TestStepRunSerializesWorktreeRecreationUnderRescueLock(t *testing.T) {
 	runGit(t, repoDir, "commit", "-m", "base")
 	baseSHA := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
 	worktreePath := filepath.Join(worktreeBase, string(runID)+"-pass1-a1")
-	branch := "auto-improve/" + string(runID) + "/pass1/a1"
+	branch := "harnest/" + string(runID) + "/pass1/a1"
 	runGit(t, repoDir, "worktree", "add", "-b", branch, worktreePath, baseSHA)
 	runIO, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
 	require.NoError(t, err)
@@ -479,7 +479,7 @@ func TestStepRun_RecreatesMissingWorktreeBeforeLaunch(t *testing.T) {
 	runGit(t, repoDir, "commit", "-m", "base")
 	baseSHA := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
 	worktreePath := filepath.Join(worktreeBase, string(runID)+"-pass1-a1")
-	branch := "auto-improve/" + string(runID) + "/pass1/a1"
+	branch := "harnest/" + string(runID) + "/pass1/a1"
 	runGit(t, repoDir, "worktree", "add", "-b", branch, worktreePath, baseSHA)
 	runIO, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
 	require.NoError(t, err)
@@ -543,7 +543,7 @@ func TestStepRun_RecreatesMissingWorktreeWithInactiveResumeState(t *testing.T) {
 	runGit(t, repoDir, "commit", "-m", "base")
 	baseSHA := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
 	worktreePath := filepath.Join(worktreeBase, string(runID)+"-pass1-a1")
-	branch := "auto-improve/" + string(runID) + "/pass1/a1"
+	branch := "harnest/" + string(runID) + "/pass1/a1"
 	runGit(t, repoDir, "worktree", "add", "-b", branch, worktreePath, baseSHA)
 	runIO, err := internalio.NewRunContext(runID, runsBase, worktreeBase)
 	require.NoError(t, err)

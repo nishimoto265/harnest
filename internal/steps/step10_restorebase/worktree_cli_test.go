@@ -17,9 +17,9 @@ func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 	rc := newRunCtx(t)
 	repoRoot := t.TempDir()
 	basePath := filepath.Join(rc.WorktreeBase, fmt.Sprintf("%s-pass1-base", rc.RunID))
-	baseBranch := fmt.Sprintf("auto-improve/%s/pass1/base", rc.RunID)
+	baseBranch := fmt.Sprintf("harnest/%s/pass1/base", rc.RunID)
 	firstPath := filepath.Join(rc.WorktreeBase, fmt.Sprintf("%s-pass1-a1", rc.RunID))
-	firstBranch := fmt.Sprintf("auto-improve/%s/pass1/%s", rc.RunID, DefaultAgents[0])
+	firstBranch := fmt.Sprintf("harnest/%s/pass1/%s", rc.RunID, DefaultAgents[0])
 
 	git := gitCLI{
 		stat: os.Stat,
@@ -31,9 +31,9 @@ func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 				return nil, nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
-			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", "+refs/heads/auto-improve/best:refs/remotes/origin/auto-improve/best"}):
+			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", "+refs/heads/harnest/best:refs/remotes/origin/harnest/best"}):
 				return nil, nil, nil
-			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", "origin/auto-improve/best"}):
+			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", "origin/harnest/best"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", baseBranch, basePath, testBaseSHA}):
 				return []byte("Preparing base worktree\n"), nil, nil
@@ -62,7 +62,7 @@ func TestRun_WorktreeRetryDriftPropagates(t *testing.T) {
 	}
 	in := Input{
 		PR:               42,
-		BestBranch:       "auto-improve/best",
+		BestBranch:       "harnest/best",
 		TaskPromptSource: "issue",
 		RepoRoot:         repoRoot,
 		RunCtx:           rc,
@@ -77,7 +77,7 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 	rc := newRunCtx(t)
 	repoRoot := t.TempDir()
 	basePath := filepath.Join(rc.WorktreeBase, fmt.Sprintf("%s-pass1-base", rc.RunID))
-	baseBranch := fmt.Sprintf("auto-improve/%s/pass1/base", rc.RunID)
+	baseBranch := fmt.Sprintf("harnest/%s/pass1/base", rc.RunID)
 	firstPath := filepath.Join(rc.WorktreeBase, fmt.Sprintf("%s-pass1-a1", rc.RunID))
 	require.NoError(t, os.MkdirAll(firstPath, 0o755))
 
@@ -91,9 +91,9 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 				return nil, nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", testMergeCommitOID + "^1"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
-			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", "+refs/heads/auto-improve/best:refs/remotes/origin/auto-improve/best"}):
+			case slices.Equal(args, []string{"-C", repoRoot, "fetch", "--no-tags", "origin", "+refs/heads/harnest/best:refs/remotes/origin/harnest/best"}):
 				return nil, nil, nil
-			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", "origin/auto-improve/best"}):
+			case slices.Equal(args, []string{"-C", repoRoot, "rev-parse", "origin/harnest/best"}):
 				return []byte(testBaseSHA + "\n"), nil, nil
 			case slices.Equal(args, []string{"-C", repoRoot, "worktree", "add", "-b", baseBranch, basePath, testBaseSHA}):
 				return []byte("Preparing base worktree\n"), nil, nil
@@ -120,7 +120,7 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 	}
 	in := Input{
 		PR:               42,
-		BestBranch:       "auto-improve/best",
+		BestBranch:       "harnest/best",
 		TaskPromptSource: "issue",
 		RepoRoot:         repoRoot,
 		RunCtx:           rc,
@@ -134,7 +134,7 @@ func TestRun_ExistingWorktreeBranchDriftPropagates(t *testing.T) {
 func TestGitCLIWorktreeAdd_RetryBranchExisting_VerifiesHEAD(t *testing.T) {
 	repoRoot := t.TempDir()
 	path := filepath.Join(t.TempDir(), "worktree")
-	branch := "auto-improve/run/pass1/a1"
+	branch := "harnest/run/pass1/a1"
 
 	git := gitCLI{
 		stat: os.Stat,
@@ -163,7 +163,7 @@ func TestGitCLIWorktreeAdd_RetryBranchExisting_VerifiesHEAD(t *testing.T) {
 func TestGitCLIWorktreeAdd_RetryBranchExisting_DriftRemovesWorktree(t *testing.T) {
 	repoRoot := t.TempDir()
 	path := filepath.Join(t.TempDir(), "worktree")
-	branch := "auto-improve/run/pass1/a1"
+	branch := "harnest/run/pass1/a1"
 	var calls [][]string
 
 	git := gitCLI{
@@ -203,7 +203,7 @@ func TestGitCLIWorktreeAdd_RetryBranchExisting_DriftRemovesWorktree(t *testing.T
 func TestGitCLIWorktreeAdd_RetryBranchExisting_CleanupFailurePreservesDrift(t *testing.T) {
 	repoRoot := t.TempDir()
 	path := filepath.Join(t.TempDir(), "worktree")
-	branch := "auto-improve/run/pass1/a1"
+	branch := "harnest/run/pass1/a1"
 
 	git := gitCLI{
 		stat: os.Stat,
@@ -249,7 +249,7 @@ func TestGitCLIResolveRef_IgnoresStderrFromRunner(t *testing.T) {
 
 func TestGitCLIWorktreeAdd_ExistingPath_VerifiesBranch(t *testing.T) {
 	path := t.TempDir()
-	branch := "auto-improve/run/pass1/a1"
+	branch := "harnest/run/pass1/a1"
 	repoRoot := t.TempDir()
 
 	git := gitCLI{
@@ -277,7 +277,7 @@ func TestGitCLIWorktreeAdd_ExistingPath_VerifiesBranch(t *testing.T) {
 func TestGitCLIWorktreeAdd_RecreatesDirtyExistingWorktree(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "worktree")
 	repoRoot := t.TempDir()
-	branch := "auto-improve/run/pass1/a1"
+	branch := "harnest/run/pass1/a1"
 	require.NoError(t, os.MkdirAll(path, 0o755))
 
 	var calls [][]string
@@ -324,7 +324,7 @@ func TestGitCLIWorktreeAdd_RecreatesDirtyExistingWorktree(t *testing.T) {
 func TestGitCLIWorktreeAdd_RecreatesIgnoredExistingWorktree(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "worktree")
 	repoRoot := t.TempDir()
-	branch := "auto-improve/run/pass1/a1"
+	branch := "harnest/run/pass1/a1"
 	require.NoError(t, os.MkdirAll(path, 0o755))
 
 	var calls [][]string
@@ -376,7 +376,7 @@ func TestGitCLIWorktreeAdd_ExistingPathRequiresRegisteredWorktree(t *testing.T) 
 		},
 	}
 
-	created, err := git.WorktreeAdd(context.Background(), repoRoot, path, "auto-improve/run/pass1/a1", testBaseSHA)
+	created, err := git.WorktreeAdd(context.Background(), repoRoot, path, "harnest/run/pass1/a1", testBaseSHA)
 	require.Error(t, err)
 	assert.False(t, created)
 	assert.ErrorIs(t, err, ErrWorktreeDrift)

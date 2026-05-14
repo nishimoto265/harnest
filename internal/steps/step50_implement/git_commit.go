@@ -55,7 +55,7 @@ func commitPolicyOverlayBase(ctx context.Context, allocation contracts.WorktreeA
 		"-p",
 		parent,
 		"-m",
-		fmt.Sprintf("auto-improve: prepare step50 policy overlay for %s %s", runID, allocation.Agent),
+		fmt.Sprintf("harnest: prepare step50 policy overlay for %s %s", runID, allocation.Agent),
 	)
 	if err != nil {
 		return allocation, err
@@ -115,7 +115,7 @@ func commitPolicyOverlayPassBase(ctx context.Context, allocation contracts.PassB
 		"-p",
 		allocation.BaseSHA,
 		"-m",
-		fmt.Sprintf("auto-improve: prepare pass%d policy base for %s", allocation.Pass, runID),
+		fmt.Sprintf("harnest: prepare pass%d policy base for %s", allocation.Pass, runID),
 	)
 	if err != nil {
 		return allocation, err
@@ -189,7 +189,7 @@ func synthesizeSuccessCommit(ctx context.Context, allocation contracts.WorktreeA
 		"-p",
 		parent,
 		"-m",
-		fmt.Sprintf("auto-improve: synthesize step50 success for %s %s", run.IO.RunID, run.Agent),
+		fmt.Sprintf("harnest: synthesize step50 success for %s %s", run.IO.RunID, run.Agent),
 	)
 	if err != nil {
 		return "", "", err

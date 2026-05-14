@@ -117,9 +117,9 @@ func TestRecoverPolicyBranchFallsBackToConfigWhenSnapshotBranchEmpty(t *testing.
 	require.NoError(t, os.WriteFile(filepath.Join(ctx.RunDir(), "policy", "snapshot.json"), []byte(`{"schema_version":"1","policy_branch":"","registry_head":""}`), 0o644))
 
 	branch, meta, err := recoverPolicyBranch(ctx, config.Config{
-		Repo: config.RepoConfig{PolicyBranch: "auto-improve/policy"},
+		Repo: config.RepoConfig{PolicyBranch: "harnest/policy"},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, meta)
-	assert.Equal(t, "auto-improve/policy", branch)
+	assert.Equal(t, "harnest/policy", branch)
 }

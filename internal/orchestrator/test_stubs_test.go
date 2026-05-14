@@ -28,7 +28,7 @@ func (stubStep10) Run(ctx context.Context, run *StepRunContext) error {
 				Agent:   agent,
 				Pass:    pass,
 				Path:    path,
-				Branch:  fmt.Sprintf("auto-improve/%s/pass%d/%s", run.IO.RunID, pass, agent),
+				Branch:  fmt.Sprintf("harnest/%s/pass%d/%s", run.IO.RunID, pass, agent),
 				BaseSHA: baseSHA,
 				HeadSHA: baseSHA,
 			})

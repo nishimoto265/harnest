@@ -45,7 +45,7 @@ func syncRescueDir(path string) error {
 }
 
 func SuccessDiffBytes(ctx context.Context, worktreePath, baseSHA, errPrefix string) ([]byte, error) {
-	tempDir, err := os.MkdirTemp("", "auto-improve-diff-*")
+	tempDir, err := os.MkdirTemp("", "harnest-diff-*")
 	if err != nil {
 		return nil, err
 	}

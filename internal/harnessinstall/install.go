@@ -15,13 +15,13 @@ const (
 	ProviderClaude = "claude"
 	ProviderCodex  = "codex"
 
-	HookID = "auto-improve.checklist-gate"
+	HookID = "harnest.checklist-gate"
 
-	markdownBegin = "<!-- BEGIN AUTO-IMPROVE CHECKLIST -->"
-	markdownEnd   = "<!-- END AUTO-IMPROVE CHECKLIST -->"
+	markdownBegin = "<!-- BEGIN HARNEST CHECKLIST -->"
+	markdownEnd   = "<!-- END HARNEST CHECKLIST -->"
 
-	commentBegin = "# BEGIN AUTO-IMPROVE CHECKLIST"
-	commentEnd   = "# END AUTO-IMPROVE CHECKLIST"
+	commentBegin = "# BEGIN HARNEST CHECKLIST"
+	commentEnd   = "# END HARNEST CHECKLIST"
 )
 
 type InstallOptions struct {
@@ -80,7 +80,7 @@ func Plan(targetRoot string, install InstallOptions, opts PlanOptions) (Installa
 		}
 	}
 
-	if err := builder.addExact(filepath.Join(root, ".auto-improve", "hooks", "verify-checklist-result.sh"), []byte(RenderHookScript()), 0o755); err != nil {
+	if err := builder.addExact(filepath.Join(root, ".harnest", "hooks", "verify-checklist-result.sh"), []byte(RenderHookScript()), 0o755); err != nil {
 		return InstallationPlan{}, err
 	}
 	if containsProvider(providers, ProviderClaude) {
@@ -153,15 +153,15 @@ func NormalizeProviders(providers []string) []string {
 
 func RenderGuidance(_ string) string {
 	return strings.TrimSpace(fmt.Sprintf(`%s
-## Auto Improve Checklist
+## HarNest Checklist
 
-Before implementation, read @.auto-improve/checklist.md.
+Before implementation, read @.harnest/checklist.md.
 
 At the start of work, run:
 
 %s
 
-Before creating a PR, update .auto-improve/work/checklist-result.md:
+Before creating a PR, update .harnest/work/checklist-result.md:
 
 - [x] means compliant
 - [-] means not applicable
@@ -170,9 +170,9 @@ Before creating a PR, update .auto-improve/work/checklist-result.md:
 Then run:
 
 %s
-%s`, markdownBegin, `AUTO_IMPROVE_BIN="${AUTO_IMPROVE_BIN:-auto-improve}"
-"$AUTO_IMPROVE_BIN" lessons prepare-checklist-result --force`, `AUTO_IMPROVE_BIN="${AUTO_IMPROVE_BIN:-auto-improve}"
-"$AUTO_IMPROVE_BIN" lessons verify-checklist-result`, markdownEnd)) + "\n"
+%s`, markdownBegin, `HARNEST_BIN="${HARNEST_BIN:-harnest}"
+"$HARNEST_BIN" lessons prepare-checklist-result --force`, `HARNEST_BIN="${HARNEST_BIN:-harnest}"
+"$HARNEST_BIN" lessons verify-checklist-result`, markdownEnd)) + "\n"
 }
 
 func guidanceTemplate(install InstallOptions, provider string) string {
@@ -193,25 +193,25 @@ func RenderHookScript() string {
 	return `#!/bin/sh
 set -eu
 
-ROOT="${AUTO_IMPROVE_REPO_ROOT:-}"
+ROOT="${HARNEST_REPO_ROOT:-}"
 if [ -z "$ROOT" ]; then
   ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 fi
 
-AUTO_IMPROVE_BIN="${AUTO_IMPROVE_BIN:-auto-improve}"
+HARNEST_BIN="${HARNEST_BIN:-harnest}"
 
-if ! "$AUTO_IMPROVE_BIN" lessons verify-checklist-result --root "$ROOT" >/dev/null; then
+if ! "$HARNEST_BIN" lessons verify-checklist-result --root "$ROOT" >/dev/null; then
   cat >&2 <<'EOF'
-auto-improve checklist is incomplete.
+harnest checklist is incomplete.
 Run:
-  AUTO_IMPROVE_BIN="${AUTO_IMPROVE_BIN:-auto-improve}"
-  "$AUTO_IMPROVE_BIN" lessons prepare-checklist-result --force
-Then mark every item in .auto-improve/work/checklist-result.md:
+  HARNEST_BIN="${HARNEST_BIN:-harnest}"
+  "$HARNEST_BIN" lessons prepare-checklist-result --force
+Then mark every item in .harnest/work/checklist-result.md:
   [x] compliant
   [-] not applicable
   [!] valid exception with an indented reason:
 Then run:
-  "$AUTO_IMPROVE_BIN" lessons verify-checklist-result
+  "$HARNEST_BIN" lessons verify-checklist-result
 EOF
   exit 2
 fi
@@ -224,7 +224,7 @@ func RenderProviderHooksJSON() string {
 
 func RenderGitignoreBlock() string {
 	return strings.TrimSpace(fmt.Sprintf(`%s
-.auto-improve/work/
+.harnest/work/
 %s`, commentBegin, commentEnd)) + "\n"
 }
 

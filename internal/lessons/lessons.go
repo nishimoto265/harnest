@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	RepoDirName             = ".auto-improve"
+	RepoDirName             = ".harnest"
 	LessonsDirName          = "lessons"
 	WorkDirName             = "work"
 	ChecklistFileName       = "checklist.md"

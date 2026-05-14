@@ -97,7 +97,7 @@ if [ "$name" = "git" ] && [ "$1" = "-C" ] && [ "$3" = "config" ] && [ "$4" = "--
   exit 0
 fi
 if [ "$name" = "git" ] && [ "$1" = "-C" ] && [ "$3" = "ls-remote" ]; then
-  printf "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/auto-improve/best\n"
+  printf "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/harnest/best\n"
   exit 0
 fi
 if [ "$name" = "gh" ] && [ "$1" = "--version" ]; then
@@ -160,7 +160,7 @@ func testConfig(t *testing.T) config.Config {
 			GitHub:        "owner/repo",
 			Root:          t.TempDir(),
 			DefaultBranch: "main",
-			BestBranch:    "auto-improve/best",
+			BestBranch:    "harnest/best",
 		},
 		Worktree: config.WorktreeConfig{
 			Base: worktreeBase,
@@ -183,7 +183,7 @@ repo:
   github: owner/repo
   root: %q
   default_branch: main
-  best_branch: auto-improve/best
+  best_branch: harnest/best
 paths:
   runs: %q
 worktree:
@@ -254,7 +254,7 @@ func fakeDependencies(t *testing.T, missing string) Dependencies {
 		},
 		Run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			if name == toolPaths["git"] && len(args) >= 5 && args[0] == "-C" && args[2] == "ls-remote" {
-				return []byte(strings.Repeat("a", 40) + "\trefs/heads/auto-improve/best"), nil
+				return []byte(strings.Repeat("a", 40) + "\trefs/heads/harnest/best"), nil
 			}
 			if name == toolPaths["git"] && len(args) == 5 && args[0] == "-C" && args[2] == "config" && args[3] == "--get" && args[4] == "remote.origin.url" {
 				return []byte("https://github.com/owner/repo.git"), nil
@@ -333,7 +333,7 @@ func TestCheckUsesConfiguredOriginURLForValidationAndNetworkAuth(t *testing.T) {
 	deps.RunGitNetwork = func(ctx context.Context, remoteURL, name string, args ...string) ([]byte, error) {
 		networkRemoteURLs = append(networkRemoteURLs, remoteURL)
 		if len(args) >= 5 && args[0] == "-C" && args[2] == "ls-remote" && args[4] == "origin" {
-			return []byte(strings.Repeat("a", 40) + "\trefs/heads/auto-improve/best"), nil
+			return []byte(strings.Repeat("a", 40) + "\trefs/heads/harnest/best"), nil
 		}
 		return nil, fmt.Errorf("unexpected git network command: %s %v", name, args)
 	}
@@ -417,7 +417,7 @@ func TestCheckRejectsPolicyBranchSameAsDefaultBranch(t *testing.T) {
 
 func TestCheckAllowsPolicyBranchBootstrap(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.Repo.PolicyBranch = "auto-improve/policy"
+	cfg.Repo.PolicyBranch = "harnest/policy"
 
 	result := NewWithDependencies(fakeDependencies(t, "")).Check(context.Background(), cfg)
 

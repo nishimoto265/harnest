@@ -548,7 +548,7 @@ func TestStep70Request_UnmarshalJSON_RejectsDuplicateTopLevelKey(t *testing.T) {
     "pr": 42,
     "title": "fix",
     "base_sha": "1111111111111111111111111111111111111111",
-    "best_branch": "auto-improve/best",
+    "best_branch": "harnest/best",
     "reconstructed_task_prompt": "hello",
     "worktrees": [
       {"agent":"a1","pass":1,"path":"/tmp/wt/pass1-a1","branch":"b-pass1-a1","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"},
@@ -584,7 +584,7 @@ func TestStep70Request_UnmarshalJSON_RejectsDuplicateNestedStructKey(t *testing.
     "pr": 42,
     "title": "fix",
     "base_sha": "1111111111111111111111111111111111111111",
-    "best_branch": "auto-improve/best",
+    "best_branch": "harnest/best",
     "reconstructed_task_prompt": "hello",
     "worktrees": [
       {"agent":"a1","pass":1,"path":"/tmp/wt/pass1-a1","path":"/tmp/wt/pass1-a1-dup","branch":"b-pass1-a1","base_sha":"1111111111111111111111111111111111111111","head_sha":"1111111111111111111111111111111111111111"},

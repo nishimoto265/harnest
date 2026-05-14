@@ -186,7 +186,7 @@ func (g gitCLI) PreparePassBase(ctx context.Context, allocation contracts.PassBa
 	commit, stderr, err := g.runLocalWithEnv(ctx, syntheticCommitEnv(), "-C", allocation.Path,
 		"commit-tree", strings.TrimSpace(string(tree)),
 		"-p", allocation.BaseSHA,
-		"-m", fmt.Sprintf("auto-improve: prepare pass%d policy base for %s", allocation.Pass, runID),
+		"-m", fmt.Sprintf("harnest: prepare pass%d policy base for %s", allocation.Pass, runID),
 	)
 	if err != nil {
 		return allocation, formatCommandFailure("step10: git commit-tree policy overlay", err, commit, stderr)
@@ -383,10 +383,10 @@ func runGitWithEnv(ctx context.Context, env []string, args ...string) ([]byte, [
 func syntheticCommitEnv() []string {
 	env := processenv.GitLocalEnv()
 	env = append(env,
-		"GIT_AUTHOR_NAME=auto-improve",
-		"GIT_AUTHOR_EMAIL=auto-improve@example.invalid",
-		"GIT_COMMITTER_NAME=auto-improve",
-		"GIT_COMMITTER_EMAIL=auto-improve@example.invalid",
+		"GIT_AUTHOR_NAME=harnest",
+		"GIT_AUTHOR_EMAIL=harnest@example.invalid",
+		"GIT_COMMITTER_NAME=harnest",
+		"GIT_COMMITTER_EMAIL=harnest@example.invalid",
 	)
 	return env
 }

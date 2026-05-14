@@ -138,9 +138,9 @@ EOF
 	assert.Equal(t, "exec", argv[0])
 	workdir := argValue(t, argv, "-C")
 	assert.NotEqual(t, dir, workdir)
-	assert.Contains(t, filepath.Base(workdir), "auto-improve-judge-workdir-")
+	assert.Contains(t, filepath.Base(workdir), "harnest-judge-workdir-")
 	assertArgValue(t, argv, "-c", `web_search="disabled"`)
-	assertArgLastValueHasPrefix(t, argv, "-o", filepath.Join(os.TempDir(), "auto-improve-output-"))
+	assertArgLastValueHasPrefix(t, argv, "-o", filepath.Join(os.TempDir(), "harnest-output-"))
 	assert.Equal(t, "-", argv[len(argv)-1])
 
 	promptBytes, err := os.ReadFile(promptPath)

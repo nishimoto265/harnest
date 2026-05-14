@@ -2,12 +2,12 @@
 
 set -euo pipefail
 
-if [[ "${AUTO_IMPROVE_TEST_MODE:-0}" == "1" && -n "${AUTO_IMPROVE_TEST_SAFE_PATH:-}" ]]; then
+if [[ "${HARNEST_TEST_MODE:-0}" == "1" && -n "${HARNEST_TEST_SAFE_PATH:-}" ]]; then
   if [[ "$(/usr/bin/id -u)" == "0" || -n "${SUDO_USER:-}" ]]; then
-    echo "AUTO_IMPROVE_TEST_MODE is not allowed for privileged installs" >&2
+    echo "HARNEST_TEST_MODE is not allowed for privileged installs" >&2
     exit 1
   fi
-  PATH="$AUTO_IMPROVE_TEST_SAFE_PATH"
+  PATH="$HARNEST_TEST_SAFE_PATH"
 else
   PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
 fi
@@ -22,13 +22,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=scripts/launchd-common.sh
 . "$SCRIPT_DIR/launchd-common.sh"
 INSTALL_LAUNCHD_SCRIPT="$SCRIPT_DIR/install-launchd.sh"
-REPO_SLUG="${HARNEST_REPO_SLUG:-${AUTO_IMPROVE_REPO_SLUG:-nishimoto265/harnest}}"
+REPO_SLUG="${HARNEST_REPO_SLUG:-nishimoto265/harnest}"
 
 ARCHIVE_URL_DEFAULT_BASE="https://github.com/${REPO_SLUG}/releases/latest/download"
-RELEASE_URL="${HARNEST_RELEASE_URL:-${AUTO_IMPROVE_RELEASE_URL:-}}"
-DOWNLOAD_BASE_URL="${HARNEST_RELEASE_BASE_URL:-${AUTO_IMPROVE_RELEASE_BASE_URL:-$ARCHIVE_URL_DEFAULT_BASE}}"
-CHECKSUMS_URL="${HARNEST_CHECKSUMS_URL:-${AUTO_IMPROVE_CHECKSUMS_URL:-}}"
-EXPECTED_SHA256="${HARNEST_EXPECTED_SHA256:-${AUTO_IMPROVE_EXPECTED_SHA256:-}}"
+RELEASE_URL="${HARNEST_RELEASE_URL:-}"
+DOWNLOAD_BASE_URL="${HARNEST_RELEASE_BASE_URL:-$ARCHIVE_URL_DEFAULT_BASE}"
+CHECKSUMS_URL="${HARNEST_CHECKSUMS_URL:-}"
+EXPECTED_SHA256="${HARNEST_EXPECTED_SHA256:-}"
 PLIST_OVERRIDE_SET=0
 PLIST_OVERRIDE="${PLIST:-}"
 if [[ -n "${PLIST:-}" ]]; then
@@ -111,7 +111,7 @@ fi
 PLIST="$PLIST_OVERRIDE"
 PLIST_BAK=""
 if [[ "$asset_os" == "darwin" ]]; then
-  PLIST="$(auto_improve_launchd_plist_path)"
+  PLIST="$(harnest_launchd_plist_path)"
   PLIST_BAK="${PLIST}.bak.$$"
 fi
 
@@ -159,9 +159,9 @@ chmod +x "$STAGE"
 
 run_preflight_check() {
   local target_user target_home target_path
-  target_user="$(auto_improve_launchd_user)"
-  target_home="$(auto_improve_launchd_home)"
-  target_path="$(auto_improve_launchd_path)"
+  target_user="$(harnest_launchd_user)"
+  target_home="$(harnest_launchd_home)"
+  target_path="$(harnest_launchd_path)"
   (
     cd "$REPO_ROOT"
     if [[ "$(id -un)" != "$target_user" ]]; then
@@ -200,11 +200,11 @@ restore_backup_launchd() {
     return 0
   fi
   mv "$PLIST_BAK" "$PLIST"
-  if ! auto_improve_launchctl_bootstrap "$PLIST"; then
+  if ! harnest_launchctl_bootstrap "$PLIST"; then
     cat >&2 <<EOF
-failed to restore the previous launchd job for $(auto_improve_launchd_user).
+failed to restore the previous launchd job for $(harnest_launchd_user).
 manual recovery:
-  launchctl bootstrap $(auto_improve_launchd_domain) "$PLIST"
+  launchctl bootstrap $(harnest_launchd_domain) "$PLIST"
 EOF
     return 1
   fi
@@ -225,16 +225,16 @@ if [[ "$asset_os" == "darwin" ]]; then
     exit 4
   fi
 
-  auto_improve_launchctl_bootout "$PLIST"
-  if ! auto_improve_launchctl_bootstrap "$PLIST"; then
+  harnest_launchctl_bootout "$PLIST"
+  if ! harnest_launchctl_bootstrap "$PLIST"; then
     rm -f "$TARGET"
     [[ -f "$BACKUP" ]] && mv "$BACKUP" "$TARGET"
     restore_backup_launchd || true
     exit 4
   fi
   if [[ "$PLIST_OVERRIDE_SET" -eq 0 ]]; then
-    if ! auto_improve_migrate_legacy_launchd_plist "$PLIST"; then
-      auto_improve_launchctl_bootout "$PLIST"
+    if ! harnest_migrate_legacy_launchd_plist "$PLIST"; then
+      harnest_launchctl_bootout "$PLIST"
       rm -f "$TARGET"
       [[ -f "$BACKUP" ]] && mv "$BACKUP" "$TARGET"
       restore_backup_launchd || true

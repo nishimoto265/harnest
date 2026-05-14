@@ -27,7 +27,7 @@ func TestDrivePolicyPublish_ConfigFailuresRequireManualRecovery(t *testing.T) {
 			prLabel: "PR106",
 			mutate: func(intention *contracts.IntentionRecord) {
 				intention.Stage = contracts.IntentionStagePolicyPublishing
-				intention.PolicyBranch = "auto-improve/policy"
+				intention.PolicyBranch = "harnest/policy"
 				intention.PolicyHeadBefore = strings.Repeat("1", 40)
 			},
 			deps:       Deps{PolicyBranch: "", RepoRoot: "repo-root", Git: &fakeGit{head: strings.Repeat("1", 40)}, Now: fixedNow()},
@@ -38,10 +38,10 @@ func TestDrivePolicyPublish_ConfigFailuresRequireManualRecovery(t *testing.T) {
 			prLabel: "PR107",
 			mutate: func(intention *contracts.IntentionRecord) {
 				intention.Stage = contracts.IntentionStagePolicyPublishing
-				intention.PolicyBranch = "auto-improve/policy"
+				intention.PolicyBranch = "harnest/policy"
 				intention.PolicyHeadBefore = strings.Repeat("1", 40)
 			},
-			deps:       Deps{PolicyBranch: "auto-improve/policy", RepoRoot: "", Git: &fakeGit{head: strings.Repeat("1", 40)}, Now: fixedNow()},
+			deps:       Deps{PolicyBranch: "harnest/policy", RepoRoot: "", Git: &fakeGit{head: strings.Repeat("1", 40)}, Now: fixedNow()},
 			wantDetail: "policy_repo_root_missing",
 		},
 		{
@@ -49,10 +49,10 @@ func TestDrivePolicyPublish_ConfigFailuresRequireManualRecovery(t *testing.T) {
 			prLabel: "PR108",
 			mutate: func(intention *contracts.IntentionRecord) {
 				intention.Stage = contracts.IntentionStagePolicyPublishing
-				intention.PolicyBranch = "auto-improve/policy-old"
+				intention.PolicyBranch = "harnest/policy-old"
 				intention.PolicyHeadBefore = strings.Repeat("1", 40)
 			},
-			deps:       Deps{PolicyBranch: "auto-improve/policy", RepoRoot: "repo-root", Git: &fakeGit{head: strings.Repeat("1", 40)}, Now: fixedNow()},
+			deps:       Deps{PolicyBranch: "harnest/policy", RepoRoot: "repo-root", Git: &fakeGit{head: strings.Repeat("1", 40)}, Now: fixedNow()},
 			wantDetail: "policy_branch_config_mismatch",
 		},
 	}
@@ -81,11 +81,11 @@ func TestDrivePolicyPublish_RemoteAndProbeFailuresRequireManualRecovery(t *testi
 			prLabel: "PR109",
 			mutate: func(intention *contracts.IntentionRecord) {
 				intention.Stage = contracts.IntentionStagePolicyPublished
-				intention.PolicyBranch = "auto-improve/policy"
+				intention.PolicyBranch = "harnest/policy"
 				intention.PolicyHeadBefore = strings.Repeat("1", 40)
 				intention.PolicyHeadAfter = strings.Repeat("2", 40)
 			},
-			deps:       Deps{PolicyBranch: "auto-improve/policy", RepoRoot: "repo-root", Git: &fakeGit{remoteHeadErr: errors.New("remote unavailable")}, Now: fixedNow()},
+			deps:       Deps{PolicyBranch: "harnest/policy", RepoRoot: "repo-root", Git: &fakeGit{remoteHeadErr: errors.New("remote unavailable")}, Now: fixedNow()},
 			wantDetail: "policy_remote_head_failure",
 		},
 		{
@@ -93,10 +93,10 @@ func TestDrivePolicyPublish_RemoteAndProbeFailuresRequireManualRecovery(t *testi
 			prLabel: "PR110",
 			mutate: func(intention *contracts.IntentionRecord) {
 				intention.Stage = contracts.IntentionStagePolicyPublishing
-				intention.PolicyBranch = "auto-improve/policy"
+				intention.PolicyBranch = "harnest/policy"
 				intention.PolicyHeadBefore = strings.Repeat("1", 40)
 			},
-			deps:       Deps{PolicyBranch: "auto-improve/policy", RepoRoot: "repo-root", Git: &fakeGit{remoteHeadErr: errors.New("remote unavailable")}, Now: fixedNow()},
+			deps:       Deps{PolicyBranch: "harnest/policy", RepoRoot: "repo-root", Git: &fakeGit{remoteHeadErr: errors.New("remote unavailable")}, Now: fixedNow()},
 			wantDetail: "policy_remote_head_failure",
 		},
 		{
@@ -104,10 +104,10 @@ func TestDrivePolicyPublish_RemoteAndProbeFailuresRequireManualRecovery(t *testi
 			prLabel: "PR111",
 			mutate: func(intention *contracts.IntentionRecord) {
 				intention.Stage = contracts.IntentionStagePolicyPublishing
-				intention.PolicyBranch = "auto-improve/policy"
+				intention.PolicyBranch = "harnest/policy"
 				intention.PolicyHeadBefore = strings.Repeat("1", 40)
 			},
-			deps: Deps{PolicyBranch: "auto-improve/policy", RepoRoot: "repo-root", Git: &fakeGit{head: strings.Repeat("2", 40)}, Now: fixedNow()},
+			deps: Deps{PolicyBranch: "harnest/policy", RepoRoot: "repo-root", Git: &fakeGit{head: strings.Repeat("2", 40)}, Now: fixedNow()},
 			setup: func(t *testing.T) {
 				originalMatches := branchSnapshotMatchesLocal
 				branchSnapshotMatchesLocal = func(context.Context, string, string, string) (bool, error) {
@@ -122,10 +122,10 @@ func TestDrivePolicyPublish_RemoteAndProbeFailuresRequireManualRecovery(t *testi
 			prLabel: "PR112",
 			mutate: func(intention *contracts.IntentionRecord) {
 				intention.Stage = contracts.IntentionStagePolicyPublishing
-				intention.PolicyBranch = "auto-improve/policy"
+				intention.PolicyBranch = "harnest/policy"
 				intention.PolicyHeadBefore = strings.Repeat("1", 40)
 			},
-			deps: Deps{PolicyBranch: "auto-improve/policy", RepoRoot: "repo-root", Git: &fakeGit{head: strings.Repeat("2", 40)}, Now: fixedNow()},
+			deps: Deps{PolicyBranch: "harnest/policy", RepoRoot: "repo-root", Git: &fakeGit{head: strings.Repeat("2", 40)}, Now: fixedNow()},
 			setup: func(t *testing.T) {
 				originalMatches := branchSnapshotMatchesLocal
 				branchSnapshotMatchesLocal = func(context.Context, string, string, string) (bool, error) {
@@ -153,7 +153,7 @@ func TestDrivePolicyPublish_RemoteAndProbeFailuresRequireManualRecovery(t *testi
 func TestDrivePolicyPublish_PlanMismatchRequiresManualRecovery(t *testing.T) {
 	runCtx, store, intention := newPolicyPublishTestFixture(t, "PR113")
 	intention.Stage = contracts.IntentionStagePolicyPublishing
-	intention.PolicyBranch = "auto-improve/policy"
+	intention.PolicyBranch = "harnest/policy"
 	intention.PolicyHeadBefore = strings.Repeat("1", 40)
 	intention.PolicyHeadAfter = strings.Repeat("2", 40)
 	plan := &fakePolicyPublishPlan{head: strings.Repeat("3", 40)}
@@ -165,7 +165,7 @@ func TestDrivePolicyPublish_PlanMismatchRequiresManualRecovery(t *testing.T) {
 	t.Cleanup(func() { preparePolicyPublish = originalPrepare })
 
 	assertDrivePolicyPublishManualRecovery(t, runCtx, store, intention, Deps{
-		PolicyBranch: "auto-improve/policy",
+		PolicyBranch: "harnest/policy",
 		RepoRoot:     "repo-root",
 		Git:          &fakeGit{head: strings.Repeat("1", 40)},
 		Now:          fixedNow(),
@@ -176,7 +176,7 @@ func TestDrivePolicyPublish_PlanMismatchRequiresManualRecovery(t *testing.T) {
 func TestDrivePolicyPublish_PostSavePushFailureRequiresManualRecovery(t *testing.T) {
 	runCtx, store, intention := newPolicyPublishTestFixture(t, "PR116")
 	intention.Stage = contracts.IntentionStagePolicyPublishing
-	intention.PolicyBranch = "auto-improve/policy"
+	intention.PolicyBranch = "harnest/policy"
 	intention.PolicyHeadBefore = strings.Repeat("1", 40)
 	plannedHead := strings.Repeat("2", 40)
 	plan := &fakePolicyPublishPlan{head: plannedHead, pushErr: errors.New("push failed")}
@@ -188,7 +188,7 @@ func TestDrivePolicyPublish_PostSavePushFailureRequiresManualRecovery(t *testing
 	t.Cleanup(func() { preparePolicyPublish = originalPrepare })
 
 	assertDrivePolicyPublishManualRecovery(t, runCtx, store, intention, Deps{
-		PolicyBranch: "auto-improve/policy",
+		PolicyBranch: "harnest/policy",
 		RepoRoot:     "repo-root",
 		Git:          &fakeGit{head: strings.Repeat("1", 40)},
 		Now:          fixedNow(),
@@ -205,7 +205,7 @@ func TestDrivePolicyPublish_PostSavePushFailureRequiresManualRecovery(t *testing
 func TestDrivePolicyPublish_RetryWithPersistedHeadAfterPushFailureRequiresManualRecovery(t *testing.T) {
 	runCtx, store, intention := newPolicyPublishTestFixture(t, "PR117")
 	intention.Stage = contracts.IntentionStagePolicyPublishing
-	intention.PolicyBranch = "auto-improve/policy"
+	intention.PolicyBranch = "harnest/policy"
 	intention.PolicyHeadBefore = strings.Repeat("1", 40)
 	intention.PolicyHeadAfter = strings.Repeat("2", 40)
 	plan := &fakePolicyPublishPlan{head: intention.PolicyHeadAfter, pushErr: errors.New("push failed")}
@@ -217,7 +217,7 @@ func TestDrivePolicyPublish_RetryWithPersistedHeadAfterPushFailureRequiresManual
 	t.Cleanup(func() { preparePolicyPublish = originalPrepare })
 
 	assertDrivePolicyPublishManualRecovery(t, runCtx, store, intention, Deps{
-		PolicyBranch: "auto-improve/policy",
+		PolicyBranch: "harnest/policy",
 		RepoRoot:     "repo-root",
 		Git:          &fakeGit{head: strings.Repeat("1", 40)},
 		Now:          fixedNow(),
@@ -229,7 +229,7 @@ func TestDrivePolicyPublish_RetryWithPersistedHeadAfterPushFailureRequiresManual
 func TestDrivePolicyPublish_RetryWithPersistedHeadAfterAlreadyRemoteMarksPublished(t *testing.T) {
 	runCtx, store, intention := newPolicyPublishTestFixture(t, "PR118")
 	intention.Stage = contracts.IntentionStagePolicyPublishing
-	intention.PolicyBranch = "auto-improve/policy"
+	intention.PolicyBranch = "harnest/policy"
 	intention.PolicyHeadBefore = strings.Repeat("1", 40)
 	intention.PolicyHeadAfter = strings.Repeat("2", 40)
 
@@ -242,7 +242,7 @@ func TestDrivePolicyPublish_RetryWithPersistedHeadAfterAlreadyRemoteMarksPublish
 	t.Cleanup(func() { preparePolicyPublish = originalPrepare })
 
 	updated, err := drivePolicyPublish(context.Background(), 918, runCtx, intention, store, state.NewWriter(runCtx), Deps{
-		PolicyBranch: "auto-improve/policy",
+		PolicyBranch: "harnest/policy",
 		RepoRoot:     "repo-root",
 		Git:          &fakeGit{head: intention.PolicyHeadAfter},
 		Now:          fixedNow(),

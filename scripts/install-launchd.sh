@@ -2,12 +2,12 @@
 
 set -euo pipefail
 
-if [[ "${AUTO_IMPROVE_TEST_MODE:-0}" == "1" && -n "${AUTO_IMPROVE_TEST_SAFE_PATH:-}" ]]; then
+if [[ "${HARNEST_TEST_MODE:-0}" == "1" && -n "${HARNEST_TEST_SAFE_PATH:-}" ]]; then
   if [[ "$(/usr/bin/id -u)" == "0" || -n "${SUDO_USER:-}" ]]; then
-    echo "AUTO_IMPROVE_TEST_MODE is not allowed for privileged launchd installs" >&2
+    echo "HARNEST_TEST_MODE is not allowed for privileged launchd installs" >&2
     exit 1
   fi
-  PATH="$AUTO_IMPROVE_TEST_SAFE_PATH"
+  PATH="$HARNEST_TEST_SAFE_PATH"
 else
   PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
 fi
@@ -35,11 +35,11 @@ if ! REPO_ROOT="$(cd "$REPO_ROOT_INPUT" 2>/dev/null && pwd -P)"; then
   exit 1
 fi
 
-PLIST_DIR="$(auto_improve_launchd_plist_dir)"
-PLIST="$(auto_improve_launchd_plist_path)"
-LAUNCHD_LABEL="$(auto_improve_launchd_label)"
-LAUNCHD_PATH="$(auto_improve_launchd_path)"
-LAUNCHD_USER="$(auto_improve_launchd_user)"
+PLIST_DIR="$(harnest_launchd_plist_dir)"
+PLIST="$(harnest_launchd_plist_path)"
+LAUNCHD_LABEL="$(harnest_launchd_label)"
+LAUNCHD_PATH="$(harnest_launchd_path)"
+LAUNCHD_USER="$(harnest_launchd_user)"
 
 if [[ ! -f "$REPO_ROOT/config.yaml" ]]; then
   echo "config.yaml not found in REPO_ROOT=$REPO_ROOT" >&2
@@ -54,10 +54,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-escaped_target="$(auto_improve_xml_escape "$TARGET")"
-escaped_repo_root="$(auto_improve_xml_escape "$REPO_ROOT")"
-escaped_path="$(auto_improve_xml_escape "$LAUNCHD_PATH")"
-escaped_label="$(auto_improve_xml_escape "$LAUNCHD_LABEL")"
+escaped_target="$(harnest_xml_escape "$TARGET")"
+escaped_repo_root="$(harnest_xml_escape "$REPO_ROOT")"
+escaped_path="$(harnest_xml_escape "$LAUNCHD_PATH")"
+escaped_label="$(harnest_xml_escape "$LAUNCHD_LABEL")"
 
 cat >"$tmp_plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -93,6 +93,6 @@ if [[ "$(id -un)" != "$LAUNCHD_USER" ]]; then
   chown "$LAUNCHD_USER" "$PLIST"
 fi
 
-if [[ "$PLIST_OVERRIDE_SET" -eq 0 ]] && auto_improve_launchctl_label_loaded "$LAUNCHD_LABEL"; then
-  auto_improve_migrate_legacy_launchd_plist "$PLIST"
+if [[ "$PLIST_OVERRIDE_SET" -eq 0 ]] && harnest_launchctl_label_loaded "$LAUNCHD_LABEL"; then
+  harnest_migrate_legacy_launchd_plist "$PLIST"
 fi

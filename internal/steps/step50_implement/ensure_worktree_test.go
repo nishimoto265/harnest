@@ -102,9 +102,9 @@ func TestEnsureAllocationWorktreeBeforeResume_AdoptsPolicyOnlyOverlayHeadWithout
 	agentDir, err := agentDir(env.run.IO, 2, "a1")
 	require.NoError(t, err)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(allocation.Path, ".auto-improve", "lessons"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ".auto-improve", "lessons", "seed.md"), []byte("lesson\n"), 0o644))
-	runCommand(t, allocation.Path, "git", "add", ".auto-improve")
+	require.NoError(t, os.MkdirAll(filepath.Join(allocation.Path, ".harnest", "lessons"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ".harnest", "lessons", "seed.md"), []byte("lesson\n"), 0o644))
+	runCommand(t, allocation.Path, "git", "add", ".harnest")
 	runCommand(t, allocation.Path, "git", "commit", "-m", "policy overlay")
 	overlayHead := strings.TrimSpace(runCommand(t, allocation.Path, "git", "rev-parse", "HEAD"))
 
@@ -162,18 +162,18 @@ func TestCommitPolicyOverlayBase_UnstagesPreStagedRepoPolicyArtifacts(t *testing
 	allocation, err := worktreeFor(env.run.TaskPackage, 2, "a1")
 	require.NoError(t, err)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(allocation.Path, ".auto-improve", "lessons"), 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Join(allocation.Path, "auto-improve", "rules"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ".auto-improve", "lessons", "overlay.md"), []byte("overlay\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "auto-improve", "rules-registry.jsonl"), []byte("{}\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "auto-improve", "rules", "r.md"), []byte("rule\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(allocation.Path, ".harnest", "lessons"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(allocation.Path, "harnest", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, ".harnest", "lessons", "overlay.md"), []byte("overlay\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "harnest", "rules-registry.jsonl"), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(allocation.Path, "harnest", "rules", "r.md"), []byte("rule\n"), 0o644))
 	runCommand(t, allocation.Path, "git", "add", "-A")
 
 	updated, err := commitPolicyOverlayBase(context.Background(), allocation, env.run.TaskPackage.RunID)
 	require.NoError(t, err)
 
 	files := runCommand(t, allocation.Path, "git", "diff-tree", "--no-commit-id", "--name-only", "-r", updated.BaseSHA)
-	assert.Contains(t, files, ".auto-improve/lessons/overlay.md")
-	assert.NotContains(t, files, "auto-improve/rules-registry.jsonl")
-	assert.NotContains(t, files, "auto-improve/rules/r.md")
+	assert.Contains(t, files, ".harnest/lessons/overlay.md")
+	assert.NotContains(t, files, "harnest/rules-registry.jsonl")
+	assert.NotContains(t, files, "harnest/rules/r.md")
 }

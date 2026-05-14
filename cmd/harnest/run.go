@@ -78,7 +78,7 @@ func newRunCmd(outputOptions *cliOutputOptions) *cobra.Command {
 				defer cancel()
 				result := runPreflightCheck(checkCtx, cfg)
 				if !result.OK {
-					return commandExitError{code: 10, msg: "run: preflight failed; run `auto-improve preflight` for details"}
+					return commandExitError{code: 10, msg: "run: preflight failed; run `harnest preflight` for details"}
 				}
 			}
 

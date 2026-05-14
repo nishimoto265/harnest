@@ -50,7 +50,7 @@ func ApplyWithSnapshot(worktreePath, policySnapshotDir string, activeRules []pol
 	if err := internalio.EnsureNoSymlinkPathComponents(root); err != nil {
 		return fmt.Errorf("policyoverlay: worktree path rejected: %w", err)
 	}
-	overlayDir := filepath.Join(root, ".auto-improve")
+	overlayDir := filepath.Join(root, ".harnest")
 	lessonsDir := filepath.Join(overlayDir, "lessons")
 	if err := ensureRealDir(overlayDir); err != nil {
 		return err
@@ -125,13 +125,13 @@ func loadHarnessTemplates(policySnapshotDir string) (harnessinstall.Templates, e
 	}
 	var templates harnessinstall.Templates
 	var err error
-	if templates.CodexGuidance, err = readOptionalTemplate(snapshotRoot, "auto-improve/guidance/AGENTS.md.template"); err != nil {
+	if templates.CodexGuidance, err = readOptionalTemplate(snapshotRoot, "harnest/guidance/AGENTS.md.template"); err != nil {
 		return harnessinstall.Templates{}, err
 	}
-	if templates.ClaudeGuidance, err = readOptionalTemplate(snapshotRoot, "auto-improve/guidance/CLAUDE.md.template"); err != nil {
+	if templates.ClaudeGuidance, err = readOptionalTemplate(snapshotRoot, "harnest/guidance/CLAUDE.md.template"); err != nil {
 		return harnessinstall.Templates{}, err
 	}
-	providerHooks, err := readOptionalTemplateBytes(snapshotRoot, "auto-improve/guidance/provider-hooks.json.template")
+	providerHooks, err := readOptionalTemplateBytes(snapshotRoot, "harnest/guidance/provider-hooks.json.template")
 	if err != nil {
 		return harnessinstall.Templates{}, err
 	}
@@ -173,7 +173,7 @@ func copySnapshotOverlay(root, policySnapshotDir string) error {
 	if err := internalio.EnsureNoSymlinkPathComponents(snapshotRoot); err != nil {
 		return fmt.Errorf("policyoverlay: policy snapshot path rejected: %w", err)
 	}
-	srcRoot := filepath.Join(snapshotRoot, ".auto-improve")
+	srcRoot := filepath.Join(snapshotRoot, ".harnest")
 	info, err := os.Lstat(srcRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -195,7 +195,7 @@ func copySnapshotOverlay(root, policySnapshotDir string) error {
 		if rel == "." {
 			return nil
 		}
-		dst := filepath.Join(root, ".auto-improve", rel)
+		dst := filepath.Join(root, ".harnest", rel)
 		if d.IsDir() {
 			return ensureRealDir(dst)
 		}

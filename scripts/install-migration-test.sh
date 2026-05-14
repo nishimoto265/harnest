@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/auto-improve-install-test.XXXXXX")"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/harnest-install-test.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 repo_root="$TMP_ROOT/repo"
@@ -18,7 +18,7 @@ install_output_path="$TMP_ROOT/install.out"
 
 mkdir -p "$repo_root" "$install_dir" "$plist_dir" "$fake_bin"
 printf 'paths:\n  runs: "%s"\nworktree:\n  base: "%s"\n' "$TMP_ROOT/runs" "$TMP_ROOT/worktrees" >"$repo_root/config.yaml"
-printf 'legacy plist\n' >"$plist_dir/com.nishimoto265.auto-improve.plist"
+printf 'legacy plist\n' >"$plist_dir/com.nishimoto265.harnest.plist"
 
 write_legacy_plist_for_repo() {
   local path="$1"
@@ -32,7 +32,7 @@ write_legacy_plist_for_repo() {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.nishimoto265.auto-improve</string>
+  <string>com.nishimoto265.harnest</string>
   <key>WorkingDirectory</key>
   <string>$root</string>
 </dict>
@@ -89,28 +89,28 @@ if [[ -z "$out" ]]; then
   echo "fake curl expected -o" >&2
   exit 2
 fi
-cp "$AUTO_IMPROVE_TEST_PAYLOAD" "$out"
+cp "$HARNEST_TEST_PAYLOAD" "$out"
 EOF
 chmod +x "$fake_bin/curl"
 
 cat >"$fake_bin/launchctl" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >>"$AUTO_IMPROVE_TEST_LAUNCHCTL_LOG"
+printf '%s\n' "$*" >>"$HARNEST_TEST_LAUNCHCTL_LOG"
 case "${1:-}" in
   bootstrap)
-    if [[ "${AUTO_IMPROVE_TEST_BOOTSTRAP_FAIL:-0}" == "1" ]]; then
+    if [[ "${HARNEST_TEST_BOOTSTRAP_FAIL:-0}" == "1" ]]; then
       exit 42
     fi
     exit 0
     ;;
   bootout)
-    if [[ "${AUTO_IMPROVE_TEST_LEGACY_BOOTOUT_FAIL:-0}" == "1" && "$*" == *"com.nishimoto265.auto-improve.plist"* ]]; then
+    if [[ "${HARNEST_TEST_LEGACY_BOOTOUT_FAIL:-0}" == "1" && "$*" == *"com.nishimoto265.harnest.plist"* ]]; then
       exit 42
     fi
     exit 0
     ;;
   print)
-    if [[ "${2:-}" == */com.nishimoto265.auto-improve && "${AUTO_IMPROVE_TEST_LEGACY_LOADED:-0}" == "1" ]]; then
+    if [[ "${2:-}" == */com.nishimoto265.harnest && "${HARNEST_TEST_LEGACY_LOADED:-0}" == "1" ]]; then
       exit 0
     fi
     exit 42
@@ -131,7 +131,7 @@ chmod +x "$fake_bin/sudo"
 
 cat >"$fake_bin/chown" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${AUTO_IMPROVE_TEST_CHOWN_FAIL:-0}" == "1" ]]; then
+if [[ "${HARNEST_TEST_CHOWN_FAIL:-0}" == "1" ]]; then
   exit 42
 fi
 /usr/sbin/chown "$@"
@@ -140,19 +140,19 @@ chmod +x "$fake_bin/chown"
 
 set +e
 PATH="$fake_bin:$PATH" \
-AUTO_IMPROVE_TEST_MODE=1 \
-AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
+HARNEST_TEST_MODE=1 \
+HARNEST_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 REPO_ROOT="$repo_root" \
 HARNEST_RELEASE_URL="https://example.invalid/harnest" \
 HARNEST_EXPECTED_SHA256="$expected_sha" \
-AUTO_IMPROVE_LAUNCHD_USER="testuser" \
-AUTO_IMPROVE_LAUNCHD_HOME="$home_dir" \
-AUTO_IMPROVE_PLIST_DIR="$plist_dir" \
-AUTO_IMPROVE_INSTANCE="new" \
-AUTO_IMPROVE_TEST_PAYLOAD="$payload" \
-AUTO_IMPROVE_TEST_LAUNCHCTL_LOG="$launchctl_log" \
-AUTO_IMPROVE_TEST_BOOTSTRAP_FAIL=1 \
+HARNEST_LAUNCHD_USER="testuser" \
+HARNEST_LAUNCHD_HOME="$home_dir" \
+HARNEST_PLIST_DIR="$plist_dir" \
+HARNEST_INSTANCE="new" \
+HARNEST_TEST_PAYLOAD="$payload" \
+HARNEST_TEST_LAUNCHCTL_LOG="$launchctl_log" \
+HARNEST_TEST_BOOTSTRAP_FAIL=1 \
 bash "$ROOT/scripts/install.sh" >"$install_output_path" 2>&1
 status=$?
 set -e
@@ -163,7 +163,7 @@ if [[ "$status" -ne 4 ]]; then
   exit 1
 fi
 
-legacy_plist="$plist_dir/com.nishimoto265.auto-improve.plist"
+legacy_plist="$plist_dir/com.nishimoto265.harnest.plist"
 if [[ ! -f "$legacy_plist" ]]; then
   echo "legacy plist was removed after new bootstrap failed" >&2
   exit 1
@@ -173,7 +173,7 @@ if [[ "$(cat "$legacy_plist")" != "legacy plist" ]]; then
   exit 1
 fi
 
-if grep -F "com.nishimoto265.auto-improve.plist" "$launchctl_log" >/dev/null 2>&1; then
+if grep -F "com.nishimoto265.harnest.plist" "$launchctl_log" >/dev/null 2>&1; then
   echo "legacy launchd job was migrated before new bootstrap succeeded" >&2
   exit 1
 fi
@@ -181,16 +181,16 @@ fi
 standalone_log="$TMP_ROOT/standalone-launchctl.log"
 printf 'legacy plist\n' >"$legacy_plist"
 PATH="$fake_bin:$PATH" \
-AUTO_IMPROVE_TEST_MODE=1 \
-AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
+HARNEST_TEST_MODE=1 \
+HARNEST_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 TARGET="$install_dir/harnest" \
 REPO_ROOT="$repo_root" \
-AUTO_IMPROVE_LAUNCHD_USER="testuser" \
-AUTO_IMPROVE_LAUNCHD_HOME="$home_dir" \
-AUTO_IMPROVE_PLIST_DIR="$plist_dir" \
-AUTO_IMPROVE_INSTANCE="standalone" \
-AUTO_IMPROVE_TEST_LAUNCHCTL_LOG="$standalone_log" \
+HARNEST_LAUNCHD_USER="testuser" \
+HARNEST_LAUNCHD_HOME="$home_dir" \
+HARNEST_PLIST_DIR="$plist_dir" \
+HARNEST_INSTANCE="standalone" \
+HARNEST_TEST_LAUNCHCTL_LOG="$standalone_log" \
 bash "$ROOT/scripts/install-launchd.sh" >"$install_output_path" 2>&1
 
 if [[ ! -f "$legacy_plist" ]]; then
@@ -198,7 +198,7 @@ if [[ ! -f "$legacy_plist" ]]; then
   echo "standalone install-launchd migrated legacy plist before the new label was loaded" >&2
   exit 1
 fi
-if grep -F "com.nishimoto265.auto-improve.plist" "$standalone_log" >/dev/null 2>&1; then
+if grep -F "com.nishimoto265.harnest.plist" "$standalone_log" >/dev/null 2>&1; then
   cat "$standalone_log" >&2
   echo "standalone install-launchd touched legacy launchd job before the new label was loaded" >&2
   exit 1
@@ -207,20 +207,20 @@ fi
 write_legacy_plist_for_repo "$legacy_plist" "$repo_root"
 set +e
 PATH="$fake_bin:$PATH" \
-AUTO_IMPROVE_TEST_MODE=1 \
-AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
+HARNEST_TEST_MODE=1 \
+HARNEST_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 REPO_ROOT="$repo_root" \
 HARNEST_RELEASE_URL="https://example.invalid/harnest" \
 HARNEST_EXPECTED_SHA256="$expected_sha" \
-AUTO_IMPROVE_LAUNCHD_USER="testuser" \
-AUTO_IMPROVE_LAUNCHD_HOME="$home_dir" \
-AUTO_IMPROVE_PLIST_DIR="$plist_dir" \
-AUTO_IMPROVE_INSTANCE="bootoutfail" \
-AUTO_IMPROVE_TEST_PAYLOAD="$payload" \
-AUTO_IMPROVE_TEST_LAUNCHCTL_LOG="$launchctl_log" \
-AUTO_IMPROVE_TEST_LEGACY_BOOTOUT_FAIL=1 \
-AUTO_IMPROVE_TEST_LEGACY_LOADED=1 \
+HARNEST_LAUNCHD_USER="testuser" \
+HARNEST_LAUNCHD_HOME="$home_dir" \
+HARNEST_PLIST_DIR="$plist_dir" \
+HARNEST_INSTANCE="bootoutfail" \
+HARNEST_TEST_PAYLOAD="$payload" \
+HARNEST_TEST_LAUNCHCTL_LOG="$launchctl_log" \
+HARNEST_TEST_LEGACY_BOOTOUT_FAIL=1 \
+HARNEST_TEST_LEGACY_LOADED=1 \
 bash "$ROOT/scripts/install.sh" >"$install_output_path" 2>&1
 status=$?
 set -e
@@ -239,19 +239,19 @@ fi
 write_legacy_plist_for_repo "$legacy_plist" "$repo_root"
 set +e
 PATH="$fake_bin:$PATH" \
-AUTO_IMPROVE_TEST_MODE=1 \
-AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
+HARNEST_TEST_MODE=1 \
+HARNEST_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 REPO_ROOT="$repo_root" \
 HARNEST_RELEASE_URL="https://example.invalid/harnest" \
 HARNEST_EXPECTED_SHA256="$expected_sha" \
-AUTO_IMPROVE_LAUNCHD_USER="testuser" \
-AUTO_IMPROVE_LAUNCHD_HOME="$home_dir" \
-AUTO_IMPROVE_PLIST_DIR="$plist_dir" \
-AUTO_IMPROVE_INSTANCE="unloaded" \
-AUTO_IMPROVE_TEST_PAYLOAD="$payload" \
-AUTO_IMPROVE_TEST_LAUNCHCTL_LOG="$launchctl_log" \
-AUTO_IMPROVE_TEST_LEGACY_BOOTOUT_FAIL=1 \
+HARNEST_LAUNCHD_USER="testuser" \
+HARNEST_LAUNCHD_HOME="$home_dir" \
+HARNEST_PLIST_DIR="$plist_dir" \
+HARNEST_INSTANCE="unloaded" \
+HARNEST_TEST_PAYLOAD="$payload" \
+HARNEST_TEST_LAUNCHCTL_LOG="$launchctl_log" \
+HARNEST_TEST_LEGACY_BOOTOUT_FAIL=1 \
 bash "$ROOT/scripts/install.sh" >"$install_output_path" 2>&1
 status=$?
 set -e
@@ -271,18 +271,18 @@ foreign_log="$TMP_ROOT/foreign-legacy-launchctl.log"
 write_legacy_plist_for_repo "$legacy_plist" "$TMP_ROOT/foreign-repo"
 set +e
 PATH="$fake_bin:$PATH" \
-AUTO_IMPROVE_TEST_MODE=1 \
-AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
+HARNEST_TEST_MODE=1 \
+HARNEST_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 REPO_ROOT="$repo_root" \
 HARNEST_RELEASE_URL="https://example.invalid/harnest" \
 HARNEST_EXPECTED_SHA256="$expected_sha" \
-AUTO_IMPROVE_LAUNCHD_USER="testuser" \
-AUTO_IMPROVE_LAUNCHD_HOME="$home_dir" \
-AUTO_IMPROVE_PLIST_DIR="$plist_dir" \
-AUTO_IMPROVE_INSTANCE="foreign-legacy" \
-AUTO_IMPROVE_TEST_PAYLOAD="$payload" \
-AUTO_IMPROVE_TEST_LAUNCHCTL_LOG="$foreign_log" \
+HARNEST_LAUNCHD_USER="testuser" \
+HARNEST_LAUNCHD_HOME="$home_dir" \
+HARNEST_PLIST_DIR="$plist_dir" \
+HARNEST_INSTANCE="foreign-legacy" \
+HARNEST_TEST_PAYLOAD="$payload" \
+HARNEST_TEST_LAUNCHCTL_LOG="$foreign_log" \
 bash "$ROOT/scripts/install.sh" >"$install_output_path" 2>&1
 status=$?
 set -e
@@ -297,30 +297,30 @@ if [[ ! -f "$legacy_plist" ]]; then
   echo "foreign legacy plist was removed" >&2
   exit 1
 fi
-if grep -F "com.nishimoto265.auto-improve.plist" "$foreign_log" >/dev/null 2>&1; then
+if grep -F "com.nishimoto265.harnest.plist" "$foreign_log" >/dev/null 2>&1; then
   cat "$foreign_log" >&2
   echo "foreign legacy launchd job was touched" >&2
   exit 1
 fi
 
-chown_plist="$plist_dir/com.nishimoto265.auto-improve.chownfail.plist"
+chown_plist="$plist_dir/com.nishimoto265.harnest.chownfail.plist"
 printf 'old chown plist\n' >"$chown_plist"
 
 set +e
 PATH="$fake_bin:$PATH" \
-AUTO_IMPROVE_TEST_MODE=1 \
-AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
+HARNEST_TEST_MODE=1 \
+HARNEST_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 REPO_ROOT="$repo_root" \
 HARNEST_RELEASE_URL="https://example.invalid/harnest" \
 HARNEST_EXPECTED_SHA256="$expected_sha" \
-AUTO_IMPROVE_LAUNCHD_USER="otheruser" \
-AUTO_IMPROVE_LAUNCHD_HOME="$home_dir" \
-AUTO_IMPROVE_PLIST_DIR="$plist_dir" \
-AUTO_IMPROVE_INSTANCE="chownfail" \
-AUTO_IMPROVE_TEST_PAYLOAD="$payload" \
-AUTO_IMPROVE_TEST_LAUNCHCTL_LOG="$launchctl_log" \
-AUTO_IMPROVE_TEST_CHOWN_FAIL=1 \
+HARNEST_LAUNCHD_USER="otheruser" \
+HARNEST_LAUNCHD_HOME="$home_dir" \
+HARNEST_PLIST_DIR="$plist_dir" \
+HARNEST_INSTANCE="chownfail" \
+HARNEST_TEST_PAYLOAD="$payload" \
+HARNEST_TEST_LAUNCHCTL_LOG="$launchctl_log" \
+HARNEST_TEST_CHOWN_FAIL=1 \
 bash "$ROOT/scripts/install.sh" >"$install_output_path" 2>&1
 status=$?
 set -e
@@ -338,24 +338,24 @@ fi
 
 custom_log="$TMP_ROOT/custom-plist-launchctl.log"
 custom_plist="$TMP_ROOT/custom.plist"
-default_custom_plist="$plist_dir/com.nishimoto265.auto-improve.custom-override.plist"
+default_custom_plist="$plist_dir/com.nishimoto265.harnest.custom-override.plist"
 printf 'old custom plist\n' >"$custom_plist"
 printf 'legacy plist\n' >"$legacy_plist"
 
 PATH="$fake_bin:$PATH" \
-AUTO_IMPROVE_TEST_MODE=1 \
-AUTO_IMPROVE_TEST_SAFE_PATH="$test_safe_path" \
+HARNEST_TEST_MODE=1 \
+HARNEST_TEST_SAFE_PATH="$test_safe_path" \
 INSTALL_DIR="$install_dir" \
 REPO_ROOT="$repo_root" \
 PLIST="$custom_plist" \
 HARNEST_RELEASE_URL="https://example.invalid/harnest" \
 HARNEST_EXPECTED_SHA256="$expected_sha" \
-AUTO_IMPROVE_LAUNCHD_USER="testuser" \
-AUTO_IMPROVE_LAUNCHD_HOME="$home_dir" \
-AUTO_IMPROVE_PLIST_DIR="$plist_dir" \
-AUTO_IMPROVE_INSTANCE="custom-override" \
-AUTO_IMPROVE_TEST_PAYLOAD="$payload" \
-AUTO_IMPROVE_TEST_LAUNCHCTL_LOG="$custom_log" \
+HARNEST_LAUNCHD_USER="testuser" \
+HARNEST_LAUNCHD_HOME="$home_dir" \
+HARNEST_PLIST_DIR="$plist_dir" \
+HARNEST_INSTANCE="custom-override" \
+HARNEST_TEST_PAYLOAD="$payload" \
+HARNEST_TEST_LAUNCHCTL_LOG="$custom_log" \
 bash "$ROOT/scripts/install.sh" >"$install_output_path" 2>&1
 
 if [[ "$(cat "$custom_plist")" == "old custom plist" ]]; then
@@ -378,7 +378,7 @@ if ! grep -F "$custom_plist" "$custom_log" >/dev/null 2>&1; then
   echo "launchctl did not receive the custom PLIST path" >&2
   exit 1
 fi
-if grep -F "com.nishimoto265.auto-improve.plist" "$custom_log" >/dev/null 2>&1; then
+if grep -F "com.nishimoto265.harnest.plist" "$custom_log" >/dev/null 2>&1; then
   cat "$custom_log" >&2
   echo "legacy launchd job was touched despite custom PLIST override" >&2
   exit 1

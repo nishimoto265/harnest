@@ -28,8 +28,8 @@ var defaultRubricContent []byte
 var ErrDefaultRubricEmpty = errors.New("judges: embedded default rubric is empty")
 
 // defaultRubricDir overrides the base directory used to materialize the
-// embedded rubric. Empty string means "use os.UserCacheDir with a TempDir
-// fallback". Tests set this via SetDefaultRubricDirForTest.
+// embedded rubric. Empty string means "use HARNEST_HOME or ~/.harnest with a
+// TempDir fallback". Tests set this via SetDefaultRubricDirForTest.
 var (
 	defaultRubricDirMu    sync.Mutex
 	defaultRubricDir      string
@@ -87,20 +87,36 @@ func resolveRubricCacheDir() (string, error) {
 	override := defaultRubricDir
 	defaultRubricDirMu.Unlock()
 	if override != "" {
-		if err := contracts.EnsureCleanAbsolutePath(override); err != nil {
-			return "", err
-		}
-		return override, nil
+		return cleanAbsoluteDir(override)
+	}
+	if override := strings.TrimSpace(os.Getenv("HARNEST_RUBRIC_CACHE_DIR")); override != "" {
+		return cleanAbsoluteDir(override)
+	}
+	if home := strings.TrimSpace(os.Getenv("HARNEST_HOME")); home != "" {
+		return cleanAbsoluteDir(filepath.Join(home, "cache", "rubrics"))
+	}
+	if userHome, err := os.UserHomeDir(); err == nil && userHome != "" {
+		return cleanAbsoluteDir(filepath.Join(userHome, ".harnest", "cache", "rubrics"))
 	}
 	if userCache, err := os.UserCacheDir(); err == nil && userCache != "" {
-		candidate := filepath.Join(userCache, "auto-improve", "rubrics")
-		if abs, err := filepath.Abs(candidate); err == nil {
-			return filepath.Clean(abs), nil
-		}
+		candidate := filepath.Join(userCache, "harnest", "rubrics")
+		return cleanAbsoluteDir(candidate)
 	}
 	// Fallback to TempDir when the user cache is unavailable (e.g. sandboxed
 	// CI with $HOME unset). TempDir is always absolute.
-	return filepath.Join(os.TempDir(), "auto-improve-rubrics"), nil
+	return filepath.Join(os.TempDir(), "harnest-rubrics"), nil
+}
+
+func cleanAbsoluteDir(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	clean := filepath.Clean(abs)
+	if err := contracts.EnsureCleanAbsolutePath(clean); err != nil {
+		return "", err
+	}
+	return clean, nil
 }
 
 // writeFileIfNeeded writes `data` to `path` atomically when the file does not

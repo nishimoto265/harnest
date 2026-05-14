@@ -4,7 +4,7 @@ package processenv
 
 import "os"
 
-const integrationTrustedPathEnv = "AUTO_IMPROVE_INTEGRATION_TRUSTED_PATH"
+const integrationTrustedPathEnv = "HARNEST_INTEGRATION_TRUSTED_PATH"
 
 func init() {
 	path := os.Getenv(integrationTrustedPathEnv)

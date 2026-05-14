@@ -54,8 +54,9 @@ func TestIntegrationRecoverAdoptAnywaySubprocess(t *testing.T) {
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
 		integrationTrustedPathEnvVar+"="+trustedPathWithFakeBin(binDir),
-		"AUTO_IMPROVE_GIT_STATE_DIR="+gitStateDir,
-		"AUTO_IMPROVE_TEST_REMOTE_SHA="+strings.Repeat("b", 40),
+		"HARNEST_HOME="+filepath.Join(root, "home"),
+		"HARNEST_GIT_STATE_DIR="+gitStateDir,
+		"HARNEST_TEST_REMOTE_SHA="+strings.Repeat("b", 40),
 	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

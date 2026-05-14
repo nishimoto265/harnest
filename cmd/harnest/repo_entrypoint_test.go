@@ -338,8 +338,8 @@ func testRepoEntrypointRuntime(t *testing.T) repoEntrypointRuntime {
 		GitHub:        "owner/repo",
 		Root:          repoRoot,
 		DefaultBranch: "main",
-		BestBranch:    "auto-improve/best",
-		PolicyBranch:  "auto-improve/policy",
+		BestBranch:    "harnest/best",
+		PolicyBranch:  "harnest/policy",
 	}, runsPath, worktreePath)
 	require.NoError(t, cfg.Validate())
 	runsBase, err := cfg.RunsBase()

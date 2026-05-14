@@ -26,8 +26,8 @@ func TestIntegrationFakeGitFixtureCreatesPlainDirectoriesNotWorktrees(t *testing
 	require.NoError(t, os.MkdirAll(filepath.Dir(worktreePath), 0o755))
 	copyExecutable(t, filepath.Join(mustRepoRoot(t), "internal", "orchestrator", "testdata", "bin", "git"), filepath.Join(binDir, "git"))
 
-	cmd := exec.Command(filepath.Join(binDir, "git"), "-C", root, "worktree", "add", "-b", "auto-improve/fake/pass1/a1", worktreePath, strings.Repeat("a", 40))
-	cmd.Env = append(os.Environ(), "AUTO_IMPROVE_GIT_STATE_DIR="+stateDir)
+	cmd := exec.Command(filepath.Join(binDir, "git"), "-C", root, "worktree", "add", "-b", "harnest/fake/pass1/a1", worktreePath, strings.Repeat("a", 40))
+	cmd.Env = append(os.Environ(), "HARNEST_GIT_STATE_DIR="+stateDir)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 
@@ -35,13 +35,13 @@ func TestIntegrationFakeGitFixtureCreatesPlainDirectoriesNotWorktrees(t *testing
 	assert.NoFileExists(t, filepath.Join(worktreePath, ".git"), "fake git records paths but does not create real git worktrees")
 
 	removeCmd := exec.Command(filepath.Join(binDir, "git"), "-C", root, "worktree", "remove", "--force", worktreePath)
-	removeCmd.Env = append(os.Environ(), "AUTO_IMPROVE_GIT_STATE_DIR="+stateDir)
+	removeCmd.Env = append(os.Environ(), "HARNEST_GIT_STATE_DIR="+stateDir)
 	removeOut, removeErr := removeCmd.CombinedOutput()
 	require.NoError(t, removeErr, string(removeOut))
 	assert.NoDirExists(t, worktreePath)
 
 	listCmd := exec.Command(filepath.Join(binDir, "git"), "-C", root, "worktree", "list", "--porcelain")
-	listCmd.Env = append(os.Environ(), "AUTO_IMPROVE_GIT_STATE_DIR="+stateDir)
+	listCmd.Env = append(os.Environ(), "HARNEST_GIT_STATE_DIR="+stateDir)
 	listOut, listErr := listCmd.CombinedOutput()
 	require.NoError(t, listErr, string(listOut))
 	assert.NotContains(t, string(listOut), worktreePath)
@@ -76,10 +76,11 @@ func TestIntegrationRunUsesRealGitWorktreesWhenFakeGitIsAbsent(t *testing.T) {
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
 		integrationTrustedPathEnvVar+"="+trustedPathWithFakeBin(binDir),
-		"AUTO_IMPROVE_TEST_BASE_SHA="+shas.base,
-		"AUTO_IMPROVE_TEST_TARGET_SHA="+shas.head,
-		"AUTO_IMPROVE_TEST_MERGE_SHA="+shas.merge,
-		"AUTO_IMPROVE_TEST_BEST_SHA="+shas.base,
+		"HARNEST_HOME="+filepath.Join(root, "home"),
+		"HARNEST_TEST_BASE_SHA="+shas.base,
+		"HARNEST_TEST_TARGET_SHA="+shas.head,
+		"HARNEST_TEST_MERGE_SHA="+shas.merge,
+		"HARNEST_TEST_BEST_SHA="+shas.base,
 	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -124,10 +125,10 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	require.NoError(t, os.MkdirAll(binDir, 0o755))
 
 	shas := seedRealGitIntegrationRepo(t, repoRoot)
-	seedIntegrationPolicyBranch(t, repoRoot, "auto-improve/policy")
+	seedIntegrationPolicyBranch(t, repoRoot, "harnest/policy")
 	writeIntegrationConfigForRepo(t, root, repoRoot, runsBase, worktreeBase)
 	ensureIntegrationRepoGitHubConfig(t, filepath.Join(root, "config.yaml"), "owner/repo")
-	appendPolicyBranchConfig(t, filepath.Join(root, "config.yaml"), "auto-improve/policy")
+	appendPolicyBranchConfig(t, filepath.Join(root, "config.yaml"), "harnest/policy")
 	copyExecutable(t, filepath.Join(mustRepoRoot(t), "internal", "orchestrator", "testdata", "bin", "gh"), filepath.Join(binDir, "gh"))
 	installPreflightRuntimeToolsWithoutGit(t, binDir)
 	implementerPath := filepath.Join(binDir, "fake-implementer")
@@ -141,10 +142,11 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
 		integrationTrustedPathEnvVar+"="+trustedPathWithFakeBin(binDir),
-		"AUTO_IMPROVE_TEST_BASE_SHA="+shas.base,
-		"AUTO_IMPROVE_TEST_TARGET_SHA="+shas.head,
-		"AUTO_IMPROVE_TEST_MERGE_SHA="+shas.merge,
-		"AUTO_IMPROVE_TEST_BEST_SHA="+shas.base,
+		"HARNEST_HOME="+filepath.Join(root, "home"),
+		"HARNEST_TEST_BASE_SHA="+shas.base,
+		"HARNEST_TEST_TARGET_SHA="+shas.head,
+		"HARNEST_TEST_MERGE_SHA="+shas.merge,
+		"HARNEST_TEST_BEST_SHA="+shas.base,
 	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -172,7 +174,7 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	winnerManifest := readIntegrationManifest(t, runDir, 2, "a1")
 	assert.NotEqual(t, winnerManifest.HeadSHA, adopt.TargetSha)
 	assert.Equal(t, shas.base, adopt.TargetSha)
-	remoteBestHead := strings.Fields(runIntegrationGit(t, repoRoot, "ls-remote", "origin", "auto-improve/best"))[0]
+	remoteBestHead := strings.Fields(runIntegrationGit(t, repoRoot, "ls-remote", "origin", "harnest/best"))[0]
 	assert.Equal(t, shas.base, remoteBestHead)
 
 	lines, err := internalio.RegistryLines(filepath.Join(effectiveRunsBase, "rules-registry.jsonl"))
@@ -184,12 +186,12 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	assert.NotEmpty(t, added.IdempotencyKey)
 	assert.Equal(t, adopt.RegistryAppendResult.Sha256, lines[0].Sha256)
 	assert.FileExists(t, filepath.Join(effectiveRunsBase, added.RulePath))
-	runIntegrationGit(t, repoRoot, "fetch", "origin", "+refs/heads/auto-improve/policy:refs/remotes/origin/auto-improve/policy")
-	policyRegistry := runIntegrationGit(t, repoRoot, "show", "origin/auto-improve/policy:auto-improve/rules-registry.jsonl")
+	runIntegrationGit(t, repoRoot, "fetch", "origin", "+refs/heads/harnest/policy:refs/remotes/origin/harnest/policy")
+	policyRegistry := runIntegrationGit(t, repoRoot, "show", "origin/harnest/policy:harnest/rules-registry.jsonl")
 	assert.Equal(t, string(mustReadFile(t, filepath.Join(effectiveRunsBase, "rules-registry.jsonl"))), policyRegistry)
-	policyTree := runIntegrationGit(t, repoRoot, "ls-tree", "-r", "--name-only", "origin/auto-improve/policy")
-	assert.Contains(t, policyTree, "auto-improve/rules-registry.jsonl")
-	assert.Contains(t, policyTree, "auto-improve/"+added.RulePath)
+	policyTree := runIntegrationGit(t, repoRoot, "ls-tree", "-r", "--name-only", "origin/harnest/policy")
+	assert.Contains(t, policyTree, "harnest/rules-registry.jsonl")
+	assert.Contains(t, policyTree, "harnest/"+added.RulePath)
 	assert.NotContains(t, policyTree, "app/message.txt")
 	firstPublishedRegistry := string(mustReadFile(t, filepath.Join(effectiveRunsBase, "rules-registry.jsonl")))
 
@@ -219,9 +221,9 @@ func TestIntegrationRunAdoptsWithRealGitWorktreesAndFakeCLIs(t *testing.T) {
 	secondLines, err := internalio.RegistryLines(filepath.Join(effectiveRunsBase, "rules-registry.jsonl"))
 	require.NoError(t, err)
 	require.Len(t, secondLines, 1)
-	runIntegrationGit(t, repoRoot, "fetch", "origin", "+refs/heads/auto-improve/policy:refs/remotes/origin/auto-improve/policy")
-	secondPolicyRegistry := runIntegrationGit(t, repoRoot, "show", "origin/auto-improve/policy:auto-improve/rules-registry.jsonl")
+	runIntegrationGit(t, repoRoot, "fetch", "origin", "+refs/heads/harnest/policy:refs/remotes/origin/harnest/policy")
+	secondPolicyRegistry := runIntegrationGit(t, repoRoot, "show", "origin/harnest/policy:harnest/rules-registry.jsonl")
 	assert.Equal(t, string(mustReadFile(t, filepath.Join(effectiveRunsBase, "rules-registry.jsonl"))), secondPolicyRegistry)
-	remoteBestHead = strings.Fields(runIntegrationGit(t, repoRoot, "ls-remote", "origin", "auto-improve/best"))[0]
+	remoteBestHead = strings.Fields(runIntegrationGit(t, repoRoot, "ls-remote", "origin", "harnest/best"))[0]
 	assert.Equal(t, shas.base, remoteBestHead)
 }

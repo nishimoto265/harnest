@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/nishimoto265/harnest/internal/contracts"
 	internalio "github.com/nishimoto265/harnest/internal/io"
+	"github.com/nishimoto265/harnest/internal/judges"
 	"github.com/nishimoto265/harnest/internal/state"
 	"github.com/stretchr/testify/require"
 	"os"
@@ -129,6 +130,8 @@ func fixedNow() func() time.Time {
 }
 func newFixture(t *testing.T, prLabel string) (internalio.RunContext, *contracts.TaskPackage, *contracts.Candidates, IntentionWriter, *fixtureResolver) {
 	t.Helper()
+	judges.SetDefaultRubricDirForTest(filepath.Join(t.TempDir(), "rubric-cache"))
+	t.Cleanup(func() { judges.SetDefaultRubricDirForTest("") })
 	tempRuns := realTempDir(t)
 	worktreeBase := realTempDir(t)
 	runID := contracts.RunID("2026-04-21-" + prLabel + "-abcdef0")
@@ -193,7 +196,7 @@ func validTaskPackage(runID contracts.RunID, worktreeBase string) contracts.Task
 				Agent:   agent,
 				Pass:    pass,
 				Path:    filepath.Join(worktreeBase, fmt.Sprintf("%s-pass%d-%s", runID, pass, agent)),
-				Branch:  "auto-improve/" + string(runID) + "/pass" + pad(pass) + "/" + string(agent),
+				Branch:  "harnest/" + string(runID) + "/pass" + pad(pass) + "/" + string(agent),
 				BaseSHA: base,
 				HeadSHA: base,
 			})

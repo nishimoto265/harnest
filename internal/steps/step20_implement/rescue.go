@@ -260,10 +260,10 @@ func gitOutputBytesContextWithEnv(ctx context.Context, worktreePath string, env 
 
 func syntheticCommitEnv() []string {
 	return append(processenv.GitLocalEnv(),
-		"GIT_AUTHOR_NAME=auto-improve",
-		"GIT_AUTHOR_EMAIL=auto-improve@example.invalid",
-		"GIT_COMMITTER_NAME=auto-improve",
-		"GIT_COMMITTER_EMAIL=auto-improve@example.invalid",
+		"GIT_AUTHOR_NAME=harnest",
+		"GIT_AUTHOR_EMAIL=harnest@example.invalid",
+		"GIT_COMMITTER_NAME=harnest",
+		"GIT_COMMITTER_EMAIL=harnest@example.invalid",
 	)
 }
 

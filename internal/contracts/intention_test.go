@@ -114,7 +114,7 @@ func TestIntentionRecord_Validate_PolicyPublishing_RequiresAppendResultAndPolicy
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrIntentionMissingPolicyBranch)
 
-	r.PolicyBranch = "auto-improve/policy"
+	r.PolicyBranch = "harnest/policy"
 	assert.NoError(t, r.Validate(), "empty policy_head_before means bootstrap a missing policy branch")
 
 	r.PolicyHeadBefore = "1111111111111111111111111111111111111111"
@@ -125,7 +125,7 @@ func TestIntentionRecord_Validate_PolicyPublished_RequiresPolicyHeadAfter(t *tes
 	r := validIntentionBase()
 	r.Stage = IntentionStagePolicyPublished
 	r.RegistryAppendResult = &RegistryAppendResult{Offset: 0, Sha256: "0000000000000000000000000000000000000000000000000000000000000003"}
-	r.PolicyBranch = "auto-improve/policy"
+	r.PolicyBranch = "harnest/policy"
 	r.PolicyHeadBefore = "1111111111111111111111111111111111111111"
 	err := r.Validate()
 	require.Error(t, err)
@@ -271,10 +271,10 @@ func TestIntentionRecord_Validate_RejectsForgedIdempotencyKeyAcrossStages(t *tes
 			}
 			switch stage {
 			case IntentionStagePolicyPublishing:
-				r.PolicyBranch = "auto-improve/policy"
+				r.PolicyBranch = "harnest/policy"
 				r.PolicyHeadBefore = "1111111111111111111111111111111111111111"
 			case IntentionStagePolicyPublished:
-				r.PolicyBranch = "auto-improve/policy"
+				r.PolicyBranch = "harnest/policy"
 				r.PolicyHeadBefore = "1111111111111111111111111111111111111111"
 				r.PolicyHeadAfter = "2222222222222222222222222222222222222222"
 			}

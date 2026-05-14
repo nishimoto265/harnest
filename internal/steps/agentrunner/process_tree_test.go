@@ -521,7 +521,7 @@ func TestProcessTreePSUsesTrustedPathAndSanitizedEnv(t *testing.T) {
 	trustedPS := filepath.Join(trustedDir, "ps")
 	shadowPS := filepath.Join(shadowDir, "ps")
 	require.NoError(t, os.WriteFile(trustedPS, []byte(`#!/bin/sh
-/usr/bin/env > "$AUTO_IMPROVE_PS_ENV_PATH"
+/usr/bin/env > "$HARNEST_PS_ENV_PATH"
 case "$*" in
   "-axo pid=,sess=")
     printf " 11 22\n 12 22\n 13 23\n"
@@ -542,7 +542,7 @@ esac
 	t.Cleanup(restore)
 	t.Setenv("PATH", shadowDir)
 	t.Setenv("BASH_ENV", "/tmp/malicious-bash-env")
-	t.Setenv("AUTO_IMPROVE_PS_ENV_PATH", envPath)
+	t.Setenv("HARNEST_PS_ENV_PATH", envPath)
 
 	sessionPIDs, err := sessionProcesses(22)
 	require.NoError(t, err)
@@ -560,7 +560,7 @@ esac
 	require.NoError(t, err)
 	env := string(envBytes)
 	require.Contains(t, env, "PATH="+trustedDir)
-	require.Contains(t, env, "AUTO_IMPROVE_PS_ENV_PATH="+envPath)
+	require.Contains(t, env, "HARNEST_PS_ENV_PATH="+envPath)
 	require.NotContains(t, env, "PATH="+shadowDir)
 	require.NotContains(t, env, "BASH_ENV=/tmp/malicious-bash-env")
 }

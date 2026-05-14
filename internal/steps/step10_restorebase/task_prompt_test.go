@@ -29,7 +29,7 @@ func TestRun_TaskPromptSourceAutoUsesGeneratorWithDiffContext(t *testing.T) {
 
 	res, err := runner.Run(context.Background(), Input{
 		PR:                 42,
-		BestBranch:         "auto-improve/best",
+		BestBranch:         "harnest/best",
 		TaskPromptSource:   "auto",
 		TaskBriefGenerator: generator,
 		RepoRoot:           t.TempDir(),
@@ -63,7 +63,7 @@ func TestRun_TaskPromptSourceIssueSkipsDiffFetch(t *testing.T) {
 
 	res, err := runner.Run(context.Background(), Input{
 		PR:               42,
-		BestBranch:       "auto-improve/best",
+		BestBranch:       "harnest/best",
 		TaskPromptSource: "issue",
 		RepoRoot:         t.TempDir(),
 		RunCtx:           rc,
@@ -96,7 +96,7 @@ func TestRun_TaskPromptSourceIssueFallsBackToAutoWhenIssueUnavailable(t *testing
 
 	res, err := runner.Run(context.Background(), Input{
 		PR:                 42,
-		BestBranch:         "auto-improve/best",
+		BestBranch:         "harnest/best",
 		TaskPromptSource:   "issue",
 		TaskBriefGenerator: generator,
 		RepoRoot:           t.TempDir(),
@@ -129,7 +129,7 @@ func TestRun_TaskPromptSourceAutoUsesHeadRefFallbackWhenMergeCommitMissing(t *te
 
 	res, err := runner.Run(context.Background(), Input{
 		PR:               42,
-		BestBranch:       "auto-improve/best",
+		BestBranch:       "harnest/best",
 		TaskPromptSource: "auto",
 		RepoRoot:         t.TempDir(),
 		RunCtx:           rc,

@@ -29,8 +29,8 @@ func TestPlanApplyMergesMarkdownIdempotently(t *testing.T) {
 	body, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "Keep me.")
-	assert.Equal(t, 1, strings.Count(string(body), "BEGIN AUTO-IMPROVE CHECKLIST"))
-	assert.Equal(t, 1, strings.Count(string(body), "END AUTO-IMPROVE CHECKLIST"))
+	assert.Equal(t, 1, strings.Count(string(body), "BEGIN HARNEST CHECKLIST"))
+	assert.Equal(t, 1, strings.Count(string(body), "END HARNEST CHECKLIST"))
 }
 
 func TestPlanApplyFullInstallIsIdempotent(t *testing.T) {
@@ -53,7 +53,7 @@ func TestPlanApplyFullInstallIsIdempotent(t *testing.T) {
 }
 
 func TestMergeProviderHooksJSONReplacesStableHookID(t *testing.T) {
-	first, err := MergeProviderHooksJSON([]byte(`{"hooks":{"Stop":[{"id":"auto-improve.checklist-gate","hooks":[{"type":"command","command":"old"}]},{"hooks":[{"type":"command","command":"echo keep"}]}]}}`))
+	first, err := MergeProviderHooksJSON([]byte(`{"hooks":{"Stop":[{"id":"harnest.checklist-gate","hooks":[{"type":"command","command":"old"}]},{"hooks":[{"type":"command","command":"echo keep"}]}]}}`))
 	require.NoError(t, err)
 	second, err := MergeProviderHooksJSON(first)
 	require.NoError(t, err)
@@ -71,7 +71,7 @@ func TestMergeProviderHooksJSONReplacesStableHookID(t *testing.T) {
 	require.Len(t, stopHooks, 2)
 	assert.Equal(t, "echo keep", stopHooks[0].Hooks[0].Command)
 	assert.Equal(t, HookID, stopHooks[1].ID)
-	assert.Equal(t, "sh .auto-improve/hooks/verify-checklist-result.sh", stopHooks[1].Hooks[0].Command)
+	assert.Equal(t, "sh .harnest/hooks/verify-checklist-result.sh", stopHooks[1].Hooks[0].Command)
 	assert.Equal(t, 1, strings.Count(string(second), HookID))
 }
 
@@ -102,7 +102,7 @@ func TestMergeProviderHooksJSONPreservesConfigOutsideStopHooks(t *testing.T) {
 }
 
 func TestMergeProviderHooksJSONUsesTemplateHook(t *testing.T) {
-	template := []byte(`{"hooks":{"Stop":[{"id":"auto-improve.checklist-gate","hooks":[{"type":"command","command":"custom-check","timeout":9}]}]}}`)
+	template := []byte(`{"hooks":{"Stop":[{"id":"harnest.checklist-gate","hooks":[{"type":"command","command":"custom-check","timeout":9}]}]}}`)
 
 	merged, err := MergeProviderHooksJSONWithTemplate([]byte(`{"hooks":{"Stop":[]}}`), template)
 	require.NoError(t, err)

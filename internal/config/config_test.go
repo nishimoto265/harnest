@@ -12,8 +12,8 @@ import (
 
 func TestLoadConfig_RejectsUnknownField(t *testing.T) {
 	path := writeConfigFixture(t, `
-runs_base: "/tmp/auto-improve/runs"
-worktree_base: "/tmp/auto-improve/worktrees"
+runs_base: "/tmp/harnest/runs"
+worktree_base: "/tmp/harnest/worktrees"
 claude_cli_path: "claude"
 preflight_timeout_sec: 30
 rescue_max_retries: 3
@@ -35,8 +35,8 @@ unexpected: true
 
 func TestLoadConfig_RejectsInvalidType(t *testing.T) {
 	path := writeConfigFixture(t, `
-runs_base: "/tmp/auto-improve/runs"
-worktree_base: "/tmp/auto-improve/worktrees"
+runs_base: "/tmp/harnest/runs"
+worktree_base: "/tmp/harnest/worktrees"
 claude_cli_path: "claude"
 preflight_timeout_sec: "thirty"
 rescue_max_retries: 3
@@ -57,7 +57,7 @@ step_timeouts:
 
 func TestLoadConfig_RejectsMissingRequiredField(t *testing.T) {
 	path := writeConfigFixture(t, `
-worktree_base: "/tmp/auto-improve/worktrees"
+worktree_base: "/tmp/harnest/worktrees"
 claude_cli_path: "claude"
 preflight_timeout_sec: 30
 rescue_max_retries: 3
@@ -79,8 +79,8 @@ step_timeouts:
 
 func TestLoadConfig_RejectsYAMLSyntaxError(t *testing.T) {
 	path := writeConfigFixture(t, `
-runs_base: "/tmp/auto-improve/runs"
-worktree_base: "/tmp/auto-improve/worktrees"
+runs_base: "/tmp/harnest/runs"
+worktree_base: "/tmp/harnest/worktrees"
 claude_cli_path: "claude"
 preflight_timeout_sec: 30
 rescue_max_retries: 3
@@ -94,8 +94,8 @@ step_timeouts: [
 
 func TestLoadConfig_AppliesDefaultThresholds(t *testing.T) {
 	path := writeConfigFixture(t, `
-runs_base: "/tmp/auto-improve/runs"
-worktree_base: "/tmp/auto-improve/worktrees"
+runs_base: "/tmp/harnest/runs"
+worktree_base: "/tmp/harnest/worktrees"
 claude_cli_path: "claude"
 preflight_timeout_sec: 30
 rescue_max_retries: 3
@@ -121,11 +121,11 @@ repo:
   github: "owner/repo"
   root: "."
   default_branch: "main"
-  best_branch: "auto-improve/best"
+  best_branch: "harnest/best"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 `)
 
 	_, err := LoadConfig(path)
@@ -137,14 +137,14 @@ func TestLoadConfig_RejectsStateFileOverride(t *testing.T) {
 	path := writeConfigFixture(t, `
 repo:
   github: "owner/repo"
-  root: "/tmp/auto-improve"
+  root: "/tmp/harnest"
   default_branch: "main"
-  best_branch: "auto-improve/best"
+  best_branch: "harnest/best"
 paths:
-  runs: "/tmp/auto-improve/runs"
-  state_file: "/tmp/auto-improve/custom-processed.jsonl"
+  runs: "/tmp/harnest/runs"
+  state_file: "/tmp/harnest/custom-processed.jsonl"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 `)
 
 	_, err := LoadConfig(path)
@@ -156,12 +156,12 @@ func TestLoadConfig_RejectsMissingDefaultBranchWhenRepoGitHubSet(t *testing.T) {
 	path := writeConfigFixture(t, `
 repo:
   github: "owner/repo"
-  root: "/tmp/auto-improve"
-  best_branch: "auto-improve/best"
+  root: "/tmp/harnest"
+  best_branch: "harnest/best"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 `)
 
 	_, err := LoadConfig(path)
@@ -173,12 +173,12 @@ func TestLoadConfig_RejectsMissingBestBranchWhenRepoGitHubSet(t *testing.T) {
 	path := writeConfigFixture(t, `
 repo:
   github: "owner/repo"
-  root: "/tmp/auto-improve"
+  root: "/tmp/harnest"
   default_branch: "main"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 `)
 
 	_, err := LoadConfig(path)
@@ -194,22 +194,22 @@ func TestLoadConfig_RejectsPolicyBranchMatchingDefaultOrBestBranch(t *testing.T)
 	}{
 		{name: "default", policyBranch: "main", want: "repo.default_branch"},
 		{name: "default ref path", policyBranch: "refs/heads/main", want: "repo.policy_branch must be a branch name"},
-		{name: "dot component", policyBranch: "auto-improve/.policy", want: "invalid branch component"},
-		{name: "trailing dot", policyBranch: "auto-improve/policy.", want: "must not end with '.'"},
-		{name: "best", policyBranch: "auto-improve/best", want: "repo.best_branch"},
+		{name: "dot component", policyBranch: "harnest/.policy", want: "invalid branch component"},
+		{name: "trailing dot", policyBranch: "harnest/policy.", want: "must not end with '.'"},
+		{name: "best", policyBranch: "harnest/best", want: "repo.best_branch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeConfigFixture(t, `
 repo:
   github: "owner/repo"
-  root: "/tmp/auto-improve"
+  root: "/tmp/harnest"
   default_branch: "main"
-  best_branch: "auto-improve/best"
+  best_branch: "harnest/best"
   policy_branch: "`+tc.policyBranch+`"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 `)
 
 			_, err := LoadConfig(path)
@@ -226,13 +226,13 @@ func TestLoadConfig_LoadsAgentsFileWhenPresent(t *testing.T) {
 	require.NoError(t, os.WriteFile(configPath, []byte(`
 repo:
   github: "owner/repo"
-  root: "/tmp/auto-improve"
+  root: "/tmp/harnest"
   default_branch: "main"
-  best_branch: "auto-improve/best"
+  best_branch: "harnest/best"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 agent_config_path: "./agents.yaml"
 `), 0o644))
 	require.NoError(t, os.WriteFile(agentsPath, []byte(`
@@ -263,13 +263,13 @@ func TestLoadConfig_AgentFileSnapshotOverridesAgentConfigPath(t *testing.T) {
 	require.NoError(t, os.WriteFile(configPath, []byte(`
 repo:
   github: "owner/repo"
-  root: "/tmp/auto-improve"
+  root: "/tmp/harnest"
   default_branch: "main"
-  best_branch: "auto-improve/best"
+  best_branch: "harnest/best"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 agent_config_path: "./agents.yaml"
 agent_file_snapshot:
   profiles:
@@ -298,13 +298,13 @@ func TestLoadConfig_RejectsStubImplementerProfile(t *testing.T) {
 	require.NoError(t, os.WriteFile(configPath, []byte(`
 repo:
   github: "owner/repo"
-  root: "/tmp/auto-improve"
+  root: "/tmp/harnest"
   default_branch: "main"
-  best_branch: "auto-improve/best"
+  best_branch: "harnest/best"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 agent_config_path: "./agents.yaml"
 `), 0o644))
 	require.NoError(t, os.WriteFile(agentsPath, []byte(`
@@ -331,13 +331,13 @@ func TestLoadConfig_RejectsUnsafeJudgeProfileArgs(t *testing.T) {
 	require.NoError(t, os.WriteFile(configPath, []byte(`
 repo:
   github: "owner/repo"
-  root: "/tmp/auto-improve"
+  root: "/tmp/harnest"
   default_branch: "main"
-  best_branch: "auto-improve/best"
+  best_branch: "harnest/best"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 agent_config_path: "./agents.yaml"
 `), 0o644))
 	require.NoError(t, os.WriteFile(agentsPath, []byte(`
@@ -367,13 +367,13 @@ func TestLoadConfig_DefaultsTaskPromptSourceToAuto(t *testing.T) {
 	path := writeConfigFixture(t, `
 repo:
   github: "owner/repo"
-  root: "/tmp/auto-improve"
+  root: "/tmp/harnest"
   default_branch: "main"
-  best_branch: "auto-improve/best"
+  best_branch: "harnest/best"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 `)
 
 	cfg, err := LoadConfig(path)
@@ -385,13 +385,13 @@ func TestTaskGeneratorProfile_ReturnsFalseWhenRoleIsUnset(t *testing.T) {
 	path := writeConfigFixture(t, `
 repo:
   github: "owner/repo"
-  root: "/tmp/auto-improve"
+  root: "/tmp/harnest"
   default_branch: "main"
-  best_branch: "auto-improve/best"
+  best_branch: "harnest/best"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 `)
 
 	cfg, err := LoadConfig(path)
@@ -409,13 +409,13 @@ func TestTaskGeneratorProfile_ReturnsConfiguredProfile(t *testing.T) {
 	require.NoError(t, os.WriteFile(configPath, []byte(`
 repo:
   github: "owner/repo"
-  root: "/tmp/auto-improve"
+  root: "/tmp/harnest"
   default_branch: "main"
-  best_branch: "auto-improve/best"
+  best_branch: "harnest/best"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 agent_config_path: "./agents.yaml"
 `), 0o644))
 	require.NoError(t, os.WriteFile(agentsPath, []byte(`
@@ -445,13 +445,13 @@ func TestLoadConfig_RejectsInvalidTaskPromptSource(t *testing.T) {
 	path := writeConfigFixture(t, `
 repo:
   github: "owner/repo"
-  root: "/tmp/auto-improve"
+  root: "/tmp/harnest"
   default_branch: "main"
-  best_branch: "auto-improve/best"
+  best_branch: "harnest/best"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 task_prompt:
   source: "title_only"
 `)
@@ -468,10 +468,10 @@ func TestRunsBaseAndWorktreeBase_AreNamespacedByRepoSlug(t *testing.T) {
 			Root:   "/tmp/project",
 		},
 		Paths: PathsConfig{
-			Runs: "/var/lib/auto-improve/runs",
+			Runs: "/var/lib/harnest/runs",
 		},
 		Worktree: WorktreeConfig{
-			Base: "/var/lib/auto-improve/worktrees",
+			Base: "/var/lib/harnest/worktrees",
 		},
 	}
 
@@ -480,8 +480,8 @@ func TestRunsBaseAndWorktreeBase_AreNamespacedByRepoSlug(t *testing.T) {
 	worktreeBase, err := cfg.WorktreeBase()
 	require.NoError(t, err)
 
-	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/runs"), runsBase)
-	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/worktrees"), worktreeBase)
+	assert.Equal(t, filepath.Clean("/var/lib/harnest/owner__repo/runs"), runsBase)
+	assert.Equal(t, filepath.Clean("/var/lib/harnest/owner__repo/worktrees"), worktreeBase)
 }
 
 func TestRunsBaseAndWorktreeBase_PreserveExplicitRepoScopedPaths(t *testing.T) {
@@ -491,10 +491,10 @@ func TestRunsBaseAndWorktreeBase_PreserveExplicitRepoScopedPaths(t *testing.T) {
 			Root:   "/tmp/project",
 		},
 		Paths: PathsConfig{
-			Runs: "/var/lib/auto-improve/owner__repo/runs",
+			Runs: "/var/lib/harnest/owner__repo/runs",
 		},
 		Worktree: WorktreeConfig{
-			Base: "/var/lib/auto-improve/owner__repo/worktrees",
+			Base: "/var/lib/harnest/owner__repo/worktrees",
 		},
 	}
 
@@ -503,8 +503,8 @@ func TestRunsBaseAndWorktreeBase_PreserveExplicitRepoScopedPaths(t *testing.T) {
 	worktreeBase, err := cfg.WorktreeBase()
 	require.NoError(t, err)
 
-	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/runs"), runsBase)
-	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/worktrees"), worktreeBase)
+	assert.Equal(t, filepath.Clean("/var/lib/harnest/owner__repo/runs"), runsBase)
+	assert.Equal(t, filepath.Clean("/var/lib/harnest/owner__repo/worktrees"), worktreeBase)
 }
 
 func TestRunsBaseAndWorktreeBase_NamespaceCustomLeafPaths(t *testing.T) {
@@ -514,10 +514,10 @@ func TestRunsBaseAndWorktreeBase_NamespaceCustomLeafPaths(t *testing.T) {
 			Root:   "/tmp/project",
 		},
 		Paths: PathsConfig{
-			Runs: "/var/lib/auto-improve/repo-a-state",
+			Runs: "/var/lib/harnest/repo-a-state",
 		},
 		Worktree: WorktreeConfig{
-			Base: "/var/lib/auto-improve/repo-a-wt",
+			Base: "/var/lib/harnest/repo-a-wt",
 		},
 	}
 
@@ -526,8 +526,8 @@ func TestRunsBaseAndWorktreeBase_NamespaceCustomLeafPaths(t *testing.T) {
 	worktreeBase, err := cfg.WorktreeBase()
 	require.NoError(t, err)
 
-	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/repo-a-state"), runsBase)
-	assert.Equal(t, filepath.Clean("/var/lib/auto-improve/owner__repo/repo-a-wt"), worktreeBase)
+	assert.Equal(t, filepath.Clean("/var/lib/harnest/owner__repo/repo-a-state"), runsBase)
+	assert.Equal(t, filepath.Clean("/var/lib/harnest/owner__repo/repo-a-wt"), worktreeBase)
 }
 
 func TestRunsBaseAndWorktreeBase_NamespaceWhenNamespaceOnlyAppearsInAncestor(t *testing.T) {
@@ -555,12 +555,12 @@ func TestRunsBaseAndWorktreeBase_NamespaceWhenNamespaceOnlyAppearsInAncestor(t *
 
 func TestLoadConfig_RejectsConflictingPathAliases(t *testing.T) {
 	path := writeConfigFixture(t, `
-runs_base: "/tmp/auto-improve/legacy-runs"
-worktree_base: "/tmp/auto-improve/worktrees"
+runs_base: "/tmp/harnest/legacy-runs"
+worktree_base: "/tmp/harnest/worktrees"
 paths:
-  runs: "/tmp/auto-improve/runs"
+  runs: "/tmp/harnest/runs"
 worktree:
-  base: "/tmp/auto-improve/worktrees"
+  base: "/tmp/harnest/worktrees"
 `)
 
 	_, err := LoadConfig(path)
@@ -570,8 +570,8 @@ worktree:
 
 func TestLoadConfig_RejectsDeprecatedCodexCLIPath(t *testing.T) {
 	path := writeConfigFixture(t, `
-runs_base: "/tmp/auto-improve/runs"
-worktree_base: "/tmp/auto-improve/worktrees"
+runs_base: "/tmp/harnest/runs"
+worktree_base: "/tmp/harnest/worktrees"
 codex_cli_path: "codex"
 `)
 
@@ -585,10 +585,10 @@ codex_cli_path: "codex"
 func TestValidate_RejectsDeprecatedCodexCLIPath(t *testing.T) {
 	cfg := Config{
 		Paths: PathsConfig{
-			Runs: "/tmp/auto-improve/runs",
+			Runs: "/tmp/harnest/runs",
 		},
 		Worktree: WorktreeConfig{
-			Base: "/tmp/auto-improve/worktrees",
+			Base: "/tmp/harnest/worktrees",
 		},
 		CodexCLIPath:              "codex",
 		RegistryHighThreshold:     DefaultRegistryHighThreshold,
@@ -604,8 +604,8 @@ func TestValidate_RejectsDeprecatedCodexCLIPath(t *testing.T) {
 
 func TestLoadConfig_LegacyClaudeCLIPathOverridesDefaultImplementerBinary(t *testing.T) {
 	path := writeConfigFixture(t, `
-runs_base: "/tmp/auto-improve/runs"
-worktree_base: "/tmp/auto-improve/worktrees"
+runs_base: "/tmp/harnest/runs"
+worktree_base: "/tmp/harnest/worktrees"
 claude_cli_path: "/opt/bin/claude"
 `)
 
@@ -619,8 +619,8 @@ claude_cli_path: "/opt/bin/claude"
 
 func TestLoadConfig_LegacyCodexImplementerDoesNotUseClaudePromptFlag(t *testing.T) {
 	path := writeConfigFixture(t, `
-runs_base: "/tmp/auto-improve/runs"
-worktree_base: "/tmp/auto-improve/worktrees"
+runs_base: "/tmp/harnest/runs"
+worktree_base: "/tmp/harnest/worktrees"
 agents:
   implementer: "/opt/bin/codex"
 `)

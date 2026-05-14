@@ -23,14 +23,14 @@ func TestWorkflowRenderConfigSeparatesClaudeImplementerAndJudgeProfiles(t *testi
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(),
 		"HOME="+homeDir,
-		"AUTO_IMPROVE_WORKFLOW_OUTPUT_DIR="+outputDir,
+		"HARNEST_WORKFLOW_OUTPUT_DIR="+outputDir,
 		"GITHUB_REPOSITORY=owner/repo",
 		"GITHUB_WORKSPACE="+repoRoot,
 		"REPOSITORY_DEFAULT_BRANCH=main",
 		"INPUT_REPO_GITHUB=",
 		"INPUT_DEFAULT_BRANCH=",
-		"INPUT_BEST_BRANCH=auto-improve/best",
-		"INPUT_POLICY_BRANCH=auto-improve/policy",
+		"INPUT_BEST_BRANCH=harnest/best",
+		"INPUT_POLICY_BRANCH=harnest/policy",
 		"INPUT_RUNS_BASE="+runsBase,
 		"INPUT_WORKTREE_BASE="+worktreeBase,
 		"INPUT_CLAUDE_CLI_PATH=/tmp/fake claude",
@@ -55,8 +55,8 @@ func TestWorkflowRenderConfigSeparatesClaudeImplementerAndJudgeProfiles(t *testi
 	assert.Equal(t, "owner/repo", generatedConfig.Repo.GitHub)
 	assert.Equal(t, repoRoot, generatedConfig.Repo.Root)
 	assert.Equal(t, "main", generatedConfig.Repo.DefaultBranch)
-	assert.Equal(t, "auto-improve/best", generatedConfig.Repo.BestBranch)
-	assert.Equal(t, "auto-improve/policy", generatedConfig.Repo.PolicyBranch)
+	assert.Equal(t, "harnest/best", generatedConfig.Repo.BestBranch)
+	assert.Equal(t, "harnest/policy", generatedConfig.Repo.PolicyBranch)
 	assert.Equal(t, runsBase, generatedConfig.Paths.Runs)
 	assert.Equal(t, worktreeBase, generatedConfig.Worktree.Base)
 

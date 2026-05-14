@@ -54,7 +54,7 @@ func writeFullHeadBundle(ctx context.Context, repoPath, bundlePath string, gitOu
 }
 
 func writeGitBundleAtomic(ctx context.Context, repoPath, bundlePath string, runGit RunGitFunc, revArgs ...string) error {
-	tempDir, err := os.MkdirTemp("", "auto-improve-rescue-bundle-*")
+	tempDir, err := os.MkdirTemp("", "harnest-rescue-bundle-*")
 	if err != nil {
 		return err
 	}

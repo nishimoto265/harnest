@@ -46,11 +46,12 @@ func newCLIIntegrationEnv(t *testing.T, agentSleep time.Duration) cliIntegration
 	baseEnv := os.Environ()
 	baseEnv = append(baseEnv,
 		integrationTrustedPathEnvVar+"="+trustedPathWithFakeBin(binDir),
-		"AUTO_IMPROVE_GIT_STATE_DIR="+filepath.Join(root, "git-state"),
-		"AUTO_IMPROVE_TEST_BASE_SHA="+strings.Repeat("a", 40),
-		"AUTO_IMPROVE_TEST_TARGET_SHA="+strings.Repeat("b", 40),
-		"AUTO_IMPROVE_TEST_MERGE_SHA="+strings.Repeat("c", 40),
-		"AUTO_IMPROVE_TEST_BEST_SHA="+strings.Repeat("d", 40),
+		"HARNEST_HOME="+filepath.Join(root, "home"),
+		"HARNEST_GIT_STATE_DIR="+filepath.Join(root, "git-state"),
+		"HARNEST_TEST_BASE_SHA="+strings.Repeat("a", 40),
+		"HARNEST_TEST_TARGET_SHA="+strings.Repeat("b", 40),
+		"HARNEST_TEST_MERGE_SHA="+strings.Repeat("c", 40),
+		"HARNEST_TEST_BEST_SHA="+strings.Repeat("d", 40),
 	)
 
 	return cliIntegrationEnv{
@@ -106,7 +107,7 @@ func findIntegrationRunDir(t *testing.T, runsBase, contains string) string {
 func buildIntegrationBinary(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "auto-improve")
+	bin := filepath.Join(dir, "harnest")
 	cmd := exec.Command("go", "build", "-tags", "integrationtest", "-o", bin, ".")
 	cmd.Dir = mustPackageDir(t)
 	out, err := cmd.CombinedOutput()
@@ -203,7 +204,7 @@ func mustPackageDir(t *testing.T) string {
 func requireIntegrationEnv(t *testing.T) {
 	t.Helper()
 	if os.Getenv(integrationEnvVar) != "1" {
-		t.Skip("set AUTO_IMPROVE_INTEGRATION=1 to run integration tests")
+		t.Skip("set HARNEST_INTEGRATION=1 to run integration tests")
 	}
 }
 

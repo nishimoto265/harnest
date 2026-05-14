@@ -1,6 +1,6 @@
 # Provider hooks 設計
 
-この文書は、Claude Code と Codex の hooks を `auto-improve` から扱う場合の
+この文書は、Claude Code と Codex の hooks を `harnest` から扱う場合の
 共通化境界を定義する。hook の詳細仕様は provider 側で変わり得るため、
 この文書では harness が依存してよい最小 subset だけを正本とする。
 
@@ -13,11 +13,11 @@
 
 Claude と Codex の hooks は同じ機能ではない。
 
-`auto-improve` では provider の hook 設定を直接アプリ仕様にしない。
+`harnest` では provider の hook 設定を直接アプリ仕様にしない。
 代わりに、以下の 6 種類だけを provider-neutral capability として扱い、
 Claude / Codex adapter が各 provider の設定形式へ変換する。
 
-| auto-improve capability | Claude event | Codex event | 用途 |
+| harnest capability | Claude event | Codex event | 用途 |
 | --- | --- | --- | --- |
 | `session_start` | `SessionStart` | `SessionStart` | セッション開始時に追加コンテキストや環境確認を行う |
 | `user_prompt_submit` | `UserPromptSubmit` | `UserPromptSubmit` | prompt 投入前に secrets / 禁止操作 / task brief を検査する |
@@ -35,7 +35,7 @@ Claude / Codex adapter が各 provider の設定形式へ変換する。
 セッション開始または resume 時に走る。
 追加コンテキストの注入、repo policy snapshot の説明、runtime 状態の注意喚起に使える。
 
-hard block 用途には使わない。実行開始可否は `auto-improve preflight` と step 側で判定する。
+hard block 用途には使わない。実行開始可否は `harnest preflight` と step 側で判定する。
 
 ### `user_prompt_submit`
 
@@ -43,7 +43,7 @@ agent に prompt が渡る前に走る。
 secret 混入、禁止されている高リスク依頼、task brief の最低限の形を検査する用途に向く。
 
 ここで実装方針を作り替えすぎると pass1 / pass2 の比較条件が変わるため、
-`auto-improve` では追加コンテキストまたは明確な block に限定する。
+`harnest` では追加コンテキストまたは明確な block に限定する。
 
 ### `pre_tool_use`
 
@@ -72,7 +72,7 @@ provider が approval を要求する直前に走る。
 - 特定 command だけ allow
 - user approval に回す前の policy 判定
 
-`auto-improve` では、実装 agent の自動実行を安定させるため、
+`harnest` では、実装 agent の自動実行を安定させるため、
 provider の permission model へ直接依存しすぎない。
 最終的な安全性は sandbox と post-run diff validation で担保する。
 
@@ -101,17 +101,17 @@ turn 終了時に走る。
 - checklist 未更新なら継続させる
 - 明らかな未完了状態なら final response を止める
 
-`auto-improve` では `stop` hook を採用判定の正本にしない。
+`harnest` では `stop` hook を採用判定の正本にしない。
 採用判定は step30 / step60 / step70 の artifact と judge 結果で行う。
 
 通常利用の PR 前 checklist guard では、provider-specific hook に判定を埋め込まず、
 次を呼ぶ。
 
 ```bash
-auto-improve lessons verify-checklist-result
+harnest lessons verify-checklist-result
 ```
 
-このコマンドは `.auto-improve/work/checklist-result.md` の `[x]` / `[-]` / `[!]` を検証し、
+このコマンドは `.harnest/work/checklist-result.md` の `[x]` / `[-]` / `[!]` を検証し、
 未確認 `[ ]` や理由のない `[!]` を失敗させる。
 
 ## 編集禁止の扱い
@@ -138,7 +138,7 @@ Claude Code は hooks の種類が多く、command / HTTP / MCP tool / prompt / 
 `PreCompact`、`SessionEnd` などがある。
 
 これらは便利だが、Codex 側に同等の安定機能がないため、
-`auto-improve` の共通 hook contract には入れない。
+`harnest` の共通 hook contract には入れない。
 
 ### Codex
 
@@ -159,7 +159,7 @@ Codex の実用上の共通 event は `SessionStart`、`PreToolUse`、
 Codex hooks は複数 matching hook が並列実行されるため、
 1 つの hook が別の hook の起動を止める前提にしない。
 
-## auto-improve の設定モデル案
+## harnest の設定モデル案
 
 provider 固有設定を直接ユーザーに書かせず、まずは次のような中立設定を持つ。
 
@@ -184,13 +184,13 @@ Claude では `.claude/settings.json` の hook 設定に変換する。
 Codex では `.codex/hooks.json` または `.codex/config.toml` に変換し、
 必要なら `[features] codex_hooks = true` も生成する。
 
-ただし、`auto-improve` が npm 的に配布される前提では、
+ただし、`harnest` が npm 的に配布される前提では、
 tool install directory に対象 repo の hook 設定を書かない。
 
 配置方針:
 
-- user scope: `~/.auto-improve/hooks/` に共通 script template / cache を置く
-- repo scope: `<repo>/.auto-improve/` に repo-specific hook policy を置く
+- user scope: `~/.harnest/hooks/` に共通 script template / cache を置く
+- repo scope: `<repo>/.harnest/` に repo-specific hook policy を置く
 - provider projection: `.claude/` / `.codex/` は必要時に生成または managed path として publish する
 
 ## 共通仕様に入れないもの

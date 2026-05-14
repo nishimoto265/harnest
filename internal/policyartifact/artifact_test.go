@@ -12,15 +12,15 @@ func TestIsPolicyArtifactPath(t *testing.T) {
 		want bool
 	}{
 		{path: "checklist-result.json", want: true},
-		{path: ".auto-improve", want: true},
-		{path: ".auto-improve/lessons/r.md", want: true},
-		{path: "auto-improve", want: false},
-		{path: "auto-improve/app.go", want: false},
-		{path: "auto-improve/guidance", want: true},
-		{path: "auto-improve/guidance/AGENTS.md.template", want: true},
-		{path: "auto-improve/rules-registry.jsonl", want: true},
-		{path: "auto-improve/rules", want: true},
-		{path: "auto-improve/rules/r.md", want: true},
+		{path: ".harnest", want: true},
+		{path: ".harnest/lessons/r.md", want: true},
+		{path: "harnest", want: false},
+		{path: "harnest/app.go", want: false},
+		{path: "harnest/guidance", want: true},
+		{path: "harnest/guidance/AGENTS.md.template", want: true},
+		{path: "harnest/rules-registry.jsonl", want: true},
+		{path: "harnest/rules", want: true},
+		{path: "harnest/rules/r.md", want: true},
 		{path: "AGENTS.md", want: false},
 		{path: "CLAUDE.md", want: false},
 		{path: ".gitignore", want: false},
@@ -41,7 +41,7 @@ func TestIsPolicyArtifactPath(t *testing.T) {
 
 func TestIsPolicyBasePathIncludesManagedMixedFiles(t *testing.T) {
 	for _, path := range []string{
-		".auto-improve/checklist.md",
+		".harnest/checklist.md",
 		"AGENTS.md",
 		"CLAUDE.md",
 		".gitignore",

@@ -233,8 +233,8 @@ func (g RepoGit) VerifyUnregisteredWorktreeRemoval(ctx context.Context, allocati
 }
 
 func cleanupOwnsBranch(runID contracts.RunID, wt contracts.WorktreeAllocation) bool {
-	want := fmt.Sprintf("auto-improve/%s/pass%d/%s", runID, wt.Pass, wt.Agent)
-	baseWant := fmt.Sprintf("auto-improve/%s/pass%d/base", runID, wt.Pass)
+	want := fmt.Sprintf("harnest/%s/pass%d/%s", runID, wt.Pass, wt.Agent)
+	baseWant := fmt.Sprintf("harnest/%s/pass%d/base", runID, wt.Pass)
 	return wt.Branch == want || wt.Branch == baseWant
 }
 

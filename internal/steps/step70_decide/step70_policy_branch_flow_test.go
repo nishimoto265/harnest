@@ -20,7 +20,7 @@ func TestRun_RejectsWhenPolicyBranchAdvancedSinceRunSnapshot(t *testing.T) {
 	require.NoError(t, os.MkdirAll(policyDir, 0o755))
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(policyDir, "snapshot.json"), policyrepo.SnapshotMetadata{
 		SchemaVersion: "1",
-		PolicyBranch:  "auto-improve/policy",
+		PolicyBranch:  "harnest/policy",
 		PolicyHead:    strings.Repeat("1", 40),
 		RegistryHead:  "",
 	}))
@@ -30,7 +30,7 @@ func TestRun_RejectsWhenPolicyBranchAdvancedSinceRunSnapshot(t *testing.T) {
 		Git:          git,
 		Resolver:     resolver,
 		Now:          fixedNow(),
-		PolicyBranch: "auto-improve/policy",
+		PolicyBranch: "harnest/policy",
 		RepoRoot:     runCtx.RunsBase,
 	})
 
@@ -46,7 +46,7 @@ func TestRun_PlanningResumeRejectsWhenPolicyBranchAdvancedSinceRunSnapshot(t *te
 	require.NoError(t, os.MkdirAll(policyDir, 0o755))
 	require.NoError(t, internalio.WriteJSONAtomic(filepath.Join(policyDir, "snapshot.json"), policyrepo.SnapshotMetadata{
 		SchemaVersion: "1",
-		PolicyBranch:  "auto-improve/policy",
+		PolicyBranch:  "harnest/policy",
 		PolicyHead:    strings.Repeat("1", 40),
 		RegistryHead:  "",
 	}))
@@ -57,7 +57,7 @@ func TestRun_PlanningResumeRejectsWhenPolicyBranchAdvancedSinceRunSnapshot(t *te
 		Git:          git,
 		Resolver:     resolver,
 		Now:          fixedNow(),
-		PolicyBranch: "auto-improve/policy",
+		PolicyBranch: "harnest/policy",
 		RepoRoot:     runCtx.RunsBase,
 	})
 
@@ -94,14 +94,14 @@ func TestDrivePolicyPublish_PolicyPublishingEmptyAfterAdoptsMatchingRemoteSnapsh
 	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
 	intention.Stage = contracts.IntentionStagePolicyPublishing
 	intention.RegistryAppendResult = &contracts.RegistryAppendResult{Offset: 12, Sha256: strings.Repeat("a", 64)}
-	intention.PolicyBranch = "auto-improve/policy"
+	intention.PolicyBranch = "harnest/policy"
 	intention.PolicyHeadBefore = strings.Repeat("1", 40)
 	require.NoError(t, store.Save(intention))
 
 	originalMatches := branchSnapshotMatchesLocal
 	branchSnapshotMatchesLocal = func(ctx context.Context, repoRoot, branch, runsBase string) (bool, error) {
 		assert.Equal(t, "repo-root", repoRoot)
-		assert.Equal(t, "auto-improve/policy", branch)
+		assert.Equal(t, "harnest/policy", branch)
 		assert.Equal(t, runCtx.RunsBase, runsBase)
 		return true, nil
 	}
@@ -114,7 +114,7 @@ func TestDrivePolicyPublish_PolicyPublishingEmptyAfterAdoptsMatchingRemoteSnapsh
 		Git:          &fakeGit{head: publishedHead},
 		Now:          fixedNow(),
 		RepoRoot:     "repo-root",
-		PolicyBranch: "auto-improve/policy",
+		PolicyBranch: "harnest/policy",
 	})
 	require.NoError(t, err)
 
@@ -223,7 +223,7 @@ func TestRun_ResumeFromDecisionWritten_PolicyBranchStaleNeedsManualRecovery(t *t
 	intention := planningIntention(runCtx.RunID, resolver.target, candidates.CandidatesHash)
 	intention.Stage = contracts.IntentionStageDecisionWritten
 	intention.RegistryAppendResult = &appendResult
-	intention.PolicyBranch = "auto-improve/policy"
+	intention.PolicyBranch = "harnest/policy"
 	intention.PolicyHeadBefore = strings.Repeat("3", 40)
 	intention.PolicyHeadAfter = strings.Repeat("4", 40)
 	require.NoError(t, store.Save(intention))
@@ -249,7 +249,7 @@ func TestRun_ResumeFromDecisionWritten_PolicyBranchStaleNeedsManualRecovery(t *t
 	err = Run(context.Background(), 5011, runCtx, pkg, candidates, store, Deps{
 		Git: &fakeGit{heads: map[string]string{
 			resolver.target.BestBranch: intention.TargetSha,
-			"auto-improve/policy":      strings.Repeat("5", 40),
+			"harnest/policy":           strings.Repeat("5", 40),
 		}},
 		Resolver: unexpectedResolver{t: t},
 		Now:      fixedNow(),

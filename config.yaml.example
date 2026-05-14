@@ -2,14 +2,14 @@
 
 repo:
   github: "owner/repo" # Required for detect-merged and detect-loop.
-  root: "/abs/path/to/auto-improve" # Repository root for manual CLI use and launchd.
+  root: "/abs/path/to/harnest" # Repository root for manual CLI use and launchd.
   default_branch: "main" # Branch watched by detect-merged and detect-loop.
-  best_branch: "auto-improve/best" # Promotion target branch.
-  policy_branch: "auto-improve/policy" # Optional; repo-backed learned policy branch.
+  best_branch: "harnest/best" # Promotion target branch.
+  policy_branch: "harnest/policy" # Optional; repo-backed learned policy branch.
 paths:
-  runs: "/abs/path/to/auto-improve-state/runs" # Durable absolute directory for per-run artifacts.
+  runs: "/abs/path/to/harnest-state/runs" # Durable absolute directory for per-run artifacts.
 worktree:
-  base: "/abs/path/to/auto-improve-state/worktrees" # Durable absolute directory for git worktrees.
+  base: "/abs/path/to/harnest-state/worktrees" # Durable absolute directory for git worktrees.
 task_prompt:
   source: "auto" # auto | issue
 scoring:

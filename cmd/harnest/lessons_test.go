@@ -34,7 +34,7 @@ func TestLessonsNewAndGenerateChecklist(t *testing.T) {
 	var created map[string]string
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &created))
 	assert.Equal(t, "lesson_created", created["event"])
-	assert.Equal(t, filepath.Join(root, ".auto-improve", "lessons", "no-temp-artifact-commit.md"), created["path"])
+	assert.Equal(t, filepath.Join(root, ".harnest", "lessons", "no-temp-artifact-commit.md"), created["path"])
 
 	stdout.Reset()
 	cmd = newRootCmd()
@@ -46,9 +46,9 @@ func TestLessonsNewAndGenerateChecklist(t *testing.T) {
 	var generated map[string]string
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &generated))
 	assert.Equal(t, "checklist_generated", generated["event"])
-	assert.Equal(t, filepath.Join(root, ".auto-improve", "checklist.md"), generated["path"])
+	assert.Equal(t, filepath.Join(root, ".harnest", "checklist.md"), generated["path"])
 
-	checklist, err := os.ReadFile(filepath.Join(root, ".auto-improve", "checklist.md"))
+	checklist, err := os.ReadFile(filepath.Join(root, ".harnest", "checklist.md"))
 	require.NoError(t, err)
 	assert.Equal(t, "# Checklist\n\n- [ ] `no-temp-artifact-commit` 作業用ファイルや一時ファイルを実装差分に含めない\n", string(checklist))
 }
@@ -65,7 +65,7 @@ func TestLessonsGenerateChecklistCheckReportsStaleFile(t *testing.T) {
 	})
 	require.NoError(t, cmd.Execute())
 
-	checklistPath := filepath.Join(root, ".auto-improve", "checklist.md")
+	checklistPath := filepath.Join(root, ".harnest", "checklist.md")
 	require.NoError(t, os.WriteFile(checklistPath, []byte("stale\n"), 0o644))
 
 	cmd = newRootCmd()
@@ -101,7 +101,7 @@ func TestLessonsPrepareAndVerifyChecklistResult(t *testing.T) {
 	var prepared map[string]string
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &prepared))
 	assert.Equal(t, "checklist_result_prepared", prepared["event"])
-	resultPath := filepath.Join(root, ".auto-improve", "work", "checklist-result.md")
+	resultPath := filepath.Join(root, ".harnest", "work", "checklist-result.md")
 	assert.Equal(t, resultPath, prepared["path"])
 
 	data, err := os.ReadFile(resultPath)
@@ -174,11 +174,11 @@ func TestLessonsInstallGuidance(t *testing.T) {
 	assert.Equal(t, "guidance_installed", got.Event)
 	assert.Contains(t, got.Files, filepath.Join(root, "CLAUDE.md"))
 	assert.Contains(t, got.Files, filepath.Join(root, "AGENTS.md"))
-	assert.Contains(t, got.Files, filepath.Join(root, ".auto-improve", "hooks", "verify-checklist-result.sh"))
+	assert.Contains(t, got.Files, filepath.Join(root, ".harnest", "hooks", "verify-checklist-result.sh"))
 
 	agentsBody, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
 	require.NoError(t, err)
-	assert.Contains(t, string(agentsBody), "@.auto-improve/checklist.md")
+	assert.Contains(t, string(agentsBody), "@.harnest/checklist.md")
 }
 
 func TestLessonsInstallGuidanceDryRunDoesNotWrite(t *testing.T) {

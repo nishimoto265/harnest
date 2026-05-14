@@ -15,7 +15,7 @@
 ## ディレクトリ構造 (Go)
 
 ```
-cmd/auto-improve/
+cmd/harnest/
   main.go                       # Phase 0-A 独占
   preflight.go                  # Phase 0-D
   detect.go                     # Phase 0-D
@@ -59,7 +59,7 @@ scripts/
   install.sh                    # Phase 3-C (staged transaction: temp → preflight → launchd → swap)
   check-contracts-sync.sh       # Phase 0-bootstrap (一方向: contracts 変更 → io-contracts.md 要求)
 .github/workflows/
-  auto-improve.yml              # Phase 3-A (workflow_dispatch only)
+  harnest.yml              # Phase 3-A (workflow_dispatch only)
   release.yml                   # Phase 3-C
   ci.yml                        # Phase 0-bootstrap (build/test/lint + sync check)
 .githooks/pre-commit            # Phase 0-bootstrap
@@ -80,11 +80,11 @@ testdata/
 
 | Owner | 書き換えて良い場所 |
 |---|---|
-| **phase0-bootstrap (A)** | `internal/contracts/**`, `internal/contracts/stepio/**`, `internal/io/**`, `internal/validation/**`, `cmd/auto-improve/main.go`, `go.mod/.sum`, `Makefile` (scaffold), `scripts/check-contracts-sync.sh`, `.githooks/pre-commit`, `.github/workflows/ci.yml`, `docs/design/io-contracts.md` (rev11 準拠への Go 固有書き換え) |
+| **phase0-bootstrap (A)** | `internal/contracts/**`, `internal/contracts/stepio/**`, `internal/io/**`, `internal/validation/**`, `cmd/harnest/main.go`, `go.mod/.sum`, `Makefile` (scaffold), `scripts/check-contracts-sync.sh`, `.githooks/pre-commit`, `.github/workflows/ci.yml`, `docs/design/io-contracts.md` (rev11 準拠への Go 固有書き換え) |
 | phase0-B | `internal/config/**`, `internal/logger/**`, `config.yaml.example` |
 | phase0-C | `internal/state/**` |
-| phase0-D | `internal/preflight/**`, `internal/detect/**`, `cmd/auto-improve/preflight.go`, `cmd/auto-improve/detect.go` |
-| phase0-E | `internal/orchestrator/queue.go / budget.go / intention.go / sunset_tick.go`, `cmd/auto-improve/run.go` (**`--with-preflight` flag 実装含む**) |
+| phase0-D | `internal/preflight/**`, `internal/detect/**`, `cmd/harnest/preflight.go`, `cmd/harnest/detect.go` |
+| phase0-E | `internal/orchestrator/queue.go / budget.go / intention.go / sunset_tick.go`, `cmd/harnest/run.go` (**`--with-preflight` flag 実装含む**) |
 | phase0-F | `internal/judges/**`, `internal/prompt/**`, `internal/interruption/**`, `testdata/interruption/**`, `rubrics/**`, `prompts/**` |
 | step10 | `internal/steps/step10_restore_base/**` |
 | step20 | `internal/steps/step20_implement/**` |
@@ -92,10 +92,10 @@ testdata/
 | step30 | `internal/steps/step30_score/**` |
 | step60 | `internal/steps/step60_score/**` |
 | step40 | `internal/steps/step40_extract_rules/**` |
-| **step70+archive+recover (Phase 1-F)** | `internal/steps/step70_decide/**`, `internal/archive/**`, `cmd/auto-improve/sunset.go` (wiring のみ), `cmd/auto-improve/recover.go`, `internal/recover/**` (sentinel 管理) |
+| **step70+archive+recover (Phase 1-F)** | `internal/steps/step70_decide/**`, `internal/archive/**`, `cmd/harnest/sunset.go` (wiring のみ), `cmd/harnest/recover.go`, `internal/recover/**` (sentinel 管理) |
 | phase1.5 | `internal/steps/agentrunner/**`, `internal/steps/scorecore/**` (既存 step を書き換えて helper 呼び出しに) |
 | phase2 | `internal/orchestrator/cycle.go`, `internal/orchestrator/*_test.go`, `testdata/golden_run/**` |
-| infra | `.github/workflows/auto-improve.yml`, `release.yml`, `scripts/install*.sh`, `.goreleaser.yml`, `README.md`, `Makefile` (append のみ、既存行変更禁止) |
+| infra | `.github/workflows/harnest.yml`, `release.yml`, `scripts/install*.sh`, `.goreleaser.yml`, `README.md`, `Makefile` (append のみ、既存行変更禁止) |
 
 ### Phase 分割ポリシー(Codex R2 指摘反映)
 
@@ -135,7 +135,7 @@ testdata/
 
 ### 0-bootstrap-2 (統合基盤, ~50min)
 6. `internal/io/*.go` 全 helper
-7. `cmd/auto-improve/main.go` cobra root + 全サブコマンド stub (`preflight / detect-merged / run / sunset / recover`)
+7. `cmd/harnest/main.go` cobra root + 全サブコマンド stub (`preflight / detect-merged / run / sunset / recover`)
 8. `Makefile` scaffold (`build / test / lint / tidy`)
 9. `scripts/check-contracts-sync.sh` + `.githooks/pre-commit`
 10. `.github/workflows/ci.yml` (`go build/test/lint` + sync check)
@@ -276,7 +276,7 @@ type IntentionRecord struct {
 **完了条件**:
 - `go build ./...` pass
 - `go test ./...` pass(union 失敗系 6 ケース × 2 union = 12 + 通常 schema test)
-- `auto-improve --help` 全サブコマンド列挙
+- `harnest --help` 全サブコマンド列挙
 - pre-commit hook 動作確認
 
 ### Bootstrap-1 レビューゲート基準 (rev5 新規、Codex R2 #5 対応)
@@ -343,7 +343,7 @@ yaml KnownFields(true) + validator / slog JSON handler / config.yaml.example
   - orchestrator main loop: claude/codex 呼出中は lock を持たず、state append 時のみ state.lock 短時間取得
   - step70 内部: promotion.lock 保持中に state.lock 取得して append(lock order: state ⊂ promotion、deadlock 防止)
   - 結果: 数時間オーダーの claude 呼出が lock 外なので sunset_tick / recover --inspect が block されない
-  - **sentinel pre-flight gate** (rev20 明示、rev21 TOCTOU 強化、Codex rev19 #3 H1/H2 + Claude rev20 H4 対応): 起動時の最初のアクション(state mutation / worktree allocation / claude 呼出の前)で `<runs_base>/needs-recovery/` を scan。`*.json` または `*.aborted.json` が 1件でもあれば、**全 CLI / 全 step / sunset** を即 exit 0 (`auto-improve recover` のみ例外)。`run --detect-loop` は次 tick で再試行、launchd は単純 interval retry
+  - **sentinel pre-flight gate** (rev20 明示、rev21 TOCTOU 強化、Codex rev19 #3 H1/H2 + Claude rev20 H4 対応): 起動時の最初のアクション(state mutation / worktree allocation / claude 呼出の前)で `<runs_base>/needs-recovery/` を scan。`*.json` または `*.aborted.json` が 1件でもあれば、**全 CLI / 全 step / sunset** を即 exit 0 (`harnest recover` のみ例外)。`run --detect-loop` は次 tick で再試行、launchd は単純 interval retry
   - **TOCTOU 対策**(rev21、rev22 step70 runtime 追加): 単発 scan では race が残る。以下 3 点で re-scan 義務化:
     1. queue.go の promotion.lock 取得**直後**に sentinel 再 scan
     2. 各 step (10/20/30/40/50/60/70) の launch 直前に sentinel 再 scan
@@ -352,7 +352,7 @@ yaml KnownFields(true) + validator / slog JSON handler / config.yaml.example
   - **resume precedence** (rev8, Codex rev7 R2 対応): 上記 sentinel gate を通過した後、`processed.jsonl` から non-terminal PR (`started / step_done / interrupted / promoting / registry_size_high / registry_size_critical / rescue_retry`) を列挙 → 既存 run_id で先行 resume → 全 resolve 完了後に `detect` で新規 PR を enqueue。fresh detect が resume 待ち run を追い抜かないことを保証
 - `budget.go`: file counter + TTL + daily reset
 - `intention.go`: staged transaction primitives (Write/ReadIntention, atomic overwrite per stage, recovery decoder)
-- `sunset_tick.go`: **lock → stale marker reconcile → 24h gate → run → finalize** の順 (rev5 修正、Codex R1 #3, R3 #4 対応)。**lock 取得・解放・stale marker reconcile・archive 呼出のロジックは `internal/archive/sunset.go` 側に集約**(`auto-improve sunset` CLI と `sunset_tick.go` 両方が同 lock 経路 `archive.RunSunsetWithLock(opts)` を call する。Phase 1-F の archive owner が responsible)、sunset_tick.go と cmd/sunset.go は wiring のみ。これにより locking ownership 一本化(rev16、Codex rev16 R2 対応):
+- `sunset_tick.go`: **lock → stale marker reconcile → 24h gate → run → finalize** の順 (rev5 修正、Codex R1 #3, R3 #4 対応)。**lock 取得・解放・stale marker reconcile・archive 呼出のロジックは `internal/archive/sunset.go` 側に集約**(`harnest sunset` CLI と `sunset_tick.go` 両方が同 lock 経路 `archive.RunSunsetWithLock(opts)` を call する。Phase 1-F の archive owner が responsible)、sunset_tick.go と cmd/sunset.go は wiring のみ。これにより locking ownership 一本化(rev16、Codex rev16 R2 対応):
   ```
   1. **flock <runs_base>/promotion.lock 取得** (rev18: step70/recover と同一 lock。registry を 単一 writer 化、`.sunset-lock` 廃止。Codex rev17 R1/R2/R3 対応)。**sunset_tick auto は lock 取得に 30秒 timeout**、取得失敗なら **lock 取得失敗そのものを stderr + slog で log のみ**(processed.jsonl には append しない、rev28、Codex rev26 遅延指摘対応: lock 外で state log 書くと single-writer 契約違反)。exit 0 で次 tick 再試行。`sunset --force` 手動は無制限 wait
   2. stale marker reconcile: <runs_base>/sunset-running.marker が存在する場合:
@@ -366,7 +366,7 @@ yaml KnownFields(true) + validator / slog JSON handler / config.yaml.example
   5. lock release
   ```
   archive 各操作に `sunset_run_id = sha256(date || run_fingerprint)` を付与、registry tail で重複検出 skip
-- `cmd/auto-improve/run.go`: `run --pr <n>` / `run --detect-loop` / **`run --with-preflight`** flag (preflight → 成功のみ state mutation) / **`run --from-scratch`** (既存 run を捨てて新 run_id、**旧 run の 6 worktree を `git worktree remove` で prune してから新 run_id 発行**、Codex rev6 R2 #5 対応)
+- `cmd/harnest/run.go`: `run --pr <n>` / `run --detect-loop` / **`run --with-preflight`** flag (preflight → 成功のみ state mutation) / **`run --from-scratch`** (既存 run を捨てて新 run_id、**旧 run の 6 worktree を `git worktree remove` で prune してから新 run_id 発行**、Codex rev6 R2 #5 対応)
 - **Resume ロジック**(rev6、rev11 で vocabulary 拡張、io-contracts.md §6.1 準拠):
   - 起動時に `processed.jsonl` を読み、各 PR の最後 event を取得
   - terminal (`completed/failed/promoted/rollback/skipped/timeout/needs_manual_recovery`) → skip
@@ -481,15 +481,15 @@ PanelReview / 5次元 / reasons cap + sidecar / compliance / `LoadScorableManife
     - 1800 超 → 上記 + index lookup mandatory
     - 2000 超 → 上記 + `registry_size_critical` を同 shape で append + stderr 強制
 - **Rollback path**: remote HEAD 確認 → safe revert 可なら terminal rollback(decision.json + processed rollback、rollback は per-PR terminal で scheduler は次 PR 進行) / 不可なら **needs_manual_recovery** (intention 保持 + **durable sentinel `<runs_base>/needs-recovery/<run_id>.json` atomic write** + processed terminal event + flock release)
-- **needs_manual_recovery 状態は `auto-improve recover --run <id>` コマンドで operator が解除**(sentinel 削除 + intention 処理)
+- **needs_manual_recovery 状態は `harnest recover --run <id>` コマンドで operator が解除**(sentinel 削除 + intention 処理)
 - flock は live 排他のみ、durable block は sentinel が担う
 
 **archive(cycle③)**:
 - `internal/archive/sunset.go` に business logic 集約 (Codex R2 #6 対応)
-- `cmd/auto-improve/sunset.go` と `internal/orchestrator/sunset_tick.go` は **両方とも `archive.RunSunsetWithLock(ctx, opts)` を call するだけの wiring**(rev31 統一、Codex rev29 #2 対応。直接 `archive.RunSunset` を呼ばない、lock 経由版のみ。`RunSunsetWithLock` 内部で promotion.lock 取得 → stale marker reconcile → 24h gate → archive.RunSunset → finalize → release を一貫実行)
+- `cmd/harnest/sunset.go` と `internal/orchestrator/sunset_tick.go` は **両方とも `archive.RunSunsetWithLock(ctx, opts)` を call するだけの wiring**(rev31 統一、Codex rev29 #2 対応。直接 `archive.RunSunset` を呼ばない、lock 経由版のみ。`RunSunsetWithLock` 内部で promotion.lock 取得 → stale marker reconcile → 24h gate → archive.RunSunset → finalize → release を一貫実行)
 - manual invoke:
-  - `auto-improve sunset` → 24h gate 遵守 (default)
-  - `auto-improve sunset --force` → gate bypass
+  - `harnest sunset` → 24h gate 遵守 (default)
+  - `harnest sunset --force` → gate bypass
 - **per-op idempotency** (rev6 強化、Codex rev5 R2 #4 対応):
   - 各 archive operation に `op_id = sha256(sunset_run_id || rule_id || transition)` 付与
   - registry には entry ごとに `op_id` を含める
@@ -497,7 +497,7 @@ PanelReview / 5次元 / reasons cap + sidecar / compliance / `LoadScorableManife
   - stale marker 発見時: marker の sunset_run_id に紐付く全 `{rule_id, transition}` pair を business logic 側で列挙 → 各 op_id を individually check → 未 append のものだけ resume
 
 **recover コマンド** (rev6 追加, rev10 完全版、io-contracts.md §recover と 1:1):
-- `auto-improve recover --run <id> [--rollback | --adopt-anyway | --inspect | --mark-manual-abort | --finalize-cleanup | --clear-sentinel]`
+- `harnest recover --run <id> [--rollback | --adopt-anyway | --inspect | --mark-manual-abort | --finalize-cleanup | --clear-sentinel]`
 - **全 subcommand**: `<runs_base>/promotion.lock` を `defer unlock()` でラップして取得、lock 取得後 state 再読込(intention / decision / sentinel / remote HEAD / registry head / idempotency)
 - `--inspect`: read-only state dump(JSON + human readable)。副作用無し
 - `--rollback`: safe matrix 該当 cell のみ rollback path 実行(decision.json rollback + processed rollback append + sentinel 削除 + intention 削除)
@@ -594,10 +594,10 @@ Phase 2 owner は全 16 fixture を実装する。
 ## Phase 3: infra (3 agent 並列, ~1h)
 
 ### 3-A: GitHub Actions
-`workflow_dispatch` only、schedule 無し、concurrency: `auto-improve-prod`
+`workflow_dispatch` only、schedule 無し、concurrency: `harnest-prod`
 
 ### 3-B: launchd (simplified, Codex R3 #3 対応)
-- plist: `StartInterval: 3600` + `ProgramArguments: [auto-improve, run, --detect-loop, --with-preflight]`
+- plist: `StartInterval: 3600` + `ProgramArguments: [harnest, run, --detect-loop, --with-preflight]`
 - per-exit-code backoff は **廃止**。preflight 失敗 → state 未更新 → launchd 次 tick で単純再試行
 
 ### 3-C: release + install (staged transaction, rev5 full rewrite, Codex R2 #1 対応)
@@ -607,11 +607,11 @@ Phase 2 owner は全 16 fixture を実装する。
 - `scripts/install.sh` (同一 filesystem staging + writability + plist transactional rollback、rev6 強化):
   ```
   INSTALL_DIR=${INSTALL_DIR:-/usr/local/bin}   # env で override 可 (sudo 回避用)
-  TARGET=$INSTALL_DIR/auto-improve
-  STAGE=$INSTALL_DIR/.auto-improve.new.$$       # 同一 FS で EXDEV 回避
-  BACKUP=$INSTALL_DIR/.auto-improve.bak.$$
-  PLIST=~/Library/LaunchAgents/com.nishimoto265.auto-improve.plist
-  PLIST_BAK=~/Library/LaunchAgents/com.nishimoto265.auto-improve.plist.bak.$$
+  TARGET=$INSTALL_DIR/harnest
+  STAGE=$INSTALL_DIR/.harnest.new.$$       # 同一 FS で EXDEV 回避
+  BACKUP=$INSTALL_DIR/.harnest.bak.$$
+  PLIST=~/Library/LaunchAgents/com.nishimoto265.harnest.plist
+  PLIST_BAK=~/Library/LaunchAgents/com.nishimoto265.harnest.plist.bak.$$
 
   1. writability check: test -w "$INSTALL_DIR" → NG なら stderr に
      "INSTALL_DIR=$INSTALL_DIR not writable. Re-run with sudo, or set INSTALL_DIR=$HOME/.local/bin"
@@ -704,7 +704,7 @@ Phase 4:               1 agent  半日    [実PR検証 + docs + tag]
 | 18 | helper drift | archive/sunset business logic 1点集約で drift 防止 |
 | 19 | step70 排他 | `<runs_base>/promotion.lock` (global) flock で全 flow 排他 + recovery も lock 取得後 state 再読込 |
 | 20 | Stage 4 判定順序 | idempotency tail scan 先行 → registry_head 比較 → CAS |
-| 21 | rollback 非終端化 | divergence / lease failure 時は `needs_manual_recovery`(intention 保持、`auto-improve recover` で解除) |
+| 21 | rollback 非終端化 | divergence / lease failure 時は `needs_manual_recovery`(intention 保持、`harnest recover` で解除) |
 | 22 | registry scan bound | tail scan bound と index fallback の併用。具体閾値は `io-contracts.md` の single source of truth に追従 |
 | 23 | sunset recovery 順序 | lock → stale marker reconcile → gate check → run |
 | 24 | installer | 同一 FS staging + writability check + swap rollback + INSTALL_DIR env(sudo 回避) |
@@ -714,14 +714,14 @@ Phase 4:               1 agent  半日    [実PR検証 + docs + tag]
 | 28 | crash fixture | **rev11+ で #89 に統合、本行は削除済み** |
 | 29 | bootstrap-1 ゲート | critical/high あれば block、medium 以下 conditional pass |
 | 30 | Phase 1.5 stop-the-line | drift 発見時 fixture 作業凍結 + source-of-truth 判定 + 再生成 + 再開 |
-| 31 | needs_manual_recovery 解除 | `auto-improve recover --run <id> [--rollback|--adopt-anyway]` CLI (Phase 1-F) |
+| 31 | needs_manual_recovery 解除 | `harnest recover --run <id> [--rollback|--adopt-anyway]` CLI (Phase 1-F) |
 | 32 | global promotion lock | `<runs_base>/promotion.lock` に変更(per-run promotion.lock は廃止)、step70/recover/sunset_tick 共有 |
 | 33 | needs_manual_recovery durable sentinel | `<runs_base>/needs-recovery/<run_id>.json` ファイル、flock と独立の block 機構 |
 | 34 | rollback terminal 明確化 | per-PR terminal(再試行せず)、scheduler は次 PR 進行、手動再試行は `run --pr <n> --from-scratch` |
 | 35 | installer plist transactional | plist も backup/restore、INSTALL_DIR 変更時は絶対 path 再生成 |
 | 36 | sunset per-op idempotency | `op_id = sha256(sunset_run_id || rule_id || transition)`、reconcile は per-op |
 | 37 | registry size check | step70 append 時(24h gate と独立)、registry size telemetry / index activation / critical alert の閾値は常に `io-contracts.md` と同期 |
-| 38 | recover CLI 実装 | cmd/auto-improve/recover.go + internal/recover/**、Phase 1-F owner |
+| 38 | recover CLI 実装 | cmd/harnest/recover.go + internal/recover/**、Phase 1-F owner |
 | 39 | Resume 機構 (rev6) | interrupted event, ResumeTarget, 各 step idempotent skip, signal/rate_limit/budget handling |
 | 40 | crash fixture | **rev11+ で #89 に統合、本行は削除済み** |
 | 41 | state vocabulary 拡張 | `interrupted / promoting / registry_size_high / registry_size_critical / rescue_retry / needs_manual_recovery` schema 追加。基本は non-terminal event に step required、**ただし `source: 'sunset_tick'` の global telemetry warning は step forbidden** |

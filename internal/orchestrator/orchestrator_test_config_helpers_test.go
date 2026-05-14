@@ -16,6 +16,7 @@ import (
 
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
+	installTestRubricCache(t)
 	runsBase := filepath.Join(t.TempDir(), "runs")
 	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
 	return &config.Config{
@@ -46,6 +47,7 @@ func testConfig(t *testing.T) *config.Config {
 
 func testConfigWithCLIJudge(t *testing.T) *config.Config {
 	t.Helper()
+	installTestRubricCache(t)
 	dir := t.TempDir()
 	runsBase := filepath.Join(dir, "runs")
 	worktreeBase := filepath.Join(dir, "worktrees")
@@ -83,6 +85,12 @@ roles:
 	cfg, err := config.LoadConfig(configPath)
 	require.NoError(t, err)
 	return cfg
+}
+
+func installTestRubricCache(t *testing.T) {
+	t.Helper()
+	judges.SetDefaultRubricDirForTest(filepath.Join(t.TempDir(), "rubric-cache"))
+	t.Cleanup(func() { judges.SetDefaultRubricDirForTest("") })
 }
 
 func writeFakeConfigImplementer(t *testing.T, dir string) string {
@@ -180,7 +188,7 @@ func installFakeCLI(t *testing.T) string {
 	t.Helper()
 	sourceDir := filepath.Join(repoRootFromTestFile(t), "internal", "orchestrator", "testdata", "bin")
 	destDir := t.TempDir()
-	t.Setenv("AUTO_IMPROVE_GIT_STATE_DIR", filepath.Join(t.TempDir(), "git-state"))
+	t.Setenv("HARNEST_GIT_STATE_DIR", filepath.Join(t.TempDir(), "git-state"))
 	for _, name := range []string{"gh", "git", "claude"} {
 		src := filepath.Join(sourceDir, name)
 		data, err := os.ReadFile(src)

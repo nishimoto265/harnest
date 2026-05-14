@@ -19,7 +19,7 @@ import (
 // to gh. `git remote get-url` expands url.insteadOf rewrites, which can obscure
 // the operator-configured GitHub origin.
 func TestGitClient_RepoSlugParsesOriginURL(t *testing.T) {
-	repoRoot := "/tmp/auto-improve-r17-fake-repo"
+	repoRoot := "/tmp/harnest-r17-fake-repo"
 
 	git := gitCLI{
 		run: func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {

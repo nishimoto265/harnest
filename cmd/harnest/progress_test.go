@@ -291,7 +291,7 @@ func progressTestTaskPackage(t *testing.T, runDir string) contracts.TaskPackage 
 		PR:                      42,
 		Title:                   "test task",
 		BaseSHA:                 sha,
-		BestBranch:              "auto-improve/best",
+		BestBranch:              "harnest/best",
 		ReconstructedTaskPrompt: "# Task\n\nTest task.\n",
 		Worktrees:               worktrees,
 		CreatedAt:               time.Now().UTC(),

@@ -1,4 +1,4 @@
-name: Auto Improve
+name: HarNest
 
 on:
   workflow_dispatch:
@@ -29,18 +29,18 @@ on:
       best_branch:
         description: "best_branch for config.yaml"
         required: true
-        default: auto-improve/best
+        default: harnest/best
         type: string
       policy_branch:
         description: "Optional policy_branch for config.yaml"
         required: false
         type: string
       runs_base:
-        description: "Absolute runs_base override (defaults to $HOME/.auto-improve/runs)"
+        description: "Absolute runs_base override (defaults to $HOME/.harnest/runs)"
         required: false
         type: string
       worktree_base:
-        description: "Absolute worktree_base override (defaults to $HOME/.auto-improve/worktrees)"
+        description: "Absolute worktree_base override (defaults to $HOME/.harnest/worktrees)"
         required: false
         type: string
       claude_cli_path:
@@ -71,14 +71,14 @@ on:
           - codex
 
 concurrency:
-  group: auto-improve-prod
+  group: harnest-prod
   cancel-in-progress: false
 
 jobs:
-  auto-improve:
+  harnest:
     runs-on:
       - self-hosted
-      - auto-improve
+      - harnest
     permissions:
       contents: write
       pull-requests: read
@@ -118,14 +118,14 @@ jobs:
           set -euo pipefail
           bash scripts/render-workflow-config.sh
 
-      - name: Run auto-improve
+      - name: Run harnest
         env:
           INPUT_COMMAND: ${{ inputs.command }}
           INPUT_ARGS: ${{ inputs.args }}
         run: |
           set -euo pipefail
 
-          cmd=(go run ./cmd/auto-improve "${INPUT_COMMAND}")
+          cmd=(go run ./cmd/harnest "${INPUT_COMMAND}")
           if [[ -n "${INPUT_ARGS}" ]]; then
             read -r -a extra_args <<< "${INPUT_ARGS}"
             cmd+=("${extra_args[@]}")

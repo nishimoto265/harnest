@@ -37,7 +37,7 @@ func TestRun_HappyPath_PassBaseFanout(t *testing.T) {
 
 	in := Input{
 		PR:           42,
-		BestBranch:   "auto-improve/best",
+		BestBranch:   "harnest/best",
 		HarnessFiles: true,
 		RepoRoot:     t.TempDir(),
 		RunCtx:       rc,
@@ -53,8 +53,8 @@ func TestRun_HappyPath_PassBaseFanout(t *testing.T) {
 	assert.Equal(t, rc.RunID, resp.RunID)
 	assert.Len(t, resp.TaskPackage.Worktrees, 6)
 	assert.Len(t, resp.TaskPackage.PassBases, 2)
-	assert.Equal(t, "auto-improve/"+string(rc.RunID)+"/pass1/base", resp.TaskPackage.PassBases[0].Branch)
-	assert.Equal(t, "auto-improve/"+string(rc.RunID)+"/pass2/base", resp.TaskPackage.PassBases[1].Branch)
+	assert.Equal(t, "harnest/"+string(rc.RunID)+"/pass1/base", resp.TaskPackage.PassBases[0].Branch)
+	assert.Equal(t, "harnest/"+string(rc.RunID)+"/pass2/base", resp.TaskPackage.PassBases[1].Branch)
 
 	// Uniqueness (path + branch) is a TaskPackage invariant; also confirm here.
 	paths := map[string]struct{}{}
@@ -106,7 +106,7 @@ func TestRun_UsesCodeBaseForWorktreeBaseAndTaskDiff(t *testing.T) {
 
 	res, err := runner.Run(context.Background(), Input{
 		PR:               42,
-		BestBranch:       "auto-improve/best",
+		BestBranch:       "harnest/best",
 		TaskPromptSource: string(TaskPromptSourceAuto),
 		RepoRoot:         repoRoot,
 		RunCtx:           rc,
@@ -139,7 +139,7 @@ func TestRun_NoPolicyBranchSnapshotsLocalPolicy(t *testing.T) {
 
 	_, err := runner.Run(context.Background(), Input{
 		PR:           42,
-		BestBranch:   "auto-improve/best",
+		BestBranch:   "harnest/best",
 		HarnessFiles: true,
 		RepoRoot:     t.TempDir(),
 		RunCtx:       rc,
@@ -168,7 +168,7 @@ func TestRun_FetchesMergeCommitBeforeResolveRef(t *testing.T) {
 
 	_, err := runner.Run(context.Background(), Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   repoRoot,
 		RunCtx:     rc,
 	})
@@ -189,7 +189,7 @@ func TestRun_Resume_NoNewWorktrees(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   t.TempDir(),
 		RunCtx:     rc,
 	}
@@ -212,7 +212,7 @@ func TestRun_ExpectedRunIDMismatch(t *testing.T) {
 
 	in := Input{
 		PR:            42,
-		BestBranch:    "auto-improve/best",
+		BestBranch:    "harnest/best",
 		RepoRoot:      t.TempDir(),
 		RunCtx:        rc,
 		ExpectedRunID: contracts.RunID("2026-04-20-PR99-deadbee"),
@@ -229,7 +229,7 @@ func TestRun_GHFailurePropagates(t *testing.T) {
 
 	in := Input{
 		PR:         42,
-		BestBranch: "auto-improve/best",
+		BestBranch: "harnest/best",
 		RepoRoot:   t.TempDir(),
 		RunCtx:     rc,
 	}

@@ -703,11 +703,11 @@ func defaultBootstrapSnapshot() snapshot {
 		registryPresent: true,
 		rules:           map[string][]byte{},
 		files: map[string][]byte{
-			".auto-improve/checklist.md":                         []byte("# Checklist\n\nNo active lessons.\n"),
-			".auto-improve/hooks/verify-checklist-result.sh":     []byte(harnessinstall.RenderHookScript()),
-			"auto-improve/guidance/AGENTS.md.template":           []byte(harnessinstall.RenderGuidance(harnessinstall.ProviderCodex)),
-			"auto-improve/guidance/CLAUDE.md.template":           []byte(harnessinstall.RenderGuidance(harnessinstall.ProviderClaude)),
-			"auto-improve/guidance/provider-hooks.json.template": []byte(harnessinstall.RenderProviderHooksJSON()),
+			".harnest/checklist.md":                         []byte("# Checklist\n\nNo active lessons.\n"),
+			".harnest/hooks/verify-checklist-result.sh":     []byte(harnessinstall.RenderHookScript()),
+			"harnest/guidance/AGENTS.md.template":           []byte(harnessinstall.RenderGuidance(harnessinstall.ProviderCodex)),
+			"harnest/guidance/CLAUDE.md.template":           []byte(harnessinstall.RenderGuidance(harnessinstall.ProviderClaude)),
+			"harnest/guidance/provider-hooks.json.template": []byte(harnessinstall.RenderProviderHooksJSON()),
 		},
 	}
 }

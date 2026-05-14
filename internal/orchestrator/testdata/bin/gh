@@ -4,7 +4,7 @@ set -eu
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   pr="${3}"
   cat <<EOF
-{"number":${pr},"title":"Stub PR ${pr}","body":"Stub body","state":"MERGED","baseRefOid":"${AUTO_IMPROVE_TEST_BASE_SHA}","headRefOid":"${AUTO_IMPROVE_TEST_TARGET_SHA}","mergeCommit":{"oid":"${AUTO_IMPROVE_TEST_MERGE_SHA}"},"potentialMergeCommit":{"oid":"${AUTO_IMPROVE_TEST_MERGE_SHA}"},"closingIssuesReferences":[]}
+{"number":${pr},"title":"Stub PR ${pr}","body":"Stub body","state":"MERGED","baseRefOid":"${HARNEST_TEST_BASE_SHA}","headRefOid":"${HARNEST_TEST_TARGET_SHA}","mergeCommit":{"oid":"${HARNEST_TEST_MERGE_SHA}"},"potentialMergeCommit":{"oid":"${HARNEST_TEST_MERGE_SHA}"},"closingIssuesReferences":[]}
 EOF
   exit 0
 fi
