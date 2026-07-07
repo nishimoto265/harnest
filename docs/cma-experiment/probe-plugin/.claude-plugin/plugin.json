@@ -1,0 +1,8 @@
+{
+  "name": "probe-plugin",
+  "description": "Experimental plugin to probe what context Claude Code hooks can capture (cwd, git info, PR linkage, etc.)",
+  "version": "0.1.0",
+  "author": {
+    "name": "harness-experiment"
+  }
+}
